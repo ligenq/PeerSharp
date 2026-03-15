@@ -1,89 +1,127 @@
 # PeerSharp
 
 [![NuGet Version](https://img.shields.io/nuget/v/PeerSharp.svg)](https://www.nuget.org/packages/PeerSharp)
-[![Build Status](https://github.com/Peerfluence/PeerSharp/actions/workflows/build.yml/badge.svg)](https://github.com/Peerfluence/PeerSharp/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-PeerSharp is a high-performance, modern BitTorrent engine for .NET.
+PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 
-## 🚀 Key Features
+## Key Features
 
-- **Full BEP Support:** Implements core and extended BitTorrent Extension Protocols (see [Supported BEPs](#-supported-beps)).
+- **Full BEP Support:** Implements 20+ BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
 - **Hybrid Networking:** Native support for both TCP and uTP (BEP 29) with automatic congestion control.
-- **DHT & Peer Discovery:** Full Mainline DHT (BEP 5) implementation, Local Service Discovery (LSD), and UDP/HTTP Tracker support.
+- **DHT & Peer Discovery:** Full Mainline DHT (BEP 5), Local Service Discovery (BEP 14), Peer Exchange (PEX), and UDP/HTTP Tracker support.
 - **Magnet Links:** Fast metadata exchange (BEP 9) allowing torrent starts from magnet links alone.
 - **Streaming Engine:** Integrated HTTP streaming server for real-time media playback while downloading.
-- **Optimized I/O:** Zero-copy Bencoding, pooled buffers, and asynchronous disk I/O designed for high-throughput scenarios.
-- **Enterprise-Grade Testing:** Rigorous validation using **Microsoft Coyote** for concurrency testing, architecture tests for design integrity, and extensive fuzzing for robustness.
+- **Protocol Encryption:** MSE (Message Stream Encryption) with configurable enforcement modes.
+- **NAT Traversal:** UPnP, NAT-PMP, and Holepunch (BEP 55) for connectivity behind NATs.
+- **Bandwidth Control:** Per-torrent and global upload/download/disk I/O rate limiting.
+- **Proxy Support:** SOCKS5 and HTTP proxy support with authentication.
+- **IP Blocklist & GeoIP:** Block peers by IP range or country.
+- **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.
+- **Enterprise-Grade Testing:** Rigorous validation using **Microsoft Coyote** for concurrency testing, architecture tests for design integrity, and fuzzing for robustness.
 
-## 🛠 Architecture
-
-PeerSharp is designed with a modular, interface-driven architecture to ensure testability and extensibility:
-
-- **ClientEngine:** The central orchestrator managing multiple torrent sessions.
-- **PiecePicker:** Advanced logic for piece selection (rarest-first, sequential, streaming modes).
-- **PieceWriter/Storage:** Abstracted disk I/O layer with sparse file support and block caching.
-- **BEncoding:** A high-performance, allocation-aware parser and writer for the BitTorrent data format.
-- **Alert System:** A centralized event bus for real-time monitoring of engine state and statistics.
-
-## 📦 Getting Started
+## Getting Started
 
 ### Installation
-
-Add the PeerSharp NuGet package to your project:
 
 ```bash
 dotnet add package PeerSharp
 ```
+
+Requires .NET 10.0 or later.
 
 ### Basic Usage
 
 ```csharp
 using PeerSharp.Clients;
 using PeerSharp.Config;
+using PeerSharp.Core;
 
 // Initialize the engine
 var engine = ClientEngineFactory.Create();
-await engine.StartAsync();
+await engine.InitializeAsync();
 
-// Add a torrent from a file or magnet link
-var options = new AddTorrentOptions { SavePath = "./downloads" };
-var torrent = await engine.AddTorrentAsync("my_file.torrent", options);
+// Add a torrent
+var torrentFile = TorrentFile.Load("my_file.torrent");
+var options = new AddTorrentOptions("./downloads");
+var torrent = await engine.AddTorrentAsync(torrentFile, options);
 
-// Monitor progress via alerts
-engine.Alerts.TorrentAdded += (s, e) => Console.WriteLine($"Started: {e.Torrent.Name}");
-torrent.Events.PieceChecked += (s, e) => Console.WriteLine($"Progress: {e.Progress:P2}");
-
-// Wait for completion or perform other actions
+// Or add from a magnet link
+var magnet = MagnetLink.Parse("magnet:?xt=urn:btih:...");
+var torrent2 = await engine.AddMagnetAsync(magnet, new AddTorrentOptions("./downloads"));
 ```
 
-## 📜 Supported BEPs
+### Monitoring Progress
+
+PeerSharp supports two models for monitoring: a polling-based alert queue and per-torrent event callbacks.
+
+```csharp
+// Option 1: Polling alerts
+await foreach (var alert in engine.Alerts.GetAlertsAsync())
+{
+    Console.WriteLine(alert);
+}
+
+// Option 2: Per-torrent event callbacks via builder
+var events = new TorrentEventsBuilder()
+    .OnProgressChanged((torrent, progress) =>
+        Console.WriteLine($"Progress: {progress}"))
+    .OnFinished((torrent, selectedOnly) =>
+        Console.WriteLine($"Finished: {torrent}"))
+    .Build();
+
+var options = new AddTorrentOptions("./downloads") { Events = events };
+```
+
+### Streaming
+
+```csharp
+// Open a seekable stream for media playback
+var stream = await torrent.OpenStreamAsync(fileIndex: 0);
+```
+
+## Supported BEPs
 
 PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 
 | BEP | Title | Status |
 |-----|-------|--------|
-| 3   | The BitTorrent Protocol Specification (TCP) | ✅ |
-| 5   | DHT Protocol | ✅ |
-| 6   | Fast Extension | ✅ |
-| 9   | Extension for Handling Metadata Files | ✅ |
-| 10  | Extension Protocol | ✅ |
-| 12  | Multitracker Metadata Extension | ✅ |
-| 14  | Local Service Discovery | ✅ |
-| 15  | UDP Tracker Protocol | ✅ |
-| 27  | Private Torrents | ✅ |
-| 29  | uTP - Micro Transport Protocol | ✅ |
-| 52  | BitTorrent Protocol v2 | 🏗️ (Planned) |
+| 3   | The BitTorrent Protocol Specification (TCP) | Supported |
+| 5   | DHT Protocol | Supported |
+| 6   | Fast Extension | Supported |
+| 9   | Extension for Handling Metadata Files | Supported |
+| 10  | Extension Protocol | Supported |
+| 12  | Multitracker Metadata Extension | Supported |
+| 14  | Local Service Discovery | Supported |
+| 15  | UDP Tracker Protocol | Supported |
+| 16  | Super-seeding | Supported |
+| 19  | Web Seed Protocol | Supported |
+| 20  | Peer ID Conventions | Supported |
+| 23  | Compact Peer Lists | Supported |
+| 27  | Private Torrents | Supported |
+| 29  | uTP - Micro Transport Protocol | Supported |
+| 30  | Merkle Hash Torrent | Supported |
+| 32  | Merkle Tree (revised) | Supported |
+| 33  | DHT Scrape | Supported |
+| 40  | Canonical Peer Priority | Supported |
+| 42  | DHT Security Extension | Supported |
+| 47  | Padding Files | Supported |
+| 48  | Tracker Returns Compact Peer Lists | Supported |
+| 52  | BitTorrent Protocol v2 | Planned |
+| 55  | Holepunch Extension | Supported |
 
-## 🧪 Robustness & Quality
+## Architecture
 
-PeerSharp is built with a "reliability-first" mindset:
+PeerSharp is designed with a modular, interface-driven architecture:
 
-- **Concurrency Testing:** Uses [Microsoft Coyote](https://microsoft.github.io/coyote/) to detect and fix non-deterministic race conditions in the distributed state machine.
-- **Architecture Tests:** Enforces strict layering and design patterns (e.g., disposable ownership, thread-safety primitives) via automated tests.
-- **Performance Profiling:** Continuous monitoring of allocations and throughput to maintain a low-overhead profile.
+- **ClientEngine:** The central orchestrator managing multiple torrent sessions.
+- **PiecePicker:** Advanced logic for piece selection (rarest-first, sequential, streaming modes).
+- **Storage:** Abstracted disk I/O layer with sparse file support, block caching, and file handle pooling.
+- **BEncoding:** A high-performance, allocation-aware parser and writer for the BitTorrent data format.
+- **Alert System:** A centralized event bus with both polling and callback models for real-time monitoring.
+- **NetworkManager:** TCP and uTP connection handling with protocol encryption.
+- **DhtManager:** Full Kademlia-style distributed hash table with security extensions.
 
-## 📄 License
+## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
-
