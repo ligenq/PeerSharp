@@ -1,7 +1,13 @@
-# PeerSharp
+<p align="center">
+  <img src="src/PeerSharp/application-icon.png" alt="PeerSharp" width="128" />
+</p>
 
-[![NuGet Version](https://img.shields.io/nuget/v/PeerSharp.svg)](https://www.nuget.org/packages/PeerSharp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<h1 align="center">PeerSharp</h1>
+
+<p align="center">
+  <a href="https://www.nuget.org/packages/PeerSharp"><img src="https://img.shields.io/nuget/v/PeerSharp.svg" alt="NuGet Version" /></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+</p>
 
 PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 
