@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/PeerSharp/PeerSharp.csproj" />
+  <Project Path="tests/PeerSharp.Tests/PeerSharp.Tests.csproj" />
+</Solution>
