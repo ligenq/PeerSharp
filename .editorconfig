@@ -1,0 +1,25 @@
+﻿[*.cs]
+
+# S3267: Loops should be simplified with "LINQ" expressions
+dotnet_diagnostic.S3267.severity = none
+
+# Naming: private static fields - CamelCase, no prefix
+dotnet_naming_rule.private_static_fields_should_be_camel_case.symbols = private_static_fields
+dotnet_naming_rule.private_static_fields_should_be_camel_case.style = camel_case_style
+dotnet_naming_rule.private_static_fields_should_be_camel_case.severity = warning
+
+dotnet_naming_symbols.private_static_fields.applicable_kinds = field
+dotnet_naming_symbols.private_static_fields.applicable_accessibilities = private
+dotnet_naming_symbols.private_static_fields.required_modifiers = static
+
+# Naming: private const fields - CamelCase, no prefix
+dotnet_naming_rule.private_const_fields_should_be_camel_case.symbols = private_const_fields
+dotnet_naming_rule.private_const_fields_should_be_camel_case.style = camel_case_style
+dotnet_naming_rule.private_const_fields_should_be_camel_case.severity = warning
+
+dotnet_naming_symbols.private_const_fields.applicable_kinds = field
+dotnet_naming_symbols.private_const_fields.applicable_accessibilities = private
+dotnet_naming_symbols.private_const_fields.required_modifiers = const
+
+# Shared style: CamelCase with no prefix
+dotnet_naming_style.camel_case_style.capitalization = pascal_case

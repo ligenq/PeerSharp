@@ -1,0 +1,47 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<WarningsAsErrors>CS8600;CS8602;CS8603;CS8604;CS8618;CS8620;CS8625;CS8655;CS8669</WarningsAsErrors>
+		<Version>0.1.0</Version>
+		<Authors>Peerfluence</Authors>
+		<Description>A high-performance BitTorrent engine for .NET.</Description>
+		<PackageIcon>application-icon.png</PackageIcon>
+		<IsTrimmable>true</IsTrimmable>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="application-icon.png" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
+		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.21.0.135717">
+			<PrivateAssets>all</PrivateAssets>
+			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+		</PackageReference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<Compile Remove="Types\**\*.cs" />
+		<Compile Remove="Internals\Utilities\Bencode\**\*.cs" />
+		<Compile Remove="Internals\Peers\MessageId.cs" />
+		<Compile Remove="Internals\Peers\PeerMessage.cs" />
+		<Compile Remove="Internals\Pieces\PiecePicker.cs" />
+		<Compile Remove="Internals\Pieces\IPiecePickerContext.cs" />
+		<Compile Remove="Internals\Pieces\PiecesProgress.cs" />
+		<Compile Remove="Internals\Pieces\PieceChecker.cs" />
+		<Compile Remove="Internals\Pieces\Block.cs" />
+		<Compile Remove="Internals\IO\**\*.cs" />
+		<Compile Remove="Internals\Streaming\**\*.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+			<_Parameter1>PeerSharp.Tests</_Parameter1>
+		</AssemblyAttribute>
+	</ItemGroup>
+
+</Project>
