@@ -467,6 +467,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         AddPeersInternal(peers, sourceKind, source, flags: null);
     }
 
+    public Task AddConnectedPeerAsync(Stream stream, bool initiator, IPEndPoint? remote = null, PeerSourceKind sourceKind = PeerSourceKind.Unknown)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+
+        return AddConnectedPeerCoreAsync(stream, initiator, remote, sourceKind);
+    }
+
     public async Task BroadcastHaveAsync(int pieceIndex)
     {
         var tasks = new List<Task>();
@@ -2306,5 +2313,78 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             _stableSpeedSince = DateTimeOffset.MinValue;
         }
+    }
+
+    private async Task AddConnectedPeerCoreAsync(Stream stream, bool initiator, IPEndPoint? remote, PeerSourceKind sourceKind)
+    {
+        if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
+        {
+            _logger.LogDebug("Rejecting connected stream peer - ForceProxy is enabled");
+            stream.Close();
+            return;
+        }
+
+        if (_torrent.Blocklist?.IsBlocked(remote) == true)
+        {
+            _logger.LogDebug("Blocked connected stream peer from {Remote} (blocklist)", remote);
+            stream.Close();
+            return;
+        }
+
+        int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
+        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        {
+            _logger.LogDebug("Rejecting connected stream peer - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
+            stream.Close();
+            return;
+        }
+
+        if (!_governor.TryAcquireConnectionSlot())
+        {
+            _logger.LogDebug("Rejecting connected stream peer - global limit reached ({MaxConnections})", _settings.Connection.MaxConnections);
+            stream.Close();
+            return;
+        }
+
+        var peer = remote != null
+            ? _peerFactory.Create(_torrent, this, _timeProvider, stream, remote)
+            : _peerFactory.Create(_torrent, this, _timeProvider, stream);
+
+        if (peer.RemoteEndPoint != null)
+        {
+            peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
+            peer.Priority = PeerPriority.Calculate(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
+            _connectedEndpoints.TryAdd(peer.RemoteEndPoint, 0);
+
+            var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
+            history.UpdateSource(sourceKind);
+        }
+
+        if (_connectedPeers.TryAdd(peer, 0))
+        {
+            Interlocked.Increment(ref _connectedPeersCount);
+        }
+        else
+        {
+            if (peer.RemoteEndPoint != null)
+            {
+                _connectedEndpoints.TryRemove(peer.RemoteEndPoint, out _);
+            }
+
+            _governor.ReleaseConnectionSlot();
+            stream.Close();
+            return;
+        }
+
+        if (initiator)
+        {
+            peer.StartAsInitiator(stream);
+        }
+        else
+        {
+            peer.Start(stream);
+        }
+
+        await Task.CompletedTask.ConfigureAwait(false);
     }
 }

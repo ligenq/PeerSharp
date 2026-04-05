@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Version>0.1.0</Version>
+    <Authors>Peerfluence</Authors>
+    <Description>WebTorrent adapter for PeerSharp using WebRtcSharp data channels and WebSocket trackers.</Description>
+    <PackageTags>torrent;webtorrent;webrtc;websocket;tracker;p2p</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/ligenq/PeerSharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ligenq/PeerSharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>PeerSharp.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PeerSharp\PeerSharp.csproj" />
+    <Reference Include="WebRtcSharp">
+      <HintPath>..\..\..\WebRtcSharp\WebRtcSharp\bin\Debug\net10.0\WebRtcSharp.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
