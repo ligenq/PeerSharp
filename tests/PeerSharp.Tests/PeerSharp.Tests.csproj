@@ -33,6 +33,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PeerSharp\PeerSharp.csproj" />
+    <Reference Include="PeerSharp.WebTorrent">
+      <HintPath>..\..\src\PeerSharp.WebTorrent\bin\Debug\net10.0\PeerSharp.WebTorrent.dll</HintPath>
+    </Reference>
+    <Reference Include="WebRtcSharp">
+      <HintPath>..\..\..\WebRtcSharp\WebRtcSharp\bin\Debug\net10.0\WebRtcSharp.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>

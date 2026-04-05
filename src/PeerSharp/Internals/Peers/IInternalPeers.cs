@@ -26,6 +26,15 @@ internal interface IInternalPeers : IPeers
     Task AddIncomingPeerAsync(Stream stream, byte[] handshake, System.Net.IPEndPoint? remote = null);
 
     /// <summary>
+    /// Attaches an already-connected duplex stream as a BitTorrent peer.
+    /// </summary>
+    /// <param name="stream">The connected peer stream.</param>
+    /// <param name="initiator">True if the local side should initiate the BitTorrent handshake.</param>
+    /// <param name="remote">Optional remote endpoint info.</param>
+    /// <param name="sourceKind">The source of the peer connection.</param>
+    Task AddConnectedPeerAsync(Stream stream, bool initiator, System.Net.IPEndPoint? remote = null, PeerSourceKind sourceKind = PeerSourceKind.Unknown);
+
+    /// <summary>
     /// Adds a list of peers to the peer manager.
     /// </summary>
     /// <param name="peers">List of peer endpoints.</param>

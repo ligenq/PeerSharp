@@ -18,7 +18,7 @@ public class PeerManagerIntegrationTests
         torrent.Settings.Connection.Encryption = Encryption.Refuse;
 
         var timeProvider = new FakeTimeProvider();
-        var manager = new PeerManager(torrent, new FakeGeoIpService(), new RealPeerFactory(), timeProvider, new FakeConnectionGovernor());
+        var manager = new PeerManager(torrent, new FakeGeoIpService(), new PeerCommunicationFactory(), timeProvider, new FakeConnectionGovernor());
 
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -39,6 +39,45 @@ public class PeerManagerIntegrationTests
         await manager.StopAsync();
         await torrent.DisposeAsync();
         CleanupPath(path);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddConnectedPeerAsync_AttachesInitiatorAndResponderStreams()
+    {
+        string leftPath = CreateTempPath();
+        string rightPath = CreateTempPath();
+        var metadata = CreateMetadata();
+
+        var leftTorrent = TorrentTestUtility.CreateMinimal(metadata, leftPath);
+        var rightTorrent = TorrentTestUtility.CreateMinimal(metadata, rightPath);
+        leftTorrent.Settings.Connection.Encryption = Encryption.Refuse;
+        rightTorrent.Settings.Connection.Encryption = Encryption.Refuse;
+
+        var timeProvider = new FakeTimeProvider();
+        var leftManager = new PeerManager(leftTorrent, new FakeGeoIpService(), new PeerCommunicationFactory(), timeProvider, new FakeConnectionGovernor());
+        var rightManager = new PeerManager(rightTorrent, new FakeGeoIpService(), new PeerCommunicationFactory(), timeProvider, new FakeConnectionGovernor());
+
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+        using var leftClient = new TcpClient();
+        Task<TcpClient> acceptTask = listener.AcceptTcpClientAsync();
+        await leftClient.ConnectAsync(IPAddress.Loopback, port);
+        using var rightClient = await acceptTask;
+
+        await leftManager.AddConnectedPeerAsync(leftClient.GetStream(), initiator: true, remote: (IPEndPoint?)leftClient.Client.RemoteEndPoint, sourceKind: PeerSourceKind.WebTorrent);
+        await rightManager.AddConnectedPeerAsync(rightClient.GetStream(), initiator: false, remote: (IPEndPoint?)rightClient.Client.RemoteEndPoint, sourceKind: PeerSourceKind.WebTorrent);
+
+        await AssertEventuallyAsync(() => leftManager.ConnectedCount == 1 && rightManager.ConnectedCount == 1, TimeSpan.FromSeconds(5));
+
+        listener.Stop();
+        await leftManager.StopAsync();
+        await rightManager.StopAsync();
+        await leftTorrent.DisposeAsync();
+        await rightTorrent.DisposeAsync();
+        CleanupPath(leftPath);
+        CleanupPath(rightPath);
     }
 
     private static TorrentFileMetadata CreateMetadata()
@@ -82,6 +121,22 @@ public class PeerManagerIntegrationTests
         }
     }
 
+    private static async Task AssertEventuallyAsync(Func<bool> predicate, TimeSpan timeout)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (predicate())
+            {
+                return;
+            }
+
+            await Task.Delay(50);
+        }
+
+        Assert.True(predicate());
+    }
+
     private sealed class FakeGeoIpService : IGeoIpService
     {
         public bool Enabled { get; set; }
@@ -93,24 +148,6 @@ public class PeerManagerIntegrationTests
             return Task.CompletedTask;
         }
         public void Clear() { Enabled = false; }
-    }
-
-    private sealed class RealPeerFactory : IPeerCommunicationFactory
-    {
-        public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
-        {
-            return new PeerCommunication(torrent, listener, timeProvider);
-        }
-
-        public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, Stream stream, IPEndPoint? remoteEndPoint)
-        {
-            return new PeerCommunication(torrent, listener, timeProvider);
-        }
-
-        public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, TcpClient client)
-        {
-            return new PeerCommunication(torrent, listener, timeProvider);
-        }
     }
 
     private sealed class FakeConnectionGovernor : IConnectionGovernor

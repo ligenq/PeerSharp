@@ -1260,6 +1260,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _handshakeLoopTask = RunBackgroundTaskAsync(IncomingHandshakeLoopAsync, "IncomingHandshakeLoop", closeOnCompletion: false, ct: ConnectionToken);
     }
 
+    public void StartAsInitiator(Stream stream)
+    {
+        Stream = stream;
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+        _connected = 1;
+        _logger.LogDebug("Connected stream peer {PeerName} starting as initiator", Name);
+        _handshakeLoopTask = RunBackgroundTaskAsync(OutgoingConnectedHandshakeLoopAsync, "OutgoingConnectedHandshakeLoop", closeOnCompletion: false, ct: ConnectionToken);
+    }
+
     public void Unchoke()
     {
         var now = _timeProvider.GetUtcNow();
@@ -1595,6 +1605,36 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         catch (Exception ex)
         {
             _logger.LogError(ex, "Incoming handshake error for {PeerName}", Name);
+            await CloseAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task OutgoingConnectedHandshakeLoopAsync(CancellationToken token)
+    {
+        try
+        {
+            if (!await PerformPlaintextHandshakeAsync().ConfigureAwait(false))
+            {
+                await CloseAsync().ConfigureAwait(false);
+                return;
+            }
+
+            try { await Listener.HandshakeFinishedAsync(this).ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogError(ex, "HandshakeFinished callback error"); }
+            StartBackgroundLoops();
+        }
+        catch (OperationCanceledException)
+        {
+            await CloseAsync().ConfigureAwait(false);
+        }
+        catch (IOException ex)
+        {
+            _logger.LogDebug(ex, "Outgoing connected handshake I/O error for {PeerName}", Name);
+            await CloseAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Outgoing connected handshake error for {PeerName}", Name);
             await CloseAsync().ConfigureAwait(false);
         }
     }

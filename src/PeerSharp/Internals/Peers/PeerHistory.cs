@@ -10,6 +10,7 @@ internal enum PeerSourceKind
     Pex = 3,
     Resume = 4,
     Ltep = 5,
+    WebTorrent = 6,
     Unknown = 7
 }
 
