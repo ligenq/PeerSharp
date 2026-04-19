@@ -15,6 +15,8 @@ internal static class TorrentLoggerFactory
 {
     private static ILoggerFactory _sharedInstance = NullLoggerFactory.Instance;
 
+    internal static ILoggerFactory Current => _sharedInstance;
+
     /// <summary>
     /// Creates a logger for the specified type.
     /// </summary>

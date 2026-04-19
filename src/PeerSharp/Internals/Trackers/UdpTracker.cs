@@ -5,6 +5,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 
 namespace PeerSharp.Internals.Trackers;
 
@@ -120,7 +121,7 @@ internal class UdpTracker : TrackerBase, IDisposable
 
             // All retries exhausted - this is expected for unreachable trackers
             _connectionId = 0;
-            _logger.LogWarning(lastException, "Tracker announce failed after {MaxRetries} retries - {Message}", MaxRetries, lastException?.Message ?? "Unknown error");
+            _logger.LogWarning(lastException, "Tracker {Url} announce failed after {MaxRetries} retries - {Message}", Url, MaxRetries, lastException?.Message ?? "Unknown error");
             RaiseAnnounceResult(false, new AnnounceResponse(), lastException?.Message ?? "Retries exhausted");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -131,21 +132,21 @@ internal class UdpTracker : TrackerBase, IDisposable
         {
             // Non-transient tracker error (e.g., protocol error)
             _connectionId = 0;
-            _logger.LogWarning(ex, "Tracker announce failed - {Message}", ex.Message);
+            _logger.LogWarning(ex, "Tracker {Url} announce failed - {Message}", Url, ex.Message);
             RaiseAnnounceResult(false, new AnnounceResponse(), ex.Message);
         }
         catch (Exception ex) when (ex is SocketException || ex is TimeoutException)
         {
             // Expected network errors on first attempt (no retries)
             _connectionId = 0;
-            _logger.LogWarning(ex, "Tracker announce failed - {Message}", ex.Message);
+            _logger.LogWarning(ex, "Tracker {Url} announce failed - {Message}", Url, ex.Message);
             RaiseAnnounceResult(false, new AnnounceResponse(), ex.Message);
         }
         catch (Exception ex)
         {
             // Unexpected exception
             _connectionId = 0;
-            _logger.LogError(ex, "Tracker announce failed (unexpected)");
+            _logger.LogError(ex, "Tracker {Url} announce failed (unexpected)", Url);
             RaiseAnnounceResult(false, new AnnounceResponse(), ex.Message);
         }
         finally
@@ -221,7 +222,7 @@ internal class UdpTracker : TrackerBase, IDisposable
 
             // All retries exhausted
             _connectionId = 0;
-            _logger.LogWarning(lastException, "Scrape failed after {MaxRetries} retries - {Message}", MaxRetries, lastException?.Message ?? "Unknown error");
+            _logger.LogWarning(lastException, "Tracker {Url} scrape failed after {MaxRetries} retries - {Message}", Url, MaxRetries, lastException?.Message ?? "Unknown error");
             RaiseScrapeResult(false, new ScrapeResponse());
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -232,7 +233,7 @@ internal class UdpTracker : TrackerBase, IDisposable
         {
             // Unexpected exception
             _connectionId = 0;
-            _logger.LogWarning(ex, "Tracker scrape failed");
+            _logger.LogWarning(ex, "Tracker {Url} scrape failed", Url);
             RaiseScrapeResult(false, new ScrapeResponse());
         }
         finally
@@ -302,7 +303,7 @@ internal class UdpTracker : TrackerBase, IDisposable
             }
 
             _connectionId = 0;
-            _logger.LogWarning(lastException, "Tracker multi-scrape failed after {MaxRetries} retries - {Message}", MaxRetries, lastException?.Message ?? "Unknown error");
+            _logger.LogWarning(lastException, "Tracker {Url} multi-scrape failed after {MaxRetries} retries - {Message}", Url, MaxRetries, lastException?.Message ?? "Unknown error");
             RaiseMultiScrapeResult(false, new MultiScrapeResponse());
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -312,19 +313,19 @@ internal class UdpTracker : TrackerBase, IDisposable
         catch (UdpTrackerException ex)
         {
             _connectionId = 0;
-            _logger.LogWarning(ex, "Tracker multi-scrape failed - {Message}", ex.Message);
+            _logger.LogWarning(ex, "Tracker {Url} multi-scrape failed - {Message}", Url, ex.Message);
             RaiseMultiScrapeResult(false, new MultiScrapeResponse());
         }
         catch (Exception ex) when (ex is SocketException || ex is TimeoutException)
         {
             _connectionId = 0;
-            _logger.LogWarning(ex, "Tracker multi-scrape failed - {Message}", ex.Message);
+            _logger.LogWarning(ex, "Tracker {Url} multi-scrape failed - {Message}", Url, ex.Message);
             RaiseMultiScrapeResult(false, new MultiScrapeResponse());
         }
         catch (Exception ex)
         {
             _connectionId = 0;
-            _logger.LogError(ex, "Tracker multi-scrape failed (unexpected)");
+            _logger.LogError(ex, "Tracker {Url} multi-scrape failed (unexpected)", Url);
             RaiseMultiScrapeResult(false, new MultiScrapeResponse());
         }
         finally
@@ -385,13 +386,13 @@ internal class UdpTracker : TrackerBase, IDisposable
             }
 
             _connectionId = 0;
-            _logger.LogError(lastException, "Multi-scrape failed after {MaxRetries} retries", MaxRetries);
+            _logger.LogError(lastException, "Tracker {Url} multi-scrape failed after {MaxRetries} retries", Url, MaxRetries);
             return new MultiScrapeResponse();
         }
         catch (Exception ex)
         {
             _connectionId = 0;
-            _logger.LogError(ex, "Multi-scrape failed");
+            _logger.LogError(ex, "Tracker {Url} multi-scrape failed", Url);
             return new MultiScrapeResponse();
         }
         finally
@@ -437,9 +438,19 @@ internal class UdpTracker : TrackerBase, IDisposable
         int action = BinaryPrimitives.ReadInt32BigEndian(res.Buffer.AsSpan(0));
         int resTransId = BinaryPrimitives.ReadInt32BigEndian(res.Buffer.AsSpan(4));
 
-        if (action != 0 || resTransId != transId)
+        if (resTransId != transId)
         {
-            throw new InvalidDataException("Invalid connect response");
+            throw new InvalidDataException($"Invalid connect response: transaction ID mismatch (expected {transId}, got {resTransId})");
+        }
+
+        if (action == 3)
+        {
+            throw new UdpTrackerException($"Tracker returned error on connect: {ParseTrackerErrorMessage(res.Buffer)}", isTransient: false);
+        }
+
+        if (action != 0)
+        {
+            throw new InvalidDataException($"Invalid connect response: expected action 0, got {action}");
         }
 
         return BinaryPrimitives.ReadInt64BigEndian(res.Buffer.AsSpan(8));
@@ -500,6 +511,28 @@ internal class UdpTracker : TrackerBase, IDisposable
         return _connectionId;
     }
 
+    internal static string ParseTrackerErrorMessage(byte[] buffer)
+    {
+        if (buffer.Length <= 8)
+        {
+            return "(no error message)";
+        }
+
+        var messageBytes = buffer.AsSpan(8);
+        int end = messageBytes.Length;
+        while (end > 0 && messageBytes[end - 1] == 0)
+        {
+            end--;
+        }
+
+        if (end == 0)
+        {
+            return "(empty error message)";
+        }
+
+        return Encoding.ASCII.GetString(messageBytes.Slice(0, end));
+    }
+
     private async Task<UdpReceiveResult> ReceiveSpecificTransactionAsync(int expectedTransId, int minSize, CancellationToken ct)
     {
         if (_client == null)
@@ -535,7 +568,10 @@ internal class UdpTracker : TrackerBase, IDisposable
                     int receivedTransId = BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan(4));
                     if (receivedTransId == expectedTransId)
                     {
-                        if (buffer.Length < minSize)
+                        int receivedAction = BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan(0));
+                        // BEP 15 action==3 is an error response and may be shorter than the
+                        // minSize expected for a successful response. Let the caller surface it.
+                        if (buffer.Length < minSize && receivedAction != 3)
                         {
                             throw new InvalidDataException("Response too short");
                         }
@@ -635,11 +671,16 @@ internal class UdpTracker : TrackerBase, IDisposable
 
         if (action == 3) // Error
         {
-            throw new UdpTrackerException("Tracker returned error response", isTransient: false);
+            throw new UdpTrackerException($"Tracker returned error on announce: {ParseTrackerErrorMessage(res.Buffer)}", isTransient: false);
         }
         if (action != 1)
         {
             throw new InvalidDataException($"Invalid announce action: expected 1, got {action}");
+        }
+
+        if (res.Buffer.Length < 20)
+        {
+            throw new InvalidDataException($"Announce response too short: {res.Buffer.Length} bytes");
         }
 
         var announceResp = new AnnounceResponse
@@ -760,12 +801,17 @@ internal class UdpTracker : TrackerBase, IDisposable
 
         if (action == 3)
         {
-            throw new UdpTrackerException("Tracker returned error response", isTransient: false);
+            throw new UdpTrackerException($"Tracker returned error on scrape: {ParseTrackerErrorMessage(res.Buffer)}", isTransient: false);
         }
 
         if (action != 2)
         {
             throw new InvalidDataException($"Invalid scrape action: expected 2, got {action}");
+        }
+
+        if (res.Buffer.Length < minSize)
+        {
+            throw new InvalidDataException($"Scrape response too short: {res.Buffer.Length} bytes (expected at least {minSize})");
         }
 
         var multiResp = new MultiScrapeResponse();

@@ -12,11 +12,12 @@ using PeerSharp.Streaming;
 using PeerSharp.Internals.Trackers;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.Internals.Utp;
+using PeerSharp.WebTorrent;
 using System.Text.Json;
 
 namespace PeerSharp.Internals;
 
-internal sealed class Torrent : ITorrent, IAsyncDisposable, IFileSelectionObserver
+internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, IFileSelectionObserver
 {
     internal int _lastReportedDownloadSpeed;
     internal int _lastReportedUploadSpeed;
@@ -50,6 +51,8 @@ internal sealed class Torrent : ITorrent, IAsyncDisposable, IFileSelectionObserv
     private int _stopping;
 
     private int _timerTickCount;
+
+    private WebTorrentSession? _webTorrentSession;
 
     private Torrent(
             TorrentFileMetadata infoFile,
@@ -150,6 +153,7 @@ internal sealed class Torrent : ITorrent, IAsyncDisposable, IFileSelectionObserv
 
     public string Name => InfoFile.Info.Name;
     public IPeers Peers => PeersInternal;
+    public ReadOnlyMemory<byte> PeerId => Settings.PeerId;
     public int PieceCount => Pieces?.Count ?? 0;
 
     // Subsystems
@@ -422,6 +426,12 @@ internal sealed class Torrent : ITorrent, IAsyncDisposable, IFileSelectionObserv
         return Streaming.OpenStreamAsync(fileIndex, cancellationToken);
     }
 
+    public Task AttachPeerTransportAsync(Stream stream, bool initiator, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return PeersInternal.AddConnectedPeerAsync(stream, initiator, remote: null, sourceKind: PeerSourceKind.WebTorrent);
+    }
+
     public async Task ReinitializeAfterMetadataAsync(CancellationToken ct = default)
     {
         bool wasStarted = Started;
@@ -524,6 +534,7 @@ internal sealed class Torrent : ITorrent, IAsyncDisposable, IFileSelectionObserv
 
             await PeersInternal.StartAsync().ConfigureAwait(false);
             await TrackerManager.StartAsync().ConfigureAwait(false);
+            await StartWebTorrentSessionAsync(cancellationToken).ConfigureAwait(false);
 
             FireAndForgetLsdAnnounce();
 
@@ -556,6 +567,24 @@ internal sealed class Torrent : ITorrent, IAsyncDisposable, IFileSelectionObserv
         }
 
         StartSeedingTimerIfNeeded();
+    }
+
+    private async Task StartWebTorrentSessionAsync(CancellationToken cancellationToken)
+    {
+        if (!Settings.Connection.EnableWebTorrent)
+        {
+            return;
+        }
+
+        var settings = Settings.Connection.WebTorrent;
+        var options = new WebTorrentSessionOptions
+        {
+            OffersPerTracker = settings.OffersPerTracker,
+            AdditionalTrackers = settings.AdditionalTrackers.ToArray(),
+            MinimumReannounceInterval = settings.MinimumReannounceInterval
+        };
+
+        _webTorrentSession = await WebTorrentSession.AttachAsync(this, options, TorrentLoggerFactory.Current, cancellationToken).ConfigureAwait(false);
     }
 
     public Task StopAsync(CancellationToken cancellationToken = default)
@@ -963,6 +992,11 @@ internal sealed class Torrent : ITorrent, IAsyncDisposable, IFileSelectionObserv
                 {
                     await TrackerManager.StopAsync().ConfigureAwait(false);
                 }
+                if (_webTorrentSession != null)
+                {
+                    await _webTorrentSession.DisposeAsync().ConfigureAwait(false);
+                    _webTorrentSession = null;
+                }
                 if (WebSeedManager != null)
                 {
                     await WebSeedManager.DisposeAsync().ConfigureAwait(false);
@@ -993,4 +1027,3 @@ internal sealed class Torrent : ITorrent, IAsyncDisposable, IFileSelectionObserv
         }
     }
 }
-
