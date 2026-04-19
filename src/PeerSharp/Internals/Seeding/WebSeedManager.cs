@@ -160,8 +160,9 @@ internal sealed class WebSeedManager : IAsyncDisposable
                 continue;
             }
 
-            // Build URL for this file
-            string fileUrl = $"{source.Url}/{Uri.EscapeDataString(file.Path.Replace('\\', '/'))}";
+            string fileUrl = source.IsDirectory
+                ? BuildFileUrl(source.Url, _torrent.InfoFile.Info.Name, file.Path)
+                : BuildFileUrl(source.Url, file.Path);
 
             var data = await DownloadFileRangeAsync(fileUrl, fileReadStart, bytesToRead, ct).ConfigureAwait(false);
             if (data == null || data.Length != bytesToRead)
@@ -277,6 +278,16 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
 
         return null;
+    }
+
+    private static string BuildFileUrl(string baseUrl, params string[] paths)
+    {
+        var segments = paths
+            .SelectMany(path => path
+                .Replace('\\', '/')
+                .Split('/', StringSplitOptions.RemoveEmptyEntries));
+
+        return $"{baseUrl}/{string.Join("/", segments.Select(Uri.EscapeDataString))}";
     }
 
     private async Task DownloadPieceAsync(WebSeedSource source, int pieceIndex, CancellationToken ct)
@@ -492,6 +503,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         public WebSeedSource(string url, bool isMultiFile)
         {
+            IsDirectory = url.EndsWith("/", StringComparison.Ordinal);
             Url = url.TrimEnd('/');
             IsMultiFile = isMultiFile;
         }
@@ -499,6 +511,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         public int ActiveDownloads { get; set; }
         public int FailureCount { get; set; }
         public bool IsActive { get; set; }
+        public bool IsDirectory { get; }
         public bool IsMultiFile { get; }
         public DateTimeOffset LastFailure { get; set; }
         public DateTimeOffset LastSuccess { get; set; }
@@ -512,4 +525,3 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 }
-

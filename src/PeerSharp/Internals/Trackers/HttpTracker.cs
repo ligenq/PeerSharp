@@ -159,6 +159,14 @@ internal class HttpTracker : TrackerBase, IDisposable
         var node = BencodeParser.Parse(data);
         if (node is BDict dict)
         {
+            // BEP 3: a tracker may return {'failure reason': '...'} with no other keys.
+            // Surface that string rather than silently treating the empty response as success.
+            var failureReason = dict.GetString("failure reason");
+            if (!string.IsNullOrEmpty(failureReason))
+            {
+                throw new InvalidDataException($"Tracker returned failure: {failureReason}");
+            }
+
             var resp = new AnnounceResponse
             {
                 Interval = (uint)(dict.GetLong("interval") ?? 600),
@@ -209,7 +217,15 @@ internal class HttpTracker : TrackerBase, IDisposable
     {
         // Response: d5:filesd20:...d8:completei5e...eee
         var node = BencodeParser.Parse(data);
-        if (node is BDict dict && dict.Get("files") is BDict files)
+        if (node is BDict dict)
+        {
+            var failureReason = dict.GetString("failure reason");
+            if (!string.IsNullOrEmpty(failureReason))
+            {
+                throw new InvalidDataException($"Tracker returned failure: {failureReason}");
+            }
+        }
+        if (node is BDict dict2 && dict2.Get("files") is BDict files)
         {
             // We only care about our infohash
             foreach (var key in files.Dict.Keys)
@@ -235,7 +251,15 @@ internal class HttpTracker : TrackerBase, IDisposable
     {
         var result = new MultiScrapeResponse();
         var node = BencodeParser.Parse(data);
-        if (node is BDict dict && dict.Get("files") is BDict files)
+        if (node is BDict dict)
+        {
+            var failureReason = dict.GetString("failure reason");
+            if (!string.IsNullOrEmpty(failureReason))
+            {
+                throw new InvalidDataException($"Tracker returned failure: {failureReason}");
+            }
+        }
+        if (node is BDict dict2 && dict2.Get("files") is BDict files)
         {
             foreach (var kvp in files.Dict)
             {

@@ -67,6 +67,10 @@ internal class NetworkManager : INetworkManager
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         var settings = _settings;
+        bool udpEnabled = settings.Connection.EnableUtpIn
+            || settings.Connection.EnableUtpOut
+            || settings.Dht.Enabled
+            || settings.Connection.EnableLsd;
 
         // Initialize packet handlers
         if (settings.Connection.EnableUtpIn || settings.Connection.EnableUtpOut)
@@ -86,7 +90,10 @@ internal class NetworkManager : INetworkManager
         }
 
         // Start receiving packets
-        await UdpListener.StartAsync(cancellationToken).ConfigureAwait(false);
+        if (udpEnabled)
+        {
+            await UdpListener.StartAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         // TCP listener
         if (settings.Connection.EnableTcpIn)
@@ -107,7 +114,7 @@ internal class NetworkManager : INetworkManager
             _portMappingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _portMappingCts.CancelAfter(TimeSpan.FromSeconds(10));
 
-            _portMappingTask = StartPortMappingSafeAsync(BoundTcpPort, BoundUdpPort, _portMappingCts.Token);
+            _portMappingTask = StartPortMappingSafeAsync(BoundTcpPort, udpEnabled ? BoundUdpPort : 0, _portMappingCts.Token);
             _ = _portMappingTask.ContinueWith(t =>
             {
                 if (t.IsFaulted)
@@ -175,6 +182,11 @@ internal class NetworkManager : INetworkManager
             {
                 await mapper.StartAsync(ct).ConfigureAwait(false);
                 await mapper.MapPortAsync(tcpPort, "TCP", "PeerSharp TCP", ct).ConfigureAwait(false);
+                if (udpPort <= 0)
+                {
+                    continue;
+                }
+
                 if (udpPort != tcpPort)
                 {
                     await mapper.MapPortAsync(udpPort, "UDP", "PeerSharp UDP", ct).ConfigureAwait(false);
