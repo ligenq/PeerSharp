@@ -33,6 +33,78 @@ public class ProxyHelperTests
     }
 
     [Fact]
+    public void WriteSocks5UdpPacket_IPv4_WritesPacketWithoutAllocation()
+    {
+        byte[] payload = new byte[] { 9, 8, 7 };
+        var ep = new IPEndPoint(IPAddress.Parse("5.6.7.8"), 65000);
+        Span<byte> destination = stackalloc byte[13];
+
+        int written = ProxyHelper.WriteSocks5UdpPacket(payload, ep, destination);
+
+        Assert.Equal(13, written);
+        Assert.Equal(new byte[] { 0, 0, 0, 1, 5, 6, 7, 8, 253, 232, 9, 8, 7 }, destination.ToArray());
+    }
+
+    [Fact]
+    public void WriteSocks5UdpPacket_IPv6_WritesPacketWithoutAllocation()
+    {
+        byte[] payload = new byte[] { 4, 5 };
+        var ep = new IPEndPoint(IPAddress.Parse("2001:db8::2"), 6881);
+        Span<byte> destination = stackalloc byte[24];
+
+        int written = ProxyHelper.WriteSocks5UdpPacket(payload, ep, destination);
+
+        Assert.Equal(24, written);
+        Assert.Equal(0x04, destination[3]);
+        Assert.Equal(0x1a, destination[20]);
+        Assert.Equal(0xe1, destination[21]);
+        Assert.Equal(payload, destination.Slice(22, 2).ToArray());
+    }
+
+    [Fact]
+    public void WriteSocks5UdpPacket_ThrowsWhenDestinationTooSmall()
+    {
+        var ep = new IPEndPoint(IPAddress.Parse("1.2.3.4"), 1234);
+
+        Assert.Throws<ArgumentException>(() =>
+        {
+            Span<byte> destination = stackalloc byte[9];
+            ProxyHelper.WriteSocks5UdpPacket(new byte[] { 1 }, ep, destination);
+        });
+    }
+
+    [Fact]
+    public void UnwrapSocks5UdpPacket_DomainAddress_ReturnsPayloadWithAnyEndpoint()
+    {
+        byte[] packet =
+        {
+            0, 0, 0, 3,
+            11,
+            (byte)'e', (byte)'x', (byte)'a', (byte)'m', (byte)'p', (byte)'l', (byte)'e', (byte)'.', (byte)'c', (byte)'o', (byte)'m',
+            0x1a, 0xe1,
+            1, 2, 3
+        };
+
+        var (payload, endpoint) = ProxyHelper.UnwrapSocks5UdpPacket(packet);
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, payload.ToArray());
+        Assert.Equal(IPAddress.Any, endpoint.Address);
+        Assert.Equal(6881, endpoint.Port);
+    }
+
+    [Theory]
+    [InlineData(new byte[] { 0, 0, 0 })]
+    [InlineData(new byte[] { 0, 0, 0, 9, 1, 2, 3, 4, 0, 1 })]
+    public void UnwrapSocks5UdpPacket_InvalidPacket_ReturnsEmptyPayload(byte[] packet)
+    {
+        var (payload, endpoint) = ProxyHelper.UnwrapSocks5UdpPacket(packet);
+
+        Assert.True(payload.IsEmpty);
+        Assert.Equal(IPAddress.Any, endpoint.Address);
+        Assert.Equal(0, endpoint.Port);
+    }
+
+    [Fact]
     public async Task ConnectHttpProxyAsync_SucceedsOn200()
     {
         using var server = new HttpProxyTestServer(HttpProxyTestResponse.Success);

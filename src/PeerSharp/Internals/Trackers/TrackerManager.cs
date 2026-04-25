@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Peers;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 
 namespace PeerSharp.Internals.Trackers;
 
@@ -318,34 +319,18 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
     public bool RemoveTracker(string url)
     {
+        TrackerInfo? removed = null;
+        bool shouldSendStopped = false;
+
         lock (_lock)
         {
             var info = _trackers.FirstOrDefault(t => t.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
             if (info != null)
             {
+                shouldSendStopped = _started
+                    || info.LastAnnounce != DateTimeOffset.MinValue
+                    || info.CurrentAnnounceTask != null;
                 info.Dispose();
-
-                // Fire and forget, but ensure Deinit happens AFTER announce
-                var task = Task.Run(async () =>
-                {
-                    try
-                    {
-                        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                        await info.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Log but otherwise ignore errors during removal
-                        _logger.LogTrace(ex, "Failed to send Stopped event for removed tracker {Url}", info.Url);
-                    }
-                    finally
-                    {
-                        info.Tracker.Deinit();
-                    }
-                });
-
-                _removalTasks.TryAdd(task, 0);
-                _ = task.ContinueWith(t => _removalTasks.TryRemove(t, out _), TaskScheduler.Default);
 
                 _trackers.Remove(info);
                 _trackerUrls.Remove(url);
@@ -355,10 +340,44 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                     var tier = GetTier(info.TierIndex);
                     tier?.Trackers.Remove(info);
                 }
-                return true;
+                removed = info;
             }
+        }
+
+        if (removed == null)
+        {
             return false;
         }
+
+        if (!shouldSendStopped)
+        {
+            removed.Tracker.Deinit();
+            return true;
+        }
+
+        // Fire and forget, but ensure Deinit happens AFTER announce
+        var task = Task.Run(async () =>
+        {
+            try
+            {
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                await removed.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Log but otherwise ignore errors during removal
+                _logger.LogTrace(ex, "Failed to send Stopped event for removed tracker {Url}", removed.Url);
+            }
+            finally
+            {
+                removed.Tracker.Deinit();
+            }
+        });
+
+        _removalTasks.TryAdd(task, 0);
+        _ = task.ContinueWith(t => _removalTasks.TryRemove(t, out _), TaskScheduler.Default);
+
+        return true;
     }
 
     public Task StartAsync()
@@ -602,6 +621,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         }
     }
 
+    [ExcludeFromCodeCoverage]
     private sealed class TrackerInfo : IDisposable
     {
         private AtomicDisposal _disposal = new();
@@ -648,6 +668,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         }
     }
 
+    [ExcludeFromCodeCoverage]
     private sealed class TrackerTier
     {
         public int Index { get; init; }

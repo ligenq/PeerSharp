@@ -28,5 +28,7 @@ public class ConfigurationDefaultsTests
         Assert.Equal(30 * 1024, settings.Connection.SlowPeerMinDownloadSpeedBytesPerSec);
         Assert.Equal(30 * 1024, settings.Connection.SlowPeerMinUploadSpeedBytesPerSec);
         Assert.Equal(30, settings.Connection.SlowPeerGraceSeconds);
+
+        Assert.True(settings.Connection.EnableWebSeeds);
     }
 }

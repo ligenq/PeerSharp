@@ -330,4 +330,15 @@ public interface ITorrent
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A task that completes when the torrent has stopped.</returns>
     Task StopAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Registers an optional peer transport (e.g. WebTorrent over WebRTC). The torrent will
+    /// start, stop, and dispose the transport in step with its own lifecycle. Must be called
+    /// before <see cref="StartAsync"/>; transports registered after the torrent has started
+    /// will not be started until the torrent is stopped and restarted.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="transport"/> is null.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when the same transport instance is already registered.</exception>
+    /// <exception cref="ObjectDisposedException">Thrown when the torrent has been disposed.</exception>
+    void RegisterPeerTransport(IPeerTransport transport);
 }

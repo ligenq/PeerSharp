@@ -85,14 +85,10 @@ public sealed class ConnectionSettings
     public bool EnableUtpOut { get; set; } = true;
 
     /// <summary>
-    /// Allow WebTorrent peers over WebRTC data channels. Default is false.
-    /// Enabling this adds WebTorrent support alongside the normal TCP/uTP transports.
-    /// Disable the other transports and discovery mechanisms to run in WebTorrent-only mode.
+    /// Allow HTTP/HTTPS web seeds from torrent metadata. Default is true.
+    /// Disable this when validating pure peer-to-peer/WebTorrent download behavior.
     /// </summary>
-    public bool EnableWebTorrent { get; set; } = false;
-
-    /// <summary>Settings for WebTorrent tracker signaling and peer connection setup.</summary>
-    public WebTorrentSettings WebTorrent { get; set; } = new();
+    public bool EnableWebSeeds { get; set; } = true;
 
     /// <summary>
     /// BitTorrent protocol encryption mode. Default is Allow.
@@ -321,30 +317,6 @@ public sealed class ConnectionSettings
     /// uTP is allowed during warmup only for peers with a known uTP hint.
     /// </summary>
     public int UtpWarmupSeconds { get; set; } = 30;
-}
-
-/// <summary>
-/// Settings for WebTorrent peer discovery and signaling.
-/// </summary>
-public sealed class WebTorrentSettings
-{
-    /// <summary>
-    /// Number of WebRTC offers to send to each WebSocket tracker announce.
-    /// Default is 5.
-    /// </summary>
-    public int OffersPerTracker { get; set; } = 5;
-
-    /// <summary>
-    /// Additional WebSocket trackers to use for WebTorrent announces.
-    /// The library does not add public trackers automatically.
-    /// </summary>
-    public List<string> AdditionalTrackers { get; } = [];
-
-    /// <summary>
-    /// Lower bound for tracker reannounce cadence. Default is 30 seconds.
-    /// Trackers may provide a longer interval in announce responses.
-    /// </summary>
-    public TimeSpan MinimumReannounceInterval { get; set; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>

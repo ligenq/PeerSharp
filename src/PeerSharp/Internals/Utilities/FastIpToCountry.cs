@@ -205,6 +205,8 @@ internal class FastIpToCountry
             var countryBuffer = new List<byte>(128);
             bool foundSeparator = false;
             int bytesRead;
+            int remainingOffset = 0;
+            int remainingCount = 0;
             while ((bytesRead = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
             {
                 int offset = 0;
@@ -218,6 +220,8 @@ internal class FastIpToCountry
                         if (string.IsNullOrEmpty(line))
                         {
                             foundSeparator = true;
+                            remainingOffset = offset;
+                            remainingCount = bytesRead - offset;
                             break;
                         }
                         _countries.Add(line);
@@ -244,33 +248,10 @@ internal class FastIpToCountry
             int entryOffset = 0;
             int bucket = 0;
 
+            ProcessEntries(buffer, remainingOffset, remainingCount, entryBuffer, ref entryOffset, ref bucket);
             while (bucket < 256 && (bytesRead = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
             {
-                int offset = 0;
-                while (offset < bytesRead && bucket < 256)
-                {
-                    int toCopy = Math.Min(6 - entryOffset, bytesRead - offset);
-                    Buffer.BlockCopy(buffer, offset, entryBuffer, entryOffset, toCopy);
-                    entryOffset += toCopy;
-                    offset += toCopy;
-
-                    if (entryOffset == 6)
-                    {
-                        uint ip = BitConverter.ToUInt32(entryBuffer, 0);
-                        ushort country = BitConverter.ToUInt16(entryBuffer, 4);
-
-                        if (country == 0x4545) // Bucket separator marker "EE"
-                        {
-                            bucket++;
-                        }
-                        else
-                        {
-                            _buckets[bucket].Add((ip, country));
-                        }
-
-                        entryOffset = 0;
-                    }
-                }
+                ProcessEntries(buffer, 0, bytesRead, entryBuffer, ref entryOffset, ref bucket);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -280,6 +261,35 @@ internal class FastIpToCountry
         catch (Exception)
         {
             // Fail silently
+        }
+    }
+
+    private void ProcessEntries(byte[] buffer, int offset, int count, byte[] entryBuffer, ref int entryOffset, ref int bucket)
+    {
+        int end = offset + count;
+        while (offset < end && bucket < 256)
+        {
+            int toCopy = Math.Min(6 - entryOffset, end - offset);
+            Buffer.BlockCopy(buffer, offset, entryBuffer, entryOffset, toCopy);
+            entryOffset += toCopy;
+            offset += toCopy;
+
+            if (entryOffset == 6)
+            {
+                uint ip = BitConverter.ToUInt32(entryBuffer, 0);
+                ushort country = BitConverter.ToUInt16(entryBuffer, 4);
+
+                if (country == 0x4545) // Bucket separator marker "EE"
+                {
+                    bucket++;
+                }
+                else
+                {
+                    _buckets[bucket].Add((ip, country));
+                }
+
+                entryOffset = 0;
+            }
         }
     }
 }

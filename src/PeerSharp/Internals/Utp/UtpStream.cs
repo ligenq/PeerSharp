@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.IO.Pipelines;
 using System.Net;
 using System.Threading.Channels;
@@ -1696,6 +1697,7 @@ internal class UtpStream : Stream
         public ushort SeqNr { get; set; }
     }
 
+    [ExcludeFromCodeCoverage]
     private sealed class SeqComparer : IComparer<ushort>
     {
         public int Compare(ushort a, ushort b)

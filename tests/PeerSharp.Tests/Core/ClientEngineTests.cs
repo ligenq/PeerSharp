@@ -100,6 +100,36 @@ public class ClientEngineTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task InitializeAsync_PreservesConfiguredPort_WhenNetworkManagerDoesNotBind()
+    {
+        // Network manager reports BoundTcpPort=0 (e.g. TCP disabled in WebTorrent-only setups).
+        // The user-configured port must survive — trackers reject port=0 as "invalid port".
+        _networkManager.BoundTcpPort = 0;
+        _networkManager.BoundUdpPort = 0;
+        ushort configuredTcp = _settings.Connection.TcpPort;
+        ushort configuredUdp = _settings.Connection.UdpPort;
+
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        Assert.Equal(configuredTcp, _settings.Connection.TcpPort);
+        Assert.Equal(configuredUdp, _settings.Connection.UdpPort);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task InitializeAsync_OverwritesConfiguredPort_WhenNetworkManagerBindsDifferent()
+    {
+        _networkManager.BoundTcpPort = 12345;
+        _networkManager.BoundUdpPort = 23456;
+
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        Assert.Equal((ushort)12345, _settings.Connection.TcpPort);
+        Assert.Equal((ushort)23456, _settings.Connection.UdpPort);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task GetStats_AggregatesFromTorrents()
     {
         var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);

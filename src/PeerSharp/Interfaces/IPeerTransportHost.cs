@@ -16,6 +16,20 @@ public interface IPeerTransportHost
     long DataLeft { get; }
 
     /// <summary>
+    /// Gets the total bytes downloaded since the host was started. Mirrors
+    /// <c>Torrent.TotalDownloaded</c> and is used to compute per-session deltas for tracker
+    /// announces.
+    /// </summary>
+    long DataDownloaded { get; }
+
+    /// <summary>
+    /// Gets the total bytes uploaded since the host was started. Mirrors
+    /// <c>Torrent.TotalUploaded</c> and is used to compute per-session deltas for tracker
+    /// announces.
+    /// </summary>
+    long DataUploaded { get; }
+
+    /// <summary>
      /// Gets the local peer ID advertised to trackers and peers.
      /// </summary>
     ReadOnlyMemory<byte> PeerId { get; }

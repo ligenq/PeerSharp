@@ -86,6 +86,41 @@ var options = new AddTorrentOptions("./downloads") { Events = events };
 var stream = await torrent.OpenStreamAsync(fileIndex: 0);
 ```
 
+## WebTorrent
+
+PeerSharp ships an optional WebTorrent extension (`PeerSharp.WebTorrent`) that adds peer support over WebRTC data channels. The extension assembly is bundled in the same NuGet package as the core engine but is opt-in: call `torrent.UseWebTorrent(...)` per torrent to enable it. The core engine has no dependency on RtcForge or WebRTC unless you opt in.
+
+```csharp
+using PeerSharp.WebTorrent;
+
+var torrent = await engine.AddTorrentAsync(torrentFile, addOptions);
+
+torrent.UseWebTorrent(new WebTorrentSessionOptions
+{
+    OffersPerTracker = 5,
+    AdditionalTrackers = new[]
+    {
+        "wss://tracker.openwebtorrent.com",
+        "wss://tracker.webtorrent.dev"
+    }
+}, loggerFactory);
+
+await torrent.StartAsync();
+```
+
+Notes for production use:
+
+- WebTorrent discovery requires `ws://` or `wss://` trackers. UDP and HTTP trackers do not participate in WebTorrent signaling.
+- The default ICE configuration is STUN-only. That is often enough for open networks and some home NATs, but not for symmetric-NAT or relay-required environments. For reliable browser-style connectivity you should supply TURN servers in `WebTorrentSessionOptions.IceServers`.
+- There is a demo harness at [samples/PeerSharp.WebTorrent.Demo/Program.cs](samples/PeerSharp.WebTorrent.Demo/Program.cs) for controlled interop and soak testing.
+- The `PeerSharp.WebTorrent` logger category emits reconnect, pending-peer expiry, and signaling lifecycle information. For rollout, capture this category at `Information` or `Debug`.
+
+Recommended validation before broad rollout:
+
+1. Verify announce and peer negotiation against at least one browser WebTorrent client and a couple of real WebSocket trackers.
+2. Run long-lived churn tests with forced tracker disconnects and failed negotiations to confirm pending peers remain bounded.
+3. Test at least one TURN-backed path in addition to STUN-only connectivity.
+
 ## Supported BEPs
 
 PeerSharp aims for high compatibility with the BitTorrent ecosystem:

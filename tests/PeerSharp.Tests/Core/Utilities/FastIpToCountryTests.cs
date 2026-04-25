@@ -37,10 +37,80 @@ public class FastIpToCountryTests
         Assert.Equal("", geo.GetCountry(IPAddress.Parse("2.0.0.1"))); // Bucket 2 empty
     }
 
+    [Fact]
+    public async Task LoadAsync_ReadsEntriesThatShareBufferWithCountrySeparator()
+    {
+        using var ms = CreateDatabase();
+        var geo = new FastIpToCountry();
+
+        await geo.LoadAsync(ms);
+
+        Assert.Equal("US", geo.GetCountry(IPAddress.Parse("1.2.3.4")));
+        Assert.Equal("GB", geo.GetCountry(IPAddress.Parse("1.11.0.1")));
+        Assert.Equal("", geo.GetCountry(IPAddress.Parse("2.0.0.1")));
+    }
+
+    [Fact]
+    public async Task LoadAsync_MissingFileLeavesLookupEmpty()
+    {
+        var geo = new FastIpToCountry();
+
+        await geo.LoadAsync(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "missing.ipdb"));
+
+        Assert.Equal("", geo.GetCountry(IPAddress.Parse("1.2.3.4")));
+    }
+
+    [Fact]
+    public async Task LoadAsync_PropagatesCancellation()
+    {
+        var geo = new FastIpToCountry();
+        using var stream = new CancellingStream();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => geo.LoadAsync(stream, cts.Token));
+    }
+
+    private static MemoryStream CreateDatabase()
+    {
+        var ms = new MemoryStream();
+
+        ms.Write(Encoding.ASCII.GetBytes("US\n"));
+        ms.Write(Encoding.ASCII.GetBytes("GB\n"));
+        ms.Write(Encoding.ASCII.GetBytes("\n"));
+
+        WriteEntry(ms, 0, 0x4545);
+        WriteEntry(ms, 0x01000000, 0);
+        WriteEntry(ms, 0x010A0000, 1);
+        WriteEntry(ms, 0, 0x4545);
+
+        ms.Position = 0;
+        return ms;
+    }
+
     private static void WriteEntry(Stream s, uint ip, ushort country)
     {
         s.Write(BitConverter.GetBytes(ip));
         s.Write(BitConverter.GetBytes(country));
+    }
+
+    private sealed class CancellingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(0);
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }
 

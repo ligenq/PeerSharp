@@ -8,16 +8,17 @@
 		<Version>1.0.0</Version>
 		<Authors>Peerfluence</Authors>
 		<Copyright>Copyright (c) 2026 ligenq</Copyright>
-		<Description>A high-performance BitTorrent engine for .NET.</Description>
-		<PackageTags>bittorrent;torrent;p2p;peer-to-peer;dht;magnet;utp;streaming;download</PackageTags>
+		<Description>A high-performance BitTorrent engine for .NET. Includes optional WebTorrent over WebRTC support (call torrent.UseWebTorrent() to enable).</Description>
+		<PackageTags>bittorrent;torrent;p2p;peer-to-peer;dht;magnet;utp;streaming;download;webtorrent;webrtc</PackageTags>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageProjectUrl>https://github.com/ligenq/PeerSharp</PackageProjectUrl>
 		<RepositoryUrl>https://github.com/ligenq/PeerSharp</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>Initial stable release with support for 20+ BEPs, TCP/uTP networking, DHT, magnet links, streaming, protocol encryption, and NAT traversal.</PackageReleaseNotes>
+		<PackageReleaseNotes>Initial stable release with support for 20+ BEPs, TCP/uTP networking, DHT, magnet links, streaming, protocol encryption, and NAT traversal. WebTorrent over WebRTC ships as an optional extension assembly (PeerSharp.WebTorrent) bundled in the same package.</PackageReleaseNotes>
 		<IsTrimmable>true</IsTrimmable>
+		<TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);IncludeWebTorrentExtensionInPack</TargetsForTfmSpecificBuildOutput>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -26,15 +27,17 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\..\..\RtcForge\RtcForge\RtcForge.csproj" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.6" />
-		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.21.0.135717">
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" />
+		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.24.0.138807">
 			<PrivateAssets>all</PrivateAssets>
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>
+		<!--
+			RtcForge is the WebRTC backend used by PeerSharp.WebTorrent. Once RtcForge ships
+			as its own NuGet package, add a PackageReference here so the dependency flows to
+			consumers that call torrent.UseWebTorrent(). Until then, applications using the
+			WebTorrent extension must reference RtcForge themselves.
+		-->
 	</ItemGroup>
 
 	<ItemGroup>
@@ -55,6 +58,38 @@
 		<AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
 			<_Parameter1>PeerSharp.Tests</_Parameter1>
 		</AssemblyAttribute>
+		<AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+			<_Parameter1>PeerSharp.WebTorrent</_Parameter1>
+		</AssemblyAttribute>
 	</ItemGroup>
+
+	<!--
+		PeerSharp.WebTorrent ships as part of the PeerSharp NuGet package: its DLL is built
+		separately (it depends on PeerSharp + RtcForge) and bundled into lib/<tfm>/. We invoke
+		MSBuild on PeerSharp.WebTorrent.csproj here rather than via a ProjectReference because a
+		ProjectReference would create a build cycle (PeerSharp.WebTorrent already references
+		PeerSharp). The companion .xml documentation file is included when present.
+	-->
+	<Target Name="IncludeWebTorrentExtensionInPack" Condition="'$(NoBuild)' != 'true'">
+		<MSBuild Projects="..\PeerSharp.WebTorrent\PeerSharp.WebTorrent.csproj" Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework)" Targets="Build">
+			<Output ItemName="WebTorrentBuildOutput" TaskParameter="TargetOutputs" />
+		</MSBuild>
+		<ItemGroup>
+			<BuildOutputInPackage Include="@(WebTorrentBuildOutput)" />
+			<BuildOutputInPackage Include="@(WebTorrentBuildOutput->'%(RootDir)%(Directory)%(Filename).xml')" Condition="Exists('%(WebTorrentBuildOutput.RootDir)%(WebTorrentBuildOutput.Directory)%(WebTorrentBuildOutput.Filename).xml')" />
+		</ItemGroup>
+	</Target>
+
+	<Target Name="IncludePrebuiltWebTorrentExtensionInPack" BeforeTargets="GetPackageFiles" Condition="'$(NoBuild)' == 'true'">
+		<PropertyGroup>
+			<WebTorrentPrebuiltOutput>$(MSBuildThisFileDirectory)..\PeerSharp.WebTorrent\bin\$(Configuration)\$(TargetFramework)\PeerSharp.WebTorrent.dll</WebTorrentPrebuiltOutput>
+			<WebTorrentPrebuiltXml>$(MSBuildThisFileDirectory)..\PeerSharp.WebTorrent\bin\$(Configuration)\$(TargetFramework)\PeerSharp.WebTorrent.xml</WebTorrentPrebuiltXml>
+		</PropertyGroup>
+		<Error Condition="!Exists('$(WebTorrentPrebuiltOutput)')" Text="PeerSharp.WebTorrent has not been built for $(Configuration) $(TargetFramework). Build src\PeerSharp.WebTorrent\PeerSharp.WebTorrent.csproj before packing PeerSharp with --no-build." />
+		<ItemGroup>
+			<BuildOutputInPackage Include="$(WebTorrentPrebuiltOutput)" />
+			<BuildOutputInPackage Include="$(WebTorrentPrebuiltXml)" Condition="Exists('$(WebTorrentPrebuiltXml)')" />
+		</ItemGroup>
+	</Target>
 
 </Project>

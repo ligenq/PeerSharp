@@ -30,6 +30,7 @@ public sealed class UpnpTests
             () => new[] { IPAddress.Loopback },
             ssdpEndpoint,
             UpnpDiscovery.ParseDescriptionAsync,
+            TimeProvider.System,
             cts.Token);
 
         await responderTask;

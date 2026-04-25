@@ -49,6 +49,7 @@ public class HttpTrackerTests
         public bool Success { get; private set; }
         public AnnounceResponse? AnnounceResponse { get; private set; }
         public ScrapeResponse? ScrapeResponse { get; private set; }
+        public MultiScrapeResponse? MultiScrapeResponse { get; private set; }
         public string? ErrorMessage { get; private set; }
 
         public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null)
@@ -60,7 +61,8 @@ public class HttpTrackerTests
 
         public void OnMultiScrapeResult(bool success, MultiScrapeResponse response, ITracker tracker)
         {
-            throw new NotImplementedException();
+            Success = success;
+            MultiScrapeResponse = response;
         }
 
         public void OnScrapeResult(bool success, ScrapeResponse response, ITracker tracker)
@@ -182,6 +184,162 @@ public class HttpTrackerTests
         await tracker.ScrapeAsync(CancellationToken.None);
 
         Assert.False(callback.Success);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_FailureReasonResponse_SurfacesErrorMessage()
+    {
+        // BEP 3: a tracker may reply with {'failure reason': '...'} and nothing else.
+        // This used to be silently parsed as Success=true with 0 peers.
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["failure reason"] = new BString(Encoding.UTF8.GetBytes("torrent not registered"));
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.False(_callback.Success);
+        Assert.NotNull(_callback.ErrorMessage);
+        Assert.Contains("torrent not registered", _callback.ErrorMessage);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_Ipv6Peers_ParsesPeers6Field()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        // peers6 entry: 16 bytes IP + 2 bytes port
+        byte[] ipv6 = new byte[16];
+        ipv6[0] = 0x20; ipv6[1] = 0x01; ipv6[2] = 0x0d; ipv6[3] = 0xb8;
+        ipv6[15] = 0x01;
+        byte[] peers6 = new byte[18];
+        ipv6.CopyTo(peers6, 0);
+        peers6[16] = 0x1a; peers6[17] = 0xe1; // port 6881
+
+        var dict = new BDict();
+        dict.Dict["interval"] = new BNumber(1800);
+        dict.Dict["peers6"] = new BString(peers6);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.NotNull(_callback.AnnounceResponse);
+        Assert.Single(_callback.AnnounceResponse.Peers);
+        Assert.Equal("2001:db8::1", _callback.AnnounceResponse.Peers[0].Address.ToString());
+        Assert.Equal(6881, _callback.AnnounceResponse.Peers[0].Port);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_MinInterval_IsParsed()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["interval"] = new BNumber(1800);
+        dict.Dict["min interval"] = new BNumber(300);
+        dict.Dict["peers"] = new BString(Array.Empty<byte>());
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.Equal(300u, _callback.AnnounceResponse?.MinInterval);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ScrapeAsync_FailureReasonResponse_RaisesFailure()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["failure reason"] = new BString(Encoding.UTF8.GetBytes("scrape not supported"));
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.ScrapeAsync(CancellationToken.None);
+
+        Assert.False(_callback.Success);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task MultiScrapeAsync_ValidResponse_ParsesAllHashStats()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var firstHashBytes = Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray();
+        var secondHashBytes = Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(255 - i)).ToArray();
+        var firstStats = CreateScrapeStats(12, 3, 44);
+        var secondStats = CreateScrapeStats(7, 1, 9);
+        var files = new BDict();
+        files.Dict[Encoding.Latin1.GetString(firstHashBytes)] = firstStats;
+        files.Dict[Encoding.Latin1.GetString(secondHashBytes)] = secondStats;
+        var root = new BDict();
+        root.Dict["files"] = files;
+        _mockHttp.ResponseBytes = BencodeWriter.Write(root);
+
+        await tracker.MultiScrapeAsync(new[] { new InfoHash(firstHashBytes), new InfoHash(secondHashBytes) }, CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.NotNull(_callback.MultiScrapeResponse);
+        Assert.Equal(2, _callback.MultiScrapeResponse.Results.Count);
+        var first = _callback.MultiScrapeResponse.Results[Convert.ToHexString(firstHashBytes)];
+        Assert.Equal(12u, first.SeedCount);
+        Assert.Equal(3u, first.LeechCount);
+        Assert.Equal(44u, first.Downloaded);
+        var second = _callback.MultiScrapeResponse.Results[Convert.ToHexString(secondHashBytes)];
+        Assert.Equal(7u, second.SeedCount);
+        Assert.Equal(1u, second.LeechCount);
+        Assert.Equal(9u, second.Downloaded);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task MultiScrapeAsync_SkipsUnsupportedV2HashesInRequestUrl()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(new BDict { Dict = { ["files"] = new BDict() } });
+        var v1Hash = new InfoHash(Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray());
+        var v2Hash = new InfoHash(Enumerable.Range(0, InfoHash.V2Length).Select(i => (byte)(i + 1)).ToArray());
+
+        await tracker.MultiScrapeAsync(new[] { v1Hash, v2Hash }, CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.NotNull(_mockHttp.LastUrl);
+        Assert.Equal(1, CountOccurrences(_mockHttp.LastUrl, "info_hash="));
+    }
+
+    private static BDict CreateScrapeStats(long complete, long incomplete, long downloaded)
+    {
+        var stats = new BDict();
+        stats.Dict["complete"] = new BNumber(complete);
+        stats.Dict["incomplete"] = new BNumber(incomplete);
+        stats.Dict["downloaded"] = new BNumber(downloaded);
+        return stats;
+    }
+
+    private static int CountOccurrences(string value, string search)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = value.IndexOf(search, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += search.Length;
+        }
+
+        return count;
     }
 }
 

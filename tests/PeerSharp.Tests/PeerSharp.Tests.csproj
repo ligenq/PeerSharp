@@ -14,14 +14,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="8.0.0">
+    <PackageReference Include="coverlet.collector" Version="10.0.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.5" />
-    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.4.0" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.7" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.5.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.4.0" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -33,12 +33,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PeerSharp\PeerSharp.csproj" />
-    <Reference Include="PeerSharp.WebTorrent">
-      <HintPath>..\..\src\PeerSharp.WebTorrent\bin\Debug\net10.0\PeerSharp.WebTorrent.dll</HintPath>
-    </Reference>
-    <Reference Include="WebRtcSharp">
-      <HintPath>..\..\..\WebRtcSharp\WebRtcSharp\bin\Debug\net10.0\WebRtcSharp.dll</HintPath>
-    </Reference>
   </ItemGroup>
 
   <ItemGroup>

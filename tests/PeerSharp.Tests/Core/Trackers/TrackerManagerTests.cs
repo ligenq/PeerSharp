@@ -11,6 +11,7 @@ public class TrackerManagerTests
         public string Url { get; private set; } = string.Empty;
         public ITrackerCallback? Callback { get; private set; }
         public int AnnounceCount { get; private set; }
+        public int DeinitCount { get; private set; }
         public TrackerEvent LastEvent { get; private set; }
         private readonly SemaphoreSlim _announceSemaphore = new(0);
 
@@ -20,7 +21,10 @@ public class TrackerManagerTests
             Callback = callback;
         }
 
-        public void Deinit() { }
+        public void Deinit()
+        {
+            DeinitCount++;
+        }
 
         public async Task WaitAnnounceAsync(TimeSpan timeout)
         {
@@ -43,6 +47,11 @@ public class TrackerManagerTests
         public void TriggerResult(bool success, AnnounceResponse response, string? error = null)
         {
             Callback?.OnAnnounceResult(success, response, this, error);
+        }
+
+        public void TriggerMultiScrapeResult(bool success, MultiScrapeResponse response)
+        {
+            Callback?.OnMultiScrapeResult(success, response, this);
         }
 
         public Task MultiScrapeAsync(IReadOnlyList<InfoHash> infoHashes, CancellationToken ct)
@@ -83,6 +92,42 @@ public class TrackerManagerTests
         Assert.True(_factory.Trackers.ContainsKey(url));
         var tracker = _factory.Trackers[url];
         Assert.Equal(url, tracker.Url);
+    }
+
+    [Fact]
+    public async Task RemoveTracker_BeforeStart_DoesNotSendStoppedAnnounce()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        string url = "udp://tracker.example:6969/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+
+        Assert.True(manager.RemoveTracker(url));
+        await Task.Delay(50);
+
+        Assert.Equal(0, tracker.AnnounceCount);
+        Assert.Equal(1, tracker.DeinitCount);
+        Assert.Empty(manager.GetTrackers());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RemoveTracker_AfterStart_SendsStoppedAnnounce()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        string url = "udp://tracker.example:6969/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+
+        await manager.StartAsync();
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        Assert.True(manager.RemoveTracker(url));
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Equal(2, tracker.AnnounceCount);
+        Assert.Equal(TrackerEvent.Stopped, tracker.LastEvent);
+        Assert.Equal(1, tracker.DeinitCount);
+        Assert.Empty(manager.GetTrackers());
     }
 
     [Fact(Timeout = 30000)]
@@ -165,6 +210,96 @@ public class TrackerManagerTests
         var status = manager.GetTrackers().First();
         Assert.Equal(TrackerStatusType.Working, status.Status);
         Assert.Equal(0, status.ConsecutiveFailures);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task StartAsync_WithTrackerTiers_AnnouncesOnlyActiveTier()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        manager.AddTrackers(new[]
+        {
+            new[] { "http://tier0.example/announce" },
+            new[] { "http://tier1.example/announce" }
+        });
+
+        await manager.StartAsync();
+
+        var activeTracker = _factory.Trackers["http://tier0.example/announce"];
+        var fallbackTracker = _factory.Trackers["http://tier1.example/announce"];
+        await activeTracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Equal(1, activeTracker.AnnounceCount);
+        Assert.Equal(TrackerEvent.Started, activeTracker.LastEvent);
+        Assert.Equal(0, fallbackTracker.AnnounceCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ActiveTierExhausted_AnnouncesNextTier()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        manager.AddTrackers(new[]
+        {
+            new[] { "http://tier0.example/announce" },
+            new[] { "http://tier1.example/announce" }
+        });
+
+        await manager.StartAsync();
+        var failingTracker = _factory.Trackers["http://tier0.example/announce"];
+        var fallbackTracker = _factory.Trackers["http://tier1.example/announce"];
+        await failingTracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        failingTracker.TriggerResult(false, new AnnounceResponse(), "first failure");
+        failingTracker.TriggerResult(false, new AnnounceResponse(), "second failure");
+        failingTracker.TriggerResult(false, new AnnounceResponse(), "third failure");
+
+        await fallbackTracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Equal(TrackerStatusType.CircuitOpen, manager.GetTrackers().Single(t => t.Url == failingTracker.Url).Status);
+        Assert.Equal(1, fallbackTracker.AnnounceCount);
+        Assert.Equal(TrackerEvent.Started, fallbackTracker.LastEvent);
+    }
+
+    [Fact]
+    public void OnMultiScrapeResult_MatchingHash_UpdatesTrackerStats()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        string url = "http://tracker.example/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+        var response = new MultiScrapeResponse();
+        response.Results[_torrent.Hash.ToHexStringUpper()] = new ScrapeResponse
+        {
+            SeedCount = 12,
+            LeechCount = 4,
+            Downloaded = 20
+        };
+
+        tracker.TriggerMultiScrapeResult(true, response);
+
+        var status = manager.GetTrackers().Single();
+        Assert.Equal(12u, status.SeedCount);
+        Assert.Equal(4u, status.LeechCount);
+    }
+
+    [Fact]
+    public void OnMultiScrapeResult_NonMatchingHash_LeavesTrackerStatsUnchanged()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        string url = "http://tracker.example/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+        var response = new MultiScrapeResponse();
+        response.Results[InfoHash.CreateRandom().ToHexStringUpper()] = new ScrapeResponse
+        {
+            SeedCount = 12,
+            LeechCount = 4
+        };
+
+        tracker.TriggerMultiScrapeResult(true, response);
+
+        var status = manager.GetTrackers().Single();
+        Assert.Equal(0u, status.SeedCount);
+        Assert.Equal(0u, status.LeechCount);
     }
 }
 

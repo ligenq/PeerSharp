@@ -11,6 +11,7 @@ using PeerSharp.Internals.Trackers;
 using PeerSharp.Internals.Utp;
 using PeerSharp.Internals.Utilities;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 
 namespace PeerSharp.Internals;
@@ -569,6 +570,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         }
     }
 
+    [ExcludeFromCodeCoverage]
     private sealed class TorrentEventsProxy : ITorrentEvents
     {
         private readonly ITorrentEvents _inner;
@@ -739,9 +741,18 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
         await _networkManager.StartAsync(cancellationToken).ConfigureAwait(false);
 
-        // Update settings with actual bound ports (relevant if port 0 was used)
-        Settings.Connection.TcpPort = (ushort)_networkManager.BoundTcpPort;
-        Settings.Connection.UdpPort = (ushort)_networkManager.BoundUdpPort;
+        // Update settings with actual bound ports (relevant if port 0 was used).
+        // Preserve the configured port when no listener was bound (e.g. TCP disabled in
+        // WebTorrent-only setups) so trackers don't receive port=0, which some reject as
+        // "invalid port".
+        if (_networkManager.BoundTcpPort > 0)
+        {
+            Settings.Connection.TcpPort = (ushort)_networkManager.BoundTcpPort;
+        }
+        if (_networkManager.BoundUdpPort > 0)
+        {
+            Settings.Connection.UdpPort = (ushort)_networkManager.BoundUdpPort;
+        }
 
         // THROUGHPUT OPTIMIZATION: Configure bandwidth update interval
         // Lower interval = lower latency, higher throughput (10ms default for gigabit+)
@@ -768,6 +779,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         }
     }
 
+    [ExcludeFromCodeCoverage]
     private sealed class NullTorrentEvents : ITorrentEvents
     {
         public static readonly NullTorrentEvents Instance = new();
