@@ -24,15 +24,17 @@ internal static class UpnpDiscovery
 
     public static Task<List<UpnpGateway>> DiscoverAsync(CancellationToken ct = default)
     {
-        return DiscoverAsync(GetLocalIPs, new IPEndPoint(IPAddress.Parse(SsdpIp), SsdpPort), ParseDescriptionAsync, ct);
+        return DiscoverAsync(GetLocalIPs, new IPEndPoint(IPAddress.Parse(SsdpIp), SsdpPort), ParseDescriptionAsync, TimeProvider.System, ct);
     }
 
     internal static async Task<List<UpnpGateway>> DiscoverAsync(
         Func<IEnumerable<IPAddress>> localIpProvider,
         IPEndPoint ssdpEndpoint,
         Func<string, IPAddress, CancellationToken, Task<UpnpGateway?>> parseDescriptionAsync,
+        TimeProvider? timeProvider = null,
         CancellationToken ct = default)
     {
+        timeProvider ??= TimeProvider.System;
         var gateways = new List<UpnpGateway>();
         var clients = new List<UdpClient>();
         var tasks = new List<Task>();
@@ -65,7 +67,7 @@ internal static class UpnpDiscovery
                 }
             }
 
-            await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(3000, ct)).ConfigureAwait(false);
+            await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(TimeSpan.FromSeconds(3), timeProvider, ct)).ConfigureAwait(false);
         }
         finally
         {

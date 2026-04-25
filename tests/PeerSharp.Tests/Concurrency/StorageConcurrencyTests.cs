@@ -91,10 +91,7 @@ public class StorageConcurrencyTests
                 // Ensure order is start -> end
                 if (start > end) (start, end) = (end, start);
 
-                tasks.Add(Task.Run(async () =>
-                {
-                    await model.AccessRangeAsync(start, end);
-                }));
+                tasks.Add(Task.Run(async () => await model.AccessRangeAsync(start, end)));
             }
 
             Task.WaitAll(tasks.ToArray());

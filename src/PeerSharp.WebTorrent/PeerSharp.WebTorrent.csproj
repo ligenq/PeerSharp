@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<WarningsAsErrors>CS8600;CS8602;CS8603;CS8604;CS8618;CS8620;CS8625;CS8655;CS8669</WarningsAsErrors>
+		<IsTrimmable>true</IsTrimmable>
+		<!-- Bundled into the PeerSharp NuGet by PeerSharp.csproj's pack target; not packed itself. -->
+		<IsPackable>false</IsPackable>
+		<RootNamespace>PeerSharp.WebTorrent</RootNamespace>
+		<AssemblyName>PeerSharp.WebTorrent</AssemblyName>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\PeerSharp\PeerSharp.csproj" />
+		<!--
+			RtcForge is referenced by relative path because it ships from a sibling repository
+			checked out next to peersharp (i.e. C:\repos\RtcForge alongside C:\repos\peersharp).
+			Once RtcForge is published as a NuGet package, replace this ProjectReference with a
+			PackageReference and drop the layout assumption.
+		-->
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" />
+		<PackageReference Include="RtcForge" Version="1.0.0" />
+		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.24.0.138807">
+			<PrivateAssets>all</PrivateAssets>
+			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+		</PackageReference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+			<_Parameter1>PeerSharp.WebTorrent.Tests</_Parameter1>
+		</AssemblyAttribute>
+	</ItemGroup>
+
+</Project>

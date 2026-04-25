@@ -63,6 +63,7 @@ public class ProtocolEncryptionTests
         public bool QueueAutoStart { get => false; set { } }
         public float? RatioLimit { get => null; set { } }
         public TimeSpan? SeedTimeLimit { get => null; set { } }
+        public void RegisterPeerTransport(IPeerTransport transport) => throw new NotImplementedException();
     }
 
     private class MockTorrentResolver : ITorrentResolver

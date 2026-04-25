@@ -95,6 +95,114 @@ public class TorrentTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => torrent.SetDownloadPathAsync("D:\\NewPath"));
     }
+
+    [Fact]
+    public void RegisterPeerTransport_RejectsNullAndDuplicateInstances()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var transport = new RecordingPeerTransport();
+
+        Assert.Throws<ArgumentNullException>(() => torrent.RegisterPeerTransport(null!));
+
+        torrent.RegisterPeerTransport(transport);
+
+        Assert.Throws<InvalidOperationException>(() => torrent.RegisterPeerTransport(transport));
+    }
+
+    [Fact]
+    public async Task RegisteredPeerTransport_StartsAndStopsWithTorrent()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var transport = new RecordingPeerTransport();
+        torrent.RegisterPeerTransport(transport);
+
+        await torrent.StartAsync();
+        await torrent.StopAsync();
+
+        Assert.Equal(1, transport.StartCalls);
+        Assert.Equal(1, transport.StopCalls);
+        Assert.Equal(0, transport.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task RegisteredPeerTransport_AfterStartWaitsUntilNextStartCycle()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        await torrent.StartAsync();
+
+        var transport = new RecordingPeerTransport();
+        torrent.RegisterPeerTransport(transport);
+
+        Assert.Equal(0, transport.StartCalls);
+
+        await torrent.StopAsync();
+        await torrent.StartAsync();
+
+        Assert.Equal(1, transport.StartCalls);
+    }
+
+    [Fact]
+    public async Task StopAsync_SwallowsPeerTransportStopException()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var transport = new RecordingPeerTransport { ThrowOnStop = true };
+        torrent.RegisterPeerTransport(transport);
+
+        await torrent.StartAsync();
+        await torrent.StopAsync();
+
+        Assert.Equal(1, transport.StopCalls);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_StopsDisposesAndClearsPeerTransports()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var transport = new RecordingPeerTransport { ThrowOnStop = true, ThrowOnDispose = true };
+        torrent.RegisterPeerTransport(transport);
+
+        await torrent.StartAsync();
+        await torrent.DisposeAsync();
+
+        Assert.Equal(1, transport.StopCalls);
+        Assert.Equal(1, transport.DisposeCalls);
+        Assert.Throws<ObjectDisposedException>(() => torrent.RegisterPeerTransport(new RecordingPeerTransport()));
+    }
+
+    private sealed class RecordingPeerTransport : IPeerTransport
+    {
+        public int StartCalls { get; private set; }
+        public int StopCalls { get; private set; }
+        public int DisposeCalls { get; private set; }
+        public bool ThrowOnStop { get; init; }
+        public bool ThrowOnDispose { get; init; }
+
+        public Task StartAsync(CancellationToken cancellationToken = default)
+        {
+            StartCalls++;
+            return Task.CompletedTask;
+        }
+
+        public Task StopAsync(CancellationToken cancellationToken = default)
+        {
+            StopCalls++;
+            if (ThrowOnStop)
+            {
+                throw new InvalidOperationException("stop failed");
+            }
+            return Task.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCalls++;
+            if (ThrowOnDispose)
+            {
+                throw new InvalidOperationException("dispose failed");
+            }
+            return ValueTask.CompletedTask;
+        }
+    }
 }
 
 

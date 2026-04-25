@@ -1,6 +1,7 @@
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utp;
+using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.Tests.Core.Network;
 
@@ -111,6 +112,33 @@ public class NetworkManagerTests
         }
     }
 
+    [Fact]
+    public void PortMapperFactory_WithoutPortMappingSettings_ReturnsNoMappers()
+    {
+        var settings = new Settings();
+        settings.Connection.UpnpPortMapping = false;
+        settings.Connection.NatPmpPortMapping = false;
+
+        var mappers = new PortMapperFactory().CreateMappers(settings);
+
+        Assert.Empty(mappers);
+    }
+
+    [Fact]
+    public void PortMapperFactory_WithEnabledSettings_ReturnsMatchingMappersInStableOrder()
+    {
+        var settings = new Settings();
+        settings.Connection.UpnpPortMapping = true;
+        settings.Connection.NatPmpPortMapping = true;
+
+        var mappers = new PortMapperFactory().CreateMappers(settings).ToArray();
+
+        Assert.Collection(
+            mappers,
+            mapper => Assert.IsType<UpnpPortMapping>(mapper),
+            mapper => Assert.IsType<NatPmpPortMapping>(mapper));
+    }
+
     [Fact(Timeout = 30000)]
     public async Task StartAsync_StartsAllServices()
     {
@@ -139,6 +167,35 @@ public class NetworkManagerTests
         Assert.Equal(5000, port.Port);
         Assert.True(udp.Started);
         Assert.True(lsd.Started);
+    }
+
+    [Fact]
+    public async Task StartAsync_UdpFeaturesDisabled_DoesNotStartUdpListener()
+    {
+        var settings = new Settings();
+        settings.Dht.Enabled = false;
+        settings.Connection.EnableLsd = false;
+        settings.Connection.EnableTcpIn = false;
+        settings.Connection.EnableUtpIn = false;
+        settings.Connection.EnableUtpOut = false;
+
+        var dht = new MockDhtManager();
+        var utp = new MockUtpManager();
+        var port = new MockPortListener();
+        var udp = new MockUdpListener();
+        var lsd = new MockLsdManager();
+        var mapper = new MockPortMapperFactory();
+
+        var services = new NetworkServices(dht, utp, port, udp, lsd, mapper);
+        var manager = new NetworkManager(settings, _ => { }, services);
+
+        await manager.StartAsync();
+
+        Assert.False(dht.Started);
+        Assert.False(utp.Started);
+        Assert.False(port.Started);
+        Assert.False(udp.Started);
+        Assert.False(lsd.Started);
     }
 }
 

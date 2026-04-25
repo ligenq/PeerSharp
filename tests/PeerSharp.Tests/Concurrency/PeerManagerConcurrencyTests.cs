@@ -123,10 +123,7 @@ public class PeerManagerConcurrencyTests
             var tasks = new List<Task>();
             for (int i = 0; i < 5; i++)
             {
-                tasks.Add(Task.Run(() =>
-                {
-                    manager.ConnectTo(ipStr, ep.Port);
-                }));
+                tasks.Add(Task.Run(() => manager.ConnectTo(ipStr, ep.Port)));
             }
 
             Task.WaitAll(tasks.ToArray());
@@ -153,10 +150,7 @@ public class PeerManagerConcurrencyTests
             var tasks = new List<Task>();
 
             // Outgoing connection attempt
-            tasks.Add(Task.Run(() =>
-            {
-                manager.ConnectTo(ipStr, ep.Port);
-            }));
+            tasks.Add(Task.Run(() => manager.ConnectTo(ipStr, ep.Port)));
 
             // Incoming connection (simulated handshake completion)
             tasks.Add(Task.Run(async () =>

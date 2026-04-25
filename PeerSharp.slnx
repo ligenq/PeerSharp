@@ -1,4 +1,7 @@
 <Solution>
   <Project Path="src/PeerSharp/PeerSharp.csproj" />
+  <Project Path="src/PeerSharp.WebTorrent/PeerSharp.WebTorrent.csproj" />
+  <Project Path="samples/PeerSharp.WebTorrent.Demo/PeerSharp.WebTorrent.Demo.csproj" />
   <Project Path="tests/PeerSharp.Tests/PeerSharp.Tests.csproj" />
+  <Project Path="tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj" />
 </Solution>

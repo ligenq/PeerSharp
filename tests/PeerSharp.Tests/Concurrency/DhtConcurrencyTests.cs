@@ -135,10 +135,7 @@ public class DhtConcurrencyTests
 
             for (int i = 0; i < 10; i++)
             {
-                tasks.Add(Task.Run(() =>
-                {
-                    dht.FindPeers(infoHash);
-                }));
+                tasks.Add(Task.Run(() => dht.FindPeers(infoHash)));
             }
 
             Task.WaitAll(tasks.ToArray());

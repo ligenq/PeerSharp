@@ -12,7 +12,6 @@ using PeerSharp.Streaming;
 using PeerSharp.Internals.Trackers;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.Internals.Utp;
-using PeerSharp.WebTorrent;
 using System.Text.Json;
 
 namespace PeerSharp.Internals;
@@ -52,7 +51,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private int _timerTickCount;
 
-    private WebTorrentSession? _webTorrentSession;
+    private readonly List<IPeerTransport> _peerTransports = new();
+    private readonly Lock _peerTransportsLock = new();
 
     private Torrent(
             TorrentFileMetadata infoFile,
@@ -92,6 +92,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             return Math.Max(0, InfoFile.Info.FullSize - finished);
         }
     }
+
+    public long DataDownloaded => TotalDownloaded;
+
+    public long DataUploaded => TotalUploaded;
 
     // Public Facade Properties
     public IDhtManager? DhtManager { get => Network.Dht; set => Network.Dht = value; }
@@ -533,8 +537,15 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             _timer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
 
             await PeersInternal.StartAsync().ConfigureAwait(false);
-            await TrackerManager.StartAsync().ConfigureAwait(false);
-            await StartWebTorrentSessionAsync(cancellationToken).ConfigureAwait(false);
+            if (ShouldStartClassicTrackers())
+            {
+                await TrackerManager.StartAsync().ConfigureAwait(false);
+            }
+            else
+            {
+                _logger.LogInformation("Classic trackers disabled because TCP/uTP transports are disabled");
+            }
+            await StartPeerTransportsAsync(cancellationToken).ConfigureAwait(false);
 
             FireAndForgetLsdAnnounce();
 
@@ -548,11 +559,15 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 _logger.LogDebug("DHT disabled for private torrent {TorrentName}", Name);
             }
 
-            if (InfoFile.WebSeedUrls.Count > 0)
+            if (Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
             {
                 WebSeedManager ??= new WebSeedManager(this, InfoFile.WebSeedUrls, Services.TimeProvider);
                 WebSeedManager.Start();
                 _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", InfoFile.WebSeedUrls.Count);
+            }
+            else if (!Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
+            {
+                _logger.LogInformation("Web seeds disabled; ignoring {UrlCount} URLs from torrent metadata", InfoFile.WebSeedUrls.Count);
             }
 
             Alerts.TorrentAlert(AlertId.TorrentCheckStarted, this);
@@ -569,22 +584,93 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         StartSeedingTimerIfNeeded();
     }
 
-    private async Task StartWebTorrentSessionAsync(CancellationToken cancellationToken)
+    public void RegisterPeerTransport(IPeerTransport transport)
     {
-        if (!Settings.Connection.EnableWebTorrent)
+        ArgumentNullException.ThrowIfNull(transport);
+        lock (_peerTransportsLock)
         {
-            return;
+            _disposal.ThrowIfDisposed(this);
+            if (_peerTransports.Contains(transport))
+            {
+                throw new InvalidOperationException("This peer transport is already registered with this torrent.");
+            }
+            _peerTransports.Add(transport);
+        }
+    }
+
+    private async Task StartPeerTransportsAsync(CancellationToken cancellationToken)
+    {
+        IPeerTransport[] snapshot;
+        lock (_peerTransportsLock)
+        {
+            snapshot = _peerTransports.ToArray();
         }
 
-        var settings = Settings.Connection.WebTorrent;
-        var options = new WebTorrentSessionOptions
+        foreach (var transport in snapshot)
         {
-            OffersPerTracker = settings.OffersPerTracker,
-            AdditionalTrackers = settings.AdditionalTrackers.ToArray(),
-            MinimumReannounceInterval = settings.MinimumReannounceInterval
-        };
+            await transport.StartAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
 
-        _webTorrentSession = await WebTorrentSession.AttachAsync(this, options, TorrentLoggerFactory.Current, cancellationToken).ConfigureAwait(false);
+    private async Task StopPeerTransportsAsync(bool disposing, CancellationToken cancellationToken)
+    {
+        IPeerTransport[] snapshot;
+        lock (_peerTransportsLock)
+        {
+            snapshot = _peerTransports.ToArray();
+            if (disposing)
+            {
+                _peerTransports.Clear();
+            }
+        }
+
+        foreach (var transport in snapshot)
+        {
+            try
+            {
+                await transport.StopAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                if (disposing)
+                {
+                    _logger.LogDebug(ex, "Peer transport StopAsync threw during dispose");
+                }
+                else
+                {
+                    _logger.LogWarning(ex, "Peer transport StopAsync threw");
+                }
+            }
+
+            if (disposing)
+            {
+                try
+                {
+                    await transport.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Peer transport DisposeAsync threw");
+                }
+            }
+        }
+    }
+
+    private bool ShouldStartClassicTrackers()
+    {
+        bool anyClassicEnabled = Settings.Connection.EnableTcpIn
+            || Settings.Connection.EnableTcpOut
+            || Settings.Connection.EnableUtpIn
+            || Settings.Connection.EnableUtpOut;
+        if (anyClassicEnabled)
+        {
+            return true;
+        }
+
+        lock (_peerTransportsLock)
+        {
+            return _peerTransports.Count == 0;
+        }
     }
 
     public Task StopAsync(CancellationToken cancellationToken = default)
@@ -992,11 +1078,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 {
                     await TrackerManager.StopAsync().ConfigureAwait(false);
                 }
-                if (_webTorrentSession != null)
-                {
-                    await _webTorrentSession.DisposeAsync().ConfigureAwait(false);
-                    _webTorrentSession = null;
-                }
+                await StopPeerTransportsAsync(disposing, ct).ConfigureAwait(false);
                 if (WebSeedManager != null)
                 {
                     await WebSeedManager.DisposeAsync().ConfigureAwait(false);

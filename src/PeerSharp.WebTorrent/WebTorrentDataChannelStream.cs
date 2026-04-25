@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using PeerSharp.Core;
 using RtcForge;
 
 namespace PeerSharp.WebTorrent;
@@ -6,7 +7,12 @@ namespace PeerSharp.WebTorrent;
 internal sealed class WebTorrentDataChannelStream : Stream
 {
     private readonly IWebRtcDataChannel _channel;
-    private readonly Channel<byte[]> _incomingFrames = Channel.CreateUnbounded<byte[]>();
+    private readonly Channel<byte[]> _incomingFrames = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(256)
+    {
+        SingleReader = true,
+        SingleWriter = true,
+        FullMode = BoundedChannelFullMode.Wait
+    });
     private readonly CancellationTokenSource _pumpCts = new();
     private Task? _pumpTask;
     private byte[]? _currentBuffer;
@@ -31,12 +37,16 @@ internal sealed class WebTorrentDataChannelStream : Stream
         {
             await foreach (var message in _channel.Messages.WithCancellation(_pumpCts.Token).ConfigureAwait(false))
             {
-                _incomingFrames.Writer.TryWrite(message.ToArray());
+                await _incomingFrames.Writer.WriteAsync(message.ToArray(), _pumpCts.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
             // Expected during stream disposal.
+        }
+        catch (ChannelClosedException)
+        {
+            // Expected if the stream completes while a producer is waiting for capacity.
         }
         finally
         {
@@ -69,6 +79,10 @@ internal sealed class WebTorrentDataChannelStream : Stream
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
+        if (buffer.IsEmpty)
+        {
+            return 0;
+        }
 
         while (true)
         {
@@ -125,6 +139,7 @@ internal sealed class WebTorrentDataChannelStream : Stream
         {
             _pumpCts.Cancel();
             _incomingFrames.Writer.TryComplete();
+            _ = _channel.DisposeAsync().AsTask().ContinueWith(static task => _ = task.Exception, TaskScheduler.Default);
             _pumpCts.Dispose();
         }
 
@@ -135,7 +150,7 @@ internal sealed class WebTorrentDataChannelStream : Stream
     {
         if (_disposal.MarkDisposed())
         {
-            _pumpCts.Cancel();
+            await _pumpCts.CancelAsync().ConfigureAwait(false);
             _incomingFrames.Writer.TryComplete();
 
             if (_pumpTask != null)
@@ -150,6 +165,7 @@ internal sealed class WebTorrentDataChannelStream : Stream
                 }
             }
 
+            await _channel.DisposeAsync().ConfigureAwait(false);
             _pumpCts.Dispose();
         }
 

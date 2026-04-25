@@ -88,10 +88,7 @@ public class TrackerManagerConcurrencyTests
             // Concurrent announces
             for (int i = 0; i < 5; i++)
             {
-                tasks.Add(Task.Run(async () =>
-                {
-                    await manager.AnnounceAsync();
-                }));
+                tasks.Add(Task.Run(async () => await manager.AnnounceAsync()));
             }
 
             Task.WaitAll(tasks.ToArray());
@@ -100,10 +97,7 @@ public class TrackerManagerConcurrencyTests
             tasks.Clear();
             for (int i = 0; i < 2; i++)
             {
-                tasks.Add(Task.Run(async () =>
-                {
-                    await manager.StopAsync();
-                }));
+                tasks.Add(Task.Run(async () => await manager.StopAsync()));
             }
 
             Task.WaitAll(tasks.ToArray());
@@ -133,10 +127,7 @@ public class TrackerManagerConcurrencyTests
             // Concurrent announces triggering failover
             for (int i = 0; i < 5; i++)
             {
-                tasks.Add(Task.Run(async () =>
-                {
-                    await manager.AnnounceAsync();
-                }));
+                tasks.Add(Task.Run(async () => await manager.AnnounceAsync()));
             }
 
             Task.WaitAll(tasks.ToArray());

@@ -149,6 +149,60 @@ public class WebSeedManagerTests
     }
 
     [Fact]
+    public async Task DownloadMultiFilePieceAsync_EscapesPathSegmentsWithoutEscapingSlashes()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Name = "multi";
+        metadata.Info.PieceSize = 4;
+        metadata.Info.FullSize = 4;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "dir name/a file.bin", Size = 4, Offset = 0 });
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        var handler = new MockHttpClient
+        {
+            ResponseBytes = [1, 2, 3, 4]
+        };
+
+        var manager = new WebSeedManager(torrent, new[] { "http://seed.com/root" }, _timeProvider);
+        manager.SetTestClient(handler);
+
+        var source = new WebSeedManager.WebSeedSource("http://seed.com/root", true);
+        var data = await manager.DownloadMultiFilePieceAsync(source, 0, 0, 4, CancellationToken.None);
+
+        Assert.Equal([1, 2, 3, 4], data);
+        Assert.Equal("http://seed.com/root/dir%20name/a%20file.bin", handler.SentRequests.Single().RequestUri?.AbsoluteUri);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DownloadMultiFilePieceAsync_DirectoryWebSeed_IncludesTorrentName()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Name = "Big Buck Bunny";
+        metadata.Info.PieceSize = 4;
+        metadata.Info.FullSize = 4;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "Big Buck Bunny.en.srt", Size = 4, Offset = 0 });
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        var handler = new MockHttpClient
+        {
+            ResponseBytes = [1, 2, 3, 4]
+        };
+
+        var manager = new WebSeedManager(torrent, new[] { "https://webtorrent.io/torrents/" }, _timeProvider);
+        manager.SetTestClient(handler);
+
+        var source = new WebSeedManager.WebSeedSource("https://webtorrent.io/torrents/", true);
+        var data = await manager.DownloadMultiFilePieceAsync(source, 0, 0, 4, CancellationToken.None);
+
+        Assert.Equal([1, 2, 3, 4], data);
+        Assert.Equal("https://webtorrent.io/torrents/Big%20Buck%20Bunny/Big%20Buck%20Bunny.en.srt", handler.SentRequests.Single().RequestUri?.AbsoluteUri);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
     public void GetStats_ReflectsAvailableSources()
     {
         var manager = new WebSeedManager(_torrent, new[] { "http://seed1.com", "http://seed2.com" }, _timeProvider);

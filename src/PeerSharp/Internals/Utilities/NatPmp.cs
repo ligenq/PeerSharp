@@ -19,16 +19,23 @@ internal class NatPmpPortMapping : IPortMapper
     private readonly List<(int Port, string Protocol)> _mappings = new();
     private readonly int _natPmpPort;
     private readonly Dictionary<IPAddress, (PortMappingResult MappingResult, string? Error, int? ExternalPort)> _status = new();
+    private readonly TimeProvider _timeProvider;
 
     public NatPmpPortMapping()
-        : this(GetDefaultGateways, NatPmpPort)
+        : this(GetDefaultGateways, NatPmpPort, TimeProvider.System)
     {
     }
 
     internal NatPmpPortMapping(Func<IEnumerable<IPAddress>> gatewayProvider, int natPmpPort)
+        : this(gatewayProvider, natPmpPort, TimeProvider.System)
+    {
+    }
+
+    internal NatPmpPortMapping(Func<IEnumerable<IPAddress>> gatewayProvider, int natPmpPort, TimeProvider timeProvider)
     {
         _gatewayProvider = gatewayProvider;
         _natPmpPort = natPmpPort;
+        _timeProvider = timeProvider;
     }
 
     public string Name => "NAT-PMP";
@@ -67,7 +74,7 @@ internal class NatPmpPortMapping : IPortMapper
         bool anySuccess = false;
         foreach (var gateway in _gateways)
         {
-            var result = await MapOnGatewayAsync(gateway, port, protocol, _natPmpPort, ct).ConfigureAwait(false);
+            var result = await MapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _timeProvider, ct).ConfigureAwait(false);
             if (result.Success)
             {
                 anySuccess = true;
@@ -162,7 +169,7 @@ internal class NatPmpPortMapping : IPortMapper
             .Distinct();
     }
 
-    private static async Task<(bool Success, int? ExternalPort)> MapOnGatewayAsync(IPAddress gateway, int port, string protocol, int natPmpPort, CancellationToken ct)
+    private static async Task<(bool Success, int? ExternalPort)> MapOnGatewayAsync(IPAddress gateway, int port, string protocol, int natPmpPort, TimeProvider timeProvider, CancellationToken ct)
     {
         try
         {
@@ -189,7 +196,7 @@ internal class NatPmpPortMapping : IPortMapper
             await client.SendAsync(request, endpoint, ct).ConfigureAwait(false);
 
             var receiveTask = client.ReceiveAsync(ct).AsTask();
-            if (await Task.WhenAny(receiveTask, Task.Delay(2000, ct)).ConfigureAwait(false) == receiveTask)
+            if (await Task.WhenAny(receiveTask, Task.Delay(TimeSpan.FromSeconds(2), timeProvider, ct)).ConfigureAwait(false) == receiveTask)
             {
                 var response = await receiveTask.ConfigureAwait(false);
                 if (response.Buffer.Length >= 12 && response.Buffer[0] == 0 && response.Buffer[1] == (128 + opCode))
