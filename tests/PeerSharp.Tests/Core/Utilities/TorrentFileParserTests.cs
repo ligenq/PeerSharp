@@ -120,6 +120,93 @@ public class TorrentFileParserTests
     }
 
     [Fact]
+    public void Parse_V2FileLargerThanPiece_RequiresValidPieceLayer()
+    {
+        byte[] fileData = new byte[32 * 1024];
+        Random.Shared.NextBytes(fileData);
+        var leaves = MerkleTree.ComputeLeaves(fileData);
+        var piecesRoot = MerkleTree.ComputeRoot(leaves);
+
+        var fileInfo = new BDict();
+        fileInfo.Dict["length"] = new BNumber(fileData.Length);
+        fileInfo.Dict["pieces root"] = new BString(piecesRoot);
+
+        var fileNode = new BDict();
+        fileNode.Dict[""] = fileInfo;
+
+        var fileTree = new BDict();
+        fileTree.Dict["large.bin"] = fileNode;
+
+        var info = new BDict();
+        info.Dict["name"] = new BString("root"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(16_384);
+        info.Dict["meta version"] = new BNumber(2);
+        info.Dict["file tree"] = fileTree;
+
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        var ex = Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+        Assert.Contains("piece layers", ex.Message, StringComparison.OrdinalIgnoreCase);
+
+        var pieceLayer = MerkleTree.GetPieceLayer(leaves, 16_384);
+        byte[] layerData = pieceLayer.SelectMany(hash => hash).ToArray();
+        var layers = new BDict();
+        layers.Dict[System.Text.Encoding.Latin1.GetString(piecesRoot)] = new BString(layerData);
+        root.Dict["piece layers"] = layers;
+
+        var metadata = TorrentFileParser.Parse(BencodeWriter.Write(root));
+
+        Assert.Equal(TorrentVersion.V2, metadata.Info.Version);
+        Assert.NotNull(metadata.Info.Files[0].PieceLayers);
+        Assert.Equal(2, metadata.Info.Files[0].PieceLayers!.Count);
+    }
+
+    [Fact]
+    public void ParseInfoBytes_V2FileLargerThanPiece_AllowsMissingPieceLayer()
+    {
+        byte[] fileData = new byte[32 * 1024];
+        Random.Shared.NextBytes(fileData);
+        var piecesRoot = MerkleTree.ComputeRoot(MerkleTree.ComputeLeaves(fileData));
+
+        var fileInfo = new BDict();
+        fileInfo.Dict["length"] = new BNumber(fileData.Length);
+        fileInfo.Dict["pieces root"] = new BString(piecesRoot);
+
+        var fileNode = new BDict();
+        fileNode.Dict[""] = fileInfo;
+
+        var fileTree = new BDict();
+        fileTree.Dict["large.bin"] = fileNode;
+
+        var info = new BDict();
+        info.Dict["name"] = new BString("root"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(16_384);
+        info.Dict["meta version"] = new BNumber(2);
+        info.Dict["file tree"] = fileTree;
+
+        var metadata = TorrentFileParser.ParseInfoBytes(BencodeWriter.Write(info));
+
+        Assert.Equal(TorrentVersion.V2, metadata.Info.Version);
+        Assert.Null(metadata.Info.Files[0].PieceLayers);
+    }
+
+    [Fact]
+    public void Parse_V2UnsupportedMetaVersion_Throws()
+    {
+        var info = new BDict();
+        info.Dict["name"] = new BString("root"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(16_384);
+        info.Dict["meta version"] = new BNumber(3);
+        info.Dict["file tree"] = new BDict();
+
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+    }
+
+    [Fact]
     public void Parse_MerkleBEP30_ParsesCorrectly()
     {
         var info = new BDict();

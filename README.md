@@ -17,6 +17,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 - **Hybrid Networking:** Native support for both TCP and uTP (BEP 29) with automatic congestion control.
 - **DHT & Peer Discovery:** Full Mainline DHT (BEP 5), Local Service Discovery (BEP 14), Peer Exchange (PEX), and UDP/HTTP Tracker support.
 - **Magnet Links:** Fast metadata exchange (BEP 9) allowing torrent starts from magnet links alone.
+- **BitTorrent v2 & Hybrid Torrents:** Parse, create, announce, and verify v2/hybrid torrents with BEP 52 file trees, piece layers, and Merkle proofs.
 - **Streaming Engine:** Integrated HTTP streaming server for real-time media playback while downloading.
 - **Protocol Encryption:** MSE (Message Stream Encryption) with configurable enforcement modes.
 - **NAT Traversal:** UPnP, NAT-PMP, and Holepunch (BEP 55) for connectivity behind NATs.
@@ -57,6 +58,18 @@ var magnet = MagnetLink.Parse("magnet:?xt=urn:btih:...");
 var torrent2 = await engine.AddMagnetAsync(magnet, new AddTorrentOptions("./downloads"));
 ```
 
+### Creating Torrents
+
+```csharp
+var created = await new TorrentFileBuilder()
+    .WithName("release")
+    .WithVersion(TorrentFileVersion.Hybrid) // V1, V2, or Hybrid
+    .WithPieceLength(256 * 1024)
+    .AddTracker("https://tracker.example/announce")
+    .AddFileFromPath("release.iso")
+    .BuildAsync();
+```
+
 ### Monitoring Progress
 
 PeerSharp supports two models for monitoring: a polling-based alert queue and per-torrent event callbacks.
@@ -88,7 +101,11 @@ var stream = await torrent.OpenStreamAsync(fileIndex: 0);
 
 ## WebTorrent
 
-PeerSharp ships an optional WebTorrent extension (`PeerSharp.WebTorrent`) that adds peer support over WebRTC data channels. The extension assembly is bundled in the same NuGet package as the core engine but is opt-in: call `torrent.UseWebTorrent(...)` per torrent to enable it. The core engine has no dependency on RtcForge or WebRTC unless you opt in.
+PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
+
+```bash
+dotnet add package PeerSharp.WebTorrent
+```
 
 ```csharp
 using PeerSharp.WebTorrent;
@@ -148,7 +165,7 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 42  | DHT Security Extension | Supported |
 | 47  | Padding Files | Supported |
 | 48  | Tracker Returns Compact Peer Lists | Supported |
-| 52  | BitTorrent Protocol v2 | Planned |
+| 52  | BitTorrent Protocol v2 | Supported |
 | 55  | Holepunch Extension | Supported |
 
 ## Architecture

@@ -291,7 +291,7 @@ internal class HttpTracker : TrackerBase, IDisposable
             return string.Empty;
         }
 
-        return baseUrl + "info_hash=" + UrlEncoding.Encode(Torrent.InfoFile.Info.Hash.Span);
+        return baseUrl + "info_hash=" + UrlEncoding.Encode(Torrent.InfoFile.Info.GetTrackerInfoHash().Span);
     }
 
     private string BuildScrapeUrl(IReadOnlyList<InfoHash> infoHashes)
@@ -366,7 +366,7 @@ internal class HttpTracker : TrackerBase, IDisposable
             sb.Append(value);
         }
 
-        AppendParam("info_hash", UrlEncoding.Encode(Torrent.InfoFile.Info.Hash.Span));
+        AppendParam("info_hash", UrlEncoding.Encode(Torrent.InfoFile.Info.GetTrackerInfoHash().Span));
         AppendParam("peer_id", UrlEncoding.Encode(Torrent.Settings.PeerId));
         AppendParam("port", Torrent.Settings.Connection.TcpPort.ToString());
         AppendParam("uploaded", Torrent.FileTransfer.Uploaded.ToString());

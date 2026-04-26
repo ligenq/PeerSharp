@@ -1103,6 +1103,18 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
     }
 
+    public Task SendHashRequestAsync(byte[] piecesRoot, int baseLayer, int index, int length, int proofLayers)
+    {
+        return SendMessageAsync(new PeerMessage(MessageId.HashRequest)
+        {
+            HashPiecesRoot = piecesRoot,
+            HashBaseLayer = baseLayer,
+            HashIndex = index,
+            HashLength = length,
+            HashProofLayers = proofLayers
+        });
+    }
+
     /// <summary>
     /// BEP 5: Send Port message to advertise our DHT UDP port to the peer.
     /// This allows the peer to add us to their DHT routing table.
@@ -1887,6 +1899,33 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
                 break;
 
+            case MessageId.HashRequest:
+                await HandleHashRequestAsync(msg).ConfigureAwait(false);
+                break;
+
+            case MessageId.Hashes:
+                if (msg.HashPiecesRoot != null)
+                {
+                    bool accepted = _torrent.InfoFile.Info.TryAddV2Hashes(
+                        msg.HashPiecesRoot,
+                        msg.HashBaseLayer,
+                        msg.HashIndex,
+                        msg.HashLength,
+                        msg.HashProofLayers,
+                        msg.Data);
+
+                    _logger.LogDebug(
+                        "{PeerName} sent BEP 52 hashes for root {PiecesRoot}; accepted={Accepted}",
+                        Name,
+                        Convert.ToHexString(msg.HashPiecesRoot),
+                        accepted);
+                }
+                break;
+
+            case MessageId.HashReject:
+                _logger.LogDebug("{PeerName} rejected BEP 52 hash request for root {PiecesRoot}", Name, Convert.ToHexString(msg.HashPiecesRoot ?? Array.Empty<byte>()));
+                break;
+
             case MessageId.Extended:
                 await HandleExtendedMessageAsync(msg.Data).ConfigureAwait(false);
                 break;
@@ -1902,6 +1941,50 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             await SafeNotifyListenerAsync(msg).ConfigureAwait(false);
         }
+    }
+
+    private async Task HandleHashRequestAsync(PeerMessage msg)
+    {
+        if (!RemoteSupportsV2 || !_torrent.InfoFile.Info.IsV2 || msg.HashPiecesRoot == null)
+        {
+            await SendHashRejectAsync(msg).ConfigureAwait(false);
+            return;
+        }
+
+        var hashes = _torrent.InfoFile.Info.GetV2Hashes(
+            msg.HashPiecesRoot,
+            msg.HashBaseLayer,
+            msg.HashIndex,
+            msg.HashLength,
+            msg.HashProofLayers);
+
+        if (hashes == null)
+        {
+            await SendHashRejectAsync(msg).ConfigureAwait(false);
+            return;
+        }
+
+        await SendMessageAsync(new PeerMessage(MessageId.Hashes)
+        {
+            HashPiecesRoot = msg.HashPiecesRoot,
+            HashBaseLayer = msg.HashBaseLayer,
+            HashIndex = msg.HashIndex,
+            HashLength = msg.HashLength,
+            HashProofLayers = msg.HashProofLayers,
+            Data = hashes
+        }).ConfigureAwait(false);
+    }
+
+    private Task SendHashRejectAsync(PeerMessage request)
+    {
+        return SendMessageAsync(new PeerMessage(MessageId.HashReject)
+        {
+            HashPiecesRoot = request.HashPiecesRoot ?? new byte[32],
+            HashBaseLayer = request.HashBaseLayer,
+            HashIndex = request.HashIndex,
+            HashLength = request.HashLength,
+            HashProofLayers = request.HashProofLayers
+        });
     }
 
     private async Task<bool> ReadHandshakeAsync()

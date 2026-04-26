@@ -28,6 +28,18 @@ public class WebTorrentSessionTests
     }
 
     [Fact]
+    public async Task CappedMemoryStream_ThrowsBeforeExceedingLimit()
+    {
+        using var stream = new CappedMemoryStream(4);
+
+        await stream.WriteAsync(new byte[] { 1, 2 });
+        await stream.WriteAsync(new byte[] { 3, 4 });
+
+        await Assert.ThrowsAsync<TrackerMessageTooLargeException>(() => stream.WriteAsync(new byte[] { 5 }.AsMemory()).AsTask());
+        Assert.Equal(4, stream.Length);
+    }
+
+    [Fact]
     public async Task StartAsync_SendsStartedAnnounceWithOffer()
     {
         var host = new FakePeerTransportHost();

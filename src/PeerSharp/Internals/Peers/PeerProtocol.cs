@@ -110,6 +110,32 @@ internal static class PeerProtocol
                 message.BlockLength = ReadInt(messageBuffer, 9);
                 break;
 
+            case MessageId.HashRequest:
+            case MessageId.HashReject:
+                if (length < 49)
+                {
+                    throw new InvalidDataException($"{message.Id} message too short: {length} < 49");
+                }
+                message.HashPiecesRoot = messageBuffer.Slice(1, 32).ToArray();
+                message.HashBaseLayer = ReadInt(messageBuffer, 33);
+                message.HashIndex = ReadInt(messageBuffer, 37);
+                message.HashLength = ReadInt(messageBuffer, 41);
+                message.HashProofLayers = ReadInt(messageBuffer, 45);
+                break;
+
+            case MessageId.Hashes:
+                if (length < 49)
+                {
+                    throw new InvalidDataException($"Hashes message too short: {length} < 49");
+                }
+                message.HashPiecesRoot = messageBuffer.Slice(1, 32).ToArray();
+                message.HashBaseLayer = ReadInt(messageBuffer, 33);
+                message.HashIndex = ReadInt(messageBuffer, 37);
+                message.HashLength = ReadInt(messageBuffer, 41);
+                message.HashProofLayers = ReadInt(messageBuffer, 45);
+                message.Data = messageBuffer.Slice(49).ToArray();
+                break;
+
             case MessageId.Extended:
                 // Extended message payload starts after the message ID byte
                 message.Data = messageBuffer.Slice(1).ToArray();
@@ -167,6 +193,24 @@ internal static class PeerProtocol
                 BinaryPrimitives.WriteInt32BigEndian(destination.Slice(13), msg.BlockLength);
                 break;
 
+            case MessageId.HashRequest:
+            case MessageId.HashReject:
+            case MessageId.Hashes:
+                if (msg.HashPiecesRoot == null || msg.HashPiecesRoot.Length != 32)
+                {
+                    throw new InvalidDataException($"{msg.Id} requires a 32-byte pieces root.");
+                }
+                msg.HashPiecesRoot.CopyTo(destination.Slice(5, 32));
+                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(37), msg.HashBaseLayer);
+                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(41), msg.HashIndex);
+                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(45), msg.HashLength);
+                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(49), msg.HashProofLayers);
+                if (msg.Id == MessageId.Hashes)
+                {
+                    msg.Data?.CopyTo(destination.Slice(53));
+                }
+                break;
+
             case MessageId.Piece:
                 BinaryPrimitives.WriteInt32BigEndian(destination.Slice(5), msg.PieceIndex);
                 BinaryPrimitives.WriteInt32BigEndian(destination.Slice(9), msg.BlockOffset);
@@ -214,6 +258,10 @@ internal static class PeerProtocol
 
             MessageId.Request or MessageId.Cancel or MessageId.Reject => 13,
 
+            MessageId.HashRequest or MessageId.HashReject => 49,
+
+            MessageId.Hashes => 49 + (msg.Data?.Length ?? 0),
+
             MessageId.Bitfield => 1 + (msg.Data?.Length ?? 0),
 
             MessageId.Piece => 9 + (msg.PooledBlock?.Length ?? msg.Data?.Length ?? 0),
@@ -238,4 +286,3 @@ internal static class PeerProtocol
         return BinaryPrimitives.ReadUInt16BigEndian(tmp);
     }
 }
-

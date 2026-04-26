@@ -53,6 +53,7 @@ public class PieceCheckerTests
         public long FullSize { get; set; }
         public string TorrentName => "test";
         public bool IsMerkle { get; set; }
+        public bool IsV2 { get; set; }
         public List<byte[]> ExpectedHashes { get; } = new();
         public List<int> VerifiedPieces { get; } = new();
 
@@ -62,6 +63,17 @@ public class PieceCheckerTests
         }
 
         public void UpdatePiecesFromBitfield(byte[] bitfield) { }
+        public long GetPieceSize(int pieceIndex)
+        {
+            if (pieceIndex == PieceCount - 1)
+            {
+                long lastPieceSize = FullSize % PieceSize;
+                return lastPieceSize == 0 ? PieceSize : lastPieceSize;
+            }
+
+            return PieceSize;
+        }
+
         public void AddPiece(int pieceIndex)
         {
             VerifiedPieces.Add(pieceIndex);

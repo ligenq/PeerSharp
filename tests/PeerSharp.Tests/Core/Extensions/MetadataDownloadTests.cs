@@ -103,6 +103,30 @@ public class MetadataDownloadTests
         Assert.Equal(1.0f, download.Progress);
         Assert.Equal("test", torrent.Name);
     }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(1025)]
+    public void InitializeMetadataBuffer_InvalidSize_Throws(int size)
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MaxMetadataSizeBytes = 1024;
+        var download = new MetadataDownload(torrent);
+
+        Assert.Throws<InvalidDataException>(() => download.InitializeMetadataBuffer(size));
+    }
+
+    [Fact]
+    public void InitializeMetadataBuffer_ChangedSize_Throws()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var download = new MetadataDownload(torrent);
+
+        download.InitializeMetadataBuffer(1024);
+
+        Assert.Throws<InvalidDataException>(() => download.InitializeMetadataBuffer(2048));
+    }
 }
 
 

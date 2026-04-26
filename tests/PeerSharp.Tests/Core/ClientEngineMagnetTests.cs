@@ -6,6 +6,26 @@ namespace PeerSharp.Tests.Core;
 public class ClientEngineMagnetTests
 {
     [Fact]
+    public async Task AddMagnetAsync_V2OnlyWithoutExactSource_AddsMetadataDownloadTorrent()
+    {
+        var hash = new string('a', 64);
+        var magnet = MagnetLink.Parse($"magnet:?xt=urn:btmh:1220{hash}&dn=V2Only");
+
+        var settings = new Settings();
+        settings.Files.DefaultDownloadPath = Path.GetTempPath();
+        await using var engine = ClientEngine.Create(new TorrentClientOptions { Settings = settings });
+
+        var torrent = await engine.AddMagnetAsync(
+            magnet,
+            new AddTorrentOptions { StartImmediately = false, DownloadPath = Path.GetTempPath() });
+
+        Assert.NotNull(torrent);
+        Assert.Equal("V2Only", torrent.Name);
+        Assert.False(torrent.HasMetadata);
+        Assert.Equal(TorrentState.Stopped, torrent.State);
+    }
+
+    [Fact]
     public async Task AddMagnetAsync_WithXs_FetchesMetadataViaHttp()
     {
         // Build a proper torrent file with valid raw bytes

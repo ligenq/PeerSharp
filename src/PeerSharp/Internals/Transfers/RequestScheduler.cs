@@ -103,15 +103,7 @@ internal sealed class RequestScheduler
             {
                 if (_piecePicker.PickNextPiece(peer, out int pieceIndex))
                 {
-                    long pieceSize = _torrent.InfoFile.Info.PieceSize;
-                    if (pieceIndex == _torrent.Pieces.Count - 1)
-                    {
-                        pieceSize = _torrent.InfoFile.Info.FullSize % _torrent.InfoFile.Info.PieceSize;
-                        if (pieceSize == 0)
-                        {
-                            pieceSize = _torrent.InfoFile.Info.PieceSize;
-                        }
-                    }
+                    long pieceSize = _torrent.InfoFile.Info.GetPieceSize(pieceIndex);
                     int blocksCount = (int)((pieceSize + _blockSize - 1) / _blockSize);
 
                     var newState = new PieceState(pieceIndex, blocksCount);
@@ -159,15 +151,7 @@ internal sealed class RequestScheduler
         int pieceIndex = state.Index;
         var now = _timeProvider.GetUtcNow();
 
-        long pSize = _torrent.InfoFile.Info.PieceSize;
-        if (pieceIndex == _torrent.Pieces.Count - 1)
-        {
-            pSize = _torrent.InfoFile.Info.FullSize % _torrent.InfoFile.Info.PieceSize;
-            if (pSize == 0)
-            {
-                pSize = _torrent.InfoFile.Info.PieceSize;
-            }
-        }
+        long pSize = _torrent.InfoFile.Info.GetPieceSize(pieceIndex);
 
         bool isPeerFast = peer.SmoothedDownloadSpeed > 100_000;
 

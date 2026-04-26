@@ -18,6 +18,12 @@ internal class PeerMessage : IDisposable
     // Handshake specific
     public byte[]? HandshakeReserved { get; set; }
 
+    public int HashBaseLayer { get; set; }
+    public int HashIndex { get; set; }
+    public int HashLength { get; set; }
+    public int HashProofLayers { get; set; }
+    public byte[]? HashPiecesRoot { get; set; }
+
     // Have
     public int HavePieceIndex { get; set; }
 
@@ -45,4 +51,3 @@ internal class PeerMessage : IDisposable
         }
     }
 }
-

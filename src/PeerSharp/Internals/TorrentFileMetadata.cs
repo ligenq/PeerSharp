@@ -1,3 +1,6 @@
+using System.Collections.Concurrent;
+using PeerSharp.Internals.Utilities;
+
 namespace PeerSharp.Internals;
 
 /// <summary>
@@ -14,6 +17,8 @@ internal enum TorrentVersion
     /// <summary>Hybrid torrent (both V1 and V2 compatible)</summary>
     Hybrid = 3
 }
+
+internal sealed record V2HashRequest(byte[] PiecesRoot, int BaseLayer, int Index, int Length, int ProofLayers);
 
 internal class TorrentFileEntry
 {
@@ -35,6 +40,8 @@ internal class TorrentFileEntry
     /// BEP 52: Piece layers - the Merkle tree layer containing piece-sized hashes.
     /// </summary>
     public List<byte[]>? PieceLayers { get; internal set; }
+
+    public ConcurrentDictionary<int, byte[]> PieceLayerHashes { get; } = new();
 
     /// <summary>
     /// BEP 52: Per-file Merkle tree root hash (32 bytes SHA-256).
@@ -152,6 +159,267 @@ internal class TorrentFileInfo
         }
 
         return result;
+    }
+
+    public long GetPieceSize(int pieceIndex)
+    {
+        int pieceCount = GetPieceCount();
+        if (pieceIndex < 0 || pieceIndex >= pieceCount || PieceSize == 0)
+        {
+            return 0;
+        }
+
+        if (IsV2)
+        {
+            var file = GetV2FileForPiece(pieceIndex);
+            if (file == null)
+            {
+                return 0;
+            }
+
+            long filePieceStart = (long)(pieceIndex - file.FirstPieceIndex) * PieceSize;
+            long remaining = file.Size - filePieceStart;
+            return Math.Min(PieceSize, Math.Max(0, remaining));
+        }
+
+        if (pieceIndex == pieceCount - 1)
+        {
+            long lastPieceSize = FullSize % PieceSize;
+            return lastPieceSize == 0 ? PieceSize : lastPieceSize;
+        }
+
+        return PieceSize;
+    }
+
+    public TorrentFileEntry? GetV2FileForPiece(int pieceIndex)
+    {
+        if (!IsV2)
+        {
+            return null;
+        }
+
+        foreach (var file in Files)
+        {
+            if (file.Size <= 0)
+            {
+                continue;
+            }
+
+            if (pieceIndex >= file.FirstPieceIndex && pieceIndex < file.FirstPieceIndex + file.PieceCount)
+            {
+                return file;
+            }
+        }
+
+        return null;
+    }
+
+    public byte[]? GetV2ExpectedPieceHash(int pieceIndex)
+    {
+        var file = GetV2FileForPiece(pieceIndex);
+        if (file?.PiecesRoot == null)
+        {
+            return null;
+        }
+
+        int filePieceIndex = pieceIndex - file.FirstPieceIndex;
+        if (file.PieceCount == 1)
+        {
+            return file.PiecesRoot;
+        }
+
+        var pieceLayers = file.PieceLayers;
+        if (pieceLayers != null && filePieceIndex >= 0 && filePieceIndex < pieceLayers.Count)
+        {
+            return pieceLayers[filePieceIndex];
+        }
+
+        if (file.PieceLayerHashes.TryGetValue(filePieceIndex, out var hash))
+        {
+            return hash;
+        }
+
+        return null;
+    }
+
+    public bool ShouldPadV2PieceToPieceSize(int pieceIndex)
+    {
+        var file = GetV2FileForPiece(pieceIndex);
+        return file?.PieceCount > 1;
+    }
+
+    public InfoHash GetTrackerInfoHash()
+    {
+        if (IsV1 && !Hash.IsEmpty)
+        {
+            return Hash;
+        }
+
+        if (IsV2 && !HashV2.IsEmpty)
+        {
+            return HashV2.TruncateToV1();
+        }
+
+        return InfoHash.Empty;
+    }
+
+    public byte[]? GetV2Hashes(byte[] piecesRoot, int baseLayer, int index, int length, int proofLayers)
+    {
+        if (!IsV2 || piecesRoot.Length != Utilities.MerkleTree.HashSize || index < 0 || length <= 0)
+        {
+            return null;
+        }
+
+        int pieceLayerDepth = Utilities.MerkleTree.GetPieceLayerDepth(PieceSize);
+        if (baseLayer != pieceLayerDepth)
+        {
+            return null;
+        }
+
+        foreach (var file in Files)
+        {
+            if (file.PiecesRoot == null || !file.PiecesRoot.AsSpan().SequenceEqual(piecesRoot))
+            {
+                continue;
+            }
+
+            List<byte[]> layer;
+            if (file.PieceCount == 1)
+            {
+                layer = new List<byte[]> { file.PiecesRoot };
+            }
+            else if (file.PieceLayers != null)
+            {
+                layer = file.PieceLayers;
+            }
+            else
+            {
+                return null;
+            }
+
+            // GetPieceLayerHashesWithProof virtually pads entries past the actual piece count
+            // with the layer pad hash (BEP 52), so libtorrent-style padded chunk requests
+            // (e.g. count = NextPow2(remaining) for the final chunk) can be served.
+            return Utilities.MerkleTree.GetPieceLayerHashesWithProof(layer, PieceSize, file.Size, index, length, proofLayers);
+        }
+
+        return null;
+    }
+
+    public bool TryAddV2Hashes(byte[] piecesRoot, int baseLayer, int index, int length, int proofLayers, byte[] hashes)
+    {
+        if (!IsV2 ||
+            piecesRoot.Length != Utilities.MerkleTree.HashSize ||
+            index < 0 ||
+            length <= 0 ||
+            baseLayer != Utilities.MerkleTree.GetPieceLayerDepth(PieceSize))
+        {
+            return false;
+        }
+
+        foreach (var file in Files)
+        {
+            if (file.PiecesRoot == null || !file.PiecesRoot.AsSpan().SequenceEqual(piecesRoot))
+            {
+                continue;
+            }
+
+            if (file.PieceCount <= 1)
+            {
+                return false;
+            }
+
+            int paddedLayerSize = Utilities.MerkleTree.CeilingPowerOf2(file.PieceCount);
+            if (index >= file.PieceCount || index + length > paddedLayerSize)
+            {
+                return false;
+            }
+
+            int baseTreeLayers = Utilities.MerkleTree.FloorLog2(Utilities.MerkleTree.CeilingPowerOf2(length));
+            int proofHashCount = Math.Max(0, proofLayers - baseTreeLayers + 1);
+            if (hashes.Length != (length + proofHashCount) * Utilities.MerkleTree.HashSize)
+            {
+                return false;
+            }
+
+            var received = Utilities.MerkleTree.ParsePieceLayer(hashes.AsSpan(0, length * Utilities.MerkleTree.HashSize).ToArray());
+            var proof = proofHashCount == 0
+                ? new List<byte[]>()
+                : Utilities.MerkleTree.ParsePieceLayer(hashes.AsSpan(length * Utilities.MerkleTree.HashSize).ToArray());
+
+            if (!Utilities.MerkleTree.VerifyPieceLayerSubsetAgainstRoot(
+                    received, file.PiecesRoot, PieceSize, file.Size, index, proofLayers, proof))
+            {
+                return false;
+            }
+
+            // Store only real piece hashes; entries past file.PieceCount are pad and discarded.
+            int realCount = Math.Min(length, file.PieceCount - index);
+            for (int i = 0; i < realCount; i++)
+            {
+                file.PieceLayerHashes[index + i] = received[i];
+            }
+
+            // Promote the dictionary into PieceLayers once every real piece is known.
+            if (file.PieceLayers == null && file.PieceLayerHashes.Count >= file.PieceCount)
+            {
+                var complete = new List<byte[]>(file.PieceCount);
+                bool full = true;
+                for (int i = 0; i < file.PieceCount; i++)
+                {
+                    if (!file.PieceLayerHashes.TryGetValue(i, out var h))
+                    {
+                        full = false;
+                        break;
+                    }
+                    complete.Add(h);
+                }
+                if (full)
+                {
+                    file.PieceLayers = complete;
+                }
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    public V2HashRequest? GetV2HashRequestForPiece(int pieceIndex)
+    {
+        var file = GetV2FileForPiece(pieceIndex);
+        if (file?.PiecesRoot == null || file.PieceCount <= 1)
+        {
+            return null;
+        }
+
+        int filePieceIndex = pieceIndex - file.FirstPieceIndex;
+
+        // Skip if we already have this specific piece's hash, either fully resolved into
+        // PieceLayers or cached in PieceLayerHashes from a partial chunk.
+        if (file.PieceLayers != null && filePieceIndex < file.PieceLayers.Count)
+        {
+            return null;
+        }
+        if (file.PieceLayerHashes.ContainsKey(filePieceIndex))
+        {
+            return null;
+        }
+
+        int chunkStart = filePieceIndex / 512 * 512;
+        int remaining = file.PieceCount - chunkStart;
+        // BEP 52 / libtorrent: pad chunk length to the next power of two (capped at 512).
+        // The sender fills entries past the file's piece count with pad hashes so the
+        // chunk forms a balanced sub-tree we can hash up to a known root.
+        int chunkLength = Math.Min(512, Utilities.MerkleTree.CeilingPowerOf2(remaining));
+        int baseLayer = Utilities.MerkleTree.GetPieceLayerDepth(PieceSize);
+        int proofLayers = Utilities.MerkleTree.GetTotalLevels(file.Size) - baseLayer - 1;
+        if (proofLayers < 0)
+        {
+            proofLayers = 0;
+        }
+        return new V2HashRequest(file.PiecesRoot, baseLayer, chunkStart, chunkLength, proofLayers);
     }
 
     /// <summary>
@@ -326,7 +594,7 @@ internal class TorrentFileInfo
         return false;
     }
 
-    private int GetPieceCount()
+    public int GetPieceCount()
     {
         if (PieceSize == 0)
         {

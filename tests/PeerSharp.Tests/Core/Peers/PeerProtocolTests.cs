@@ -146,6 +146,64 @@ public class PeerProtocolTests
         Assert.Equal(MessageId.Port, message.Id);
         Assert.Equal(6881, message.Port);
     }
+
+    [Fact]
+    public void WriteAndDecode_HashRequest_RoundTrips()
+    {
+        byte[] root = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+        var msg = new PeerMessage(MessageId.HashRequest)
+        {
+            HashPiecesRoot = root,
+            HashBaseLayer = 4,
+            HashIndex = 8,
+            HashLength = 16,
+            HashProofLayers = 2
+        };
+        byte[] destination = new byte[PeerProtocol.GetMessageLength(msg)];
+
+        int written = PeerProtocol.WriteMessage(msg, destination);
+        var buffer = new ReadOnlySequence<byte>(destination);
+        bool decoded = PeerProtocol.TryDecodeMessage(ref buffer, out var parsed, out int consumed);
+
+        Assert.Equal(53, written);
+        Assert.True(decoded);
+        Assert.Equal(written, consumed);
+        Assert.NotNull(parsed);
+        Assert.Equal(MessageId.HashRequest, parsed.Id);
+        Assert.Equal(root, parsed.HashPiecesRoot);
+        Assert.Equal(4, parsed.HashBaseLayer);
+        Assert.Equal(8, parsed.HashIndex);
+        Assert.Equal(16, parsed.HashLength);
+        Assert.Equal(2, parsed.HashProofLayers);
+    }
+
+    [Fact]
+    public void WriteAndDecode_Hashes_RoundTripsHashPayload()
+    {
+        byte[] root = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+        byte[] hashes = Enumerable.Range(0, 64).Select(i => (byte)(255 - i)).ToArray();
+        var msg = new PeerMessage(MessageId.Hashes)
+        {
+            HashPiecesRoot = root,
+            HashBaseLayer = 0,
+            HashIndex = 0,
+            HashLength = 2,
+            HashProofLayers = 0,
+            Data = hashes
+        };
+        byte[] destination = new byte[PeerProtocol.GetMessageLength(msg)];
+
+        int written = PeerProtocol.WriteMessage(msg, destination);
+        var buffer = new ReadOnlySequence<byte>(destination);
+        bool decoded = PeerProtocol.TryDecodeMessage(ref buffer, out var parsed, out _);
+
+        Assert.Equal(117, written);
+        Assert.True(decoded);
+        Assert.NotNull(parsed);
+        Assert.Equal(MessageId.Hashes, parsed.Id);
+        Assert.Equal(root, parsed.HashPiecesRoot);
+        Assert.Equal(hashes, parsed.Data);
+    }
 }
 
 

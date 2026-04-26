@@ -19,6 +19,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private int MetadataRequestTimeoutSeconds => Math.Max(1, _torrent.Settings.Transfer.MetadataRequestTimeoutSeconds);
     private int MetadataRequestPipeline => Math.Clamp(_torrent.Settings.Transfer.MetadataRequestPipeline, 1, 32);
     private int MetadataMaxRequestAttempts => Math.Max(1, _torrent.Settings.Transfer.MetadataMaxRequestAttempts);
+    private int MaxMetadataSizeBytes => Math.Max(1, _torrent.Settings.Transfer.MaxMetadataSizeBytes);
 
     // Initialized to empty BitArray to avoid null reference; resized in InitializeMetadataBuffer
     private BitArray _receivedPieces = new BitArray(0);
@@ -75,8 +76,18 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     {
         lock (_lock)
         {
+            if (size <= 0 || size > MaxMetadataSizeBytes)
+            {
+                throw new InvalidDataException($"Invalid metadata size {size}. Maximum allowed is {MaxMetadataSizeBytes} bytes.");
+            }
+
             if (_metadataSize != 0)
             {
+                if (_metadataSize != size)
+                {
+                    throw new InvalidDataException($"Metadata size changed from {_metadataSize} to {size}.");
+                }
+
                 return; // Already initialized
             }
 

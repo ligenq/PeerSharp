@@ -138,6 +138,57 @@ internal static class TorrentFileParser
         }
     }
 
+    private static void ValidateV2Metadata(TorrentFileMetadata metadata, bool requirePieceLayers)
+    {
+        if (metadata.Info.PieceSize < MerkleTree.BlockSize ||
+            metadata.Info.PieceSize % MerkleTree.BlockSize != 0 ||
+            !IsPowerOfTwo(metadata.Info.PieceSize / MerkleTree.BlockSize))
+        {
+            throw new FormatException("Invalid BEP 52 piece length.");
+        }
+
+        foreach (var file in metadata.Info.Files)
+        {
+            if (file.Size < 0)
+            {
+                throw new FormatException("Invalid BEP 52 file length.");
+            }
+
+            if (file.Size == 0)
+            {
+                continue;
+            }
+
+            if (file.PiecesRoot?.Length != MerkleTree.HashSize)
+            {
+                throw new FormatException("BEP 52 non-empty files must have a 32-byte pieces root.");
+            }
+
+            if (file.Size > metadata.Info.PieceSize)
+            {
+                if (file.PieceLayers == null || file.PieceLayers.Count != file.PieceCount)
+                {
+                    if (requirePieceLayers)
+                    {
+                        throw new FormatException("BEP 52 piece layers are missing or incomplete.");
+                    }
+
+                    continue;
+                }
+
+                if (!MerkleTree.VerifyPieceLayerAgainstRoot(file.PieceLayers, file.PiecesRoot, metadata.Info.PieceSize, file.Size))
+                {
+                    throw new FormatException("BEP 52 piece layers do not match pieces root.");
+                }
+            }
+        }
+    }
+
+    private static bool IsPowerOfTwo(uint value)
+    {
+        return value != 0 && (value & (value - 1)) == 0;
+    }
+
     /// <summary>
     /// BEP 52: Parse the file tree structure recursively.
     /// File tree is a nested dictionary where keys are path components.
@@ -201,6 +252,11 @@ internal static class TorrentFileParser
         bool hasV2FileTree = info.Get("file tree") != null;
 
         // Determine torrent version
+        if (metaVersion.HasValue && metaVersion.Value != 2)
+        {
+            throw new FormatException($"Unsupported torrent meta version {metaVersion.Value}.");
+        }
+
         if (hasV1Pieces && hasV2FileTree)
         {
             metadata.Info.Version = TorrentVersion.Hybrid;
@@ -333,6 +389,7 @@ internal static class TorrentFileParser
         if (metadata.Info.IsV2)
         {
             LinkPieceLayersToFiles(metadata);
+            ValidateV2Metadata(metadata, requirePieceLayers: root != null);
         }
     }
 }

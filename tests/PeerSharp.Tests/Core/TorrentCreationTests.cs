@@ -1,4 +1,6 @@
 using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
+using PeerSharp.BEncoding;
+using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.Tests.Core;
 
@@ -138,6 +140,68 @@ public class TorrentCreationTests
         Assert.True(torrent.InfoHash.IsEmpty);
         Assert.False(torrent.InfoHashV2.IsEmpty);
         Assert.Equal(fileName, torrent.GetFile(0).Path);
+    }
+
+    [Fact]
+    public void BuildV2SmallFile_OmitsPieceLayers()
+    {
+        byte[] data = new byte[8 * 1024];
+        Random.Shared.NextBytes(data);
+
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("small.bin")
+            .WithPieceLength(16_384)
+            .WithVersion(TorrentFileVersion.V2)
+            .AddFile("small.bin", data)
+            .Build();
+
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        Assert.Null(root.Get("piece layers"));
+    }
+
+    [Fact]
+    public void BuildV2LargeFile_EmitsValidPieceLayers()
+    {
+        byte[] data = new byte[32 * 1024];
+        Random.Shared.NextBytes(data);
+
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("large.bin")
+            .WithPieceLength(16_384)
+            .WithVersion(TorrentFileVersion.V2)
+            .AddFile("large.bin", data)
+            .Build();
+
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        Assert.NotNull(root.Get("piece layers"));
+        Assert.Equal(2, torrent.Metadata.Info.Files[0].PieceLayers!.Count);
+    }
+
+    [Fact]
+    public void BuildV2NonPowerOfTwoPieceCount_PieceLayerHasExactlyPieceCountHashes()
+    {
+        // Per BEP 52, "piece layers" must contain exactly file_num_pieces hashes — NOT the
+        // padded-to-power-of-2 layer from the merkle tree. Pre-fix, GetPieceLayer returned 4
+        // entries for a 3-piece file, which (a) inflated the .torrent and (b) broke roundtripping
+        // because the parser's PieceCount/PieceLayers.Count consistency check rejected it.
+        byte[] data = new byte[80 * 1024]; // 5 blocks => 3 pieces with 32KB pieces
+        Random.Shared.NextBytes(data);
+
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("uneven.bin")
+            .WithPieceLength(32 * 1024)
+            .WithVersion(TorrentFileVersion.V2)
+            .AddFile("uneven.bin", data)
+            .Build();
+
+        Assert.Equal(3, torrent.Metadata.Info.Files[0].PieceLayers!.Count);
+
+        // Round-trip: the parser must accept what the builder emitted.
+        var reparsed = TorrentFileParser.Parse(torrent.RawData.ToArray());
+        Assert.Equal(3, reparsed.Info.Files[0].PieceLayers!.Count);
+        Assert.Equal(
+            torrent.Metadata.Info.Files[0].PiecesRoot,
+            reparsed.Info.Files[0].PiecesRoot);
     }
 
     [Fact]

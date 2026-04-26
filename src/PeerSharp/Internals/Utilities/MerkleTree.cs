@@ -37,18 +37,7 @@ internal static class MerkleTree
             int blockLen = Math.Min(BlockSize, data.Length - offset);
             var block = data.Slice(offset, blockLen);
 
-            // Pad last block to 16KB if needed
-            if (blockLen < BlockSize)
-            {
-                // Use array instead of stackalloc to avoid potential stack overflow in loop
-                var padded = new byte[BlockSize];
-                block.CopyTo(padded);
-                leaves.Add(SHA256.HashData(padded));
-            }
-            else
-            {
-                leaves.Add(SHA256.HashData(block));
-            }
+            leaves.Add(SHA256.HashData(block));
 
             offset += BlockSize;
         }
@@ -134,12 +123,26 @@ internal static class MerkleTree
 
     /// <summary>
     /// Get the piece layer (the Merkle tree layer at piece-sized granularity).
-    /// This is what's stored in the "piece layers" dictionary.
+    /// Per BEP 52, this contains exactly file_num_pieces hashes — padding hashes
+    /// from the balanced tree are NOT included in the .torrent's "piece layers" entry.
     /// </summary>
     public static List<byte[]> GetPieceLayer(List<byte[]> leaves, uint pieceSize)
     {
         int depth = GetPieceLayerDepth(pieceSize);
-        return GetLayer(leaves, depth);
+        var layer = GetLayer(leaves, depth);
+        int blocksPerPiece = (int)(pieceSize / BlockSize);
+        if (blocksPerPiece <= 0 || leaves.Count == 0)
+        {
+            return new List<byte[]>();
+        }
+
+        int actualPieceCount = (leaves.Count + blocksPerPiece - 1) / blocksPerPiece;
+        if (layer.Count <= actualPieceCount)
+        {
+            return layer;
+        }
+
+        return layer.GetRange(0, actualPieceCount);
     }
 
     /// <summary>
@@ -151,6 +154,30 @@ internal static class MerkleTree
         int blocksPerPiece = (int)(pieceSize / BlockSize);
         return Log2(blocksPerPiece);
     }
+
+    /// <summary>
+    /// BEP 52: Returns the merkle padding hash at a given layer depth above the leaf layer.
+    /// The leaf-layer pad is 32 zero bytes; each layer up, the pad becomes SHA256(pad || pad).
+    /// </summary>
+    public static byte[] PadHashAtLayer(int layerDepth)
+    {
+        byte[] pad = new byte[HashSize];
+        for (int i = 0; i < layerDepth; i++)
+        {
+            pad = HashPair(pad, pad);
+        }
+        return pad;
+    }
+
+    /// <summary>
+    /// Smallest power of two greater than or equal to <paramref name="n"/>. Returns 1 for n &lt;= 1.
+    /// </summary>
+    public static int CeilingPowerOf2(int n) => NextPowerOf2(n);
+
+    /// <summary>
+    /// Floor of log2(n). Returns 0 for n &lt;= 0.
+    /// </summary>
+    public static int FloorLog2(int n) => Log2(n);
 
     /// <summary>
     /// Compute SHA-256 hash of data.
@@ -195,22 +222,34 @@ internal static class MerkleTree
     /// <param name="pieceLayerHash">Expected hash from piece layer</param>
     /// <param name="pieceSize">Size of a piece</param>
     /// <returns>True if the piece is valid</returns>
-    public static bool VerifyPiece(ReadOnlySpan<byte> pieceData, int pieceIndex, byte[] pieceLayerHash, uint pieceSize)
+    public static bool VerifyPiece(ReadOnlySpan<byte> pieceData, int pieceIndex, byte[] pieceLayerHash, uint pieceSize, bool padToPieceSize = false)
     {
-        // Compute leaves for this piece
         var leaves = ComputeLeaves(pieceData);
 
-        // Get the piece layer (should be a single hash for this piece)
-        int depth = GetPieceLayerDepth(pieceSize);
-        var layer = GetLayer(leaves, depth);
+        if (padToPieceSize)
+        {
+            int blocksPerPiece = (int)(pieceSize / BlockSize);
+            if (blocksPerPiece <= 0 || leaves.Count > blocksPerPiece)
+            {
+                return false;
+            }
 
-        if (layer.Count == 0)
+            while (leaves.Count < blocksPerPiece)
+            {
+                leaves.Add(new byte[HashSize]);
+            }
+        }
+
+        if (leaves.Count == 0)
         {
             return false;
         }
 
-        // The computed hash should match the expected piece layer hash
-        return layer[0].AsSpan().SequenceEqual(pieceLayerHash);
+        var pieceRoot = padToPieceSize
+            ? ComputeRoot(leaves)
+            : GetLayer(leaves, GetPieceLayerDepth(pieceSize))[0];
+
+        return pieceRoot.AsSpan().SequenceEqual(pieceLayerHash);
     }
 
     /// <summary>
@@ -223,24 +262,23 @@ internal static class MerkleTree
             return false;
         }
 
-        // Compute how many levels from piece layer to root
         int pieceDepth = GetPieceLayerDepth(pieceSize);
         int totalBlocks = (int)((fileSize + BlockSize - 1) / BlockSize);
         int totalLevels = Log2(NextPowerOf2(totalBlocks));
         int levelsToRoot = totalLevels - pieceDepth;
 
-        // Build from piece layer up to root
         var layer = new List<byte[]>(pieceLayerHashes);
 
-        // Pad to power of 2
+        // BEP 52: pad with merkle_pad(blocks_per_piece, 1), NOT zero. The piece layer sits
+        // above the leaf layer, so the pad value at this depth is the result of hashing
+        // a zero leaf with itself pieceDepth times.
+        byte[] pad = PadHashAtLayer(pieceDepth);
         int paddedCount = NextPowerOf2(layer.Count);
-        byte[] zeroHash = new byte[HashSize];
         while (layer.Count < paddedCount)
         {
-            layer.Add(zeroHash);
+            layer.Add(pad);
         }
 
-        // Build up to root
         for (int i = 0; i < levelsToRoot && layer.Count > 1; i++)
         {
             var nextLayer = new List<byte[]>(layer.Count / 2);
@@ -257,6 +295,203 @@ internal static class MerkleTree
         }
 
         return layer[0].AsSpan().SequenceEqual(piecesRoot);
+    }
+
+    /// <summary>
+    /// BEP 52: Returns <paramref name="count"/> piece-layer hashes starting at <paramref name="index"/>,
+    /// followed by enough sibling (uncle) hashes to anchor the chunk in the file's merkle tree
+    /// at <paramref name="proofLayers"/> ancestor layers. Entries past the file's actual piece
+    /// count are filled in with the proper layer pad hash so callers don't have to pre-pad.
+    /// </summary>
+    public static byte[]? GetPieceLayerHashesWithProof(
+        List<byte[]> pieceLayerHashes,
+        uint pieceSize,
+        long fileSize,
+        int index,
+        int count,
+        int proofLayers)
+    {
+        int pieceDepth = GetPieceLayerDepth(pieceSize);
+        if (!ValidateLayerRequest(pieceSize, fileSize, pieceDepth, index, count, proofLayers) ||
+            index >= pieceLayerHashes.Count)
+        {
+            return null;
+        }
+
+        byte[] pieceLayerPad = PadHashAtLayer(pieceDepth);
+        int baseTreeLayers = Log2(NextPowerOf2(count));
+        int proofHashCount = Math.Max(0, proofLayers - baseTreeLayers + 1);
+        var result = new byte[(count + proofHashCount) * HashSize];
+
+        for (int i = 0; i < count; i++)
+        {
+            int absolute = index + i;
+            byte[] hash = absolute < pieceLayerHashes.Count ? pieceLayerHashes[absolute] : pieceLayerPad;
+            Buffer.BlockCopy(hash, 0, result, i * HashSize, HashSize);
+        }
+
+        if (proofHashCount == 0)
+        {
+            return result;
+        }
+
+        var layers = BuildUpperLayers(pieceLayerHashes, pieceDepth);
+        int currentIndex = index >> baseTreeLayers;
+        int writtenProofs = 0;
+
+        for (int i = baseTreeLayers; i <= proofLayers; i++)
+        {
+            int currentDepth = pieceDepth + i;
+
+            if (currentDepth >= layers.Count)
+            {
+                return null;
+            }
+
+            int siblingIndex = currentIndex ^ 1;
+            byte[] sibling = siblingIndex < layers[currentDepth].Count
+                ? layers[currentDepth][siblingIndex]
+                : PadHashAtLayer(currentDepth);
+            Buffer.BlockCopy(sibling, 0, result, (count + writtenProofs) * HashSize, HashSize);
+            writtenProofs++;
+            currentIndex /= 2;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// BEP 52: Verify a chunk of piece-layer hashes (plus uncle hashes) against the file's pieces_root.
+    /// The received chunk is treated as a sub-tree of <paramref name="pieceLayerHashes"/>.Count leaves
+    /// (which the caller may already have padded to a power of two via the pad hash); we then walk
+    /// up via <paramref name="proofHashes"/> until we either reach the root or run out of proof.
+    /// </summary>
+    public static bool VerifyPieceLayerSubsetAgainstRoot(
+        IReadOnlyList<byte[]> pieceLayerHashes,
+        byte[] piecesRoot,
+        uint pieceSize,
+        long fileSize,
+        int index,
+        int proofLayers,
+        IReadOnlyList<byte[]> proofHashes)
+    {
+        int baseLayer = GetPieceLayerDepth(pieceSize);
+        if (!ValidateLayerRequest(pieceSize, fileSize, baseLayer, index, pieceLayerHashes.Count, proofLayers))
+        {
+            return false;
+        }
+
+        int totalLevels = GetTotalLevels(fileSize);
+        int baseTreeLayers = Log2(NextPowerOf2(pieceLayerHashes.Count));
+        int expectedProofHashes = Math.Max(0, proofLayers - baseTreeLayers + 1);
+        if (proofHashes.Count != expectedProofHashes)
+        {
+            return false;
+        }
+
+        // To verify against the FILE root, climbing must reach the top: baseTreeLayers via
+        // sub-tree reduction + expectedProofHashes via uncle hashes == totalLevels - baseLayer.
+        if (baseTreeLayers + expectedProofHashes != totalLevels - baseLayer)
+        {
+            return false;
+        }
+
+        var layer = new List<byte[]>(pieceLayerHashes);
+        byte[] pad = PadHashAtLayer(baseLayer);
+        int paddedCount = NextPowerOf2(layer.Count);
+        while (layer.Count < paddedCount)
+        {
+            layer.Add(pad);
+        }
+
+        while (layer.Count > 1)
+        {
+            var nextLayer = new List<byte[]>(layer.Count / 2);
+            for (int i = 0; i < layer.Count; i += 2)
+            {
+                nextLayer.Add(HashPair(layer[i], layer[i + 1]));
+            }
+            layer = nextLayer;
+        }
+
+        byte[] current = layer[0];
+        int currentIndex = index >> baseTreeLayers;
+        int proofIndex = 0;
+
+        for (int i = baseTreeLayers; i <= proofLayers; i++)
+        {
+            byte[] sibling = proofHashes[proofIndex++];
+            current = (currentIndex & 1) == 0 ? HashPair(current, sibling) : HashPair(sibling, current);
+            currentIndex /= 2;
+        }
+
+        return current.AsSpan().SequenceEqual(piecesRoot);
+    }
+
+    public static bool ValidateLayerRequest(uint pieceSize, long fileSize, int baseLayer, int index, int count, int proofLayers)
+    {
+        if (pieceSize < BlockSize ||
+            pieceSize % BlockSize != 0 ||
+            baseLayer < 0 ||
+            index < 0 ||
+            count <= 0 ||
+            count > 8192 ||
+            proofLayers < 0)
+        {
+            return false;
+        }
+
+        int totalBlocks = (int)((fileSize + BlockSize - 1) / BlockSize);
+        int leafCount = NextPowerOf2(totalBlocks);
+        int totalLayers = Log2(leafCount);
+        if (baseLayer >= totalLayers)
+        {
+            return false;
+        }
+
+        int levelSize = leafCount >> baseLayer;
+        return index < levelSize &&
+               index + count <= levelSize &&
+               proofLayers < totalLayers - baseLayer;
+    }
+
+    public static int GetTotalLevels(long fileSize)
+    {
+        int totalBlocks = (int)((fileSize + BlockSize - 1) / BlockSize);
+        return Log2(NextPowerOf2(totalBlocks));
+    }
+
+    private static List<List<byte[]>> BuildUpperLayers(List<byte[]> pieceLayerHashes, int baseDepth)
+    {
+        var layers = new List<List<byte[]>>();
+        while (layers.Count <= baseDepth)
+        {
+            layers.Add(new List<byte[]>());
+        }
+
+        var layer = new List<byte[]>(pieceLayerHashes);
+        // BEP 52: pad with the pad hash for THIS layer (not zero), so unmerged subtrees produce
+        // the same hashes the file's full merkle tree would.
+        byte[] pad = PadHashAtLayer(baseDepth);
+        int paddedCount = NextPowerOf2(layer.Count);
+        while (layer.Count < paddedCount)
+        {
+            layer.Add(pad);
+        }
+
+        layers[baseDepth] = layer;
+        while (layer.Count > 1)
+        {
+            var nextLayer = new List<byte[]>(layer.Count / 2);
+            for (int i = 0; i < layer.Count; i += 2)
+            {
+                nextLayer.Add(HashPair(layer[i], layer[i + 1]));
+            }
+            layer = nextLayer;
+            layers.Add(layer);
+        }
+
+        return layers;
     }
 
     /// <summary>

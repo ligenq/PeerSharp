@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Peers;
+using PeerSharp.Internals.Utilities;
 using PeerSharp.PiecePicking;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
@@ -347,6 +348,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
+    // BEP 52: dedup outstanding piece-layer hash requests so we don't ask multiple peers (or the
+    // same peer repeatedly) for the same chunk while one is in flight. Key: "<piecesRootHex>|<chunkStart>".
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _outstandingHashRequests = new();
+    private static readonly TimeSpan HashRequestRetryInterval = TimeSpan.FromSeconds(3);
     private int _backgroundTasksFailed;
     private AtomicDisposal _disposal = new();
     // Increased from 32 to 128 for higher parallelism
@@ -565,7 +570,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             reject = true;
         }
 
-        if (msg.PieceIndex < 0 || msg.PieceIndex >= _torrent.Pieces.Count)
+        if (!IsValidUploadRequest(msg))
         {
             reject = true;
         }
@@ -612,6 +617,26 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             _logger.LogError(ex, "Failed to fulfil request from {RemoteEndPoint}", peer.RemoteEndPoint);
             block?.Dispose();
         }
+    }
+
+    private bool IsValidUploadRequest(PeerMessage msg)
+    {
+        if (msg.PieceIndex < 0 || msg.PieceIndex >= _torrent.Pieces.Count)
+        {
+            return false;
+        }
+
+        return IsValidUploadRequestRange(msg.BlockOffset, msg.BlockLength, _torrent.InfoFile.Info.GetPieceSize(msg.PieceIndex));
+    }
+
+    internal static bool IsValidUploadRequestRange(int offset, int length, long pieceSize)
+    {
+        if (offset < 0 || length <= 0 || pieceSize < 0)
+        {
+            return false;
+        }
+
+        return (long)offset + length <= pieceSize;
     }
 
     public void DecrementAvailability(int pieceIndex)
@@ -714,15 +739,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
             if (piece.ReceivedCount > 0)
             {
-                long pSize = _torrent.InfoFile.Info.PieceSize;
-                if (piece.Index == _torrent.Pieces.Count - 1)
-                {
-                    pSize = _torrent.InfoFile.Info.FullSize % _torrent.InfoFile.Info.PieceSize;
-                    if (pSize == 0)
-                    {
-                        pSize = _torrent.InfoFile.Info.PieceSize;
-                    }
-                }
+                long pSize = _torrent.InfoFile.Info.GetPieceSize(piece.Index);
 
                 var data = new byte[pSize];
                 for (int i = 0; i < piece.BlockData.Length; i++)
@@ -1295,6 +1312,45 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// </summary>
     private void RequestMerkleHashes(int pieceIndex)
     {
+        if (_torrent.InfoFile.Info.IsV2)
+        {
+            var request = _torrent.InfoFile.Info.GetV2HashRequestForPiece(pieceIndex);
+            if (request == null)
+            {
+                return;
+            }
+
+            string requestKey = $"{Convert.ToHexString(request.PiecesRoot)}|{request.Index}";
+            var now = _timeProvider.GetUtcNow();
+            if (_outstandingHashRequests.TryGetValue(requestKey, out var lastRequested)
+                && now - lastRequested < HashRequestRetryInterval)
+            {
+                return;
+            }
+
+            foreach (var peer in _torrent.PeersInternal.GetConnectedPeersInternal())
+            {
+                if (peer.RemoteSupportsV2 && peer.PeerPieces.HasPiece(pieceIndex))
+                {
+                    _outstandingHashRequests[requestKey] = now;
+                    _ = peer.SendHashRequestAsync(request.PiecesRoot, request.BaseLayer, request.Index, request.Length, request.ProofLayers)
+                        .ContinueWith(t =>
+                        {
+                            if (t.IsFaulted)
+                            {
+                                _outstandingHashRequests.TryRemove(requestKey, out _);
+                                _logger.LogDebug(t.Exception, "BEP 52: Failed to request piece layer for piece {PieceIndex}", pieceIndex);
+                            }
+                        }, TaskScheduler.Default);
+                    _logger.LogDebug("BEP 52: Requested piece layer for file root {PiecesRoot} from {RemoteEndPoint}", Convert.ToHexString(request.PiecesRoot), peer.RemoteEndPoint);
+                    return;
+                }
+            }
+
+            _logger.LogDebug("BEP 52: No peers available to request hashes for piece {PieceIndex}", pieceIndex);
+            return;
+        }
+
         foreach (var peer in _torrent.PeersInternal.GetConnectedPeersInternal())
         {
             // Only request from peers that support ut_hash_piece and have this piece
@@ -1351,4 +1407,3 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         }
     }
 }
-

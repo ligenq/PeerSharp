@@ -1,5 +1,6 @@
 using System.Buffers;
 using Microsoft.Extensions.Logging;
+using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.Internals;
 
@@ -59,14 +60,10 @@ internal sealed class PieceVerificationWriter
     {
         ct.ThrowIfCancellationRequested();
 
-        long pSize = _torrent.InfoFile.Info.PieceSize;
-        if (pieceToProcess.Index == _torrent.Pieces.Count - 1)
+        long pSize = _torrent.InfoFile.Info.GetPieceSize(pieceToProcess.Index);
+        if (pSize <= 0)
         {
-            pSize = _torrent.InfoFile.Info.FullSize % _torrent.InfoFile.Info.PieceSize;
-            if (pSize == 0)
-            {
-                pSize = _torrent.InfoFile.Info.PieceSize;
-            }
+            return new PieceVerificationOutcome(hashSuccess: false, hashFailed: true, pieceSize: 0, fullData: null, pool: null);
         }
         int pieceSize = (int)pSize;
 
@@ -98,6 +95,7 @@ internal sealed class PieceVerificationWriter
         copyMs = (_timeProvider.GetUtcNow() - copyStart).TotalMilliseconds;
 
         bool isMerkle = _torrent.InfoFile.Info.IsMerkle && _torrent.MerkleTree != null;
+        bool isV2 = _torrent.InfoFile.Info.IsV2;
 
         // BEP 30: For Merkle hash torrents, use the Merkle tree for verification
         if (valid && isMerkle)
@@ -113,6 +111,14 @@ internal sealed class PieceVerificationWriter
                 valid = true; // Assume valid for now, will re-verify when hashes arrive
             }
             _logger.LogTrace("Piece {PieceIndex} Merkle verification: {Elapsed}ms, size={Size} bytes, valid={Valid}", pieceToProcess.Index, Math.Round(hashMs, 1), pieceSize, valid);
+        }
+        else if (valid && isV2)
+        {
+            var hashCalcStart = _timeProvider.GetUtcNow();
+            var expected = _torrent.InfoFile.Info.GetV2ExpectedPieceHash(pieceToProcess.Index);
+            bool padToPieceSize = _torrent.InfoFile.Info.ShouldPadV2PieceToPieceSize(pieceToProcess.Index);
+            valid = expected != null && MerkleTree.VerifyPiece(fullData.AsSpan(0, pieceSize), pieceToProcess.Index, expected, _torrent.InfoFile.Info.PieceSize, padToPieceSize);
+            hashMs = (_timeProvider.GetUtcNow() - hashCalcStart).TotalMilliseconds;
         }
         else if (valid && _torrent.InfoFile.Info.Pieces.Count > pieceToProcess.Index)
         {
