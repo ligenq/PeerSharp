@@ -110,6 +110,55 @@ public class StorageTests : IAsyncLifetime
     }
 
     [Fact(Timeout = 30000)]
+    public async Task Init_WhenAlreadyInitializedWithSelection_UpdatesFileSelection()
+    {
+        var selection = new List<FileSelection>
+        {
+            new() { Selected = true, Priority = Priority.Normal },
+            new() { Selected = false, Priority = Priority.DoNotDownload }
+        };
+
+        await _storage.InitAsync(selection);
+
+        string file2 = Path.Combine(_tempDir, "folder", "file2.txt");
+        Assert.False(System.IO.File.Exists(file2));
+
+        selection[1] = new FileSelection { Selected = true, Priority = Priority.Normal };
+        await _storage.InitAsync(selection);
+
+        Assert.True(System.IO.File.Exists(file2));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Init_SkipsInvalidTorrentPathWithoutCreatingEscapedFile()
+    {
+        string storageRoot = Path.Combine(_tempDir, "invalid-path");
+        string escapedPath = Path.GetFullPath(Path.Combine(storageRoot, "..", "escape.txt"));
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Name = "invalid_path";
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "../escape.txt", Size = 32, Offset = 0 });
+        metadata.Info.FullSize = 32;
+
+        using var handleCache = new FileHandleCache();
+        var validator = new PathValidator(storageRoot);
+        var storage = new Storage(metadata, storageRoot, validator, handleCache, enableSparseFiles: false);
+        try
+        {
+            await storage.InitAsync();
+
+            Assert.False(System.IO.File.Exists(escapedPath));
+
+            byte[] data = await storage.ReadAsync(0, 32);
+            Assert.All(data, b => Assert.Equal(0, b));
+        }
+        finally
+        {
+            await storage.DisposeAsync();
+        }
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task Read_SkippedFile_ReturnsZeros()
     {
         var selection = new List<FileSelection>

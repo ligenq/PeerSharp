@@ -282,7 +282,7 @@ public sealed class TorrentFileBuilder
         return path.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
     }
 
-    private void AddFileInternal(string torrentPath, long length, Func<Stream> openRead, Func<Stream> openReadAsync)
+    private static void ValidateTorrentPath(string torrentPath)
     {
         if (string.IsNullOrWhiteSpace(torrentPath))
         {
@@ -293,6 +293,25 @@ public sealed class TorrentFileBuilder
         {
             throw new ArgumentException("Torrent paths must be relative.", nameof(torrentPath));
         }
+
+        var parts = SplitPath(torrentPath);
+        if (parts.Length == 0)
+        {
+            throw new ArgumentException("Torrent path must contain at least one file name.", nameof(torrentPath));
+        }
+
+        foreach (string part in parts)
+        {
+            if (part == "." || part == "..")
+            {
+                throw new ArgumentException("Torrent paths must not contain current or parent directory segments.", nameof(torrentPath));
+            }
+        }
+    }
+
+    private void AddFileInternal(string torrentPath, long length, Func<Stream> openRead, Func<Stream> openReadAsync)
+    {
+        ValidateTorrentPath(torrentPath);
 
         if (length < 0)
         {

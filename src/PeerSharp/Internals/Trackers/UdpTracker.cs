@@ -249,6 +249,16 @@ internal class UdpTracker : TrackerBase, IDisposable
             return;
         }
 
+        var hashes = infoHashes
+            .Where(h => h.Length == InfoHash.V1Length)
+            .Select(h => h.Span.ToArray())
+            .ToList();
+
+        if (hashes.Count == 0)
+        {
+            return;
+        }
+
         await _syncLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -270,16 +280,6 @@ internal class UdpTracker : TrackerBase, IDisposable
 
                     await EnsureConnectedAsyncUnsafeAsync(ct).ConfigureAwait(false);
                     long connId = await GetConnectionIdAsyncUnsafeAsync(ct).ConfigureAwait(false);
-
-                    var hashes = infoHashes
-                        .Where(h => h.Length == InfoHash.V1Length)
-                        .Select(h => h.Span.ToArray())
-                        .ToList();
-
-                    if (hashes.Count == 0)
-                    {
-                        return;
-                    }
 
                     var response = await SendScrapeMultipleAsync(connId, hashes, ct).ConfigureAwait(false);
                     RaiseMultiScrapeResult(true, response);

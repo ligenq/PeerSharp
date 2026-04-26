@@ -224,6 +224,45 @@ public class TorrentCreationTests
         Assert.False(torrent.InfoHash.IsEmpty);
         Assert.False(torrent.InfoHashV2.IsEmpty);
     }
+
+    [Theory]
+    [InlineData("../escape.bin")]
+    [InlineData("folder/../../escape.bin")]
+    [InlineData("./file.bin")]
+    [InlineData("folder/./file.bin")]
+    public void AddFile_RejectsSpecialDirectorySegments(string torrentPath)
+    {
+        var builder = new ApiTorrentFileBuilder();
+
+        var ex = Assert.Throws<ArgumentException>(() => builder.AddFile(torrentPath, new byte[16]));
+
+        Assert.Equal("torrentPath", ex.ParamName);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddFileFromPath_RejectsSpecialDirectorySegmentsInTorrentPath()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), "MtTorrentBuilderTests_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            string filePath = Path.Combine(tempRoot, "disk.bin");
+            await File.WriteAllBytesAsync(filePath, new byte[16]);
+
+            var builder = new ApiTorrentFileBuilder();
+
+            var ex = Assert.Throws<ArgumentException>(() => builder.AddFileFromPath(filePath, "../escape.bin"));
+
+            Assert.Equal("torrentPath", ex.ParamName);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, true);
+            }
+        }
+    }
 }
 
 

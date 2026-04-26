@@ -199,7 +199,10 @@ internal sealed class Storage : IStorage
 
         _noWritesInFlight.Dispose();
         _fileSelectionLock.Dispose();
-        _files = Array.Empty<FileEntry>();
+        // Clear _fileLocks because the semaphores above were just disposed; a stray post-dispose
+        // access through the array would throw ObjectDisposedException. _files holds POCOs
+        // (paths/sizes only — handles live in _handleCache, already closed via CloseTorrentHandles),
+        // so it's safe to leave intact for any in-flight readers about to bail out.
         _fileLocks = Array.Empty<SemaphoreSlim>();
 
         GC.SuppressFinalize(this);

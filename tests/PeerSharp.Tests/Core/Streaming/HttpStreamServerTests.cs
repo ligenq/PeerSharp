@@ -9,88 +9,204 @@ public class HttpStreamServerTests
     public async Task Get_Stream_ReturnsFileBytesAndMimeType()
     {
         var data = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
-        using var server = new HttpStreamServer(new FakeTorrent("movie.mp4", data), 0);
-        using var client = new HttpClient();
-        server.Start();
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", data), 0);
+        var response = new FakeResponse();
 
-        using var response = await client.GetAsync(server.Url, TestContext.Current.CancellationToken);
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream"), response);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("video/mp4", response.Content.Headers.ContentType?.MediaType);
-        Assert.Equal("bytes", response.Headers.AcceptRanges.Single());
-        Assert.Equal(data, await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
+        Assert.Equal((int)HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("video/mp4", response.ContentType);
+        Assert.Equal("bytes", response.Headers["Accept-Ranges"]);
+        Assert.Equal(data, response.BodyBytes);
     }
 
     [Fact(Timeout = 30000)]
     public async Task Get_WithRange_ReturnsPartialContent()
     {
         var data = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
-        using var server = new HttpStreamServer(new FakeTorrent("clip.webm", data), 0);
-        using var client = new HttpClient();
-        using var request = new HttpRequestMessage(HttpMethod.Get, server.Url);
-        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(2, 5);
-        server.Start();
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("clip.webm", data), 0);
+        var response = new FakeResponse();
 
-        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream", "bytes=2-5"), response);
 
-        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
-        Assert.Equal("bytes 2-5/16", response.Content.Headers.ContentRange?.ToString());
-        Assert.Equal(new byte[] { 2, 3, 4, 5 }, await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
+        Assert.Equal((int)HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal("bytes 2-5/16", response.Headers["Content-Range"]);
+        Assert.Equal(new byte[] { 2, 3, 4, 5 }, response.BodyBytes);
     }
 
     [Fact(Timeout = 30000)]
     public async Task Head_Stream_ReturnsHeadersWithoutBody()
     {
-        using var server = new HttpStreamServer(new FakeTorrent("audio.flac", new byte[] { 1, 2, 3, 4 }), 0);
-        using var client = new HttpClient();
-        using var request = new HttpRequestMessage(HttpMethod.Head, server.Url);
-        server.Start();
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("audio.flac", new byte[] { 1, 2, 3, 4 }), 0);
+        var response = new FakeResponse();
 
-        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+        await handler.ProcessAsync(new FakeRequest("HEAD", "/stream"), response);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("audio/flac", response.Content.Headers.ContentType?.MediaType);
-        Assert.Equal(4, response.Content.Headers.ContentLength);
-        Assert.Empty(await response.Content.ReadAsByteArrayAsync(TestContext.Current.CancellationToken));
+        Assert.Equal((int)HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("audio/flac", response.ContentType);
+        Assert.Equal(4, response.ContentLength);
+        Assert.Empty(response.BodyBytes);
     }
 
     [Fact(Timeout = 30000)]
     public async Task Get_InvalidPath_ReturnsNotFound()
     {
-        using var server = new HttpStreamServer(new FakeTorrent("movie.mp4", new byte[] { 1 }), 0);
-        using var client = new HttpClient();
-        server.Start();
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", new byte[] { 1 }), 0);
+        var response = new FakeResponse();
 
-        using var response = await client.GetAsync(server.Url.Replace("/stream", "/missing"), TestContext.Current.CancellationToken);
+        await handler.ProcessAsync(new FakeRequest("GET", "/missing"), response);
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal((int)HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact(Timeout = 30000)]
     public async Task Get_InvalidFileIndex_ReturnsNotFound()
     {
-        using var server = new HttpStreamServer(new FakeTorrent("movie.mp4", new byte[] { 1 }), 1);
-        using var client = new HttpClient();
-        server.Start();
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", new byte[] { 1 }), 1);
+        var response = new FakeResponse();
 
-        using var response = await client.GetAsync(server.Url, TestContext.Current.CancellationToken);
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream"), response);
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal((int)HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact(Timeout = 30000)]
     public async Task Get_InvalidRange_ReturnsRangeNotSatisfiable()
     {
-        using var server = new HttpStreamServer(new FakeTorrent("movie.bin", new byte[] { 1, 2, 3, 4 }), 0);
-        using var client = new HttpClient();
-        using var request = new HttpRequestMessage(HttpMethod.Get, server.Url);
-        request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(4, 9);
-        server.Start();
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.bin", new byte[] { 1, 2, 3, 4 }), 0);
+        var response = new FakeResponse();
 
-        using var response = await client.SendAsync(request, TestContext.Current.CancellationToken);
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream", "bytes=4-9"), response);
 
-        Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
-        Assert.Equal("bytes */4", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal((int)HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
+        Assert.Equal("bytes */4", response.Headers["Content-Range"]);
+    }
+
+    [Theory]
+    [InlineData("movie.mkv", "video/x-matroska")]
+    [InlineData("clip.avi", "video/x-msvideo")]
+    [InlineData("song.mp3", "audio/mpeg")]
+    [InlineData("file.bin", "application/octet-stream")]
+    public void GetMimeType_ReturnsExpectedType(string path, string expected)
+    {
+        Assert.Equal(expected, HttpStreamMimeTypes.GetMimeType(path));
+    }
+
+    [Theory]
+    // No header (or unknown unit) => serve whole file as 200.
+    [InlineData(null, 16, true, false, 0, 15)]
+    [InlineData("items=1-2", 16, true, false, 0, 15)]
+    // Open-ended high: bytes=N- => N..end.
+    [InlineData("bytes=2-", 16, true, true, 2, 15)]
+    // RFC 7233 §2.1 suffix-byte-range-spec: "bytes=-N" is the LAST N bytes.
+    [InlineData("bytes=-5", 16, true, true, 11, 15)]
+    [InlineData("bytes=-1", 16, true, true, 15, 15)]
+    // Suffix larger than file clamps to start=0 (i.e. whole file, but as a 206).
+    [InlineData("bytes=-100", 16, true, true, 0, 15)]
+    // Closed range, valid.
+    [InlineData("bytes=15-15", 16, true, true, 15, 15)]
+    [InlineData("bytes=0-0", 16, true, true, 0, 0)]
+    // Closed range, out of bounds.
+    [InlineData("bytes=16-16", 16, false, true, 16, 16)]
+    // start > end => 416.
+    [InlineData("bytes=8-7", 16, false, true, 8, 7)]
+    public void RangeParser_ParsesRanges(string? header, long totalLength, bool valid, bool partial, long start, long end)
+    {
+        var range = HttpRangeParser.Parse(header, totalLength);
+
+        Assert.Equal(valid, range.IsValid);
+        Assert.Equal(partial, range.IsPartial);
+        Assert.Equal(start, range.Start);
+        Assert.Equal(end, range.End);
+    }
+
+    [Theory]
+    // Multi-range is not supported; reject rather than serving the first range or the whole file.
+    [InlineData("bytes=0-5,10-15")]
+    // Non-numeric.
+    [InlineData("bytes=foo-bar")]
+    [InlineData("bytes=1-bar")]
+    // Suffix of zero or negative is meaningless.
+    [InlineData("bytes=-0")]
+    [InlineData("bytes=--5")]
+    // Missing dash.
+    [InlineData("bytes=5")]
+    // Empty value.
+    [InlineData("bytes=")]
+    public void RangeParser_RejectsMalformedRanges(string header)
+    {
+        var range = HttpRangeParser.Parse(header, 16);
+
+        Assert.False(range.IsValid);
+        Assert.True(range.IsPartial);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Get_SuffixRange_ReturnsLastBytes()
+    {
+        // End-to-end check that the handler honors the corrected suffix-byte-range semantics.
+        var data = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("clip.webm", data), 0);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream", "bytes=-5"), response);
+
+        Assert.Equal((int)HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal("bytes 11-15/16", response.Headers["Content-Range"]);
+        Assert.Equal(new byte[] { 11, 12, 13, 14, 15 }, response.BodyBytes);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Get_MultiRange_ReturnsRangeNotSatisfiable()
+    {
+        // We don't support multipart/byteranges; rather than silently serving the first range
+        // we return 416 so callers fall back to a single-range request.
+        var data = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("clip.webm", data), 0);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream", "bytes=0-3,8-11"), response);
+
+        Assert.Equal((int)HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
+        Assert.Equal("bytes */16", response.Headers["Content-Range"]);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Get_Cancelled_StopsStreamingBeforeCompletion()
+    {
+        // ProcessAsync now takes a CancellationToken so the listener can tear down in-flight
+        // requests on Dispose. Verify the token short-circuits the response loop.
+        var data = Enumerable.Range(0, 200_000).Select(i => (byte)(i & 0xFF)).ToArray();
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("big.bin", data), 0);
+        var response = new FakeResponse();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            handler.ProcessAsync(new FakeRequest("GET", "/stream"), response, cts.Token));
+
+        // Headers may have been set before the body loop entered; the body must not be complete.
+        Assert.True(response.BodyBytes.Length < data.Length);
+    }
+
+    private sealed record FakeRequest(string Method, string Path, string? RangeHeader = null) : IHttpStreamRequest;
+
+    private sealed class FakeResponse : IHttpStreamResponse
+    {
+        private readonly MemoryStream _body = new();
+
+        public Stream Body => _body;
+        public byte[] BodyBytes => _body.ToArray();
+        public long ContentLength { get; set; }
+        public string ContentType { get; set; } = string.Empty;
+        public Dictionary<string, string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Version ProtocolVersion { get; set; } = new(1, 0);
+        public int StatusCode { get; set; }
+
+        public void AddHeader(string name, string value)
+        {
+            Headers[name] = value;
+        }
     }
 
     private sealed class FakeTorrent : ITorrent
