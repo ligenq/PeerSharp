@@ -82,6 +82,49 @@ public class FilesTests
         CleanupPath(defaultPath);
     }
 
+    [Fact]
+    public async Task DeleteFilesAsync_AfterStop_RemovesAllocatedFiles()
+    {
+        var metadata = CreateMetadata(16 * 1024);
+        string defaultPath = CreateTempPath();
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, defaultPath);
+        var files = Files.Create(torrent, torrent.Services.FileHandleCache, defaultPath);
+
+        await files.InitializeAsync(CreateSelection(metadata), CancellationToken.None);
+        string filePath = Path.Combine(defaultPath, "file.bin");
+        Assert.True(System.IO.File.Exists(filePath));
+
+        await files.StopAsync();
+        await files.DeleteFilesAsync(CancellationToken.None);
+
+        Assert.False(System.IO.File.Exists(filePath));
+
+        await torrent.DisposeAsync();
+        CleanupPath(defaultPath);
+    }
+
+    [Fact]
+    public async Task UpdateFileSelectionAsync_AfterDispose_IsNoOp()
+    {
+        // Closes the TOCTOU window between Torrent.OnSelectionChangedAsync and the call:
+        // selection updates that race with shutdown must not throw or hit disposed storage.
+        var metadata = CreateMetadata(16 * 1024);
+        string defaultPath = CreateTempPath();
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, defaultPath);
+        var files = Files.Create(torrent, torrent.Services.FileHandleCache, defaultPath);
+
+        await files.InitializeAsync(CreateSelection(metadata), CancellationToken.None);
+        await files.DisposeAsync();
+
+        // Calling on a disposed Files must complete without throwing.
+        await files.UpdateFileSelectionAsync(CreateSelection(metadata));
+
+        await torrent.DisposeAsync();
+        CleanupPath(defaultPath);
+    }
+
     private static TorrentFileMetadata CreateMetadata(long size)
     {
         var metadata = new TorrentFileMetadata();

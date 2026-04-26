@@ -1,4 +1,5 @@
 using PeerSharp.Internals;
+using PeerSharp.PieceWriter;
 using Microsoft.Extensions.Time.Testing;
 
 namespace PeerSharp.Tests.Core;
@@ -50,6 +51,50 @@ public class TorrentTests
 
         Assert.False(torrent.Started);
         Assert.Equal(TorrentState.Stopped, torrent.State);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Stop_ReleasesTorrentFileHandles()
+    {
+        string downloadPath = Path.Combine(Path.GetTempPath(), "MtTorrentTests_Stop", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(downloadPath);
+        var handleCache = new RecordingFileHandleCache();
+        var info = new TorrentFileMetadata();
+        info.Info.Name = "test";
+        info.Info.Hash = InfoHash.CreateRandom();
+        info.Info.PieceSize = 16384;
+        info.Info.FullSize = 1000;
+        info.Info.Pieces.Add(new byte[20]);
+        info.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = 1000, Offset = 0 });
+
+        var settings = new Settings();
+        settings.Files.DefaultDownloadPath = downloadPath;
+        var torrent = Torrent.Create(
+            info,
+            settings,
+            new TorrentTestUtility.MockBandwidthManager(),
+            new TorrentTestUtility.MockAlertsManager(),
+            new TorrentTestUtility.MockFileSelectionManager(),
+            new TorrentTestUtility.MockPeerCommunicationFactory(),
+            new TorrentTestUtility.MockTrackerFactory(),
+            new TorrentTestUtility.MockGeoIpService(),
+            handleCache,
+            new TorrentTestUtility.MockConnectionGovernor(),
+            _timeProvider);
+
+        try
+        {
+            await torrent.StartAsync();
+            await torrent.StopAsync();
+
+            Assert.Equal(downloadPath, Assert.Single(handleCache.ClosedRoots));
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+            handleCache.Dispose();
+            try { Directory.Delete(downloadPath, true); } catch { }
+        }
     }
 
     [Fact]
@@ -201,6 +246,25 @@ public class TorrentTests
                 throw new InvalidOperationException("dispose failed");
             }
             return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingFileHandleCache : IFileHandleCache
+    {
+        public List<string> ClosedRoots { get; } = new();
+
+        public void CloseTorrentHandles(string rootPath)
+        {
+            ClosedRoots.Add(rootPath);
+        }
+
+        public void Dispose()
+        {
+        }
+
+        public ValueTask<IFileHandleLease> GetHandleAsync(string path, bool writable, CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
         }
     }
 }

@@ -420,6 +420,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         FileTransferInternal?.InvalidateSelection();
         if (FilesInternal != null)
         {
+            // UpdateFileSelectionAsync is itself a no-op when disposed; that avoids a TOCTOU race
+            // between a separate IsDisposed check here and a concurrent shutdown.
             await FilesInternal.UpdateFileSelectionAsync(selection, ct).ConfigureAwait(false);
         }
     }
@@ -1088,7 +1090,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 {
                     await FileTransferInternal.DisposeAsync().ConfigureAwait(false);
                 }
-                if (disposing && FilesInternal != null)
+                if (FilesInternal != null)
                 {
                     await FilesInternal.StopAsync().ConfigureAwait(false);
                 }

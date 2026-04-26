@@ -104,6 +104,12 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
 
     public Task UpdateFileSelectionAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default)
     {
+        // Guard inside the call so the (caller IsDisposed-check, callee dispatch) sequence isn't a TOCTOU race.
+        if (_disposal.IsDisposed)
+        {
+            return Task.CompletedTask;
+        }
+
         return _storage.UpdateFileSelectionAsync(selection, ct);
     }
 

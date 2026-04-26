@@ -121,6 +121,7 @@ public class UdpTrackerTests
         public bool Success { get; private set; }
         public AnnounceResponse? AnnounceResponse { get; private set; }
         public ScrapeResponse? ScrapeResponse { get; private set; }
+        public MultiScrapeResponse? MultiScrapeResponse { get; private set; }
         public string? AnnounceErrorMessage { get; private set; }
         public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null)
         {
@@ -131,7 +132,8 @@ public class UdpTrackerTests
 
         public void OnMultiScrapeResult(bool success, MultiScrapeResponse response, ITracker tracker)
         {
-            throw new NotImplementedException();
+            Success = success;
+            MultiScrapeResponse = response;
         }
 
         public void OnScrapeResult(bool success, ScrapeResponse response, ITracker tracker)
@@ -576,6 +578,30 @@ public class UdpTrackerTests
     }
 
     [Fact]
+    public async Task ScrapeMultipleAsync_EmptyInput_ReturnsEmptyWithoutSendingPacket()
+    {
+        var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
+
+        var response = await tracker.ScrapeMultipleAsync(new List<byte[]>(), CancellationToken.None);
+
+        Assert.Empty(response.Results);
+        Assert.Empty(_socketFactory.LastSocket.SentPackets);
+    }
+
+    [Fact]
+    public async Task MultiScrapeAsync_V2OnlyHashes_ReturnsWithoutSendingPacket()
+    {
+        var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
+
+        await tracker.MultiScrapeAsync(new[] { InfoHash.CreateRandomV2() }, CancellationToken.None);
+
+        Assert.Null(_callback.MultiScrapeResponse);
+        Assert.Empty(_socketFactory.LastSocket.SentPackets);
+    }
+
+    [Fact]
     public void ParseTrackerErrorMessage_ExtractsAsciiMessage()
     {
         string errorText = "torrent not registered";
@@ -612,6 +638,18 @@ public class UdpTrackerTests
         var result = UdpTracker.ParseTrackerErrorMessage(buffer);
 
         Assert.Equal("(no error message)", result);
+    }
+
+    [Fact]
+    public void ParseTrackerErrorMessage_EmptyBody_ReturnsPlaceholder()
+    {
+        byte[] buffer = new byte[12];
+        BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0), 3);
+        BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(4), 1);
+
+        var result = UdpTracker.ParseTrackerErrorMessage(buffer);
+
+        Assert.Equal("(empty error message)", result);
     }
 
 }
