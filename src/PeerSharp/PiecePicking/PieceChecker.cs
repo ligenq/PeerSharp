@@ -69,20 +69,13 @@ internal class PieceChecker : IAsyncDisposable
     {
         int validPieces = 0;
         bool isMerkle = _context.IsMerkle;
+        bool isV2 = _context.IsV2;
 
         for (int pieceIndex = startPiece; pieceIndex <= endPiece && pieceIndex < _context.PieceCount; pieceIndex++)
         {
             ct.ThrowIfCancellationRequested();
 
-            long pieceSize = _context.PieceSize;
-            if (pieceIndex == _context.PieceCount - 1)
-            {
-                pieceSize = _context.FullSize % _context.PieceSize;
-                if (pieceSize == 0)
-                {
-                    pieceSize = _context.PieceSize;
-                }
-            }
+            long pieceSize = _context.GetPieceSize(pieceIndex);
 
             long pieceOffset = pieceIndex * _context.PieceSize;
 
@@ -92,7 +85,7 @@ internal class PieceChecker : IAsyncDisposable
                 await _files.ReadAsync(pieceOffset, pieceData, ct).ConfigureAwait(false);
 
                 bool isValid;
-                if (isMerkle)
+                if (isMerkle || isV2)
                 {
                     isValid = _context.VerifyPiece(pieceIndex, pieceData);
                 }
@@ -143,6 +136,7 @@ internal class PieceChecker : IAsyncDisposable
         int checkedPieces = 0;
 
         bool isMerkle = _context.IsMerkle;
+        bool isV2 = _context.IsV2;
 
         // Reset pieces - we'll rebuild the bitfield based on actual data
         var newProgress = new PiecesProgress(totalPieces);
@@ -153,16 +147,7 @@ internal class PieceChecker : IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            long pieceSize = _context.PieceSize;
-            if (pieceIndex == totalPieces - 1)
-            {
-                // Last piece may be smaller
-                pieceSize = _context.FullSize % _context.PieceSize;
-                if (pieceSize == 0)
-                {
-                    pieceSize = _context.PieceSize;
-                }
-            }
+            long pieceSize = _context.GetPieceSize(pieceIndex);
 
             long pieceOffset = pieceIndex * _context.PieceSize;
 
@@ -173,9 +158,8 @@ internal class PieceChecker : IAsyncDisposable
                 await _files.ReadAsync(pieceOffset, pieceData, ct).ConfigureAwait(false);
 
                 bool isValid;
-                if (isMerkle)
+                if (isMerkle || isV2)
                 {
-                    // BEP 30: Use Merkle tree verification
                     isValid = _context.VerifyPiece(pieceIndex, pieceData);
                 }
                 else

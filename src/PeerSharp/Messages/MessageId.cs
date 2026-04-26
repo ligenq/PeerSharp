@@ -18,6 +18,9 @@ internal enum MessageId : byte
     Reject = 16,
     AllowedFast = 17,
     Extended = 20,
+    HashRequest = 21,
+    Hashes = 22,
+    HashReject = 23,
     Handshake = 254, // Custom ID for internal use
     KeepAlive = 255, // Custom ID for internal use
     Invalid = 253

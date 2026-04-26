@@ -6,6 +6,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace PeerSharp.Internals.Dht;
@@ -40,13 +41,13 @@ internal class DhtManager : IUdpReceiver, IDhtManager
 
     private Task? _maintenanceTask;
 
-    private string _prevSecret = Guid.NewGuid().ToString();
+    private byte[] _prevSecret = GenerateSecret();
 
     private Task? _rebootstrapTask;
 
     private bool _running;
 
-    private string _secret = Guid.NewGuid().ToString();
+    private byte[] _secret = GenerateSecret();
 
     private RoutingTable _table;
 
@@ -254,7 +255,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         _cts = null;
     }
 
-    private static byte[] CalculateToken(IPAddress addr, string secret, ReadOnlySpan<byte> infoHash)
+    private static byte[] CalculateToken(IPAddress addr, ReadOnlySpan<byte> secret, ReadOnlySpan<byte> infoHash)
     {
         Span<byte> ipBytes = stackalloc byte[16];
         if (!addr.TryWriteBytes(ipBytes, out int ipLen))
@@ -262,16 +263,15 @@ internal class DhtManager : IUdpReceiver, IDhtManager
             return Array.Empty<byte>();
         }
 
-        int secretLen = Encoding.ASCII.GetByteCount(secret);
-        int totalLen = ipLen + secretLen + infoHash.Length;
+        int totalLen = ipLen + secret.Length + infoHash.Length;
 
         var data = ArrayPool<byte>.Shared.Rent(totalLen);
         try
         {
             var work = data[..totalLen].AsSpan();
             addr.TryWriteBytes(work, out _);
-            Encoding.ASCII.GetBytes(secret, work.Slice(ipLen, secretLen));
-            infoHash.CopyTo(work.Slice(ipLen + secretLen));
+            secret.CopyTo(work.Slice(ipLen, secret.Length));
+            infoHash.CopyTo(work.Slice(ipLen + secret.Length));
 
             Span<byte> hash = stackalloc byte[20];
             System.Security.Cryptography.SHA1.HashData(work, hash);
@@ -311,7 +311,14 @@ internal class DhtManager : IUdpReceiver, IDhtManager
 
     private static void GenerateTransactionId(Span<byte> destination)
     {
-        Random.Shared.NextBytes(destination);
+        RandomNumberGenerator.Fill(destination);
+    }
+
+    private static byte[] GenerateSecret()
+    {
+        byte[] secret = new byte[32];
+        RandomNumberGenerator.Fill(secret);
+        return secret;
     }
 
     private void RestoreInitialState()
@@ -839,7 +846,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         if ((_timeProvider.GetUtcNow() - _lastSecretRotation).TotalMinutes > 10)
         {
             _prevSecret = _secret;
-            _secret = Guid.NewGuid().ToString();
+            _secret = GenerateSecret();
             _lastSecretRotation = _timeProvider.GetUtcNow();
         }
     }

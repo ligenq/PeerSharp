@@ -77,6 +77,19 @@ public class FileTransferTests
         Assert.Equal(0, _fileTransfer.Downloader.Downloaded);
         Assert.Throws<ObjectDisposedException>(() => block.Buffer);
     }
+
+    [Theory]
+    [InlineData(0, 16384, 16384, true)]
+    [InlineData(8192, 8192, 16384, true)]
+    [InlineData(8192, 8193, 16384, false)]
+    [InlineData(16384, 1, 16384, false)]
+    [InlineData(-1, 1, 16384, false)]
+    [InlineData(0, 0, 16384, false)]
+    [InlineData(int.MaxValue, 1, int.MaxValue, false)]
+    public void IsValidUploadRequestRange_RejectsRangesOutsidePiece(int offset, int length, long pieceSize, bool expected)
+    {
+        Assert.Equal(expected, FileTransfer.IsValidUploadRequestRange(offset, length, pieceSize));
+    }
 }
 
 

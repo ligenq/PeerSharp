@@ -1,5 +1,6 @@
 using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
+using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.PiecePicking;
 
@@ -42,6 +43,7 @@ internal interface IPieceCheckerContext
 {
     long FullSize { get; }
     bool IsMerkle { get; }
+    bool IsV2 { get; }
     int PieceCount { get; }
     long PieceSize { get; }
     string TorrentName { get; }
@@ -49,6 +51,8 @@ internal interface IPieceCheckerContext
     void AddPiece(int pieceIndex);
 
     byte[]? GetExpectedHash(int pieceIndex);
+
+    long GetPieceSize(int pieceIndex);
 
     void UpdatePiecesFromBitfield(byte[] bitfield);
 
@@ -116,6 +120,7 @@ internal class TorrentPieceCheckerContext : IPieceCheckerContext
 
     public long FullSize => _torrent.InfoFile.Info.FullSize;
     public bool IsMerkle => _torrent.InfoFile.Info.IsMerkle && _torrent.MerkleTree != null;
+    public bool IsV2 => _torrent.InfoFile.Info.IsV2;
     public int PieceCount => _torrent.Pieces.Count;
     public long PieceSize => _torrent.InfoFile.Info.PieceSize;
     public string TorrentName => _torrent.Name;
@@ -134,6 +139,11 @@ internal class TorrentPieceCheckerContext : IPieceCheckerContext
         return null;
     }
 
+    public long GetPieceSize(int pieceIndex)
+    {
+        return _torrent.InfoFile.Info.GetPieceSize(pieceIndex);
+    }
+
     public void UpdatePiecesFromBitfield(byte[] bitfield)
     {
         _torrent.Pieces.FromBitfield(bitfield);
@@ -141,7 +151,19 @@ internal class TorrentPieceCheckerContext : IPieceCheckerContext
 
     public bool VerifyPiece(int pieceIndex, byte[] pieceData)
     {
-        return _torrent.MerkleTree?.VerifyPiece(pieceIndex, pieceData) ?? false;
+        if (IsMerkle)
+        {
+            return _torrent.MerkleTree?.VerifyPiece(pieceIndex, pieceData) ?? false;
+        }
+
+        if (IsV2)
+        {
+            var expected = _torrent.InfoFile.Info.GetV2ExpectedPieceHash(pieceIndex);
+            bool padToPieceSize = _torrent.InfoFile.Info.ShouldPadV2PieceToPieceSize(pieceIndex);
+            return expected != null && MerkleTree.VerifyPiece(pieceData, pieceIndex, expected, _torrent.InfoFile.Info.PieceSize, padToPieceSize);
+        }
+
+        return false;
     }
 }
 

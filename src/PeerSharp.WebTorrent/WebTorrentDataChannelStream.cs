@@ -1,5 +1,4 @@
 using System.Threading.Channels;
-using PeerSharp.Core;
 using RtcForge;
 
 namespace PeerSharp.WebTorrent;
@@ -17,7 +16,7 @@ internal sealed class WebTorrentDataChannelStream : Stream
     private Task? _pumpTask;
     private byte[]? _currentBuffer;
     private int _currentOffset;
-    private AtomicDisposal _disposal = new();
+    private int _disposed;
 
     public WebTorrentDataChannelStream(IWebRtcDataChannel channel)
     {
@@ -29,7 +28,11 @@ internal sealed class WebTorrentDataChannelStream : Stream
         _pumpTask ??= Task.Run(PumpMessagesAsync);
     }
 
-    private bool IsDisposed => _disposal.IsDisposed;
+    private bool IsDisposed => Volatile.Read(ref _disposed) == 1;
+
+    private bool MarkDisposed() => Interlocked.Exchange(ref _disposed, 1) == 0;
+
+    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(IsDisposed, this);
 
     private async Task PumpMessagesAsync()
     {
@@ -78,7 +81,7 @@ internal sealed class WebTorrentDataChannelStream : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        _disposal.ThrowIfDisposed(this);
+        ThrowIfDisposed();
         if (buffer.IsEmpty)
         {
             return 0;
@@ -129,13 +132,13 @@ internal sealed class WebTorrentDataChannelStream : Stream
 
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        _disposal.ThrowIfDisposed(this);
+        ThrowIfDisposed();
         await _channel.SendAsync(buffer, cancellationToken).ConfigureAwait(false);
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (_disposal.MarkDisposed())
+        if (MarkDisposed())
         {
             _pumpCts.Cancel();
             _incomingFrames.Writer.TryComplete();
@@ -148,7 +151,7 @@ internal sealed class WebTorrentDataChannelStream : Stream
 
     public override async ValueTask DisposeAsync()
     {
-        if (_disposal.MarkDisposed())
+        if (MarkDisposed())
         {
             await _pumpCts.CancelAsync().ConfigureAwait(false);
             _incomingFrames.Writer.TryComplete();

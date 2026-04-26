@@ -244,12 +244,12 @@ public sealed class TorrentFileBuilder
         return root;
     }
 
-    private static BDict BuildPieceLayersDictionary(IReadOnlyList<FileMerkleInfo> merkleFiles)
+    private BDict? BuildPieceLayersDictionary(IReadOnlyList<FileMerkleInfo> merkleFiles)
     {
         var dict = new BDict();
         foreach (var file in merkleFiles)
         {
-            if (file.PieceLayer.Count == 0)
+            if (file.Length <= _pieceLength || file.PieceLayer.Count == 0)
             {
                 continue;
             }
@@ -264,19 +264,12 @@ public sealed class TorrentFileBuilder
             dict.Dict[key] = new BString(layerData);
         }
 
-        return dict;
+        return dict.Dict.Count == 0 ? null : dict;
     }
 
     private static byte[] HashMerkleBlock(byte[] buffer, int length)
     {
-        if (length == buffer.Length)
-        {
-            return MerkleTree.HashBlock(buffer);
-        }
-
-        var padded = new byte[buffer.Length];
-        Buffer.BlockCopy(buffer, 0, padded, 0, length);
-        return MerkleTree.HashBlock(padded);
+        return MerkleTree.HashBlock(buffer.AsSpan(0, length));
     }
 
     private static bool IsPowerOfTwo(uint value)
@@ -311,7 +304,8 @@ public sealed class TorrentFileBuilder
 
     private List<FileSource> GetV1FilesWithPadding()
     {
-        if (!_usePadding || _files.Count <= 1)
+        bool shouldPad = _usePadding || _version == TorrentFileVersion.Hybrid;
+        if (!shouldPad || _files.Count <= 1)
         {
             return _files;
         }
@@ -766,9 +760,9 @@ public sealed class TorrentFileBuilder
             throw new InvalidOperationException("Piece length must fit within a 32-bit signed integer.");
         }
 
-        if (_usePadding && _version != TorrentFileVersion.V1)
+        if (_usePadding && _version == TorrentFileVersion.V2)
         {
-            throw new InvalidOperationException("Padding files are only supported for V1 torrents.");
+            throw new InvalidOperationException("Padding files are only supported for V1 and hybrid torrents.");
         }
 
         if (_version != TorrentFileVersion.V1)
@@ -900,6 +894,5 @@ public sealed class TorrentFileBuilder
         public Stream OpenReadWithAsyncIO() => OpenReadWithAsyncIOFactory();
     }
     private sealed record FileMerkleInfo(string Path, long Length, byte[] PiecesRoot, List<byte[]> PieceLayer);
-    private sealed record V2Metadata(BDict Info, BDict PieceLayers);
+    private sealed record V2Metadata(BDict Info, BDict? PieceLayers);
 }
-

@@ -33,17 +33,8 @@ internal sealed class BlockProcessor
     public async Task HandleWebSeedBlockReceivedAsync(Block block, CancellationToken ct)
     {
         // Ensure piece state exists for this piece
-        int blocksPerPiece = (int)Math.Ceiling((double)_torrent.InfoFile.Info.PieceSize / _blockSize);
-        if (block.PieceIndex == _torrent.Pieces.Count - 1)
-        {
-            // Last piece may have fewer blocks
-            long lastPieceSize = _torrent.InfoFile.Info.FullSize % _torrent.InfoFile.Info.PieceSize;
-            if (lastPieceSize == 0)
-            {
-                lastPieceSize = _torrent.InfoFile.Info.PieceSize;
-            }
-            blocksPerPiece = (int)Math.Ceiling((double)lastPieceSize / _blockSize);
-        }
+        long pieceSize = _torrent.InfoFile.Info.GetPieceSize(block.PieceIndex);
+        int blocksPerPiece = (int)Math.Ceiling((double)pieceSize / _blockSize);
 
         var newState = new PieceState(block.PieceIndex, blocksPerPiece);
         _pieceStateManager.TryAddPiece(newState);

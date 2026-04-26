@@ -29,6 +29,9 @@ public sealed class WebTorrentSessionOptions
     /// <summary>Additional WebSocket tracker URLs to announce to. The library does not include public trackers by default.</summary>
     public IReadOnlyList<string> AdditionalTrackers { get; init; } = Array.Empty<string>();
 
+    /// <summary>Maximum accepted WebSocket tracker message size in bytes.</summary>
+    public int MaxTrackerMessageBytes { get; init; } = 256 * 1024;
+
     /// <summary>Lower bound on the tracker reannounce interval.</summary>
     public TimeSpan MinimumReannounceInterval { get; init; } = TimeSpan.FromSeconds(30);
 
@@ -114,7 +117,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
             ResolveHost(torrent),
             resolvedOptions,
             CreateDefaultRtcFactory(resolvedOptions, resolvedLoggerFactory),
-            new SystemWebSocketConnectionFactory(),
+            new SystemWebSocketConnectionFactory(resolvedOptions.MaxTrackerMessageBytes),
             resolvedLoggerFactory);
     }
 
@@ -1653,13 +1656,26 @@ internal interface IWebSocketConnectionFactory
 [ExcludeFromCodeCoverage]
 internal sealed class SystemWebSocketConnectionFactory : IWebSocketConnectionFactory
 {
-    public IWebSocketConnection Create() => new SystemWebSocketConnection();
+    private readonly int _maxMessageBytes;
+
+    public SystemWebSocketConnectionFactory(int maxMessageBytes)
+    {
+        _maxMessageBytes = maxMessageBytes;
+    }
+
+    public IWebSocketConnection Create() => new SystemWebSocketConnection(_maxMessageBytes);
 }
 
 [ExcludeFromCodeCoverage]
 internal sealed class SystemWebSocketConnection : IWebSocketConnection
 {
     private readonly ClientWebSocket _webSocket = new();
+    private readonly int _maxMessageBytes;
+
+    public SystemWebSocketConnection(int maxMessageBytes)
+    {
+        _maxMessageBytes = Math.Max(1, maxMessageBytes);
+    }
 
     public Task ConnectAsync(Uri uri, CancellationToken cancellationToken)
     {
@@ -1675,7 +1691,7 @@ internal sealed class SystemWebSocketConnection : IWebSocketConnection
     public async Task<string> ReceiveTextAsync(CancellationToken cancellationToken)
     {
         byte[] buffer = new byte[16 * 1024];
-        using var ms = new MemoryStream();
+        using var ms = new CappedMemoryStream(_maxMessageBytes);
 
         while (true)
         {
@@ -1710,6 +1726,44 @@ internal sealed class SystemWebSocketConnection : IWebSocketConnection
         }
 
         _webSocket.Dispose();
+    }
+}
+
+internal sealed class TrackerMessageTooLargeException : IOException
+{
+    public TrackerMessageTooLargeException(int maxMessageBytes)
+        : base($"WebTorrent tracker message exceeded the configured limit of {maxMessageBytes} bytes.")
+    {
+    }
+}
+
+internal sealed class CappedMemoryStream : MemoryStream
+{
+    private readonly int _maxLength;
+
+    public CappedMemoryStream(int maxLength)
+    {
+        _maxLength = Math.Max(1, maxLength);
+    }
+
+    public override void Write(byte[] buffer, int offset, int count)
+    {
+        EnsureWithinLimit(count);
+        base.Write(buffer, offset, count);
+    }
+
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        EnsureWithinLimit(buffer.Length);
+        return base.WriteAsync(buffer, cancellationToken);
+    }
+
+    private void EnsureWithinLimit(int count)
+    {
+        if (Length + count > _maxLength)
+        {
+            throw new TrackerMessageTooLargeException(_maxLength);
+        }
     }
 }
 

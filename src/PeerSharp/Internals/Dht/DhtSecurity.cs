@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 
 namespace PeerSharp.Internals.Dht;
 
@@ -21,7 +22,7 @@ internal static class DhtSecurity
     public static byte[] GenerateRandomNodeId()
     {
         byte[] nodeId = new byte[20];
-        Random.Shared.NextBytes(nodeId);
+        RandomNumberGenerator.Fill(nodeId);
         return nodeId;
     }
 
@@ -36,7 +37,7 @@ internal static class DhtSecurity
         byte[] nodeId = new byte[20];
 
         // Fill with random bytes first
-        Random.Shared.NextBytes(nodeId);
+        RandomNumberGenerator.Fill(nodeId);
 
         // Determine r value from last byte
         // For IPv4: r is in bits 0-2 (0-7)

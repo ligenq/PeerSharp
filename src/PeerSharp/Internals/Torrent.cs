@@ -551,8 +551,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
             if (Network.Dht != null && !InfoFile.Info.IsPrivate)
             {
-                Network.Dht.FindPeers(Hash);
-                Network.Dht.Announce(Hash, Settings.Connection.TcpPort);
+                var dhtHash = InfoFile.Info.GetTrackerInfoHash();
+                Network.Dht.FindPeers(dhtHash);
+                Network.Dht.Announce(dhtHash, Settings.Connection.TcpPort);
             }
             else if (InfoFile.Info.IsPrivate)
             {

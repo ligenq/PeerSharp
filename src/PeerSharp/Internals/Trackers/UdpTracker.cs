@@ -619,7 +619,7 @@ internal class UdpTracker : TrackerBase, IDisposable
         BinaryPrimitives.WriteInt64BigEndian(span.Slice(0), connId);
         BinaryPrimitives.WriteInt32BigEndian(span.Slice(8), 1); // Action Announce
         BinaryPrimitives.WriteInt32BigEndian(span.Slice(12), transId);
-        Torrent.InfoFile.Info.Hash.CopyTo(span.Slice(16));
+        Torrent.InfoFile.Info.GetTrackerInfoHash().CopyTo(span.Slice(16));
         Torrent.Settings.PeerId.CopyTo(span.Slice(36));
         BinaryPrimitives.WriteInt64BigEndian(span.Slice(56), Torrent.FileTransfer.Downloaded);
         BinaryPrimitives.WriteInt64BigEndian(span.Slice(64), Torrent.DataLeft);
@@ -739,10 +739,11 @@ internal class UdpTracker : TrackerBase, IDisposable
     private async Task<ScrapeResponse> SendScrapeAsync(long connId, CancellationToken ct)
     {
         // Single-hash scrape delegates to multi-hash implementation
-        var infoHashes = new List<byte[]> { Torrent.InfoFile.Info.Hash.ToArray() };
+        var trackerHash = Torrent.InfoFile.Info.GetTrackerInfoHash();
+        var infoHashes = new List<byte[]> { trackerHash.ToArray() };
         var multiResponse = await SendScrapeMultipleAsync(connId, infoHashes, ct).ConfigureAwait(false);
 
-        var hashKey = Torrent.InfoFile.Info.Hash.ToHexStringUpper();
+        var hashKey = trackerHash.ToHexStringUpper();
         if (multiResponse.Results.TryGetValue(hashKey, out var result))
         {
             return result;

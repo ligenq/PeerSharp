@@ -1034,11 +1034,6 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         ArgumentNullException.ThrowIfNull(magnetLink);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (magnetLink.InfoHash.IsEmpty && !magnetLink.InfoHashV2.IsEmpty && magnetLink.ExactSources.Count == 0)
-        {
-            throw new NotSupportedException("V2-only magnets require exact sources (xs=) or v2 tracker/DHT support.");
-        }
-
         Torrent? torrent = null;
         byte[]? torrentBytes = null;
 

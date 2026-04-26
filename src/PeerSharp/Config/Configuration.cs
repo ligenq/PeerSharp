@@ -579,6 +579,12 @@ public sealed class TransferSettings
     /// </summary>
     public int MetadataMaxRequestAttempts { get; set; } = 5;
 
+    /// <summary>
+    /// Maximum accepted ut_metadata size in bytes.
+    /// Default is 8 MiB, which is far above normal torrent metadata while bounding peer-controlled allocations.
+    /// </summary>
+    public int MaxMetadataSizeBytes { get; set; } = 8 * 1024 * 1024;
+
     /// <summary>Global download speed limit in bytes per second. 0 for unlimited.</summary>
     public uint MaxDownloadSpeed { get; set; } = 0;
 
