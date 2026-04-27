@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using RtcForge;
+using PeerSharp.WebTorrent.Transport;
 
 namespace PeerSharp.WebTorrent.Tests;
 
@@ -52,9 +53,9 @@ public class WebTorrentDataChannelStreamTests
     }
 
     [Fact]
-    public void StreamContract_ReportsCapabilitiesAndUnsupportedOperations()
+    public async Task StreamContract_ReportsCapabilitiesAndUnsupportedOperations()
     {
-        using var stream = new WebTorrentDataChannelStream(new FakeWebRtcDataChannel("bittorrent"));
+        await using var stream = new WebTorrentDataChannelStream(new FakeWebRtcDataChannel("bittorrent"));
 
         Assert.True(stream.CanRead);
         Assert.True(stream.CanWrite);
@@ -75,7 +76,7 @@ public class WebTorrentDataChannelStreamTests
     {
         var channel = new FakeWebRtcDataChannel("bittorrent");
         var stream = new WebTorrentDataChannelStream(channel);
-        stream.Dispose();
+        await stream.DisposeAsync();
 
         Assert.False(stream.CanRead);
         Assert.False(stream.CanWrite);

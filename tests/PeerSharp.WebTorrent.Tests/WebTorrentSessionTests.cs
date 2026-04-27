@@ -4,6 +4,9 @@ using System.Text;
 using System.Net.Sockets;
 using Microsoft.Extensions.Time.Testing;
 using RtcForge;
+using PeerSharp.WebTorrent.Network;
+using PeerSharp.WebTorrent.Configuration;
+using PeerSharp.WebTorrent.Trackers;
 
 namespace PeerSharp.WebTorrent.Tests;
 
@@ -104,6 +107,7 @@ public class WebTorrentSessionTests
 
         var connection = Assert.Single(rtcFactory.Created);
         connection.EmitIceCandidate("candidate:1 1 udp 1 127.0.0.1 5000 typ host");
+        await Task.Delay(100, TestContext.Current.CancellationToken);
         Assert.Single(socket.SentMessages);
 
         string announce = socket.SentMessages[0];
@@ -128,6 +132,51 @@ public class WebTorrentSessionTests
         Assert.Equal("candidate:1 1 udp 1 127.0.0.1 5000 typ host", candidateMessage["candidate"]!["candidate"]!.GetValue<string>());
         Assert.Equal("0", candidateMessage["candidate"]!["sdpMid"]!.GetValue<string>());
         Assert.Equal(0, candidateMessage["candidate"]!["sdpMLineIndex"]!.GetValue<int>());
+
+        await session.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ReceiveCandidate_AppliesObjectShapedRemoteIceCandidate()
+    {
+        var host = new FakePeerTransportHost();
+        var rtcFactory = new FakeWebRtcConnectionFactory();
+        var socket = new FakeWebSocketConnection();
+        var session = new WebTorrentSession(host, host, new WebTorrentSessionOptions { OffersPerTracker = 1 }, rtcFactory, new FakeWebSocketConnectionFactory(socket));
+
+        await session.StartAsync();
+
+        string announce = Assert.Single(socket.SentMessages);
+        var node = JsonNode.Parse(announce)!;
+        string offerId = node["offers"]![0]!["offer_id"]!.GetValue<string>();
+
+        socket.EnqueueReceive(new JsonObject
+        {
+            ["info_hash"] = node["info_hash"]!.GetValue<string>(),
+            ["peer_id"] = "remote-peer-id",
+            ["offer_id"] = offerId,
+            ["answer"] = new JsonObject
+            {
+                ["type"] = "answer",
+                ["sdp"] = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=remote\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n"
+            }
+        }.ToJsonString());
+
+        socket.EnqueueReceive(new JsonObject
+        {
+            ["info_hash"] = node["info_hash"]!.GetValue<string>(),
+            ["peer_id"] = "remote-peer-id",
+            ["offer_id"] = offerId,
+            ["candidate"] = new JsonObject
+            {
+                ["candidate"] = "candidate:2 1 udp 1 127.0.0.1 5001 typ host",
+                ["sdpMid"] = "0",
+                ["sdpMLineIndex"] = 0
+            }
+        }.ToJsonString());
+
+        await AssertEventuallyAsync(() => rtcFactory.Created.Single().RemoteCandidates.Count == 1, TimeSpan.FromSeconds(2));
+        Assert.Equal("candidate:2 1 udp 1 127.0.0.1 5001 typ host", rtcFactory.Created.Single().RemoteCandidates[0]);
 
         await session.DisposeAsync();
     }

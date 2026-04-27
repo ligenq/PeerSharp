@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Logging;
 using PeerSharp.Interfaces;
+using PeerSharp.WebTorrent.Configuration;
+using PeerSharp.WebTorrent.Transport;
 
 namespace PeerSharp.WebTorrent;
 
