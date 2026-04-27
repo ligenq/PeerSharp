@@ -54,7 +54,10 @@ public class FuzzTests
         for (int i = 0; i < iterations; i++)
         {
             int len = random.Next(1, 1024); // Most messages are small, but test occasional large ones
-            if (random.NextDouble() < 0.01) len = random.Next(1, maxLen); // 1% large messages
+            if (random.NextDouble() < 0.01)
+            {
+                len = random.Next(1, maxLen); // 1% large messages
+            }
 
             random.NextBytes(buffer.AsSpan(0, len));
             var sequence = new ReadOnlySequence<byte>(buffer.AsMemory(0, len));

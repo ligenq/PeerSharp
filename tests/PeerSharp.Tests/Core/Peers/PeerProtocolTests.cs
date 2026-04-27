@@ -1,4 +1,5 @@
 using PeerSharp.Internals.Peers;
+using PeerSharp.Internals;
 using System.Buffers;
 using System.Buffers.Binary;
 using PeerSharp.Messages;
@@ -110,6 +111,27 @@ public class PeerProtocolTests
     }
 
     [Fact]
+    public void TryDecodeMessage_PieceMessageTooLarge_ThrowsInvalidDataException()
+    {
+        // Arrange
+        int payloadLen = 9 + ProtocolConstants.BlockSize + 1; // Oversized block
+        byte[] data = new byte[4 + payloadLen];
+        BinaryPrimitives.WriteInt32BigEndian(data, payloadLen);
+        data[4] = (byte)MessageId.Piece;
+        BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(5), 1); // PieceIndex
+        BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(9), 16384); // BlockOffset
+        // Rest is 0s
+
+        var buffer = new ReadOnlySequence<byte>(data);
+
+        // Act & Assert
+        Assert.Throws<InvalidDataException>(() =>
+        {
+            PeerProtocol.TryDecodeMessage(ref buffer, out _, out _);
+        });
+    }
+
+    [Fact]
     public void WriteMessage_Bitfield_EncodesCorrectly()
     {
         // Arrange
@@ -202,7 +224,7 @@ public class PeerProtocolTests
         Assert.NotNull(parsed);
         Assert.Equal(MessageId.Hashes, parsed.Id);
         Assert.Equal(root, parsed.HashPiecesRoot);
-        Assert.Equal(hashes, parsed.Data);
+        Assert.Equal(hashes, parsed.Payload.ToArray());
     }
 }
 

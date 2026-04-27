@@ -113,7 +113,7 @@ internal sealed class FileHandleCache : IFileHandleCache
             }
 
             // Open new handle
-            var handle = System.IO.File.OpenHandle(
+            var handle = File.OpenHandle(
                 path: path,
                 mode: FileMode.OpenOrCreate,
                 access: writable ? FileAccess.ReadWrite : FileAccess.Read,

@@ -479,7 +479,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         {
             await FilesInternal.DisposeAsync().ConfigureAwait(false);
         }
-        FilesInternal = PeerSharp.PieceWriter.Files.Create(this, Services.FileHandleCache, path);
+        FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, path);
 
         _logger.LogInformation("Download path changed to: {Path}", path);
     }
@@ -520,7 +520,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             else if (FilesInternal.IsDisposed)
             {
                 string? downloadPath = !string.IsNullOrEmpty(LocalState.DownloadPath) ? LocalState.DownloadPath : null;
-                FilesInternal = PeerSharp.PieceWriter.Files.Create(this, Services.FileHandleCache, downloadPath);
+                FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, downloadPath);
             }
 
             if (FilesInternal == null)
@@ -706,7 +706,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     internal void FireStateChangedEvent(TorrentState newState)
     {
-        if (newState == _previousState) return;
+        if (newState == _previousState)
+        {
+            return;
+        }
 
         var previousState = _previousState;
         _previousState = newState;
@@ -721,7 +724,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     internal void FireTransferStatsEvent()
     {
-        if (FileTransferInternal == null) return;
+        if (FileTransferInternal == null)
+        {
+            return;
+        }
 
         int downloadSpeed = 0;
         int uploadSpeed = 0;
@@ -732,7 +738,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             uploadSpeed += peer.UploadSpeed;
         }
 
-        if (downloadSpeed == _lastReportedDownloadSpeed && uploadSpeed == _lastReportedUploadSpeed) return;
+        if (downloadSpeed == _lastReportedDownloadSpeed && uploadSpeed == _lastReportedUploadSpeed)
+        {
+            return;
+        }
 
         _lastReportedDownloadSpeed = downloadSpeed;
         _lastReportedUploadSpeed = uploadSpeed;
@@ -760,7 +769,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     {
         long downloaded = TotalDownloaded;
         long uploaded = TotalUploaded;
-        if (downloaded <= 0) return uploaded > 0 ? double.PositiveInfinity : 0.0;
+        if (downloaded <= 0)
+        {
+            return uploaded > 0 ? double.PositiveInfinity : 0.0;
+        }
+
         return (double)uploaded / downloaded;
     }
 
@@ -853,7 +866,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     private void FireAndForgetLsdAnnounce()
     {
         var lsd = Network.Lsd;
-        if (lsd == null) return;
+        if (lsd == null)
+        {
+            return;
+        }
 
         var announceCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         _ = lsd.AnnounceAsync(Hash, announceCts.Token).ContinueWith(t =>
@@ -901,11 +917,17 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private long GetDownloadedBytesForFile(int fileIndex)
     {
-        if (Pieces == null || fileIndex < 0 || fileIndex >= InfoFile.Info.Files.Count) return 0;
+        if (Pieces == null || fileIndex < 0 || fileIndex >= InfoFile.Info.Files.Count)
+        {
+            return 0;
+        }
 
         var file = InfoFile.Info.Files[fileIndex];
         var (firstPiece, lastPiece) = InfoFile.Info.GetPieceRangeForFile(fileIndex);
-        if (firstPiece == -1) return 0;
+        if (firstPiece == -1)
+        {
+            return 0;
+        }
 
         long downloaded = 0;
         uint pieceSize = InfoFile.Info.PieceSize;
@@ -917,7 +939,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             {
                 long pieceStart = i * pieceSize;
                 long pieceEnd = pieceStart + pieceSize;
-                if (pieceEnd > fullSize) pieceEnd = fullSize;
+                if (pieceEnd > fullSize)
+                {
+                    pieceEnd = fullSize;
+                }
 
                 long overlapStart = Math.Max(pieceStart, file.Offset);
                 long overlapEnd = Math.Min(pieceEnd, file.Offset + file.Size);
@@ -962,7 +987,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         // Create Files with persisted download path if available (from applied resume data)
         string? downloadPath = !string.IsNullOrEmpty(LocalState.DownloadPath) ? LocalState.DownloadPath : null;
 
-        FilesInternal = PeerSharp.PieceWriter.Files.Create(this, Services.FileHandleCache, downloadPath);
+        FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, downloadPath);
         Streaming = new StreamingController(this, Services.TimeProvider);
 
         PeersInternal = new PeerManager(this, Services.GeoIp, Services.PeerFactory, Services.TimeProvider, Services.ConnectionGovernor);
@@ -1036,7 +1061,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private bool ShouldReportProgress(float currentProgress)
     {
-        if (_lastReportedProgress < 0) return true;
+        if (_lastReportedProgress < 0)
+        {
+            return true;
+        }
+
         return (currentProgress - _lastReportedProgress) >= 0.01f;
     }
 

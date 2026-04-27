@@ -10,8 +10,15 @@ public class BencodeRobustnessTests
     {
         // Construct a deeply nested list: lllll...eee
         var sb = new StringBuilder();
-        for (int i = 0; i < 200; i++) sb.Append('l');
-        for (int i = 0; i < 200; i++) sb.Append('e');
+        for (int i = 0; i < 200; i++)
+        {
+            sb.Append('l');
+        }
+
+        for (int i = 0; i < 200; i++)
+        {
+            sb.Append('e');
+        }
 
         byte[] data = Encoding.ASCII.GetBytes(sb.ToString());
 
@@ -33,10 +40,20 @@ public class BencodeRobustnessTests
         // Malicious length intended to cause OutOfMemory
         byte[] data = Encoding.ASCII.GetBytes("2147483647:junk");
 
-        // Should throw because it realizes the data isn't there, 
+        // Should throw because it realizes the data isn't there,
         // without actually trying to allocate a 2GB array first.
         var ex = Assert.ThrowsAny<Exception>(() => BencodeParser.Parse(data));
         Assert.IsNotType<OutOfMemoryException>(ex);
+    }
+
+    [Fact]
+    public void Parse_OverflowingStringLength_ThrowsFormatException()
+    {
+        string lengthPrefix = new('9', 4096);
+        byte[] data = Encoding.ASCII.GetBytes(lengthPrefix + ":");
+
+        var ex = Assert.Throws<FormatException>(() => BencodeParser.Parse(data));
+        Assert.IsNotType<OverflowException>(ex);
     }
 
     [Fact]

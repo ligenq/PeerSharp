@@ -1180,10 +1180,10 @@ public class WebTorrentSessionTests
 
     private sealed class FakeWebRtcConnection : IWebRtcConnection
     {
-        private readonly System.Threading.Channels.Channel<WebRtcIceCandidateDescription> _iceCandidates = System.Threading.Channels.Channel.CreateUnbounded<WebRtcIceCandidateDescription>();
-        private readonly System.Threading.Channels.Channel<IWebRtcDataChannel> _dataChannels = System.Threading.Channels.Channel.CreateUnbounded<IWebRtcDataChannel>();
-        private readonly System.Threading.Channels.Channel<PeerConnectionState> _connectionStates = System.Threading.Channels.Channel.CreateUnbounded<PeerConnectionState>();
-        private readonly System.Threading.Channels.Channel<SignalingState> _signalingStates = System.Threading.Channels.Channel.CreateUnbounded<SignalingState>();
+        private readonly System.Threading.Channels.Channel<WebRtcIceCandidateDescription> _iceCandidates = Channel.CreateUnbounded<WebRtcIceCandidateDescription>();
+        private readonly System.Threading.Channels.Channel<IWebRtcDataChannel> _dataChannels = Channel.CreateUnbounded<IWebRtcDataChannel>();
+        private readonly System.Threading.Channels.Channel<PeerConnectionState> _connectionStates = Channel.CreateUnbounded<PeerConnectionState>();
+        private readonly System.Threading.Channels.Channel<SignalingState> _signalingStates = Channel.CreateUnbounded<SignalingState>();
         private readonly string _offerSdp;
         private readonly string _answerSdp;
 
@@ -1293,7 +1293,7 @@ public class WebTorrentSessionTests
 
     private sealed class FakeWebRtcDataChannel : IWebRtcDataChannel
     {
-        private readonly System.Threading.Channels.Channel<ReadOnlyMemory<byte>> _messages = System.Threading.Channels.Channel.CreateUnbounded<ReadOnlyMemory<byte>>();
+        private readonly System.Threading.Channels.Channel<ReadOnlyMemory<byte>> _messages = Channel.CreateUnbounded<ReadOnlyMemory<byte>>();
         private readonly TaskCompletionSource _openTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public FakeWebRtcDataChannel(string label)

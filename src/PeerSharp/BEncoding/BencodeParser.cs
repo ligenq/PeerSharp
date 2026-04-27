@@ -235,7 +235,17 @@ internal static class BencodeParser
                 throw new FormatException("Invalid string length");
             }
 
-            len = (len * 10) + (c - '0');
+            try
+            {
+                checked
+                {
+                    len = (len * 10) + (c - '0');
+                }
+            }
+            catch (OverflowException)
+            {
+                throw new FormatException("String length overflow");
+            }
 
             // SECURITY: Limit string length to prevent memory exhaustion
             if (len > MaxStringLength)

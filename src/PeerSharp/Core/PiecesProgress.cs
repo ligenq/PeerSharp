@@ -73,7 +73,7 @@ internal sealed class PiecesProgress
     /// Load pieces from bitfield. Should only be called during initialization
     /// before any concurrent access.
     /// </summary>
-    public void FromBitfield(byte[] data)
+    public void FromBitfield(ReadOnlySpan<byte> data)
     {
         // Check if all bits are set (O(N/8) check)
         bool allSet = true;

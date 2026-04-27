@@ -302,7 +302,7 @@ public class LocalSwarmTests : IDisposable
             {
                 Directory.CreateDirectory(directory);
             }
-            await System.IO.File.WriteAllBytesAsync(fullPath, file.Data);
+            await File.WriteAllBytesAsync(fullPath, file.Data);
         }
     }
 

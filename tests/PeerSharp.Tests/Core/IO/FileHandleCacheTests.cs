@@ -89,7 +89,10 @@ public class FileHandleCacheTests : IDisposable
         Assert.True(leases[0].Handle.IsClosed);
 
         smallCache.Dispose();
-        foreach (var l in leases) l.Dispose();
+        foreach (var l in leases)
+        {
+            l.Dispose();
+        }
     }
 
     [Fact(Timeout = 30000)]

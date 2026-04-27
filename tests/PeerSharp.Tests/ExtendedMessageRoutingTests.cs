@@ -65,7 +65,7 @@ public sealed class ExtendedMessageRoutingTests
         var handleMethod = typeof(PeerCommunication).GetMethod("HandleExtendedMessageAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(handleMethod);
 
-        var task = (Task)handleMethod.Invoke(peer, new object[] { new byte[] { 7 } })!;
+        var task = (Task)handleMethod.Invoke(peer, new object[] { new ReadOnlyMemory<byte>(new byte[] { 7 }) })!;
         await task;
 
         Assert.True(listener.ExtendedMessageReceivedCalled);
@@ -107,7 +107,7 @@ public sealed class ExtendedMessageRoutingTests
     {
         public TempDirectory()
         {
-            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "PeerSharp.Tests", System.Guid.NewGuid().ToString("N"));
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "PeerSharp.Tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Path);
         }
 

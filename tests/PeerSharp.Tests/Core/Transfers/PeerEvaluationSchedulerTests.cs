@@ -60,7 +60,11 @@ public class PeerEvaluationSchedulerTests
         var scheduler = new PeerEvaluationScheduler(queue, p =>
         {
             evaluationCount++;
-            if (evaluationCount == 2) tcs.TrySetResult();
+            if (evaluationCount == 2)
+            {
+                tcs.TrySetResult();
+            }
+
             return Task.CompletedTask;
         }, NullLogger<PeerEvaluationScheduler>.Instance);
 

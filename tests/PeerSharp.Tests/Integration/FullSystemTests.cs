@@ -318,7 +318,7 @@ public class FullSystemTests : IDisposable
     private static async Task WriteFileAsync(string rootPath, string fileName, byte[] data)
     {
         string fullPath = Path.Combine(rootPath, fileName);
-        await System.IO.File.WriteAllBytesAsync(fullPath, data);
+        await File.WriteAllBytesAsync(fullPath, data);
     }
 
     private static async Task EnsureConnectedAsync(ClientEngine leecherEngine, ITorrent leecherTorrent, ClientEngine seedEngine, TimeSpan timeout)

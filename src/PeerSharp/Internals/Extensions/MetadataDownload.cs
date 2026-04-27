@@ -136,12 +136,32 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
             if (_receivedPieces.Cast<bool>().All(b => b)) // All pieces received
             {
+                // Reconstruct TorrentFileMetadata from raw info dictionary bytes
+                var newMetadata = TorrentFileParser.ParseInfoBytes(_metadataBuffer);
+
+                // SECURITY: Verify the downloaded metadata hash matches the requested hash
+                bool hashMatches = true;
+                if (!_torrent.InfoFile.Info.Hash.IsEmpty && !newMetadata.Info.Hash.Equals(_torrent.InfoFile.Info.Hash))
+                {
+                    hashMatches = false;
+                }
+                if (!_torrent.InfoFile.Info.HashV2.IsEmpty && !newMetadata.Info.HashV2.Equals(_torrent.InfoFile.Info.HashV2))
+                {
+                    hashMatches = false;
+                }
+
+                if (!hashMatches)
+                {
+                    _logger.LogWarning("Downloaded metadata hash does not match expected hash. Discarding metadata.");
+                    _receivedPieces.SetAll(false);
+                    _pendingRequests.Clear();
+                    FillMissingRequests();
+                    return;
+                }
+
                 Finished = true;
                 Active = false;
                 _pendingRequests.Clear();
-
-                // Reconstruct TorrentFileMetadata from raw info dictionary bytes
-                var newMetadata = TorrentFileParser.ParseInfoBytes(_metadataBuffer);
 
                 if (string.IsNullOrEmpty(newMetadata.Announce))
                 {

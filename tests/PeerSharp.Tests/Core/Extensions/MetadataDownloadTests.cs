@@ -74,9 +74,8 @@ public class MetadataDownloadTests
     }
 
     [Fact]
-    public async Task MetadataPieceReceived_AllPieces_FinishesDownload()
+    public async Task MetadataPieceReceivedAsync_Full_SetsFinished()
     {
-        // Arrange
         var torrent = TorrentTestUtility.CreateMinimal();
         var download = new MetadataDownload(torrent);
         download.Start();
@@ -90,6 +89,10 @@ public class MetadataDownloadTests
 
         var metadataBytes = BencodeWriter.Write(infoDict);
 
+        // SECURITY: Set the torrent's expected info hash so the new check passes
+        var expectedHash = System.Security.Cryptography.SHA1.HashData(metadataBytes);
+        torrent.InfoFile.Info.Hash = new InfoHash(expectedHash);
+
         download.InitializeMetadataBuffer(metadataBytes.Length);
 
         var utMetadata = new MockUtMetadata();
@@ -102,6 +105,39 @@ public class MetadataDownloadTests
         Assert.True(download.Finished);
         Assert.Equal(1.0f, download.Progress);
         Assert.Equal("test", torrent.Name);
+    }
+
+    [Fact]
+    public async Task MetadataPieceReceivedAsync_HashMismatch_DiscardsMetadata()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        var infoDict = new BDict();
+        infoDict.Dict["name"] = new BString(Encoding.UTF8.GetBytes("malicious"));
+        infoDict.Dict["piece length"] = new BNumber(16384);
+        infoDict.Dict["pieces"] = new BString(new byte[20]);
+        infoDict.Dict["length"] = new BNumber(100);
+
+        var metadataBytes = BencodeWriter.Write(infoDict);
+
+        // SECURITY: Set the torrent's expected info hash to something different
+        var fakeHash = new byte[20];
+        fakeHash[0] = 42;
+        torrent.InfoFile.Info.Hash = new InfoHash(fakeHash);
+
+        download.InitializeMetadataBuffer(metadataBytes.Length);
+
+        var utMetadata = new MockUtMetadata();
+        var mockPeer = new MockPeerCommunication { UtMetadata = utMetadata };
+
+        // Act
+        await download.MetadataPieceReceivedAsync(mockPeer, 0, metadataBytes);
+
+        // Assert
+        Assert.False(download.Finished);
+        Assert.Equal(0.0f, download.Progress);
     }
 
     [Theory]

@@ -44,8 +44,8 @@ public class StorageTests : IAsyncLifetime
         string file1 = Path.Combine(_tempDir, "file1.txt");
         string file2 = Path.Combine(_tempDir, "folder", "file2.txt");
 
-        Assert.True(System.IO.File.Exists(file1));
-        Assert.True(System.IO.File.Exists(file2));
+        Assert.True(File.Exists(file1));
+        Assert.True(File.Exists(file2));
         Assert.Equal(1000, new FileInfo(file1).Length);
         Assert.Equal(2000, new FileInfo(file2).Length);
     }
@@ -74,12 +74,12 @@ public class StorageTests : IAsyncLifetime
         _handleCache.CloseTorrentHandles(_tempDir);
 
         // Verify file1 content
-        byte[] f1Data = System.IO.File.ReadAllBytes(Path.Combine(_tempDir, "file1.txt"));
+        byte[] f1Data = File.ReadAllBytes(Path.Combine(_tempDir, "file1.txt"));
         Assert.Equal(data[0], f1Data[800]);
         Assert.Equal(data[199], f1Data[999]);
 
         // Verify file2 content
-        byte[] f2Data = System.IO.File.ReadAllBytes(Path.Combine(_tempDir, "folder", "file2.txt"));
+        byte[] f2Data = File.ReadAllBytes(Path.Combine(_tempDir, "folder", "file2.txt"));
         Assert.Equal(data[200], f2Data[0]);
         Assert.Equal(data[499], f2Data[299]);
     }
@@ -99,14 +99,14 @@ public class StorageTests : IAsyncLifetime
         string file1 = Path.Combine(_tempDir, "file1.txt");
         string file2 = Path.Combine(_tempDir, "folder", "file2.txt");
 
-        Assert.True(System.IO.File.Exists(file1));
-        Assert.False(System.IO.File.Exists(file2));
+        Assert.True(File.Exists(file1));
+        Assert.False(File.Exists(file2));
 
         // Update selection to enable file2
         selection[1] = new FileSelection { Selected = true, Priority = Priority.Normal };
         await _storage.UpdateFileSelectionAsync(selection);
 
-        Assert.True(System.IO.File.Exists(file2));
+        Assert.True(File.Exists(file2));
     }
 
     [Fact(Timeout = 30000)]
@@ -121,12 +121,12 @@ public class StorageTests : IAsyncLifetime
         await _storage.InitAsync(selection);
 
         string file2 = Path.Combine(_tempDir, "folder", "file2.txt");
-        Assert.False(System.IO.File.Exists(file2));
+        Assert.False(File.Exists(file2));
 
         selection[1] = new FileSelection { Selected = true, Priority = Priority.Normal };
         await _storage.InitAsync(selection);
 
-        Assert.True(System.IO.File.Exists(file2));
+        Assert.True(File.Exists(file2));
     }
 
     [Fact(Timeout = 30000)]
@@ -147,7 +147,7 @@ public class StorageTests : IAsyncLifetime
         {
             await storage.InitAsync();
 
-            Assert.False(System.IO.File.Exists(escapedPath));
+            Assert.False(File.Exists(escapedPath));
 
             byte[] data = await storage.ReadAsync(0, 32);
             Assert.All(data, b => Assert.Equal(0, b));
@@ -194,7 +194,7 @@ public class StorageTests : IAsyncLifetime
 
         _handleCache.CloseTorrentHandles(_tempDir);
 
-        byte[] file2Data = System.IO.File.ReadAllBytes(Path.Combine(_tempDir, "folder", "file2.txt"));
+        byte[] file2Data = File.ReadAllBytes(Path.Combine(_tempDir, "folder", "file2.txt"));
         Assert.All(file2Data.Take(100), b => Assert.Equal(0, b));
     }
 }

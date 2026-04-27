@@ -97,14 +97,14 @@ internal sealed class Storage : IStorage
             {
                 if (file.FullPath != null)
                 {
-                    _logger.LogDebug("DeleteAll: Checking file {Path} (Exists={Exists})", file.FullPath, System.IO.File.Exists(file.FullPath));
+                    _logger.LogDebug("DeleteAll: Checking file {Path} (Exists={Exists})", file.FullPath, File.Exists(file.FullPath));
                 }
 
-                if (file.FullPath != null && System.IO.File.Exists(file.FullPath))
+                if (file.FullPath != null && File.Exists(file.FullPath))
                 {
                     try
                     {
-                        System.IO.File.Delete(file.FullPath);
+                        File.Delete(file.FullPath);
                         _logger.LogInformation("DeleteAll: Deleted file {Path}", file.FullPath);
 
                         var dir = Path.GetDirectoryName(file.FullPath);

@@ -42,11 +42,11 @@ public class StorageInterfaceTests : IAsyncLifetime
         await _storage.InitAsync();
         var filePath = Path.Combine(_tempDir, "file1.txt");
         Assert.True(Directory.Exists(_tempDir));
-        Assert.True(System.IO.File.Exists(filePath));
+        Assert.True(File.Exists(filePath));
 
         await _storage.DeleteAllAsync();
 
-        Assert.False(System.IO.File.Exists(filePath), $"File {filePath} should have been deleted");
+        Assert.False(File.Exists(filePath), $"File {filePath} should have been deleted");
         Assert.True(Directory.Exists(_tempDir)); // Root path is preserved for safety
     }
 

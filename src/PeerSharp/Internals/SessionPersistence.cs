@@ -64,14 +64,14 @@ internal sealed class SessionPersistence : ISessionPersistence
     public async Task<DhtState?> LoadDhtStateAsync(CancellationToken cancellationToken = default)
     {
         var path = Path.Combine(_sessionPath, DhtStateFileName);
-        if (!System.IO.File.Exists(path))
+        if (!File.Exists(path))
         {
             return null;
         }
 
         try
         {
-            var json = await System.IO.File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+            var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
             var dto = JsonSerializer.Deserialize(json, PeerSharpJsonContext.Default.DhtStateDto);
 
             if (dto == null)
@@ -182,21 +182,21 @@ internal sealed class SessionPersistence : ISessionPersistence
         if (entry.TorrentFileData != null)
         {
             var torrentFilePath = Path.Combine(torrentDir, TorrentFileName);
-            await System.IO.File.WriteAllBytesAsync(torrentFilePath, entry.TorrentFileData, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(torrentFilePath, entry.TorrentFileData, cancellationToken).ConfigureAwait(false);
         }
 
         // Save magnet link
         if (!string.IsNullOrEmpty(entry.MagnetLink))
         {
             var magnetFilePath = Path.Combine(torrentDir, MagnetFileName);
-            await System.IO.File.WriteAllTextAsync(magnetFilePath, entry.MagnetLink, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(magnetFilePath, entry.MagnetLink, cancellationToken).ConfigureAwait(false);
         }
 
         // Save resume data
         if (entry.ResumeData != null)
         {
             var resumeFilePath = Path.Combine(torrentDir, ResumeFileName);
-            await System.IO.File.WriteAllBytesAsync(resumeFilePath, entry.ResumeData.Data, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllBytesAsync(resumeFilePath, entry.ResumeData.Data, cancellationToken).ConfigureAwait(false);
         }
 
         // Save options
@@ -204,7 +204,7 @@ internal sealed class SessionPersistence : ISessionPersistence
         {
             var optionsFilePath = Path.Combine(torrentDir, OptionsFileName);
             var optionsJson = JsonSerializer.Serialize(entry.Options, PeerSharpJsonContext.Default.SavedTorrentOptions);
-            await System.IO.File.WriteAllTextAsync(optionsFilePath, optionsJson, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(optionsFilePath, optionsJson, cancellationToken).ConfigureAwait(false);
         }
 
         _logger.LogDebug("Saved torrent entry {Hash}", entry.Hash);
@@ -228,7 +228,7 @@ internal sealed class SessionPersistence : ISessionPersistence
         var json = JsonSerializer.Serialize(dto, PeerSharpJsonContext.Default.DhtStateDto);
         var path = Path.Combine(_sessionPath, DhtStateFileName);
 
-        await System.IO.File.WriteAllTextAsync(path, json, cancellationToken).ConfigureAwait(false);
+        await File.WriteAllTextAsync(path, json, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug("Saved DHT state with {Count} nodes", state.Nodes.Count);
     }
 
@@ -277,17 +277,17 @@ internal sealed class SessionPersistence : ISessionPersistence
         // Load .torrent file if it exists
         byte[]? torrentFileData = null;
         var torrentFilePath = Path.Combine(torrentDir, TorrentFileName);
-        if (System.IO.File.Exists(torrentFilePath))
+        if (File.Exists(torrentFilePath))
         {
-            torrentFileData = await System.IO.File.ReadAllBytesAsync(torrentFilePath, cancellationToken).ConfigureAwait(false);
+            torrentFileData = await File.ReadAllBytesAsync(torrentFilePath, cancellationToken).ConfigureAwait(false);
         }
 
         // Load magnet link if it exists
         string? magnetLink = null;
         var magnetFilePath = Path.Combine(torrentDir, MagnetFileName);
-        if (System.IO.File.Exists(magnetFilePath))
+        if (File.Exists(magnetFilePath))
         {
-            magnetLink = await System.IO.File.ReadAllTextAsync(magnetFilePath, cancellationToken).ConfigureAwait(false);
+            magnetLink = await File.ReadAllTextAsync(magnetFilePath, cancellationToken).ConfigureAwait(false);
         }
 
         // Must have either torrent file or magnet link
@@ -300,25 +300,25 @@ internal sealed class SessionPersistence : ISessionPersistence
         // Load resume data if it exists
         TorrentResumeData? resumeData = null;
         var resumeFilePath = Path.Combine(torrentDir, ResumeFileName);
-        if (System.IO.File.Exists(resumeFilePath))
+        if (File.Exists(resumeFilePath))
         {
-            var resumeBytes = await System.IO.File.ReadAllBytesAsync(resumeFilePath, cancellationToken).ConfigureAwait(false);
+            var resumeBytes = await File.ReadAllBytesAsync(resumeFilePath, cancellationToken).ConfigureAwait(false);
             resumeData = new TorrentResumeData
             {
                 Data = resumeBytes,
                 Hash = hash,
-                Timestamp = System.IO.File.GetLastWriteTimeUtc(resumeFilePath)
+                Timestamp = File.GetLastWriteTimeUtc(resumeFilePath)
             };
         }
 
         // Load options if they exist
         SavedTorrentOptions? options = null;
         var optionsFilePath = Path.Combine(torrentDir, OptionsFileName);
-        if (System.IO.File.Exists(optionsFilePath))
+        if (File.Exists(optionsFilePath))
         {
             try
             {
-                var optionsJson = await System.IO.File.ReadAllTextAsync(optionsFilePath, cancellationToken).ConfigureAwait(false);
+                var optionsJson = await File.ReadAllTextAsync(optionsFilePath, cancellationToken).ConfigureAwait(false);
                 options = JsonSerializer.Deserialize(optionsJson, PeerSharpJsonContext.Default.SavedTorrentOptions);
             }
             catch (JsonException ex)

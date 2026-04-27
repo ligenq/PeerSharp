@@ -1424,9 +1424,9 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
         // Hostname candidates (notably browser mDNS `UUID.local`) are kept so the ICE
         // agent can resolve them at pair-check time. Only drop explicit IPv6 literals.
-        if (System.Net.IPAddress.TryParse(parts[4], out var address))
+        if (IPAddress.TryParse(parts[4], out var address))
         {
-            return address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork;
+            return address.AddressFamily == AddressFamily.InterNetwork;
         }
 
         return true;
@@ -2023,17 +2023,35 @@ internal static class RemoteSdpReachability
         }
 
         // 10.0.0.0/8
-        if (bytes[0] == 10) return true;
+        if (bytes[0] == 10)
+        {
+            return true;
+        }
         // 172.16.0.0/12
-        if (bytes[0] == 172 && (bytes[1] & 0xF0) == 16) return true;
+        if (bytes[0] == 172 && (bytes[1] & 0xF0) == 16)
+        {
+            return true;
+        }
         // 192.168.0.0/16
-        if (bytes[0] == 192 && bytes[1] == 168) return true;
+        if (bytes[0] == 192 && bytes[1] == 168)
+        {
+            return true;
+        }
         // 169.254.0.0/16 link-local
-        if (bytes[0] == 169 && bytes[1] == 254) return true;
+        if (bytes[0] == 169 && bytes[1] == 254)
+        {
+            return true;
+        }
         // 127.0.0.0/8 loopback
-        if (bytes[0] == 127) return true;
+        if (bytes[0] == 127)
+        {
+            return true;
+        }
         // 100.64.0.0/10 CGNAT
-        if (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127) return true;
+        if (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127)
+        {
+            return true;
+        }
 
         return false;
     }
