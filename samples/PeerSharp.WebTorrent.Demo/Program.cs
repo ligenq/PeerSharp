@@ -174,7 +174,11 @@ internal class Program
         {
             bool isWs = tracker.Url.StartsWith("ws://", StringComparison.OrdinalIgnoreCase)
                      || tracker.Url.StartsWith("wss://", StringComparison.OrdinalIgnoreCase);
-            if (isWs) wsTrackerCount++;
+            if (isWs)
+            {
+                wsTrackerCount++;
+            }
+
             logger.LogInformation("  Tracker: {Url}{Tag}", tracker.Url, isWs ? " (WebSocket)" : "");
         }
 
@@ -359,7 +363,11 @@ internal sealed class FileLoggerProvider : ILoggerProvider
     {
         lock (_lock)
         {
-            if (_disposed) return;
+            if (_disposed)
+            {
+                return;
+            }
+
             _disposed = true;
             _writer.Dispose();
         }
@@ -372,14 +380,25 @@ internal sealed class FileLoggerProvider : ILoggerProvider
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
-            if (!IsEnabled(logLevel)) return;
+            if (!IsEnabled(logLevel))
+            {
+                return;
+            }
+
             var message = formatter(state, exception);
             var line = $"{DateTime.Now:HH:mm:ss.fff} {LevelTag(logLevel)} {category}: {message}";
             lock (gate)
             {
-                if (isDisposed()) return;
+                if (isDisposed())
+                {
+                    return;
+                }
+
                 writer.WriteLine(line);
-                if (exception != null) writer.WriteLine(exception);
+                if (exception != null)
+                {
+                    writer.WriteLine(exception);
+                }
             }
         }
 

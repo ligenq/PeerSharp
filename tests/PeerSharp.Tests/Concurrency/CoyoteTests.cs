@@ -1275,8 +1275,14 @@ public class CoyoteTests
                         bool success = model.TryDoOperation();
                         lock (countLock)
                         {
-                            if (success) successfulOps++;
-                            else failedOps++;
+                            if (success)
+                            {
+                                successfulOps++;
+                            }
+                            else
+                            {
+                                failedOps++;
+                            }
                         }
                     }
                 }));

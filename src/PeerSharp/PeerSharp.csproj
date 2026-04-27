@@ -5,7 +5,7 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<WarningsAsErrors>CS8600;CS8602;CS8603;CS8604;CS8618;CS8620;CS8625;CS8655;CS8669</WarningsAsErrors>
-		<Version>1.0.0</Version>
+		<Version>1.0.1</Version>
 		<Authors>Peerfluence</Authors>
 		<Copyright>Copyright (c) 2026 ligenq</Copyright>
 		<Description>A high-performance BitTorrent engine for .NET.</Description>
@@ -16,7 +16,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>Initial stable release with support for 20+ BEPs, TCP/uTP networking, DHT, magnet links, streaming, protocol encryption, and NAT traversal. WebTorrent over WebRTC is available as the separate PeerSharp.WebTorrent package.</PackageReleaseNotes>
+		<PackageReleaseNotes>BEP 52 (BitTorrent v2) interop fixes: correct merkle pad propagation, libtorrent-compatible piece-layer hash chunking, virtual padding past file_num_pieces, thread-safe piece-layer cache, and request dedup. HTTP streaming: RFC 7233 suffix-byte-range support, stricter rejection of malformed Range headers, ArrayPool-backed buffers, and cancellation. Hardened path validation in the torrent builder against `.`/`..` segments. Various smaller fixes around torrent disposal, tracker scrape, and storage.</PackageReleaseNotes>
 		<IsTrimmable>true</IsTrimmable>
 	</PropertyGroup>
 

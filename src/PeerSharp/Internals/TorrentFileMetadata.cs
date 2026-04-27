@@ -306,7 +306,7 @@ internal class TorrentFileInfo
         return null;
     }
 
-    public bool TryAddV2Hashes(byte[] piecesRoot, int baseLayer, int index, int length, int proofLayers, byte[] hashes)
+    public bool TryAddV2Hashes(byte[] piecesRoot, int baseLayer, int index, int length, int proofLayers, ReadOnlySpan<byte> hashes)
     {
         if (!IsV2 ||
             piecesRoot.Length != Utilities.MerkleTree.HashSize ||
@@ -342,10 +342,10 @@ internal class TorrentFileInfo
                 return false;
             }
 
-            var received = Utilities.MerkleTree.ParsePieceLayer(hashes.AsSpan(0, length * Utilities.MerkleTree.HashSize).ToArray());
+            var received = Utilities.MerkleTree.ParsePieceLayer(hashes.Slice(0, length * Utilities.MerkleTree.HashSize).ToArray());
             var proof = proofHashCount == 0
                 ? new List<byte[]>()
-                : Utilities.MerkleTree.ParsePieceLayer(hashes.AsSpan(length * Utilities.MerkleTree.HashSize).ToArray());
+                : Utilities.MerkleTree.ParsePieceLayer(hashes.Slice(length * Utilities.MerkleTree.HashSize).ToArray());
 
             if (!Utilities.MerkleTree.VerifyPieceLayerSubsetAgainstRoot(
                     received, file.PiecesRoot, PieceSize, file.Size, index, proofLayers, proof))

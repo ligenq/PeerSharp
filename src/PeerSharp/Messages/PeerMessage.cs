@@ -1,3 +1,5 @@
+using System.Buffers;
+
 namespace PeerSharp.Messages;
 
 internal class PeerMessage : IDisposable
@@ -12,6 +14,10 @@ internal class PeerMessage : IDisposable
     public int BlockLength { get; set; }
     public int BlockOffset { get; set; }
     public byte[] Data { get; set; } = Array.Empty<byte>();
+
+    public IMemoryOwner<byte>? MemoryOwner { get; set; }
+    public ReadOnlyMemory<byte> Payload { get; set; }
+
     public byte[]? HandshakeInfoHash { get; set; }
     public byte[]? HandshakePeerId { get; set; }
 
@@ -48,6 +54,7 @@ internal class PeerMessage : IDisposable
         if (_disposal.MarkDisposed() && disposing)
         {
             PooledBlock?.Dispose();
+            MemoryOwner?.Dispose();
         }
     }
 }

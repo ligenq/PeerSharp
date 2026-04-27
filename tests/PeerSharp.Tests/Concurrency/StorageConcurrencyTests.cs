@@ -48,7 +48,10 @@ public class StorageConcurrencyTests
 
         public async Task AccessFileAsync(int fileIndex)
         {
-            if (fileIndex < 0 || fileIndex >= _fileCount) return;
+            if (fileIndex < 0 || fileIndex >= _fileCount)
+            {
+                return;
+            }
 
             await _fileLocks[fileIndex].WaitAsync();
             try
@@ -89,7 +92,10 @@ public class StorageConcurrencyTests
                 int start = i % fileCount;
                 int end = (i + 1) % fileCount;
                 // Ensure order is start -> end
-                if (start > end) (start, end) = (end, start);
+                if (start > end)
+                {
+                    (start, end) = (end, start);
+                }
 
                 tasks.Add(Task.Run(async () => await model.AccessRangeAsync(start, end)));
             }

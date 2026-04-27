@@ -1061,13 +1061,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         if (Interlocked.CompareExchange(ref _connected, 0, 0) == 0)
         {
-            msg.PooledBlock?.Dispose();
+            msg.Dispose();
             return;
         }
 
         if (ShouldDropNonCriticalMessage(msg))
         {
-            msg.PooledBlock?.Dispose();
+            msg.Dispose();
             return;
         }
 
@@ -1086,19 +1086,19 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         catch (ChannelClosedException)
         {
             // Expected when the send queue is closed during shutdown.
-            msg.PooledBlock?.Dispose();
+            msg.Dispose();
         }
         catch (OperationCanceledException ex)
         {
             if (_cts?.IsCancellationRequested == true)
             {
-                msg.PooledBlock?.Dispose();
+                msg.Dispose();
                 throw;
             }
 
             // Timeout - send queue is backed up, likely network issue
             _logger.LogWarning(ex, "Send queue timeout for {PeerName} - queue backed up, closing connection", Name);
-            msg.PooledBlock?.Dispose();
+            msg.Dispose();
             await CloseAsync().ConfigureAwait(false);
         }
     }
@@ -1459,15 +1459,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         return (int)Math.Clamp(pipelineLong, MinPipeline, MaxPipeline);
     }
 
-    private async Task HandleExtendedMessageAsync(byte[] data)
+    private async Task HandleExtendedMessageAsync(ReadOnlyMemory<byte> data)
     {
-        if (data == null || data.Length == 0)
+        if (data.IsEmpty)
         {
             return;
         }
 
-        byte id = data[0];
-        byte[] payload = data.Length > 1 ? data[1..] : Array.Empty<byte>();
+        var span = data.Span;
+        byte id = span[0];
+        byte[] payload = data.Length > 1 ? data.Slice(1).ToArray() : Array.Empty<byte>();
 
         if (id == 0) // Handshake
         {
@@ -1852,7 +1853,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 break;
 
             case MessageId.Bitfield:
-                PeerPieces.FromBitfield(msg.Data);
+                PeerPieces.FromBitfield(msg.Data.Length > 0 ? msg.Data : msg.Payload.Span);
                 _logger.LogDebug("{PeerName} sent bitfield: {Count} pieces", Name, PeerPieces.ReceivedCount);
                 break;
 
@@ -1912,7 +1913,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         msg.HashIndex,
                         msg.HashLength,
                         msg.HashProofLayers,
-                        msg.Data);
+                        msg.Data.Length > 0 ? msg.Data : msg.Payload.Span);
 
                     _logger.LogDebug(
                         "{PeerName} sent BEP 52 hashes for root {PiecesRoot}; accepted={Accepted}",
@@ -1927,7 +1928,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 break;
 
             case MessageId.Extended:
-                await HandleExtendedMessageAsync(msg.Data).ConfigureAwait(false);
+                await HandleExtendedMessageAsync(msg.Data.Length > 0 ? msg.Data : msg.Payload).ConfigureAwait(false);
                 break;
 
             case MessageId.Port:
@@ -2171,7 +2172,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         }
                     }
 
-                    await ProcessMessageAsync(message).ConfigureAwait(false);
+                    try
+                    {
+                        await ProcessMessageAsync(message).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        message?.Dispose();
+                    }
                 }
 
                 pipeReader.AdvanceTo(buffer.Start, buffer.End);
@@ -2351,17 +2359,22 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 int batchCount = 0;
                 while (_sendQueue.TryDequeue(out var msg))
                 {
-                    var writeStart = _timeProvider.GetUtcNow();
-                    await WriteMessageToStreamAsync(msg, token).ConfigureAwait(false);
-                    var writeMs = (_timeProvider.GetUtcNow() - writeStart).TotalMilliseconds;
-
-                    // Log slow writes that might indicate bandwidth throttling or network issues
-                    if (writeMs > 100)
+                    try
                     {
-                        _logger.LogTrace("Slow send to {PeerName}: {MsgId} took {Elapsed}ms (possible bandwidth throttle or network issue)", Name, msg.Id, Math.Round(writeMs, 1));
-                    }
+                        var writeStart = _timeProvider.GetUtcNow();
+                        await WriteMessageToStreamAsync(msg, token).ConfigureAwait(false);
+                        var writeMs = (_timeProvider.GetUtcNow() - writeStart).TotalMilliseconds;
 
-                    msg.PooledBlock?.Dispose();
+                        // Log slow writes that might indicate bandwidth throttling or network issues
+                        if (writeMs > 100)
+                        {
+                            _logger.LogTrace("Slow send to {PeerName}: {MsgId} took {Elapsed}ms (possible bandwidth throttle or network issue)", Name, msg.Id, Math.Round(writeMs, 1));
+                        }
+                    }
+                    finally
+                    {
+                        msg.Dispose();
+                    }
                     batchCount++;
                     _messagesSentSinceLastLog++;
                 }
@@ -2406,13 +2419,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         if (Interlocked.CompareExchange(ref _connected, 0, 0) == 0)
         {
-            msg.PooledBlock?.Dispose();
+            msg.Dispose();
             return false;
         }
 
         if (ShouldDropNonCriticalMessage(msg))
         {
-            msg.PooledBlock?.Dispose();
+            msg.Dispose();
             return false;
         }
 
@@ -2431,12 +2444,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         catch (ChannelClosedException)
         {
             // Expected when the send queue is closed during shutdown.
-            msg.PooledBlock?.Dispose();
+            msg.Dispose();
             return false;
         }
         catch (OperationCanceledException)
         {
-            msg.PooledBlock?.Dispose();
+            msg.Dispose();
             return false;
         }
     }

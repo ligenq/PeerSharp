@@ -99,12 +99,12 @@ public class LifecycleTests : IDisposable
         await torrent.ForceRecheckAsync();
         await WaitForConditionAsync(torrent, t => t.Finished, TimeSpan.FromSeconds(10), "recheck completion");
 
-        Assert.True(System.IO.File.Exists(filePath));
+        Assert.True(File.Exists(filePath));
 
         await engine.RemoveTorrentAsync(torrent, RemoveOptions.DeleteFiles);
 
         await WaitForFileDeletionAsync(filePath, TimeSpan.FromSeconds(5));
-        Assert.False(System.IO.File.Exists(filePath));
+        Assert.False(File.Exists(filePath));
     }
 
     [Fact(Timeout = 60000)]
@@ -152,8 +152,8 @@ public class LifecycleTests : IDisposable
         string selectedPath = Path.Combine(_pathB, fileNameA);
         string unselectedPath = Path.Combine(_pathB, fileNameB);
 
-        Assert.True(System.IO.File.Exists(selectedPath));
-        Assert.False(System.IO.File.Exists(unselectedPath));
+        Assert.True(File.Exists(selectedPath));
+        Assert.False(File.Exists(unselectedPath));
 
         byte[] downloadedA = await ReadAllBytesSharedAsync(selectedPath);
         Assert.Equal(dataA, downloadedA);
@@ -212,7 +212,7 @@ public class LifecycleTests : IDisposable
     private static async Task WriteFileAsync(string rootPath, string fileName, byte[] data)
     {
         string fullPath = Path.Combine(rootPath, fileName);
-        await System.IO.File.WriteAllBytesAsync(fullPath, data);
+        await File.WriteAllBytesAsync(fullPath, data);
     }
 
     private static async Task EnsureConnectedAsync(ClientEngine leecherEngine, ITorrent leecherTorrent, ClientEngine seedEngine, TimeSpan timeout)
@@ -274,7 +274,7 @@ public class LifecycleTests : IDisposable
     private static async Task WaitForFileDeletionAsync(string path, TimeSpan timeout)
     {
         var cts = new CancellationTokenSource(timeout);
-        while (System.IO.File.Exists(path) && !cts.IsCancellationRequested)
+        while (File.Exists(path) && !cts.IsCancellationRequested)
         {
             try { await Task.Delay(100, cts.Token); } catch { break; }
         }

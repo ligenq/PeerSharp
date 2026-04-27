@@ -82,7 +82,10 @@ internal static class PeerProtocol
                 break;
 
             case MessageId.Bitfield:
-                message.Data = messageBuffer.Slice(1).ToArray();
+                var bitfieldPayload = messageBuffer.Slice(1);
+                message.MemoryOwner = MemoryPool<byte>.Shared.Rent((int)bitfieldPayload.Length);
+                bitfieldPayload.CopyTo(message.MemoryOwner.Memory.Span);
+                message.Payload = message.MemoryOwner.Memory.Slice(0, (int)bitfieldPayload.Length);
                 break;
 
             case MessageId.Piece:
@@ -93,6 +96,10 @@ internal static class PeerProtocol
                 message.PieceIndex = ReadInt(messageBuffer, 1);
                 message.BlockOffset = ReadInt(messageBuffer, 5);
                 var payload = messageBuffer.Slice(9);
+                if (payload.Length > ProtocolConstants.BlockSize)
+                {
+                    throw new InvalidDataException($"Piece message block too large: {payload.Length} > {ProtocolConstants.BlockSize}");
+                }
                 var block = new Block(message.PieceIndex, message.BlockOffset, (int)payload.Length);
                 payload.CopyTo(block.Buffer);
                 message.PooledBlock = block;
@@ -133,12 +140,18 @@ internal static class PeerProtocol
                 message.HashIndex = ReadInt(messageBuffer, 37);
                 message.HashLength = ReadInt(messageBuffer, 41);
                 message.HashProofLayers = ReadInt(messageBuffer, 45);
-                message.Data = messageBuffer.Slice(49).ToArray();
+                var hashesPayload = messageBuffer.Slice(49);
+                message.MemoryOwner = MemoryPool<byte>.Shared.Rent((int)hashesPayload.Length);
+                hashesPayload.CopyTo(message.MemoryOwner.Memory.Span);
+                message.Payload = message.MemoryOwner.Memory.Slice(0, (int)hashesPayload.Length);
                 break;
 
             case MessageId.Extended:
                 // Extended message payload starts after the message ID byte
-                message.Data = messageBuffer.Slice(1).ToArray();
+                var extPayload = messageBuffer.Slice(1);
+                message.MemoryOwner = MemoryPool<byte>.Shared.Rent((int)extPayload.Length);
+                extPayload.CopyTo(message.MemoryOwner.Memory.Span);
+                message.Payload = message.MemoryOwner.Memory.Slice(0, (int)extPayload.Length);
                 break;
 
             case MessageId.Port:
@@ -207,7 +220,14 @@ internal static class PeerProtocol
                 BinaryPrimitives.WriteInt32BigEndian(destination.Slice(49), msg.HashProofLayers);
                 if (msg.Id == MessageId.Hashes)
                 {
-                    msg.Data?.CopyTo(destination.Slice(53));
+                    if (msg.Data != null && msg.Data.Length > 0)
+                    {
+                        msg.Data.CopyTo(destination.Slice(53));
+                    }
+                    else
+                    {
+                        msg.Payload.Span.CopyTo(destination.Slice(53));
+                    }
                 }
                 break;
 
@@ -218,15 +238,27 @@ internal static class PeerProtocol
                 {
                     msg.PooledBlock.Data.Span.CopyTo(destination.Slice(13));
                 }
+                else if (msg.Data != null && msg.Data.Length > 0)
+                {
+                    msg.Data.CopyTo(destination.Slice(13));
+                }
                 else
                 {
-                    msg.Data?.CopyTo(destination.Slice(13));
+                    msg.Payload.Span.CopyTo(destination.Slice(13));
                 }
                 break;
 
             case MessageId.Bitfield:
             case MessageId.Extended:
-                msg.Data?.CopyTo(destination.Slice(5));
+                if (msg.Data != null && msg.Data.Length > 0)
+                {
+                    msg.Data.CopyTo(destination.Slice(5));
+                }
+                else
+                {
+                    msg.Payload.Span.CopyTo(destination.Slice(5));
+                }
+
                 break;
 
             case MessageId.Port:
@@ -260,13 +292,13 @@ internal static class PeerProtocol
 
             MessageId.HashRequest or MessageId.HashReject => 49,
 
-            MessageId.Hashes => 49 + (msg.Data?.Length ?? 0),
+            MessageId.Hashes => 49 + (msg.Data?.Length > 0 ? msg.Data.Length : msg.Payload.Length),
 
-            MessageId.Bitfield => 1 + (msg.Data?.Length ?? 0),
+            MessageId.Bitfield => 1 + (msg.Data?.Length > 0 ? msg.Data.Length : msg.Payload.Length),
 
-            MessageId.Piece => 9 + (msg.PooledBlock?.Length ?? msg.Data?.Length ?? 0),
+            MessageId.Piece => 9 + (msg.PooledBlock?.Length ?? (msg.Data?.Length > 0 ? msg.Data.Length : msg.Payload.Length)),
 
-            MessageId.Extended => 1 + (msg.Data?.Length ?? 0),
+            MessageId.Extended => 1 + (msg.Data?.Length > 0 ? msg.Data.Length : msg.Payload.Length),
 
             _ => 1 // Unknown message types: just the ID byte
         };

@@ -120,12 +120,12 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        if (!System.IO.File.Exists(path))
+        if (!File.Exists(path))
         {
             throw new FileNotFoundException("Torrent file not found.", path);
         }
 
-        var data = System.IO.File.ReadAllBytes(path);
+        var data = File.ReadAllBytes(path);
         return Parse(data);
     }
 
@@ -142,12 +142,12 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        if (!System.IO.File.Exists(path))
+        if (!File.Exists(path))
         {
             throw new FileNotFoundException("Torrent file not found.", path);
         }
 
-        var data = await System.IO.File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        var data = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
         return Parse(data);
     }
 

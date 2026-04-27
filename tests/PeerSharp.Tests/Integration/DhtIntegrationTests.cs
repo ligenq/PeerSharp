@@ -194,7 +194,10 @@ public class DhtIntegrationTests
         var tcs = new TaskCompletionSource<List<IPEndPoint>>();
         var callbackC = new MockDhtCallback((h, peers) =>
         {
-            if (h.Equals(hash)) tcs.TrySetResult(peers);
+            if (h.Equals(hash))
+            {
+                tcs.TrySetResult(peers);
+            }
         });
         nodeC.SetCallback(callbackC);
 

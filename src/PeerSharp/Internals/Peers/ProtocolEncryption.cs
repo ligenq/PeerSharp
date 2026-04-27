@@ -241,7 +241,11 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
     private static byte[] Sha1(params byte[][] data)
     {
         int totalLen = 0;
-        foreach (var d in data) totalLen += d.Length;
+        foreach (var d in data)
+        {
+            totalLen += d.Length;
+        }
+
         byte[] buffer = new byte[totalLen];
         int pos = 0;
         foreach (var d in data)

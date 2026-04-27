@@ -113,11 +113,18 @@ public class PeerManagerConnectionTests
         manager.ConnectTo("127.0.0.1", 1002);
 
         // First should happen immediately
-        while (factory.LastCreated == null) await Task.Delay(5);
+        while (factory.LastCreated == null)
+        {
+            await Task.Delay(5);
+        }
+
         var first = factory.LastCreated;
 
         // Wait for first connect
-        while (first.ConnectCalls == 0) await Task.Delay(5);
+        while (first.ConnectCalls == 0)
+        {
+            await Task.Delay(5);
+        }
 
         // Reset factory tracker to detect second
         // Since factory.LastCreated is overwritten, we just check if it changes
@@ -145,7 +152,10 @@ public class PeerManagerConnectionTests
         timeProvider.Advance(TimeSpan.FromSeconds(1.1));
 
         // Now second should proceed
-        while (factory.LastCreated == peer1) await Task.Delay(5);
+        while (factory.LastCreated == peer1)
+        {
+            await Task.Delay(5);
+        }
 
         Assert.NotSame(peer1, factory.LastCreated);
         Assert.Equal(1, factory.LastCreated.ConnectCalls);

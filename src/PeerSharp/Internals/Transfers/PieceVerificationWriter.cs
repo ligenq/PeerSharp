@@ -27,7 +27,9 @@ internal sealed class PieceVerificationOutcome : IDisposable
     {
         var data = Interlocked.Exchange(ref _fullData, null);
         if (data != null)
+        {
             _pool?.Return(data);
+        }
     }
 }
 

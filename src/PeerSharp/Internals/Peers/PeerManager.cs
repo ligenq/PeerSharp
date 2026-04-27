@@ -999,6 +999,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 if (msg.PooledBlock != null)
                 {
                     await _torrent.FileTransferInternal.BlockReceivedAsync(p, msg.PooledBlock).ConfigureAwait(false);
+                    msg.PooledBlock = null;
                     // Track successful data exchange
                     if (p.RemoteEndPoint != null)
                     {

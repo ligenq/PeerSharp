@@ -243,13 +243,19 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         }
 
         if (_bootstrapTask is { } bootstrapTask)
+        {
             await bootstrapTask.ConfigureAwait(false);
+        }
 
         if (_maintenanceTask is { } maintenanceTask)
+        {
             await maintenanceTask.ConfigureAwait(false);
+        }
 
         if (_rebootstrapTask is { } rebootstrapTask)
+        {
             await rebootstrapTask.ConfigureAwait(false);
+        }
 
         _cts?.Dispose();
         _cts = null;
@@ -274,7 +280,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
             infoHash.CopyTo(work.Slice(ipLen + secret.Length));
 
             Span<byte> hash = stackalloc byte[20];
-            System.Security.Cryptography.SHA1.HashData(work, hash);
+            SHA1.HashData(work, hash);
             return hash[..8].ToArray();
         }
         finally

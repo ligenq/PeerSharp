@@ -54,7 +54,10 @@ public class ClientEngineMagnetTests
             catch { }
         }
 
-        if (port == 0) throw new Exception("Could not bind HttpListener");
+        if (port == 0)
+        {
+            throw new Exception("Could not bind HttpListener");
+        }
 
         string url = $"http://127.0.0.1:{port}/torrent";
 

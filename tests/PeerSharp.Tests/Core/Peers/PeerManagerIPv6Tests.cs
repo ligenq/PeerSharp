@@ -82,12 +82,18 @@ public class PeerManagerIPv6Tests
 
         // Wait for processing
         int attempts = 0;
-        while (factory.LastCreated == null && attempts++ < 100) await Task.Delay(10);
+        while (factory.LastCreated == null && attempts++ < 100)
+        {
+            await Task.Delay(10);
+        }
 
         Assert.NotNull(factory.LastCreated);
 
         attempts = 0;
-        while (factory.LastCreated.ConnectedIp == null && attempts++ < 100) await Task.Delay(10);
+        while (factory.LastCreated.ConnectedIp == null && attempts++ < 100)
+        {
+            await Task.Delay(10);
+        }
 
         Assert.Equal(ipv6, factory.LastCreated.ConnectedIp);
 

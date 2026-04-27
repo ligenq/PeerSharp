@@ -93,12 +93,12 @@ public class FilesTests
 
         await files.InitializeAsync(CreateSelection(metadata), CancellationToken.None);
         string filePath = Path.Combine(defaultPath, "file.bin");
-        Assert.True(System.IO.File.Exists(filePath));
+        Assert.True(File.Exists(filePath));
 
         await files.StopAsync();
         await files.DeleteFilesAsync(CancellationToken.None);
 
-        Assert.False(System.IO.File.Exists(filePath));
+        Assert.False(File.Exists(filePath));
 
         await torrent.DisposeAsync();
         CleanupPath(defaultPath);
