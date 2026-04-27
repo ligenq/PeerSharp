@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security.Authentication;
+using PeerSharp.WebTorrent.Trackers;
 
 namespace PeerSharp.WebTorrent.Tests;
 

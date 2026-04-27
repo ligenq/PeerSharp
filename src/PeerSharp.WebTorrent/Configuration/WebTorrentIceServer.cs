@@ -1,4 +1,4 @@
-namespace PeerSharp.WebTorrent;
+namespace PeerSharp.WebTorrent.Configuration;
 
 /// <summary>
 /// Controls which ICE candidate types WebTorrent WebRTC connections may use.

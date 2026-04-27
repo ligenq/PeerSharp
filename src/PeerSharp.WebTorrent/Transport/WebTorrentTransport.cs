@@ -1,7 +1,8 @@
 using Microsoft.Extensions.Logging;
 using PeerSharp.Interfaces;
+using PeerSharp.WebTorrent.Configuration;
 
-namespace PeerSharp.WebTorrent;
+namespace PeerSharp.WebTorrent.Transport;
 
 /// <summary>
 /// Adapts <see cref="WebTorrentSession"/> to the <see cref="IPeerTransport"/> lifecycle.

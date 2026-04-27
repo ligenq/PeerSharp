@@ -4,6 +4,7 @@ using PeerSharp.Config;
 using PeerSharp.Core;
 using PeerSharp.Interfaces;
 using PeerSharp.WebTorrent;
+using PeerSharp.WebTorrent.Configuration;
 
 internal class Program
 {
@@ -118,6 +119,14 @@ internal class Program
                 "  ICE server: {Urls}{Auth}",
                 string.Join(", ", iceServer.Urls),
                 string.IsNullOrEmpty(iceServer.Username) ? "" : " (auth configured)");
+        }
+
+        bool hasTurn = webTorrentOptions.IceServers.Any(server => server.Urls.Any(url =>
+            url.StartsWith("turn:", StringComparison.OrdinalIgnoreCase)
+            || url.StartsWith("turns:", StringComparison.OrdinalIgnoreCase)));
+        if (!hasTurn)
+        {
+            logger.LogWarning("No TURN server configured. Most browser WebTorrent peers sit behind symmetric NAT and require a TURN relay to connect; expect ICE pair-checks to time out for the majority of peers. Pass --turn <url> [--turn-user X --turn-pass Y] to enable relayed connectivity.");
         }
 
         // Load torrent file

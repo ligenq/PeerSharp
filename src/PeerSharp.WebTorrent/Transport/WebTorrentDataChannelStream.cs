@@ -2,7 +2,7 @@ using System.Threading.Channels;
 using RtcForge;
 using System.Buffers;
 
-namespace PeerSharp.WebTorrent;
+namespace PeerSharp.WebTorrent.Transport;
 
 internal sealed class WebTorrentDataChannelStream : Stream
 {

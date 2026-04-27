@@ -1,4 +1,5 @@
 using System.Net;
+using PeerSharp.WebTorrent.Utilities;
 
 namespace PeerSharp.WebTorrent.Tests;
 
