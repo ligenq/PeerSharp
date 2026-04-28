@@ -5,7 +5,6 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<WarningsAsErrors>CS8600;CS8602;CS8603;CS8604;CS8618;CS8620;CS8625;CS8655;CS8669</WarningsAsErrors>
-		<Version>1.0.1</Version>
 		<Authors>Peerfluence</Authors>
 		<Copyright>Copyright (c) 2026 ligenq</Copyright>
 		<Description>A high-performance BitTorrent engine for .NET.</Description>

@@ -5,7 +5,6 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<WarningsAsErrors>CS8600;CS8602;CS8603;CS8604;CS8618;CS8620;CS8625;CS8655;CS8669</WarningsAsErrors>
-		<Version>1.0.0</Version>
 		<Authors>Peerfluence</Authors>
 		<Copyright>Copyright (c) 2026 ligenq</Copyright>
 		<Description>Optional WebTorrent over WebRTC support for PeerSharp.</Description>
@@ -16,7 +15,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>Initial stable release of the PeerSharp WebTorrent extension package.</PackageReleaseNotes>
+		<PackageReleaseNotes>Fix false-positive "Error attaching data channel" log entries that fired whenever a pending peer was disposed before its data channel opened. Pending peers now have a lifetime cancellation source that is signaled on teardown so background waits classify the cancellation as expected instead of error.</PackageReleaseNotes>
 		<IsTrimmable>true</IsTrimmable>
 		<RootNamespace>PeerSharp.WebTorrent</RootNamespace>
 		<AssemblyName>PeerSharp.WebTorrent</AssemblyName>
