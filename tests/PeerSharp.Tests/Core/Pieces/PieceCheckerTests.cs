@@ -12,6 +12,7 @@ public class PieceCheckerTests
         public string DownloadPath => "";
         public List<(long Offset, byte[] Data)> Writes { get; } = new();
         public Dictionary<long, byte[]> Data { get; } = new();
+        public HashSet<long> ThrowOnReadOffsets { get; } = new();
 
         public void DeleteFiles() { }
 
@@ -23,6 +24,11 @@ public class PieceCheckerTests
 
         public Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct = default)
         {
+            if (ThrowOnReadOffsets.Contains(offset))
+            {
+                throw new IOException("read failed");
+            }
+
             if (Data.TryGetValue(offset, out var bytes))
             {
                 return Task.FromResult(bytes);
@@ -33,6 +39,11 @@ public class PieceCheckerTests
 
         public Task ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
         {
+            if (ThrowOnReadOffsets.Contains(offset))
+            {
+                throw new IOException("read failed");
+            }
+
             if (Data.TryGetValue(offset, out var bytes))
             {
                 bytes.CopyTo(buffer);
@@ -56,6 +67,8 @@ public class PieceCheckerTests
         public bool IsV2 { get; set; }
         public List<byte[]> ExpectedHashes { get; } = new();
         public List<int> VerifiedPieces { get; } = new();
+        public List<(int PieceIndex, byte[] PieceData)> VerifyPieceCalls { get; } = new();
+        public HashSet<int> MerkleValidPieces { get; } = new();
 
         public byte[]? GetExpectedHash(int pieceIndex)
         {
@@ -81,7 +94,8 @@ public class PieceCheckerTests
 
         public bool VerifyPiece(int pieceIndex, byte[] pieceData)
         {
-            return true;
+            VerifyPieceCalls.Add((pieceIndex, pieceData));
+            return MerkleValidPieces.Contains(pieceIndex);
         }
     }
 
@@ -137,6 +151,133 @@ public class PieceCheckerTests
 
         // Assert
         Assert.Equal(0, valid);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckPieceRangeAsync_StandardHashes_VerifiesRequestedRange()
+    {
+        var files = new MockFiles();
+        var ctx = new MockContext
+        {
+            PieceCount = 4,
+            PieceSize = 10,
+            FullSize = 40
+        };
+
+        for (int i = 0; i < ctx.PieceCount; i++)
+        {
+            byte[] piece = new byte[10];
+            piece[0] = (byte)(i + 1);
+            files.Data[i * 10] = piece;
+            ctx.ExpectedHashes.Add(SHA1.HashData(piece));
+        }
+
+        var checker = new PieceChecker(files, ctx);
+
+        int valid = await checker.CheckPieceRangeAsync(1, 2);
+
+        Assert.Equal(2, valid);
+        Assert.Equal(new[] { 1, 2 }, ctx.VerifiedPieces);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckPieceRangeAsync_StopsAtPieceCount()
+    {
+        var files = new MockFiles();
+        var ctx = new MockContext
+        {
+            PieceCount = 2,
+            PieceSize = 10,
+            FullSize = 20
+        };
+
+        for (int i = 0; i < ctx.PieceCount; i++)
+        {
+            byte[] piece = new byte[10];
+            piece[0] = (byte)(i + 1);
+            files.Data[i * 10] = piece;
+            ctx.ExpectedHashes.Add(SHA1.HashData(piece));
+        }
+
+        var checker = new PieceChecker(files, ctx);
+
+        int valid = await checker.CheckPieceRangeAsync(0, 5);
+
+        Assert.Equal(2, valid);
+        Assert.Equal(new[] { 0, 1 }, ctx.VerifiedPieces);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckPieceRangeAsync_MissingExpectedHash_DoesNotAddPiece()
+    {
+        var files = new MockFiles();
+        var ctx = new MockContext
+        {
+            PieceCount = 1,
+            PieceSize = 10,
+            FullSize = 10
+        };
+
+        files.Data[0] = new byte[10];
+        var checker = new PieceChecker(files, ctx);
+
+        int valid = await checker.CheckPieceRangeAsync(0, 0);
+
+        Assert.Equal(0, valid);
+        Assert.Empty(ctx.VerifiedPieces);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckPieceRangeAsync_MerkleContext_UsesContextVerification()
+    {
+        var files = new MockFiles();
+        var ctx = new MockContext
+        {
+            PieceCount = 2,
+            PieceSize = 10,
+            FullSize = 20,
+            IsMerkle = true
+        };
+        ctx.MerkleValidPieces.Add(1);
+        files.Data[0] = new byte[] { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        files.Data[10] = new byte[] { 2, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+        var checker = new PieceChecker(files, ctx);
+
+        int valid = await checker.CheckPieceRangeAsync(0, 1);
+
+        Assert.Equal(1, valid);
+        Assert.Equal(new[] { 1 }, ctx.VerifiedPieces);
+        Assert.Equal(new[] { 0, 1 }, ctx.VerifyPieceCalls.Select(call => call.PieceIndex));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckPieceRangeAsync_ReadFailure_SkipsPiece()
+    {
+        var files = new MockFiles();
+        var ctx = new MockContext
+        {
+            PieceCount = 2,
+            PieceSize = 10,
+            FullSize = 20
+        };
+
+        byte[] piece0 = new byte[10];
+        piece0[0] = 1;
+        byte[] piece1 = new byte[10];
+        piece1[0] = 2;
+        files.Data[0] = piece0;
+        files.Data[10] = piece1;
+        files.ThrowOnReadOffsets.Add(10);
+        ctx.ExpectedHashes.Add(SHA1.HashData(piece0));
+        ctx.ExpectedHashes.Add(SHA1.HashData(piece1));
+
+        var checker = new PieceChecker(files, ctx);
+
+        int valid = await checker.CheckPieceRangeAsync(0, 1);
+
+        Assert.Equal(1, valid);
+        Assert.Equal(new[] { 0 }, ctx.VerifiedPieces);
     }
 }
 

@@ -348,10 +348,8 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
-    // BEP 52: dedup outstanding piece-layer hash requests so we don't ask multiple peers (or the
-    // same peer repeatedly) for the same chunk while one is in flight. Key: "<piecesRootHex>|<chunkStart>".
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _outstandingHashRequests = new();
     private static readonly TimeSpan HashRequestRetryInterval = TimeSpan.FromSeconds(3);
+    private readonly MerkleHashRequestCoordinator _merkleHashRequestCoordinator = new(HashRequestRetryInterval);
     private int _backgroundTasksFailed;
     private AtomicDisposal _disposal = new();
     // Increased from 32 to 128 for higher parallelism
@@ -1315,51 +1313,44 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         if (_torrent.InfoFile.Info.IsV2)
         {
             var request = _torrent.InfoFile.Info.GetV2HashRequestForPiece(pieceIndex);
-            if (request == null)
-            {
-                return;
-            }
+            var selection = _merkleHashRequestCoordinator.SelectV2Peer(
+                request,
+                _torrent.PeersInternal.GetConnectedPeersInternal(),
+                peer => peer.RemoteSupportsV2 && peer.PeerPieces.HasPiece(pieceIndex),
+                _timeProvider.GetUtcNow());
 
-            string requestKey = $"{Convert.ToHexString(request.PiecesRoot)}|{request.Index}";
-            var now = _timeProvider.GetUtcNow();
-            if (_outstandingHashRequests.TryGetValue(requestKey, out var lastRequested)
-                && now - lastRequested < HashRequestRetryInterval)
+            if (selection.Status == MerkleHashRequestSelectionStatus.Selected && selection.Peer != null && selection.RequestKey != null && request != null)
             {
-                return;
-            }
-
-            foreach (var peer in _torrent.PeersInternal.GetConnectedPeersInternal())
-            {
-                if (peer.RemoteSupportsV2 && peer.PeerPieces.HasPiece(pieceIndex))
-                {
-                    _outstandingHashRequests[requestKey] = now;
-                    _ = peer.SendHashRequestAsync(request.PiecesRoot, request.BaseLayer, request.Index, request.Length, request.ProofLayers)
-                        .ContinueWith(t =>
+                _ = selection.Peer.SendHashRequestAsync(request.PiecesRoot, request.BaseLayer, request.Index, request.Length, request.ProofLayers)
+                    .ContinueWith(t =>
+                    {
+                        if (t.IsFaulted)
                         {
-                            if (t.IsFaulted)
-                            {
-                                _outstandingHashRequests.TryRemove(requestKey, out _);
-                                _logger.LogDebug(t.Exception, "BEP 52: Failed to request piece layer for piece {PieceIndex}", pieceIndex);
-                            }
-                        }, TaskScheduler.Default);
-                    _logger.LogDebug("BEP 52: Requested piece layer for file root {PiecesRoot} from {RemoteEndPoint}", Convert.ToHexString(request.PiecesRoot), peer.RemoteEndPoint);
-                    return;
-                }
+                            _merkleHashRequestCoordinator.CompleteFailedV2Request(selection.RequestKey);
+                            _logger.LogDebug(t.Exception, "BEP 52: Failed to request piece layer for piece {PieceIndex}", pieceIndex);
+                        }
+                    }, TaskScheduler.Default);
+                _logger.LogDebug("BEP 52: Requested piece layer for file root {PiecesRoot} from {RemoteEndPoint}", Convert.ToHexString(request.PiecesRoot), selection.Peer.RemoteEndPoint);
+                return;
             }
 
-            _logger.LogDebug("BEP 52: No peers available to request hashes for piece {PieceIndex}", pieceIndex);
+            if (selection.Status == MerkleHashRequestSelectionStatus.NoPeer)
+            {
+                _logger.LogDebug("BEP 52: No peers available to request hashes for piece {PieceIndex}", pieceIndex);
+            }
+
             return;
         }
 
-        foreach (var peer in _torrent.PeersInternal.GetConnectedPeersInternal())
+        var bep30Selection = MerkleHashRequestCoordinator.SelectBep30Peer(
+            _torrent.PeersInternal.GetConnectedPeersInternal(),
+            peer => peer.UtHashPiece?.RemoteMessageId.HasValue == true && peer.PeerPieces.HasPiece(pieceIndex));
+
+        if (bep30Selection.Status == MerkleHashRequestSelectionStatus.Selected && bep30Selection.Peer != null)
         {
-            // Only request from peers that support ut_hash_piece and have this piece
-            if (peer.UtHashPiece?.RemoteMessageId.HasValue == true && peer.PeerPieces.HasPiece(pieceIndex))
-            {
-                peer.UtHashPiece.RequestHashes(pieceIndex);
-                _logger.LogDebug("BEP 30: Requested hashes for piece {PieceIndex} from {RemoteEndPoint}", pieceIndex, peer.RemoteEndPoint);
-                return; // Only request from one peer at a time
-            }
+            bep30Selection.Peer.UtHashPiece!.RequestHashes(pieceIndex);
+            _logger.LogDebug("BEP 30: Requested hashes for piece {PieceIndex} from {RemoteEndPoint}", pieceIndex, bep30Selection.Peer.RemoteEndPoint);
+            return;
         }
 
         _logger.LogDebug("BEP 30: No peers available to request hashes for piece {PieceIndex}", pieceIndex);

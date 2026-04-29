@@ -83,6 +83,63 @@ public class IpBlocklistTests
     }
 
     [Fact]
+    public async Task LoadFromStreamAsync_SupportsMultipleFormatsAndLeavesStreamOpen()
+    {
+        var content = string.Join("\n", new[]
+        {
+            "# Comment",
+            "// Another comment",
+            "Simple Block:1.1.1.1-1.1.1.10",
+            "10.0.0.0/8",
+            "192.168.1.50",
+            "not a range"
+        });
+
+        var blocklist = new IpBlocklist();
+        using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(content));
+
+        int count = await blocklist.LoadFromStreamAsync(stream, TestContext.Current.CancellationToken);
+
+        Assert.Equal(3, count);
+        Assert.Equal(3, blocklist.RangeCount);
+        Assert.True(blocklist.Enabled);
+        Assert.True(stream.CanRead);
+        Assert.True(blocklist.IsBlocked("1.1.1.5"));
+        Assert.True(blocklist.IsBlocked("10.255.255.255"));
+        Assert.True(blocklist.IsBlocked("192.168.1.50"));
+        Assert.False(blocklist.IsBlocked("1.1.1.11"));
+        Assert.False(blocklist.IsBlocked("11.0.0.1"));
+    }
+
+    [Fact]
+    public async Task LoadFromStreamAsync_CancellationRequested_ThrowsAndDoesNotEnable()
+    {
+        var blocklist = new IpBlocklist();
+        using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes("1.1.1.1"));
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => blocklist.LoadFromStreamAsync(stream, cts.Token));
+
+        Assert.False(blocklist.Enabled);
+        Assert.Equal(0, blocklist.RangeCount);
+    }
+
+    [Fact]
+    public async Task LoadFromStreamAsync_ReadFailure_ReturnsZeroAndDoesNotEnable()
+    {
+        var blocklist = new IpBlocklist();
+        using var stream = new ThrowingReadStream();
+
+        int count = await blocklist.LoadFromStreamAsync(stream, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, count);
+        Assert.False(blocklist.Enabled);
+        Assert.Equal(0, blocklist.RangeCount);
+    }
+
+    [Fact]
     public void Clear_RemovesAllRangesAndDisables()
     {
         var blocklist = new IpBlocklist();
@@ -94,6 +151,48 @@ public class IpBlocklistTests
         Assert.False(blocklist.Enabled);
         Assert.False(blocklist.IsBlocked("1.1.1.1"));
         Assert.Equal(0, blocklist.RangeCount);
+    }
+
+    private sealed class ThrowingReadStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => 0;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            throw new IOException("read failed");
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            throw new IOException("read failed");
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void SetLength(long value)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            throw new NotSupportedException();
+        }
     }
 }
 

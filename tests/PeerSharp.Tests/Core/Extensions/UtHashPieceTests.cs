@@ -98,6 +98,81 @@ public class UtHashPieceTests
         Assert.Equal(0, (int?)responseDict.GetLong("piece"));
         Assert.True(responseDict.Dict.ContainsKey("hashes"));
     }
+
+    [Fact]
+    public async Task HandleMessage_HashPiece_StoresPieceHashAndUncles()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.MerkleRootHash = new byte[20];
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384 * 2;
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        await torrent.ReinitializeAfterMetadataAsync();
+
+        var mockPeer = new MockPeerCommunication();
+        var utHashPiece = new UtHashPiece(mockPeer, torrent);
+        byte[] pieceHash = Enumerable.Range(0, 20).Select(i => (byte)(i + 1)).ToArray();
+        byte[] uncleHash = Enumerable.Range(0, 20).Select(i => (byte)(0x80 + i)).ToArray();
+
+        var dict = new BDict();
+        dict.Dict["msg_type"] = new BNumber(1);
+        dict.Dict["piece"] = new BNumber(1);
+        dict.Dict["hashes"] = new BString(pieceHash.Concat(uncleHash).ToArray());
+
+        utHashPiece.HandleMessage(BencodeWriter.Write(dict));
+
+        Assert.Equal(pieceHash, utHashPiece.GetPieceHash(1));
+        Assert.Equal(pieceHash, torrent.MerkleTree!.GetPieceHash(1));
+        Assert.Equal(uncleHash, torrent.MerkleTree.GetUncleHashes(1).Single());
+    }
+
+    [Fact]
+    public async Task HandleMessage_HashPiece_MissingHashes_DoesNothing()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.MerkleRootHash = new byte[20];
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384 * 2;
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        await torrent.ReinitializeAfterMetadataAsync();
+
+        var mockPeer = new MockPeerCommunication();
+        var utHashPiece = new UtHashPiece(mockPeer, torrent);
+        var dict = new BDict();
+        dict.Dict["msg_type"] = new BNumber(1);
+        dict.Dict["piece"] = new BNumber(1);
+
+        utHashPiece.HandleMessage(BencodeWriter.Write(dict));
+
+        Assert.Null(utHashPiece.GetPieceHash(1));
+        Assert.Null(torrent.MerkleTree!.GetPieceHash(1));
+    }
+
+    [Fact]
+    public async Task HandleMessage_HashPiece_TruncatedHashPayload_DoesNothing()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.MerkleRootHash = new byte[20];
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384 * 2;
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        await torrent.ReinitializeAfterMetadataAsync();
+
+        var mockPeer = new MockPeerCommunication();
+        var utHashPiece = new UtHashPiece(mockPeer, torrent);
+        var dict = new BDict();
+        dict.Dict["msg_type"] = new BNumber(1);
+        dict.Dict["piece"] = new BNumber(1);
+        dict.Dict["hashes"] = new BString(new byte[19]);
+
+        utHashPiece.HandleMessage(BencodeWriter.Write(dict));
+
+        Assert.Null(utHashPiece.GetPieceHash(1));
+        Assert.Null(torrent.MerkleTree!.GetPieceHash(1));
+    }
 }
 
 

@@ -1144,7 +1144,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
                     continue;
                 }
 
-                MergeMagnetTrackers(metadata, magnetLink);
+                MagnetTrackerMerger.Merge(metadata, magnetLink);
                 return (metadata, bytes);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1173,50 +1173,6 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         }
 
         return false;
-    }
-
-    private static void MergeMagnetTrackers(TorrentFileMetadata metadata, MagnetLink magnetLink)
-    {
-        if (magnetLink.Trackers.Count == 0)
-        {
-            return;
-        }
-
-        if (metadata.AnnounceTiers.Count == 0)
-        {
-            if (metadata.AnnounceList.Count > 0)
-            {
-                metadata.AnnounceTiers.Add(new List<string>(metadata.AnnounceList));
-            }
-            else if (!string.IsNullOrWhiteSpace(metadata.Announce))
-            {
-                metadata.AnnounceTiers.Add(new List<string> { metadata.Announce });
-            }
-        }
-
-        var tier = metadata.AnnounceTiers.Count > 0 ? metadata.AnnounceTiers[0] : new List<string>();
-        foreach (var tracker in magnetLink.Trackers)
-        {
-            if (!tier.Any(t => string.Equals(t, tracker, StringComparison.OrdinalIgnoreCase)))
-            {
-                tier.Add(tracker);
-            }
-        }
-
-        if (metadata.AnnounceTiers.Count == 0)
-        {
-            metadata.AnnounceTiers.Add(tier);
-        }
-
-        metadata.AnnounceList = tier
-            .Concat(metadata.AnnounceList)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (string.IsNullOrWhiteSpace(metadata.Announce) && metadata.AnnounceList.Count > 0)
-        {
-            metadata.Announce = metadata.AnnounceList[0];
-        }
     }
 
     private IHttpClient GetMagnetHttpClient()
