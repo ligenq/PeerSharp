@@ -233,60 +233,6 @@ internal class UtpManager : IUdpReceiver, IUtpManager
         }
     }
 
-    /// <summary>
-    /// SACK SUPPORT: Parse SACK bitmask extension into sequence number ranges.
-    /// The SACK bitmask indicates which packets after ack_nr have been received.
-    /// Bit 0 = ack_nr + 2, bit 1 = ack_nr + 3, etc.
-    /// </summary>
-    private List<(ushort Start, ushort End)>? ParseSackExtension(byte[] data, int offset, int len, ushort ackNr)
-    {
-        var ranges = new List<(ushort Start, ushort End)>();
-        ushort? rangeStart = null;
-        ushort lastSeq = 0;
-
-        for (int i = 0; i < len; i++)
-        {
-            byte b = data[offset + i];
-            for (int bit = 0; bit < 8; bit++)
-            {
-                int seqOffset = (i * 8) + bit;
-                ushort seq = (ushort)(ackNr + 2 + seqOffset);
-
-                if ((b & (1 << bit)) != 0)
-                {
-                    // Packet received
-                    if (rangeStart == null)
-                    {
-                        rangeStart = seq;
-                    }
-                    lastSeq = seq;
-                }
-                else
-                {
-                    // Packet not received - close current range if open
-                    if (rangeStart != null)
-                    {
-                        ranges.Add((rangeStart.Value, lastSeq));
-                        rangeStart = null;
-                    }
-                }
-            }
-        }
-
-        // Close final range if still open
-        if (rangeStart != null)
-        {
-            ranges.Add((rangeStart.Value, lastSeq));
-        }
-
-        if (ranges.Count > 0)
-        {
-            _logger.LogDebug("SACK: Parsed {Count} ranges from {Len} bytes", ranges.Count, len);
-        }
-
-        return ranges.Count > 0 ? ranges : null;
-    }
-
     private bool TryGetStream(MessageType type, UtpSocketKey key, [NotNullWhen(true)] out UtpStream? stream)
     {
         if (type == MessageType.ST_RESET)
@@ -347,7 +293,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
                     // Per BEP-29: SACK is a bitmask, each byte = 8 packets, valid range 1-32 bytes
                     if (len > 0 && len <= 32)
                     {
-                        var newRanges = ParseSackExtension(data, headerSize + 2, len, header.AckNr);
+                        var newRanges = UtpSackParser.Parse(data, headerSize + 2, len, header.AckNr);
                         if (newRanges != null)
                         {
                             if (sackRanges == null)

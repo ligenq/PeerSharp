@@ -511,14 +511,14 @@ internal class UdpTracker : TrackerBase, IDisposable
         return _connectionId;
     }
 
-    internal static string ParseTrackerErrorMessage(byte[] buffer)
+    internal static string ParseTrackerErrorMessage(ReadOnlySpan<byte> buffer)
     {
         if (buffer.Length <= 8)
         {
             return "(no error message)";
         }
 
-        var messageBytes = buffer.AsSpan(8);
+        var messageBytes = buffer[8..];
         int end = messageBytes.Length;
         while (end > 0 && messageBytes[end - 1] == 0)
         {
@@ -530,7 +530,7 @@ internal class UdpTracker : TrackerBase, IDisposable
             return "(empty error message)";
         }
 
-        return Encoding.ASCII.GetString(messageBytes.Slice(0, end));
+        return Encoding.ASCII.GetString(messageBytes[..end]);
     }
 
     private async Task<UdpReceiveResult> ReceiveSpecificTransactionAsync(int expectedTransId, int minSize, CancellationToken ct)
@@ -763,25 +763,8 @@ internal class UdpTracker : TrackerBase, IDisposable
         }
 
         int transId = _random.Next();
-
-        // BEP 48: Request format for multiple hashes:
-        // ConnId (8)
-        // Action (4) = 2 (Scrape)
-        // TransId (4)
-        // InfoHash (20) * N
-        // Max ~74 hashes per request (1500 byte MTU - 16 header = 1484 / 20 = 74)
-        int hashCount = Math.Min(infoHashes.Count, 74);
-        byte[] req = new byte[16 + (hashCount * 20)];
-        var span = req.AsSpan();
-
-        BinaryPrimitives.WriteInt64BigEndian(span.Slice(0), connId);
-        BinaryPrimitives.WriteInt32BigEndian(span.Slice(8), 2); // Action Scrape
-        BinaryPrimitives.WriteInt32BigEndian(span.Slice(12), transId);
-
-        for (int i = 0; i < hashCount; i++)
-        {
-            infoHashes[i].CopyTo(span.Slice(16 + (i * 20)));
-        }
+        int hashCount = Math.Min(infoHashes.Count, UdpTrackerScrapeCodec.MaxHashesPerRequest);
+        byte[] req = UdpTrackerScrapeCodec.BuildRequest(connId, transId, infoHashes);
 
         await SendPacketAsync(req, ct).ConfigureAwait(false);
 
@@ -791,47 +774,6 @@ internal class UdpTracker : TrackerBase, IDisposable
         // [Seeders (4) + Completed (4) + Leechers (4)] * N
         int minSize = 8 + (hashCount * 12);
         var res = await ReceiveSpecificTransactionAsync(transId, minSize, ct).ConfigureAwait(false);
-
-        int action = BinaryPrimitives.ReadInt32BigEndian(res.Buffer.AsSpan(0));
-        int resTransId = BinaryPrimitives.ReadInt32BigEndian(res.Buffer.AsSpan(4));
-
-        if (resTransId != transId)
-        {
-            throw new UdpTrackerException($"Transaction ID mismatch: expected {transId}, got {resTransId}", isTransient: true);
-        }
-
-        if (action == 3)
-        {
-            throw new UdpTrackerException($"Tracker returned error on scrape: {ParseTrackerErrorMessage(res.Buffer)}", isTransient: false);
-        }
-
-        if (action != 2)
-        {
-            throw new InvalidDataException($"Invalid scrape action: expected 2, got {action}");
-        }
-
-        if (res.Buffer.Length < minSize)
-        {
-            throw new InvalidDataException($"Scrape response too short: {res.Buffer.Length} bytes (expected at least {minSize})");
-        }
-
-        var multiResp = new MultiScrapeResponse();
-        int responseCount = (res.Buffer.Length - 8) / 12;
-
-        for (int i = 0; i < Math.Min(hashCount, responseCount); i++)
-        {
-            int offset = 8 + (i * 12);
-            var scrapeResp = new ScrapeResponse
-            {
-                SeedCount = (uint)BinaryPrimitives.ReadInt32BigEndian(res.Buffer.AsSpan(offset)),
-                Downloaded = (uint)BinaryPrimitives.ReadInt32BigEndian(res.Buffer.AsSpan(offset + 4)),
-                LeechCount = (uint)BinaryPrimitives.ReadInt32BigEndian(res.Buffer.AsSpan(offset + 8))
-            };
-
-            var hashKey = Convert.ToHexString(infoHashes[i]);
-            multiResp.Results[hashKey] = scrapeResp;
-        }
-
-        return multiResp;
+        return UdpTrackerScrapeCodec.ParseResponse(res.Buffer, transId, infoHashes);
     }
 }

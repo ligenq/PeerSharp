@@ -2,7 +2,6 @@ using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Network;
 using PeerSharp.BEncoding;
 using System.Buffers;
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -17,7 +16,6 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     private const int MaxTransactions = 5000;
     private const int MaxPeersPerInfoHash = 200;
     private const int MaxRecentQueries = 10000;
-    private readonly Lock _externalIpLock = new();
     private readonly IUdpListener _listener;
     private readonly ILogger<DhtManager> _logger = TorrentLoggerFactory.CreateLogger<DhtManager>();
     private readonly ConcurrentDictionary<string, List<DhtPeer>> _peers = new();
@@ -32,10 +30,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     private AtomicDisposal _disposal = new();
     private bool _stateDirty;
 
-    // BEP 42: External IP tracking for secure node ID
-    private IPAddress? _externalIp;
-
-    private int _externalIpVotes;
+    private DhtExternalIpVoteTracker _externalIpVoteTracker = new(requiredVotes: ExternalIpVotesRequired);
 
     private DateTimeOffset _lastSecretRotation;
 
@@ -94,12 +89,11 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         var actualDnsResolver = dnsResolver ?? new SystemDnsResolver();
         var manager = new DhtManager(id, listener, settings, actualTimeProvider, null, actualDnsResolver)
         {
-            _externalIp = externalIp
+            _externalIpVoteTracker = new DhtExternalIpVoteTracker(
+                externalIp,
+                externalIp != null ? ExternalIpVotesRequired : 0,
+                ExternalIpVotesRequired)
         };
-        if (externalIp != null)
-        {
-            manager._externalIpVotes = ExternalIpVotesRequired; // Already confirmed
-        }
         return manager;
     }
 
@@ -289,32 +283,6 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         }
     }
 
-    private static byte[] EncodeNodes(List<NodeInfo> nodes, bool ipv6 = false)
-    {
-        using var ms = new MemoryStream();
-        Span<byte> addrBytes = stackalloc byte[16];
-        Span<byte> port = stackalloc byte[2];
-
-        foreach (var node in nodes)
-        {
-            bool isV6 = node.EndPoint.AddressFamily == AddressFamily.InterNetworkV6;
-            bool isV4 = node.EndPoint.AddressFamily == AddressFamily.InterNetwork;
-
-            // BEP 32: IPv4 nodes are 26 bytes (20 ID + 4 IP + 2 port)
-            //         IPv6 nodes are 38 bytes (20 ID + 16 IP + 2 port)
-            if ((ipv6 && isV6) || (!ipv6 && isV4))
-            {
-                ms.Write(node.Id, 0, 20);
-                node.EndPoint.Address.TryWriteBytes(addrBytes, out int written);
-                ms.Write(addrBytes[..written]);
-
-                BinaryPrimitives.WriteUInt16BigEndian(port, (ushort)node.EndPoint.Port);
-                ms.Write(port);
-            }
-        }
-        return ms.ToArray();
-    }
-
     private static void GenerateTransactionId(Span<byte> destination)
     {
         RandomNumberGenerator.Fill(destination);
@@ -383,23 +351,6 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         }
     }
 
-    private static List<NodeInfo> ParseNodes(ReadOnlySpan<byte> data, bool ipv6 = false)
-    {
-        var list = new List<NodeInfo>();
-        // BEP 32: IPv4 nodes are 26 bytes, IPv6 nodes are 38 bytes
-        int nodeSize = ipv6 ? 38 : 26;
-        int ipSize = ipv6 ? 16 : 4;
-
-        for (int i = 0; i <= data.Length - nodeSize; i += nodeSize)
-        {
-            ReadOnlySpan<byte> id = data.Slice(i, 20);
-            var ip = new IPAddress(data.Slice(i + 20, ipSize));
-            int port = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(i + 20 + ipSize));
-            list.Add(new NodeInfo(id, new IPEndPoint(ip, port)));
-        }
-        return list;
-    }
-
     private void Bootstrap()
     {
         var nodes = _settings.Dht.BootstrapNodes;
@@ -457,8 +408,8 @@ internal class DhtManager : IUdpReceiver, IDhtManager
             {
                 var nodes = _table.FindClosest(target.Value.Span, 8);
                 // BEP 32: Include both nodes (IPv4) and nodes6 (IPv6) in response
-                var nodesV4 = EncodeNodes(nodes, ipv6: false);
-                var nodesV6 = EncodeNodes(nodes, ipv6: true);
+                var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
+                var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
                 if (nodesV4.Length > 0)
                 {
                     r.Dict["nodes"] = new BString(nodesV4);
@@ -485,51 +436,37 @@ internal class DhtManager : IUdpReceiver, IDhtManager
                 var hashStr = Convert.ToHexString(infoHash.Value.Span);
                 if (_peers.TryGetValue(hashStr, out var peers))
                 {
-                    // BEP 32: Separate IPv4 (values) and IPv6 (values6) peers
-                    var valuesV4 = new BList();
-                    var valuesV6 = new BList();
-
                     // BEP 33: Build bloom filters if scrape requested
                     DhtBloomFilter? bfSeeds = wantsScrape ? new DhtBloomFilter() : null;
                     DhtBloomFilter? bfPeers = wantsScrape ? new DhtBloomFilter() : null;
+                    var endpoints = new List<IPEndPoint>();
 
                     lock (peers)
                     {
                         foreach (var peer in peers.Take(50)) // Limit 50
                         {
-                            var addrBytes = peer.EndPoint.Address.GetAddressBytes();
-                            var pPort = BitConverter.GetBytes(IPAddress.HostToNetworkOrder((short)peer.EndPoint.Port));
-
-                            if (peer.EndPoint.AddressFamily == AddressFamily.InterNetwork)
-                            {
-                                // Compact IPv4 peer info: 4 bytes IP + 2 bytes Port
-                                var pData = new byte[6];
-                                Array.Copy(addrBytes, 0, pData, 0, 4);
-                                Array.Copy(pPort, 0, pData, 4, 2);
-                                valuesV4.List.Add(new BString(pData));
-                            }
-                            else if (peer.EndPoint.AddressFamily == AddressFamily.InterNetworkV6)
-                            {
-                                // Compact IPv6 peer info: 16 bytes IP + 2 bytes Port
-                                var pData = new byte[18];
-                                Array.Copy(addrBytes, 0, pData, 0, 16);
-                                Array.Copy(pPort, 0, pData, 16, 2);
-                                valuesV6.List.Add(new BString(pData));
-                            }
-
+                            endpoints.Add(peer.EndPoint);
                             // BEP 33: Add to bloom filters
                             // Note: We don't track seed vs leech status, so add all to peers filter
                             bfPeers?.Add(peer.EndPoint.Address);
                         }
                     }
-                    if (valuesV4.List.Count > 0)
+
+                    var valuesV4 = DhtCompactPeerCodec.Encode(endpoints, ipv6: false);
+                    var valuesV6 = DhtCompactPeerCodec.Encode(endpoints, ipv6: true);
+
+                    if (valuesV4.Count > 0)
                     {
-                        r.Dict["values"] = valuesV4;
+                        var values = new BList();
+                        values.List.AddRange(valuesV4.Select(value => new BString(value)));
+                        r.Dict["values"] = values;
                     }
 
-                    if (valuesV6.List.Count > 0)
+                    if (valuesV6.Count > 0)
                     {
-                        r.Dict["values6"] = valuesV6;
+                        var values = new BList();
+                        values.List.AddRange(valuesV6.Select(value => new BString(value)));
+                        r.Dict["values6"] = values;
                     }
 
                     // BEP 33: Include bloom filters in response
@@ -545,8 +482,8 @@ internal class DhtManager : IUdpReceiver, IDhtManager
                 {
                     // BEP 32: Include both nodes and nodes6 when returning closest nodes
                     var nodes = _table.FindClosest(infoHash.Value.Span, 8);
-                    var nodesV4 = EncodeNodes(nodes, ipv6: false);
-                    var nodesV6 = EncodeNodes(nodes, ipv6: true);
+                    var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
+                    var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
                     if (nodesV4.Length > 0)
                     {
                         r.Dict["nodes"] = new BString(nodesV4);
@@ -637,7 +574,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
             var nodesData = r.GetBytes("nodes");
             if (nodesData != null)
             {
-                var nodes = ParseNodes(nodesData.Value.Span, ipv6: false);
+                var nodes = DhtCompactNodeCodec.Parse(nodesData.Value.Span, ipv6: false);
                 foreach (var n in nodes)
                 {
                     _table.AddNode(n.Id, n.EndPoint);
@@ -652,7 +589,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
             var nodes6Data = r.GetBytes("nodes6");
             if (nodes6Data != null)
             {
-                var nodes = ParseNodes(nodes6Data.Value.Span, ipv6: true);
+                var nodes = DhtCompactNodeCodec.Parse(nodes6Data.Value.Span, ipv6: true);
                 foreach (var n in nodes)
                 {
                     _table.AddNode(n.Id, n.EndPoint);
@@ -669,28 +606,12 @@ internal class DhtManager : IUdpReceiver, IDhtManager
 
             if (r.Get("values") is BList values && trans.Type == "get_peers")
             {
-                foreach (var val in values.List)
-                {
-                    if (val is BString bs && bs.Value.Length == 6)
-                    {
-                        var ip = new IPAddress(bs.Value.Slice(0, 4).Span);
-                        int port = BinaryPrimitives.ReadUInt16BigEndian(bs.Value.Span.Slice(4));
-                        peers.Add(new IPEndPoint(ip, port));
-                    }
-                }
+                peers.AddRange(DhtCompactPeerCodec.Parse(values.List.OfType<BString>().Select(value => value.Value), ipv6: false));
             }
 
             if (r.Get("values6") is BList values6 && trans.Type == "get_peers")
             {
-                foreach (var val in values6.List)
-                {
-                    if (val is BString bs && bs.Value.Length == 18)
-                    {
-                        var ip = new IPAddress(bs.Value.Slice(0, 16).Span);
-                        int port = BinaryPrimitives.ReadUInt16BigEndian(bs.Value.Span.Slice(16));
-                        peers.Add(new IPEndPoint(ip, port));
-                    }
-                }
+                peers.AddRange(DhtCompactPeerCodec.Parse(values6.List.OfType<BString>().Select(value => value.Value), ipv6: true));
             }
 
             if (peers.Count > 0)
@@ -732,56 +653,22 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     /// </summary>
     private void ProcessExternalIp(ReadOnlySpan<byte> ipBytes)
     {
-        IPAddress? reportedIp = null;
-
-        try
+        var result = _externalIpVoteTracker.ProcessReport(ipBytes);
+        switch (result.Status)
         {
-            if (ipBytes.Length == 4 || ipBytes.Length == 16)
-            {
-                reportedIp = new IPAddress(ipBytes);
-            }
-        }
-        catch
-        {
-            return;
-        }
-
-        if (reportedIp == null || !DhtSecurity.ShouldValidate(reportedIp))
-        {
-            return;
-        }
-
-        lock (_externalIpLock)
-        {
-            if (_externalIp == null)
-            {
-                // First report - start tracking
-                _externalIp = reportedIp;
-                _externalIpVotes = 1;
-                _logger.LogDebug("BEP 42: First external IP report: {ExternalIP}", reportedIp);
-            }
-            else if (_externalIp.Equals(reportedIp))
-            {
-                // Same IP reported - increment vote
-                if (_externalIpVotes < ExternalIpVotesRequired)
-                {
-                    _externalIpVotes++;
-                    _logger.LogDebug("BEP 42: External IP confirmed ({Votes}/{Required}): {ExternalIP}", _externalIpVotes, ExternalIpVotesRequired, reportedIp);
-
-                    if (_externalIpVotes >= ExternalIpVotesRequired)
-                    {
-                        // We have enough confirmation - regenerate node ID
-                        RegenerateNodeId(reportedIp);
-                    }
-                }
-            }
-            else
-            {
-                // Different IP reported - reset tracking
-                _externalIp = reportedIp;
-                _externalIpVotes = 1;
-                _logger.LogDebug("BEP 42: External IP changed to: {ExternalIP}", reportedIp);
-            }
+            case DhtExternalIpVoteStatus.FirstReport:
+                _logger.LogDebug("BEP 42: First external IP report: {ExternalIP}", result.Address);
+                break;
+            case DhtExternalIpVoteStatus.Progress:
+                _logger.LogDebug("BEP 42: External IP confirmed ({Votes}/{Required}): {ExternalIP}", result.Votes, result.RequiredVotes, result.Address);
+                break;
+            case DhtExternalIpVoteStatus.Confirmed:
+                _logger.LogDebug("BEP 42: External IP confirmed ({Votes}/{Required}): {ExternalIP}", result.Votes, result.RequiredVotes, result.Address);
+                RegenerateNodeId(result.Address!);
+                break;
+            case DhtExternalIpVoteStatus.Changed:
+                _logger.LogDebug("BEP 42: External IP changed to: {ExternalIP}", result.Address);
+                break;
         }
     }
 

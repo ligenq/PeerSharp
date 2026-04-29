@@ -135,6 +135,496 @@ public class PeerManagerTests
         await CleanupAsync(ctx);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task PruneKnownPeersCache_RemovesOldestTwentyPercentAndPeerSources()
+    {
+        var ctx = CreateContext();
+        var cache = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+        var peerSources = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerCommunication>>(ctx.Manager, "_peerSources");
+        var source = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System);
+        var baseTime = TimeProvider.System.GetUtcNow();
+        var endpoints = Enumerable.Range(0, 10)
+            .Select(i => new IPEndPoint(IPAddress.Parse($"10.0.0.{i + 1}"), 6881))
+            .ToArray();
+
+        for (int i = 0; i < endpoints.Length; i++)
+        {
+            cache[endpoints[i]] = new PeerHistory
+            {
+                EndPoint = endpoints[i],
+                LastAttempt = baseTime.AddMinutes(i)
+            };
+            peerSources[endpoints[i]] = source;
+        }
+        SetPrivateField(ctx.Manager, "_knownPeersCacheCount", endpoints.Length);
+
+        InvokePrivate(ctx.Manager, "PruneKnownPeersCache");
+
+        Assert.Equal(8, cache.Count);
+        Assert.False(cache.ContainsKey(endpoints[0]));
+        Assert.False(cache.ContainsKey(endpoints[1]));
+        Assert.False(peerSources.ContainsKey(endpoints[0]));
+        Assert.False(peerSources.ContainsKey(endpoints[1]));
+        Assert.True(cache.ContainsKey(endpoints[2]));
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ApplyPexFlags_SetsSeedAndUtpHints()
+    {
+        var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 1234) };
+
+        // Reach into the static helper directly
+        var method = typeof(PeerManager).GetMethod("ApplyPexFlags",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        method!.Invoke(null, new object[] { history, (byte)(UtPex.Peer.Seed | UtPex.Peer.Utp) });
+
+        Assert.True(history.IsSeed);
+        Assert.True(history.UtpHinted);
+        Assert.True(history.UtpSupported);
+        await Task.CompletedTask;
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ApplyPexFlags_NoFlags_LeavesHistoryUnchanged()
+    {
+        var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 1234) };
+        history.IsSeed = false;
+        history.UtpHinted = false;
+
+        var method = typeof(PeerManager).GetMethod("ApplyPexFlags",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+        method!.Invoke(null, new object[] { history, (byte)0 });
+
+        Assert.False(history.IsSeed);
+        Assert.False(history.UtpHinted);
+        await Task.CompletedTask;
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetOptimisticUnchokeIntervalSeconds_FloorAtFiveSeconds()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.OptimisticUnchokeIntervalSeconds = 1;
+
+        int seconds = (int)InvokePrivate(ctx.Manager, "GetOptimisticUnchokeIntervalSeconds")!;
+        Assert.Equal(5, seconds);
+
+        ctx.Torrent.Settings.Connection.OptimisticUnchokeIntervalSeconds = 30;
+        seconds = (int)InvokePrivate(ctx.Manager, "GetOptimisticUnchokeIntervalSeconds")!;
+        Assert.Equal(30, seconds);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetUploadSlots_NoLimitFallsBackToConnectedPeerCount()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.UploadSlotsMin = 4;
+        ctx.Torrent.Settings.Connection.UploadSlotsMax = 8;
+        ctx.Torrent.Settings.Transfer.MaxUploadSpeed = 0;
+
+        // No connected peers and no upload limit: result = min(max, max(min, count)) = min(8, max(4,0)) = 4
+        int slots = (int)InvokePrivate(ctx.Manager, "GetUploadSlots")!;
+        Assert.Equal(4, slots);
+
+        // With 6 connected peers, min<=slots<=max
+        SetPrivateField(ctx.Manager, "_connectedPeersCount", 6);
+        slots = (int)InvokePrivate(ctx.Manager, "GetUploadSlots")!;
+        Assert.Equal(6, slots);
+
+        // With 12 connected peers, capped by max
+        SetPrivateField(ctx.Manager, "_connectedPeersCount", 12);
+        slots = (int)InvokePrivate(ctx.Manager, "GetUploadSlots")!;
+        Assert.Equal(8, slots);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetUploadSlots_ScalesWithUploadLimit()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.UploadSlotsMin = 1;
+        ctx.Torrent.Settings.Connection.UploadSlotsMax = 16;
+        ctx.Torrent.Settings.Connection.TargetUploadPerSlotBytesPerSec = 100_000;
+        ctx.Torrent.Settings.Transfer.MaxUploadSpeed = 1_000_000;
+        SetPrivateField(ctx.Manager, "_connectedPeersCount", 32);
+
+        int slots = (int)InvokePrivate(ctx.Manager, "GetUploadSlots")!;
+        // 1_000_000 / 100_000 = 10 slots
+        Assert.Equal(10, slots);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetUtpRatioPercent_EmptySwarm_ReturnsZero()
+    {
+        var ctx = CreateContext();
+        int ratio = (int)InvokePrivate(ctx.Manager, "GetUtpRatioPercent")!;
+        Assert.Equal(0, ratio);
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task IsSpeedStable_NeverEnteredStable_ReturnsFalse()
+    {
+        var ctx = CreateContext();
+        SetPrivateField(ctx.Manager, "_stableSpeedSince", DateTimeOffset.MinValue);
+        bool stable = (bool)InvokePrivate(ctx.Manager, "IsSpeedStable", DateTimeOffset.UtcNow)!;
+        Assert.False(stable);
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task IsSpeedStable_InsideStabilityWindow_ReturnsFalse()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.StableSpeedSeconds = 20;
+        var since = DateTimeOffset.UtcNow;
+        SetPrivateField(ctx.Manager, "_stableSpeedSince", since);
+
+        bool stable = (bool)InvokePrivate(ctx.Manager, "IsSpeedStable", since.AddSeconds(5))!;
+        Assert.False(stable);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task IsSpeedStable_StableSecondsZero_ReturnsTrueOnceTriggered()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.StableSpeedSeconds = 0;
+        var since = DateTimeOffset.UtcNow;
+        SetPrivateField(ctx.Manager, "_stableSpeedSince", since);
+
+        bool stable = (bool)InvokePrivate(ctx.Manager, "IsSpeedStable", since)!;
+        Assert.True(stable);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task IsSpeedStable_PastStabilityWindow_ReturnsTrue()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.StableSpeedSeconds = 10;
+        var since = DateTimeOffset.UtcNow;
+        SetPrivateField(ctx.Manager, "_stableSpeedSince", since);
+
+        bool stable = (bool)InvokePrivate(ctx.Manager, "IsSpeedStable", since.AddSeconds(11))!;
+        Assert.True(stable);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task UpdateStableSpeedState_DisabledThreshold_AlwaysClearsStableSince()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.StableSpeedThresholdBytesPerSec = 0;
+        SetPrivateField(ctx.Manager, "_stableSpeedSince", DateTimeOffset.UtcNow);
+
+        InvokePrivate(ctx.Manager, "UpdateStableSpeedState", DateTimeOffset.UtcNow, 5_000_000);
+
+        var since = (DateTimeOffset)GetPrivateInstanceField(ctx.Manager, "_stableSpeedSince")!;
+        Assert.Equal(DateTimeOffset.MinValue, since);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task UpdateStableSpeedState_AboveThreshold_StartsClock()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.StableSpeedThresholdBytesPerSec = 1_000_000;
+        SetPrivateField(ctx.Manager, "_stableSpeedSince", DateTimeOffset.MinValue);
+
+        var now = DateTimeOffset.UtcNow;
+        InvokePrivate(ctx.Manager, "UpdateStableSpeedState", now, 2_000_000);
+
+        var since = (DateTimeOffset)GetPrivateInstanceField(ctx.Manager, "_stableSpeedSince")!;
+        Assert.Equal(now, since);
+
+        // Subsequent above-threshold updates do not move the clock back
+        InvokePrivate(ctx.Manager, "UpdateStableSpeedState", now.AddSeconds(5), 3_000_000);
+        since = (DateTimeOffset)GetPrivateInstanceField(ctx.Manager, "_stableSpeedSince")!;
+        Assert.Equal(now, since);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task UpdateStableSpeedState_BelowThreshold_ResetsClock()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.StableSpeedThresholdBytesPerSec = 1_000_000;
+        SetPrivateField(ctx.Manager, "_stableSpeedSince", DateTimeOffset.UtcNow);
+
+        InvokePrivate(ctx.Manager, "UpdateStableSpeedState", DateTimeOffset.UtcNow, 500_000);
+
+        var since = (DateTimeOffset)GetPrivateInstanceField(ctx.Manager, "_stableSpeedSince")!;
+        Assert.Equal(DateTimeOffset.MinValue, since);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task TryGetLowestPriorityPeer_EmptySwarm_ReturnsNull()
+    {
+        var ctx = CreateContext();
+        var peer = InvokePrivate(ctx.Manager, "TryGetLowestPriorityPeer");
+        Assert.Null(peer);
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task TryGetLowestPriorityPeer_PicksLowest()
+    {
+        var ctx = CreateContext();
+        var p1 = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System) { Priority = 100 };
+        var p2 = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System) { Priority = 50 };
+        var p3 = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System) { Priority = 75 };
+
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+        connected.TryAdd(p1, 0);
+        connected.TryAdd(p2, 0);
+        connected.TryAdd(p3, 0);
+
+        var lowest = (PeerCommunication?)InvokePrivate(ctx.Manager, "TryGetLowestPriorityPeer");
+        Assert.Same(p2, lowest);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CleanupPendingConnections_RemovesExpiredEntries()
+    {
+        var ctx = CreateContext();
+        var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
+
+        var ep1 = new IPEndPoint(IPAddress.Parse("10.0.0.1"), 6881);
+        var ep2 = new IPEndPoint(IPAddress.Parse("10.0.0.2"), 6881);
+
+        long now = Environment.TickCount64;
+        pending[ep1] = now - 60_000; // > 10s old, should be removed
+        pending[ep2] = now - 1_000; // recent, kept
+
+        InvokePrivate(ctx.Manager, "CleanupPendingConnections");
+
+        Assert.False(pending.ContainsKey(ep1));
+        Assert.True(pending.ContainsKey(ep2));
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task BuildTransportPlan_TcpDisabled_ReturnsUtpOnly()
+    {
+        var ctx = CreateContext();
+        var settings = ctx.Torrent.Settings.Connection;
+        settings.EnableTcpOut = false;
+        settings.EnableUtpOut = true;
+        settings.PreferUtp = true;
+        settings.UtpWarmupSeconds = 0;
+
+        // Provide a UtpManager - PeerManager checks for it
+        SetUtpManagerStub(ctx.Torrent);
+
+        var plan = InvokeBuildTransportPlan(ctx.Manager, settings, history: null, forceUtp: false);
+        Assert.Equal(new[] { TransportPreference.Utp }, plan);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task BuildTransportPlan_UtpDisabled_ReturnsTcpOnly()
+    {
+        var ctx = CreateContext();
+        var settings = ctx.Torrent.Settings.Connection;
+        settings.EnableUtpOut = false;
+        settings.EnableTcpOut = true;
+        SetUtpManagerStub(ctx.Torrent);
+
+        var plan = InvokeBuildTransportPlan(ctx.Manager, settings, history: null, forceUtp: false);
+        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task BuildTransportPlan_NoUtpManager_PreventsUtpOnPlanEvenWhenAvailable()
+    {
+        var ctx = CreateContext();
+        var settings = ctx.Torrent.Settings.Connection;
+        settings.EnableTcpOut = true;
+        settings.EnableUtpOut = true;
+        // Don't set UtpManager - should remove utp from plan
+        var plan = InvokeBuildTransportPlan(ctx.Manager, settings, history: null, forceUtp: false);
+        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task BuildTransportPlan_GlobalUtpPenalty_PreventsUtp()
+    {
+        var ctx = CreateContext();
+        var settings = ctx.Torrent.Settings.Connection;
+        settings.EnableTcpOut = true;
+        settings.EnableUtpOut = true;
+        SetUtpManagerStub(ctx.Torrent);
+
+        SetPrivateField(ctx.Manager, "_globalUtpPenaltyUntil", DateTimeOffset.UtcNow.AddMinutes(5));
+
+        var plan = InvokeBuildTransportPlan(ctx.Manager, settings, history: null, forceUtp: false);
+        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+
+        await CleanupAsync(ctx);
+    }
+
+    private static IReadOnlyList<TransportPreference> InvokeBuildTransportPlan(
+        PeerManager manager,
+        ConnectionSettings settings,
+        PeerHistory? history,
+        bool forceUtp)
+    {
+        var method = typeof(PeerManager).GetMethod(
+            "BuildTransportPlan",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        return (IReadOnlyList<TransportPreference>)method!.Invoke(manager, new object?[] { settings, history, forceUtp })!;
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task PortReceivedAsync_NoDhtManager_NoOps()
+    {
+        var ctx = CreateContext();
+        var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 6881)
+        };
+
+        await ctx.Manager.PortReceivedAsync(peer, 6882);
+        // Asserting no exception is sufficient here.
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task PortReceivedAsync_NoRemoteEndpoint_NoOps()
+    {
+        var ctx = CreateContext();
+        var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System);
+
+        await ctx.Manager.PortReceivedAsync(peer, 6882);
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task HolepunchMessageReceivedAsync_NonConnectMessage_DoesNotInitiateConnection()
+    {
+        var ctx = CreateContext();
+        var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System);
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.5"), 6881);
+
+        // Should not throw and should not connect (not a Connect msg).
+        await ctx.Manager.HolepunchMessageReceivedAsync(peer, UtHolepunch.MsgId.Rendezvous, endpoint, UtHolepunch.ErrorCode.None);
+
+        // No pending connection should have been created
+        var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
+        Assert.False(pending.ContainsKey(endpoint));
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetOrAddKnownPeerHistory_ReturnsSameInstanceOnRepeatedCalls()
+    {
+        var ctx = CreateContext();
+        var ep = new IPEndPoint(IPAddress.Parse("198.51.100.7"), 6881);
+
+        var h1 = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", ep)!;
+        var h2 = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", ep)!;
+
+        Assert.Same(h1, h2);
+        Assert.Equal(ep, h1.EndPoint);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetPieceAvailability_AggregatesOverConnectedPeers()
+    {
+        var ctx = CreateContext();
+        // Add 2 peers each having different pieces
+        var peer1 = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System);
+        var peer2 = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System);
+        peer1.PeerPieces.AddPiece(0);
+        peer2.PeerPieces.AddPiece(0);
+
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+        connected.TryAdd(peer1, 0);
+        connected.TryAdd(peer2, 0);
+
+        int[] availability = ctx.Manager.GetPieceAvailability();
+        Assert.Equal(ctx.Torrent.Pieces.Count, availability.Length);
+        Assert.Equal(2, availability[0]);
+
+        await CleanupAsync(ctx);
+    }
+
+    private static void SetUtpManagerStub(Torrent torrent)
+    {
+        torrent.UtpManager = new FakeUtpManager();
+    }
+
+    private sealed class FakeUtpManager : PeerSharp.Internals.Utp.IUtpManager
+    {
+        public Action<PeerSharp.Internals.Utp.UtpStream>? OnNewConnection { get; set; }
+        public void CloseStream(PeerSharp.Internals.Utp.UtpStream stream) { }
+        public PeerSharp.Internals.Utp.UtpStream CreateStream(IPEndPoint remote) => null!;
+        public Task SendAsync(ReadOnlyMemory<byte> packet, IPEndPoint remote, CancellationToken ct) => Task.CompletedTask;
+        public void Start(PeerSharp.Internals.Network.IUdpListener listener) { }
+        public void Stop() { }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private static object? GetPrivateInstanceField(object target, string fieldName)
+    {
+        var field = target.GetType().GetField(fieldName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        return field?.GetValue(target);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task PruneKnownPeersCache_WithFewerThanFivePeers_DoesNothing()
+    {
+        var ctx = CreateContext();
+        var cache = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+        var baseTime = TimeProvider.System.GetUtcNow();
+        for (int i = 0; i < 4; i++)
+        {
+            var endpoint = new IPEndPoint(IPAddress.Parse($"10.1.0.{i + 1}"), 6881);
+            cache[endpoint] = new PeerHistory
+            {
+                EndPoint = endpoint,
+                LastAttempt = baseTime.AddMinutes(i)
+            };
+        }
+        SetPrivateField(ctx.Manager, "_knownPeersCacheCount", 4);
+
+        InvokePrivate(ctx.Manager, "PruneKnownPeersCache");
+
+        Assert.Equal(4, cache.Count);
+
+        await CleanupAsync(ctx);
+    }
+
     private static PeerManagerContext CreateContext()
     {
         var metadata = new TorrentFileMetadata();

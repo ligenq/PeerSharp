@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
@@ -45,6 +46,26 @@ public class PeerCommunicationTests
         byte[] handshake = BuildHandshake(wrongHash, peerId, supportsExtensions: false, supportsFast: false, supportsV2: false);
 
         bool ok = await peer.SetHandshakeReceivedAsync(handshake);
+        Assert.False(ok);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task SetHandshakeReceivedAsync_InvalidProtocol_ReturnsFalse()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var listener = new TestPeerListener();
+        var peer = new PeerCommunication(torrent, listener, TimeProvider.System);
+
+        byte[] handshake = BuildHandshake(metadata.Info.Hash.Span, new byte[20], supportsExtensions: false, supportsFast: false, supportsV2: false);
+        handshake[1] = (byte)'X';
+
+        bool ok = await peer.SetHandshakeReceivedAsync(handshake);
+
         Assert.False(ok);
 
         await torrent.DisposeAsync();
@@ -100,6 +121,306 @@ public class PeerCommunicationTests
 
         await torrent.DisposeAsync();
         CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task AllowedFastPiece_AddedAndQueriedThreadSafely()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        Assert.False(peer.IsAllowedFast(7));
+        Assert.Equal(0, peer.AllowedFastCount);
+        Assert.Empty(peer.GetAllowedFastPieces());
+
+        InvokePrivate<object?>(peer, "AddAllowedFastPiece", 7);
+        InvokePrivate<object?>(peer, "AddAllowedFastPiece", 9);
+        InvokePrivate<object?>(peer, "AddAllowedFastPiece", 7); // duplicate ignored
+
+        Assert.True(peer.IsAllowedFast(7));
+        Assert.True(peer.IsAllowedFast(9));
+        Assert.False(peer.IsAllowedFast(8));
+        Assert.Equal(2, peer.AllowedFastCount);
+
+        var snapshot = peer.GetAllowedFastPieces();
+        Assert.Contains(7, snapshot);
+        Assert.Contains(9, snapshot);
+
+        // Snapshot is reused until invalidated
+        var snapshot2 = peer.GetAllowedFastPieces();
+        Assert.Same(snapshot, snapshot2);
+
+        // New addition invalidates the cache
+        InvokePrivate<object?>(peer, "AddAllowedFastPiece", 11);
+        var snapshot3 = peer.GetAllowedFastPieces();
+        Assert.NotSame(snapshot, snapshot3);
+        Assert.Contains(11, snapshot3);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SuggestedPiece_StoredAndReturnedFromSnapshot()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        Assert.Empty(peer.GetSuggestedPieces());
+
+        InvokePrivate<object?>(peer, "AddSuggestedPiece", 4);
+        InvokePrivate<object?>(peer, "AddSuggestedPiece", 5);
+
+        var snapshot = peer.GetSuggestedPieces();
+        Assert.Equal(new[] { 4, 5 }, snapshot);
+
+        // Snapshot reuse until cache invalidates
+        Assert.Same(snapshot, peer.GetSuggestedPieces());
+
+        InvokePrivate<object?>(peer, "AddSuggestedPiece", 6);
+        Assert.NotSame(snapshot, peer.GetSuggestedPieces());
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task IncrementStrikes_IsAtomicAndCumulative()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        peer.IncrementStrikes();
+        peer.IncrementStrikes();
+        peer.IncrementStrikes();
+
+        Assert.Equal(3, peer.Strikes);
+
+        peer.Strikes = 0;
+        Assert.Equal(0, peer.Strikes);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task RecordRtt_AppliesExponentialMovingAverageAndClamps()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        // Initial smoothed RTT is 100ms, EMA: new = (old*7 + sample) / 8
+        Assert.Equal(100, peer.SmoothedRttMs);
+
+        peer.RecordRtt(200);
+        Assert.Equal((100 * 7 + 200) / 8, peer.SmoothedRttMs); // 112
+
+        peer.RecordRtt(50);
+        Assert.Equal((112 * 7 + 50) / 8, peer.SmoothedRttMs); // 104
+
+        // Lower clamp to 10ms (impossible to fall below even when sample = 0 from start of 10)
+        SetPrivateField(peer, "_smoothedRttMs", 10);
+        peer.RecordRtt(0);
+        Assert.True(peer.SmoothedRttMs >= 10);
+
+        // Upper clamp to 5000ms even with extreme sample
+        SetPrivateField(peer, "_smoothedRttMs", 5000);
+        peer.RecordRtt(int.MaxValue);
+        Assert.True(peer.SmoothedRttMs <= 5000);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Choke_RespectsCooldownAndIsIdempotent()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2030-01-01T00:00:00Z"));
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), time);
+
+        // Initially choking; calling Choke() again is a no-op (no state change).
+        peer.Choke();
+        Assert.True(peer.AmChoking);
+
+        // Unchoke transitions state - but cooldown isn't enforced on the first transition
+        peer.Unchoke();
+        Assert.False(peer.AmChoking);
+
+        // Choke immediately should be blocked by the 10s cooldown
+        peer.Choke();
+        Assert.False(peer.AmChoking);
+
+        // Advance past cooldown - choke should now succeed
+        time.Advance(TimeSpan.FromSeconds(11));
+        peer.Choke();
+        Assert.True(peer.AmChoking);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Unchoke_ReturnsEarlyWhenAlreadyUnchoked()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2030-01-01T00:00:00Z"));
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), time);
+
+        peer.Unchoke();
+        time.Advance(TimeSpan.FromSeconds(60)); // Bypass any cooldown
+
+        // Already unchoked, second call should be a no-op
+        peer.Unchoke();
+        Assert.False(peer.AmChoking);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task AddDownloadedAndUploaded_AreCumulative()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        peer.AddDownloaded(123);
+        peer.AddDownloaded(456);
+        peer.AddUploaded(7);
+        peer.AddUploaded(11);
+
+        Assert.Equal(579, peer.Downloaded);
+        Assert.Equal(18, peer.Uploaded);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task AssignBandwidth_NoOpDoesNotThrow()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        peer.AssignBandwidth(0);
+        peer.AssignBandwidth(int.MaxValue);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task GetConnectionElapsedMs_BeforeConnect_ReturnsZero()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        Assert.Equal(0, peer.GetConnectionElapsedMs());
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task UpdateSpeed_DerivesDownloadAndUploadRates()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        peer.AddDownloaded(1_000_000);
+        peer.AddUploaded(500_000);
+        peer.UpdateSpeed();
+
+        Assert.Equal(1_000_000, peer.DownloadSpeed);
+        Assert.Equal(500_000, peer.UploadSpeed);
+
+        // Smoothing on first sample with old=0 should be quick adoption: (0*7 + 1_000_000*3) / 10
+        Assert.Equal(300_000, peer.SmoothedDownloadSpeed);
+
+        // Slow decay path: when sample <= smoothed, decay slowly
+        peer.UpdateSpeed(); // delta is 0
+        // newSmoothed = (300_000 * 19 + 0) / 20 = 285_000
+        Assert.Equal(285_000, peer.SmoothedDownloadSpeed);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task CanUseUtpWithProxy_ReturnsTrueWhenNoProxy()
+    {
+        var settings = new Settings();
+        Assert.True(PeerCommunication.CanUseUtpWithProxy(settings));
+    }
+
+    [Theory]
+    [InlineData(ProxyType.Socks5, true)]
+    [InlineData(ProxyType.Http, false)]
+    public async Task CanUseUtpWithProxy_DependsOnProxyType(ProxyType type, bool expected)
+    {
+        var settings = new Settings();
+        settings.Proxy.Type = type;
+        settings.Proxy.Host = "proxy.local";
+        settings.Proxy.ProxyPeers = true;
+        Assert.Equal(expected, PeerCommunication.CanUseUtpWithProxy(settings));
+    }
+
+    [Fact]
+    public async Task CanUseUtpWithProxy_TrueWhenProxyDoesNotProxyPeers()
+    {
+        var settings = new Settings();
+        settings.Proxy.Type = ProxyType.Http;
+        settings.Proxy.Host = "proxy.local";
+        settings.Proxy.ProxyPeers = false;
+        Assert.True(PeerCommunication.CanUseUtpWithProxy(settings));
+    }
+
+    [Fact]
+    public async Task ShouldDropNonCriticalMessage_RetainsCriticalMessages()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        SetPrivateField(peer, "_connected", 1);
+        SetPrivateField(peer, "_smoothedDownloadSpeed", 0);
+
+        var queue = GetPrivateField<object>(peer, "_sendQueue");
+        int limit = InvokePrivate<int>(peer, "GetAdaptiveSendQueueLimit");
+        for (int i = 0; i < limit; i++)
+        {
+            InvokePublic(queue, "TryEnqueue", new PeerMessage(MessageId.Have));
+        }
+
+        // Critical messages should still be considered for enqueue (return false from drop check)
+        bool dropPiece = InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Piece));
+        bool dropChoke = InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Choke));
+        bool dropRequest = InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Request));
+
+        Assert.False(dropPiece);
+        Assert.False(dropChoke);
+        Assert.False(dropRequest);
+
+        // Non-critical drops
+        Assert.True(InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Have)));
+        Assert.True(InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.AllowedFast)));
+        Assert.True(InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Suggest)));
+        Assert.True(InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Port)));
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ConfigureTcpClient_AppliesSocketOptionsWithoutThrowing()
+    {
+        using var server = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        server.Start();
+        int port = ((System.Net.IPEndPoint)server.LocalEndpoint).Port;
+
+        using var client = new System.Net.Sockets.TcpClient();
+        await client.ConnectAsync(System.Net.IPAddress.Loopback, port);
+        using var serverClient = await server.AcceptTcpClientAsync();
+
+        var settings = new Settings();
+        settings.Connection.TcpNoDelay = true;
+        settings.Connection.TcpReceiveBufferBytes = 32 * 1024;
+        settings.Connection.TcpSendBufferBytes = 32 * 1024;
+
+        var configure = typeof(PeerCommunication)
+            .GetMethod("ConfigureTcpClient", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(configure);
+        configure!.Invoke(null, new object?[] { client, settings, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance });
+
+        Assert.True(client.NoDelay);
     }
 
     [Fact]

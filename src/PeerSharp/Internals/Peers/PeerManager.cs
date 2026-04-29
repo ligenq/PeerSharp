@@ -144,12 +144,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         });
     }
 
-    private enum TransportPreference
-    {
-        Utp,
-        Tcp
-    }
-
     /// <summary>
     /// Adaptive timeout manager for connection timeouts.
     /// Adjusts timeouts based on observed network conditions.
@@ -1337,74 +1331,18 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     {
         bool hasUtpManager = _torrent.UtpManager != null;
         var now = _timeProvider.GetUtcNow();
-        bool utpAllowed = settings.EnableUtpOut && hasUtpManager && now >= _globalUtpPenaltyUntil && (history?.IsUtpAllowed(now) ?? true);
-        bool tcpAllowed = settings.EnableTcpOut;
-
-        if (forceUtp)
-        {
-            return utpAllowed ? new[] { TransportPreference.Utp } : Array.Empty<TransportPreference>();
-        }
-
-        if (!utpAllowed && !tcpAllowed)
-        {
-            return Array.Empty<TransportPreference>();
-        }
-
-        var plan = new List<TransportPreference>(2);
-
-        bool utpPreferred = settings.PreferUtp && utpAllowed;
-        bool utpHinted = history?.UtpHinted ?? false;
+        bool utpAvailable = hasUtpManager
+            && now >= _globalUtpPenaltyUntil
+            && (history?.IsUtpAllowed(now) ?? true);
         bool inWarmup = (now - _startTime) < TimeSpan.FromSeconds(settings.UtpWarmupSeconds);
-        if (inWarmup && !utpHinted)
-        {
-            utpPreferred = false;
-            utpAllowed = false;
-        }
 
-        if (utpPreferred && !utpHinted && tcpAllowed)
-        {
-            // For unknown peers, start with TCP to avoid uTP stall storms.
-            plan.Add(TransportPreference.Tcp);
-            plan.Add(TransportPreference.Utp);
-        }
-        else if (utpPreferred)
-        {
-            int target = Math.Clamp(settings.PreferUtpRatioPercent, 0, 100);
-            int current = GetUtpRatioPercent();
-
-            if (current < target)
-            {
-                plan.Add(TransportPreference.Utp);
-                if (tcpAllowed)
-                {
-                    plan.Add(TransportPreference.Tcp);
-                }
-            }
-            else
-            {
-                if (tcpAllowed)
-                {
-                    plan.Add(TransportPreference.Tcp);
-                }
-                if (utpAllowed)
-                {
-                    plan.Add(TransportPreference.Utp);
-                }
-            }
-        }
-        else
-        {
-            if (tcpAllowed)
-            {
-                plan.Add(TransportPreference.Tcp);
-            }
-            if (utpAllowed)
-            {
-                plan.Add(TransportPreference.Utp);
-            }
-        }
-
-        return plan;
+        return TransportPlanBuilder.Build(new TransportPlanBuilder.Inputs(
+            Settings: settings,
+            ForceUtp: forceUtp,
+            UtpAvailable: utpAvailable,
+            UtpHinted: history?.UtpHinted ?? false,
+            InWarmupPeriod: inWarmup,
+            CurrentUtpRatioPercent: GetUtpRatioPercent));
     }
 
     private async Task CheckPeerHealthAsync()
@@ -1486,14 +1424,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     {
         var settings = _settings.Connection;
         var now = _timeProvider.GetUtcNow();
-        int baseSeconds = Math.Max(1, settings.PeerReconnectBaseSeconds);
-        int maxSeconds = Math.Max(baseSeconds, settings.PeerReconnectMaxSeconds);
-        int backoffPow = Math.Min(Math.Max(history.FruitlessConnectionCount - 1, 0), 6);
-        int delaySeconds = Math.Min(maxSeconds, baseSeconds * (1 << backoffPow));
-        int jitterMs = Math.Max(0, settings.PeerReconnectJitterMs);
-        int jitter = jitterMs > 0 ? Random.Shared.Next(0, jitterMs + 1) : 0;
-
-        history.NextConnectAttempt = now.AddSeconds(delaySeconds).AddMilliseconds(jitter);
+        var delay = ConnectionBackoffCalculator.Calculate(
+            history.FruitlessConnectionCount,
+            settings.PeerReconnectBaseSeconds,
+            settings.PeerReconnectMaxSeconds,
+            settings.PeerReconnectJitterMs);
+        history.NextConnectAttempt = now + delay;
     }
 
     private async Task ConnectAndHandleAsync(PeerCommunication peer, string ip, int port, IReadOnlyList<TransportPreference> transportPlan, bool useGovernor)

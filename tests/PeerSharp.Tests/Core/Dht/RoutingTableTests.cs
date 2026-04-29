@@ -104,6 +104,42 @@ public class RoutingTableTests
         var closest = table.FindClosest(targetId, 20);
         Assert.Contains(closest, n => n.Id.SequenceEqual(targetId));
     }
+
+    [Fact]
+    public void GetAllNodes_ReturnsOnlyActiveNodes()
+    {
+        var table = new RoutingTable(_localId, _timeProvider);
+        byte[] activeId = new byte[20]; activeId[0] = 0x80;
+        byte[] inactiveId = new byte[20]; inactiveId[0] = 0x40;
+        var active = new NodeInfo(activeId, new IPEndPoint(IPAddress.Loopback, 1000));
+        var inactive = new NodeInfo(inactiveId, new IPEndPoint(IPAddress.Loopback, 1001));
+
+        table.NodeResponded(active);
+        table.NodeResponded(inactive);
+        table.NodeNotResponded(inactive);
+
+        var nodes = table.GetAllNodes();
+
+        Assert.Contains(nodes, n => n.Id.SequenceEqual(activeId));
+        Assert.DoesNotContain(nodes, n => n.Id.SequenceEqual(inactiveId));
+    }
+
+    [Fact]
+    public void GetAllNodes_StopsAtMaxNodes()
+    {
+        var table = new RoutingTable(_localId, _timeProvider);
+        for (int i = 0; i < 10; i++)
+        {
+            byte[] id = new byte[20];
+            id[0] = (byte)(0x80 | i);
+            id[19] = (byte)i;
+            table.NodeResponded(new NodeInfo(id, new IPEndPoint(IPAddress.Loopback, 2000 + i)));
+        }
+
+        var nodes = table.GetAllNodes(maxNodes: 3);
+
+        Assert.Equal(3, nodes.Count);
+    }
 }
 
 

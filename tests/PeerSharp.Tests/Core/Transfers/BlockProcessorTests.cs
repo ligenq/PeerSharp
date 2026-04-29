@@ -25,6 +25,92 @@ public class BlockProcessorTests
     }
 
     [Fact]
+    public async Task HandleWebSeedBlockReceivedAsync_CreatesPieceStateAndQueuesCompletedPiece()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 32768;
+        metadata.Info.FullSize = 32768;
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+
+        var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var requestTracker = new BlockRequestTracker();
+        var requestCompletionTracker = new RequestCompletionTracker(requestTracker, TimeProvider.System, (_, _, _) => { });
+        var downloader = new TransferStats();
+        PieceState? queuedPiece = null;
+
+        var processor = new BlockProcessor(new BlockProcessorOptions
+        {
+            PieceStateManager = pieceStateManager,
+            BlockSize = 16384,
+            EnqueuePeerPiece = _ => Task.CompletedTask,
+            EnqueueWebSeedPiece = (piece, _) =>
+            {
+                queuedPiece = piece;
+                return Task.CompletedTask;
+            },
+            Downloader = downloader,
+            RequestCompletionTracker = requestCompletionTracker,
+            Torrent = torrent,
+            CancelBlockRequest = (_, _, _) => Task.CompletedTask,
+            Logger = NullLogger<BlockProcessor>.Instance
+        });
+
+        await processor.HandleWebSeedBlockReceivedAsync(new Block(0, 0, 16384), TestContext.Current.CancellationToken);
+        await processor.HandleWebSeedBlockReceivedAsync(new Block(0, 16384, 16384), TestContext.Current.CancellationToken);
+
+        Assert.True(pieceStateManager.TryGetPiece(0, out var pieceState));
+        Assert.Equal(2, pieceState.ReceivedCount);
+        Assert.True(pieceState.IsWriting);
+        Assert.Same(pieceState, queuedPiece);
+        Assert.Equal(32768, downloader.Downloaded);
+    }
+
+    [Fact]
+    public async Task HandleWebSeedBlockReceivedAsync_DuplicateBlockIsDisposedAndNotCountedTwice()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 32768;
+        metadata.Info.FullSize = 32768;
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+
+        var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var requestTracker = new BlockRequestTracker();
+        var requestCompletionTracker = new RequestCompletionTracker(requestTracker, TimeProvider.System, (_, _, _) => { });
+        var downloader = new TransferStats();
+        var queuedCount = 0;
+
+        var processor = new BlockProcessor(new BlockProcessorOptions
+        {
+            PieceStateManager = pieceStateManager,
+            BlockSize = 16384,
+            EnqueuePeerPiece = _ => Task.CompletedTask,
+            EnqueueWebSeedPiece = (_, _) =>
+            {
+                queuedCount++;
+                return Task.CompletedTask;
+            },
+            Downloader = downloader,
+            RequestCompletionTracker = requestCompletionTracker,
+            Torrent = torrent,
+            CancelBlockRequest = (_, _, _) => Task.CompletedTask,
+            Logger = NullLogger<BlockProcessor>.Instance
+        });
+
+        var duplicate = new Block(0, 0, 16384);
+
+        await processor.HandleWebSeedBlockReceivedAsync(new Block(0, 0, 16384), TestContext.Current.CancellationToken);
+        await processor.HandleWebSeedBlockReceivedAsync(duplicate, TestContext.Current.CancellationToken);
+
+        Assert.True(pieceStateManager.TryGetPiece(0, out var pieceState));
+        Assert.Equal(1, pieceState.ReceivedCount);
+        Assert.Equal(16384, downloader.Downloaded);
+        Assert.Equal(0, queuedCount);
+        Assert.True(duplicate.Data.IsEmpty);
+    }
+
+    [Fact]
     public async Task HandlePeerBlockAsync_AddsBlockToPieceState()
     {
         // Setup

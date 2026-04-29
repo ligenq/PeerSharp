@@ -906,65 +906,25 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     public int GetOptimalPipelineDepth()
     {
-        const int BlockSize = 16 * 1024; // 16KB
-        const int MinPipeline = 8;
-        const int MaxPipeline = 128;
-
         var transferSettings = _torrent.Settings.Transfer;
-
         int speedBytesPerSec = Math.Max(DownloadSpeed, SmoothedDownloadSpeed);
         int rttMs = SmoothedRttMs;
 
-        // THROUGHPUT OPTIMIZATION: Use estimated bandwidth/RTT at startup
-        // Prevents slow ramp-up on high-speed connections (10x faster startup)
-        if (speedBytesPerSec <= 0 || rttMs <= 0)
-        {
-            // Option 1: Use estimated bandwidth-delay product if configured
-            if (transferSettings.EstimatedBandwidthBytesPerSec > 0 && transferSettings.EstimatedRttMs > 0)
-            {
-                long estimatedBytesInFlight = (long)transferSettings.EstimatedBandwidthBytesPerSec * transferSettings.EstimatedRttMs / 1000;
-                long estimatedPipeline = estimatedBytesInFlight * 3 / 2 / BlockSize; // Add 50% headroom
-                int initialPipeline = (int)Math.Clamp(estimatedPipeline, MinPipeline, MaxPipeline);
-
-                _logger.LogDebug("Peer {RemoteEndPoint}: Using estimated pipeline depth {InitialPipeline} (BW={Bw}MB/s, RTT={Rtt}ms)",
-                    RemoteEndPoint, initialPipeline, transferSettings.EstimatedBandwidthBytesPerSec / 1024 / 1024, transferSettings.EstimatedRttMs);
-                return initialPipeline;
-            }
-
-            // Option 2: Use configured initial pipeline depth
-            int configuredInitial = Math.Clamp(transferSettings.InitialPipelineDepth, MinPipeline, MaxPipeline);
-            _logger.LogDebug("Peer {RemoteEndPoint}: Using configured initial pipeline depth {ConfiguredInitial}", RemoteEndPoint, configuredInitial);
-            return configuredInitial;
-        }
-
-        // Normal operation: Use measured bandwidth-delay product
-        // Bandwidth-delay product: bytes_in_flight = speed * rtt
-        // Pipeline depth = bytes_in_flight / block_size
-        // Add 50% headroom to keep the pipe full
-        // All calculations in long to prevent overflow at high speeds
-        long bytesInFlight = (long)speedBytesPerSec * rttMs / 1000;
-        long pipelineLong = bytesInFlight * 3 / 2 / BlockSize;
-
-        // Clamp in long space before casting to int to prevent overflow
-        return (int)Math.Clamp(pipelineLong, MinPipeline, MaxPipeline);
+        return PipelineDepthCalculator.CalculateOptimal(
+            speedBytesPerSec,
+            rttMs,
+            transferSettings.EstimatedBandwidthBytesPerSec,
+            transferSettings.EstimatedRttMs,
+            transferSettings.InitialPipelineDepth);
     }
 
     public int GetAdaptivePipelineDepth()
     {
-        int optimal = GetOptimalPipelineDepth();
-        int strikes = Strikes;
-        if (strikes > 0)
-        {
-            optimal = Math.Max(ProtocolConstants.MinPipelineDepth, optimal - (strikes * 10));
-        }
-
-        int rtt = SmoothedRttMs;
-        if (rtt >= 800)
-        {
-            optimal = Math.Max(ProtocolConstants.MinPipelineDepth, optimal / 2);
-        }
-
-        return optimal;
+        return PipelineDepthCalculator.Adapt(
+            GetOptimalPipelineDepth(),
+            Strikes,
+            SmoothedRttMs,
+            ProtocolConstants.MinPipelineDepth);
     }
 
     /// <summary>
@@ -1178,31 +1138,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     public async Task<bool> SetHandshakeReceivedAsync(byte[] handshake)
     {
-        if (handshake.Length < 68)
+        if (!PeerHandshake.TryParse(handshake, _torrent.InfoFile.Info, out var parsed))
         {
-            return false;
-        }
-
-        // Validate info_hash matches our torrent (bytes 28-47)
-        var receivedInfoHash = handshake.AsSpan(28, 20);
-        bool hashMatches = false;
-
-        // BEP 52: Check both v1 and v2 hashes for matching
-        if (_torrent.InfoFile.Info.IsV1)
-        {
-            hashMatches = receivedInfoHash.SequenceEqual(_torrent.InfoFile.Info.Hash.Span);
-        }
-
-        if (!hashMatches && _torrent.InfoFile.Info.IsV2)
-        {
-            // For v2/hybrid torrents, also accept truncated v2 hash
-            var truncatedV2Hash = _torrent.InfoFile.Info.HashV2.Span[..20];
-            hashMatches = receivedInfoHash.SequenceEqual(truncatedV2Hash);
-        }
-
-        if (!hashMatches)
-        {
-            _logger.LogWarning("Info hash mismatch from {PeerName}", Name);
+            _logger.LogWarning("Invalid handshake from {PeerName}: {Reason}", Name, parsed.Error);
             return false;
         }
 
@@ -1210,12 +1148,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _preReadHandshake = handshake;
 
         // Extract reserved bytes flags (bytes 20-27)
-        RemoteSupportsExtensions = (handshake[25] & 0x10) != 0; // BEP-10 extension protocol
-        RemoteSupportsFastExtension = (handshake[27] & 0x04) != 0; // BEP-6 fast extension
-        RemoteSupportsV2 = (handshake[27] & 0x10) != 0; // BEP-52 v2 protocol
+        RemoteSupportsExtensions = parsed.SupportsExtensions;
+        RemoteSupportsFastExtension = parsed.SupportsFastExtension;
+        RemoteSupportsV2 = parsed.SupportsV2;
         _logger.LogDebug("Peer {PeerName} capabilities: extensions={RemoteSupportsExtensions}, fast={RemoteSupportsFastExtension}, v2={RemoteSupportsV2}", Name, RemoteSupportsExtensions, RemoteSupportsFastExtension, RemoteSupportsV2);
 
-        Array.Copy(handshake, 48, PeerId, 0, 20);
+        Array.Copy(parsed.PeerId, PeerId, 20);
         PeerPieces = new PiecesProgress(_torrent.Pieces.Count);
 
         // Send extended handshake if peer supports it
@@ -1403,34 +1341,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private byte[] CreateHandshakeBuffer()
     {
-        byte[] handshake = new byte[68];
-        handshake[0] = 19;
-        System.Text.Encoding.ASCII.GetBytes("BitTorrent protocol").CopyTo(handshake, 1);
-        // Reserved bytes 20-27:
-        handshake[25] |= 0x10; // Extension protocol bit (BEP-10)
-        handshake[27] |= 0x04; // Fast Extension bit (BEP-6)
-
-        // BEP 52: Set v2 support bit if this is a v2 or hybrid torrent
-        if (_torrent.InfoFile.Info.IsV2)
-        {
-            handshake[27] |= 0x10; // V2 support bit (reserved[7] bit 4)
-        }
-
-        // BEP 52: Use appropriate hash for handshake
-        // For hybrid torrents, use v1 hash for compatibility
-        // For v2-only torrents, use truncated v2 hash (first 20 bytes)
-        if (_torrent.InfoFile.Info.IsV1)
-        {
-            _torrent.InfoFile.Info.Hash.CopyTo(handshake, 28);
-        }
-        else if (_torrent.InfoFile.Info.IsV2)
-        {
-            // V2-only: use first 20 bytes of v2 hash
-            _torrent.InfoFile.Info.HashV2.Span[..20].CopyTo(handshake.AsSpan(28));
-        }
-
-        _torrent.Settings.PeerId.CopyTo(handshake, 48);
-        return handshake;
+        return PeerHandshake.Create(_torrent.InfoFile.Info, _torrent.Settings.PeerId);
     }
 
     private int GetAdaptiveSendQueueLimit()
@@ -1443,20 +1354,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private int GetOptimalPipelineDepthForRtt(int rttMs)
     {
-        const int BlockSize = 16 * 1024;
-        const int MinPipeline = 8;
-        const int MaxPipeline = 128;
         int speedBytesPerSec = Math.Max(DownloadSpeed, SmoothedDownloadSpeed);
-        if (speedBytesPerSec <= 0)
-        {
-            return MinPipeline;
-        }
-
-        // All calculations in long to prevent overflow at high speeds
-        long bytesInFlight = (long)speedBytesPerSec * rttMs / 1000;
-        long pipelineLong = bytesInFlight * 3 / 2 / BlockSize;
-        // Clamp in long space before casting to int to prevent overflow
-        return (int)Math.Clamp(pipelineLong, MinPipeline, MaxPipeline);
+        return PipelineDepthCalculator.CalculateOptimalForRtt(speedBytesPerSec, rttMs);
     }
 
     private async Task HandleExtendedMessageAsync(ReadOnlyMemory<byte> data)
