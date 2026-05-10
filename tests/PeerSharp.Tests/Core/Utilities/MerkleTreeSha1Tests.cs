@@ -57,6 +57,55 @@ public class MerkleTreeSha1Tests
         Assert.True(partialTree.CanVerifyPiece(1));
         Assert.True(partialTree.VerifyPiece(1, data[1]));
     }
+
+    [Fact]
+    public void GetNode_ValidIndex_ReturnsHash()
+    {
+        var tree = new MerkleTreeSha1(2);
+        var expectedHash = new byte[20];
+        expectedHash[0] = 42;
+        tree.SetNode(0, expectedHash);
+
+        var result = tree.GetNode(0);
+
+        Assert.NotNull(result);
+        Assert.Equal(expectedHash, result);
+    }
+
+    [Fact]
+    public void GetNode_InvalidIndex_ReturnsNull()
+    {
+        var tree = new MerkleTreeSha1(2);
+
+        Assert.Null(tree.GetNode(-1));
+        Assert.Null(tree.GetNode(tree.TreeSize));
+        Assert.Null(tree.GetNode(tree.TreeSize + 1));
+    }
+
+    [Fact]
+    public void SetNode_ValidIndex_SetsHash()
+    {
+        var tree = new MerkleTreeSha1(2);
+        var expectedHash = new byte[20];
+        expectedHash[0] = 99;
+
+        tree.SetNode(1, expectedHash);
+
+        var result = tree.GetNode(1);
+        Assert.Equal(expectedHash, result);
+    }
+
+    [Fact]
+    public void SetNode_InvalidIndex_DoesNothing()
+    {
+        var tree = new MerkleTreeSha1(2);
+        var expectedHash = new byte[20];
+        expectedHash[0] = 99;
+
+        // Ensure no exception is thrown
+        tree.SetNode(-1, expectedHash);
+        tree.SetNode(tree.TreeSize, expectedHash);
+    }
 }
 
 

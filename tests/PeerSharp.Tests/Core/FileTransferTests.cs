@@ -62,6 +62,55 @@ public class FileTransferTests
     }
 
     [Fact]
+    public void RequestMerkleHashes_V2_SelectsPeerAndSendsRequest()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Version = TorrentVersion.V2;
+        metadata.Info.HashV2 = InfoHash.CreateRandomV2();
+        metadata.Info.PieceSize = ProtocolConstants.BlockSize;
+        metadata.Info.FullSize = ProtocolConstants.BlockSize * 2;
+        byte[] v2Root = metadata.Info.HashV2.Span.ToArray();
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = ProtocolConstants.BlockSize * 2, Offset = 0, PiecesRoot = v2Root, PieceCount = 2 });
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, Path.GetTempPath());
+        torrent.InfoFile.Info.Files[0].PiecesRoot = v2Root;
+        torrent.InfoFile.Info.Files[0].PieceCount = 2;
+
+        Assert.NotNull(torrent.InfoFile.Info.GetV2HashRequestForPiece(0)); // Check if request is valid
+
+        var fileTransfer = new FileTransfer(torrent, _timeProvider);
+
+        // Peer must support V2 and have the piece
+        var peer = new PeerCommunication(torrent, new MockPeerListener(), _timeProvider);
+        var setRemoteSupportsV2 = peer.GetType().GetProperty("RemoteSupportsV2", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+        setRemoteSupportsV2?.SetValue(peer, true);
+
+        var connectedField = peer.GetType().GetField("_connected", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        connectedField?.SetValue(peer, 1);
+
+        peer.PeerPieces.AddPiece(0);
+        Assert.True(peer.PeerPieces.HasPiece(0)); // Ensure peer has piece
+        Assert.True(peer.RemoteSupportsV2); // Ensure supports v2
+
+        var connectedPeersField = torrent.PeersInternal.GetType().GetField("_connectedPeers", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var connectedPeers = connectedPeersField?.GetValue(torrent.PeersInternal) as System.Collections.Concurrent.ConcurrentDictionary<PeerCommunication, byte>;
+        Assert.NotNull(connectedPeers);
+        connectedPeers.TryAdd(peer, 0);
+
+        Assert.Single(torrent.PeersInternal.GetConnectedPeersInternal()); // Ensure connected peers contains the peer
+
+        var requestMerkleHashes = typeof(FileTransfer).GetMethod("RequestMerkleHashes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        requestMerkleHashes?.Invoke(fileTransfer, new object[] { 0 });
+
+        // Ensure a message was queued for the peer
+        var queue = peer.GetType().GetField("_sendQueue", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(peer) as MessageQueue;
+        Assert.NotNull(queue);
+        bool dequeued = queue.TryDequeue(out var msg);
+        Assert.True(dequeued, "Queue was empty");
+        Assert.Equal(MessageId.HashRequest, msg.Id);
+    }
+
+    [Fact]
     public async Task ProcessBlock_AddsToActivePieces()
     {
         // We need to make the piece active first via PickNextPiece or manual addition.

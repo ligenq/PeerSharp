@@ -37,7 +37,17 @@ internal static class MerkleTree
             int blockLen = Math.Min(BlockSize, data.Length - offset);
             var block = data.Slice(offset, blockLen);
 
-            leaves.Add(SHA256.HashData(block));
+            if (blockLen < BlockSize)
+            {
+                // BEP 52: "If the file size is not a multiple of 16KiB, the last leaf is the SHA-256 hash of the remaining data, zero-padded to 16KiB."
+                byte[] padded = new byte[BlockSize];
+                block.CopyTo(padded);
+                leaves.Add(SHA256.HashData(padded));
+            }
+            else
+            {
+                leaves.Add(SHA256.HashData(block));
+            }
 
             offset += BlockSize;
         }

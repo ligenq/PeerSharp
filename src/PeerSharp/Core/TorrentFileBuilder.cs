@@ -269,6 +269,12 @@ public sealed class TorrentFileBuilder
 
     private static byte[] HashMerkleBlock(byte[] buffer, int length)
     {
+        if (length < MerkleTree.BlockSize)
+        {
+            // BEP 52: "If the file size is not a multiple of 16KiB, the last leaf is the SHA-256 hash of the remaining data, zero-padded to 16KiB."
+            Array.Clear(buffer, length, MerkleTree.BlockSize - length);
+            return MerkleTree.HashBlock(buffer);
+        }
         return MerkleTree.HashBlock(buffer.AsSpan(0, length));
     }
 
@@ -890,11 +896,13 @@ public sealed class TorrentFileBuilder
         {
         }
 
+        [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
         public override void SetLength(long value)
         {
             throw new NotSupportedException();
         }
 
+        [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
         public override void Write(byte[] buffer, int offset, int count)
         {
             throw new NotSupportedException();

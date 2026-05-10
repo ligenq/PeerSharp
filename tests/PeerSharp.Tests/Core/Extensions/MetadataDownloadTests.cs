@@ -163,6 +163,64 @@ public class MetadataDownloadTests
 
         Assert.Throws<InvalidDataException>(() => download.InitializeMetadataBuffer(2048));
     }
+
+    [Fact]
+    public void PeerDisconnected_ClearsPendingRequestsForPeer()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        var mockPeer = new MockPeerCommunication
+        {
+            RemoteSupportsExtensions = true,
+            RemoteExtensions = new ExtensionHandshake { MetadataSize = 16384 },
+            UtMetadata = new MockUtMetadata { RemoteMessageId = 1 }
+        };
+        mockPeer.RemoteExtensions.MessageIds[UtMetadata.Name] = 1;
+
+        download.PeerConnected(mockPeer);
+
+        // Ensure piece 0 was requested
+        var requestsField = typeof(MetadataDownload).GetField("_pendingRequests", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var requests = requestsField?.GetValue(download) as System.Collections.IDictionary;
+        Assert.NotNull(requests);
+        Assert.Equal(1, requests.Count);
+
+        download.PeerDisconnected(mockPeer);
+
+        // Ensure requests are cleared
+        Assert.Equal(0, requests.Count);
+    }
+
+    [Fact]
+    public void Stop_ClearsPendingRequestsAndDeactivates()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        var mockPeer = new MockPeerCommunication
+        {
+            RemoteSupportsExtensions = true,
+            RemoteExtensions = new ExtensionHandshake { MetadataSize = 16384 },
+            UtMetadata = new MockUtMetadata { RemoteMessageId = 1 }
+        };
+        mockPeer.RemoteExtensions.MessageIds[UtMetadata.Name] = 1;
+
+        download.PeerConnected(mockPeer);
+
+        download.Stop();
+
+        var requestsField = typeof(MetadataDownload).GetField("_pendingRequests", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var requests = requestsField?.GetValue(download) as System.Collections.IDictionary;
+        Assert.NotNull(requests);
+        Assert.Equal(0, requests.Count);
+
+        var activeProp = typeof(MetadataDownload).GetProperty("Active");
+        bool isActive = (bool)activeProp?.GetValue(download)!;
+        Assert.False(isActive);
+    }
 }
 
 

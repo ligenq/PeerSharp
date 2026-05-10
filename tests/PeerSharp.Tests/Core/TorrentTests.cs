@@ -9,6 +9,95 @@ public class TorrentTests
     private readonly FakeTimeProvider _timeProvider = new();
 
     [Fact]
+    public void GetAllFileInfo_ReturnsMappedFileInfo()
+    {
+        var info = new TorrentFileMetadata();
+        info.Info.Name = "test";
+        info.Info.PieceSize = 16384;
+        info.Info.Files.Add(new Internals.TorrentFileEntry { Path = "f1.txt", Size = 100, Offset = 0 });
+        info.Info.Files.Add(new Internals.TorrentFileEntry { Path = "f2.txt", Size = 200, Offset = 100 });
+        info.Info.FullSize = 300;
+        info.Info.Pieces.Add(new byte[20]);
+
+        var torrent = TorrentTestUtility.CreateMinimal(info);
+
+        var fileInfos = torrent.GetAllFileInfo();
+
+        Assert.Equal(2, fileInfos.Count);
+        Assert.Equal("f1.txt", fileInfos[0].Path);
+        Assert.Equal(100, fileInfos[0].Size);
+        Assert.Equal("f2.txt", fileInfos[1].Path);
+        Assert.Equal(200, fileInfos[1].Size);
+    }
+
+    [Fact]
+    public async Task FileSelectionApis_DelegateToManager()
+    {
+        var info = new TorrentFileMetadata();
+        info.Info.Name = "test";
+        info.Info.PieceSize = 16384;
+        info.Info.FullSize = 100;
+        info.Info.Files.Add(new Internals.TorrentFileEntry { Path = "f1.txt", Size = 100, Offset = 0 });
+        info.Info.Pieces.Add(new byte[20]);
+
+        var mockSelectionManager = new CustomMockSelectionManager();
+
+        var settings = new Settings();
+        settings.Files.DefaultDownloadPath = Path.GetTempPath();
+
+        var torrent = Torrent.Create(
+            info,
+            settings,
+            new TorrentTestUtility.MockBandwidthManager(),
+            new TorrentTestUtility.MockAlertsManager(),
+            mockSelectionManager,
+            new TorrentTestUtility.MockPeerCommunicationFactory(),
+            new TorrentTestUtility.MockTrackerFactory(),
+            new TorrentTestUtility.MockGeoIpService(),
+            new TorrentTestUtility.MockFileHandleCache(),
+            new TorrentTestUtility.MockConnectionGovernor(),
+            TimeProvider.System);
+
+        var selections = torrent.GetAllFileSelections();
+        Assert.Equal(mockSelectionManager.Selections.Count, selections.Count);
+        Assert.Equal(mockSelectionManager.Selections[0], selections[0]);
+
+        await torrent.SetFilePriorityAsync(0, Priority.High);
+        Assert.Equal(0, mockSelectionManager.LastSetIndex);
+        Assert.Equal(Priority.High, mockSelectionManager.LastSetPriority);
+    }
+
+    private class CustomMockSelectionManager : PeerSharp.Internals.Framework.IFileSelectionManager
+    {
+        public bool IsSelectionFinished => true;
+        public int TotalSelectedPieces => 0;
+        public int ReceivedSelectedPieces => 0;
+        public ulong CalculateFinishedSelectedBytes() => 0;
+        public float CalculateSelectionProgress() => 0;
+        public void SetObserver(PeerSharp.Internals.Framework.IFileSelectionObserver observer) { }
+        public FileSelection GetFileSelection(int fileIndex) => new FileSelection();
+
+        public IReadOnlyList<FileSelection> Selections = new List<FileSelection> { new FileSelection() };
+        public IReadOnlyList<FileSelection> GetAllFileSelections() => Selections;
+
+        public int LastSetIndex = -1;
+        public Priority LastSetPriority = Priority.DoNotDownload;
+        public Task SetFileSelectionAsync(int fileIndex, FileSelection selection, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task SetFilePriorityAsync(int fileIndex, Priority priority, CancellationToken ct = default)
+        {
+            LastSetIndex = fileIndex;
+            LastSetPriority = priority;
+            return Task.CompletedTask;
+        }
+
+        public Task SetAllFilesPriorityAsync(Priority priority, CancellationToken ct = default) => Task.CompletedTask;
+        public void OnPieceVerified(int pieceIndex) { }
+        public void Initialize(List<FileSelection>? savedSelection, PiecesProgress pieces) { }
+        public void SetBytesProvider(PeerSharp.Internals.Framework.IUnfinishedBytesProvider provider) { }
+    }
+
+    [Fact]
     public void Constructor_InitializesState()
     {
         var torrent = TorrentTestUtility.CreateMinimal();

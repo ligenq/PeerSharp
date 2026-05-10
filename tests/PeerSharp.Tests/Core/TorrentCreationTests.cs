@@ -7,6 +7,52 @@ namespace PeerSharp.Tests.Core;
 public class TorrentCreationTests
 {
     [Fact]
+    public async Task BuildAsync_V2_CreatesValidV2Torrent()
+    {
+        var fileName = "v2_async.bin";
+        byte[] data = new byte[32 * 1024];
+        Random.Shared.NextBytes(data);
+
+        var builder = new ApiTorrentFileBuilder()
+            .WithName(fileName)
+            .WithPieceLength(16_384)
+            .WithVersion(PeerSharp.Core.TorrentFileVersion.V2)
+            .AddFile(fileName, data);
+
+        var torrent = await builder.BuildAsync();
+
+        Assert.Equal(fileName, torrent.Name);
+        Assert.Equal(data.Length, torrent.TotalSize);
+        Assert.Equal(16_384u, torrent.PieceSize);
+        Assert.True(torrent.IsV2);
+        Assert.True(torrent.InfoHash.IsEmpty); // A pure v2 torrent has an empty v1 info hash
+        Assert.False(torrent.InfoHashV2.IsEmpty); // A pure v2 torrent has HashV2 populated
+    }
+
+    [Fact]
+    public async Task BuildAsync_Hybrid_CreatesValidHybridTorrent()
+    {
+        var fileA = new byte[8 * 1024];
+        var fileB = new byte[12 * 1024];
+        Random.Shared.NextBytes(fileA);
+        Random.Shared.NextBytes(fileB);
+
+        var builder = new ApiTorrentFileBuilder()
+            .WithName("HybridTest")
+            .WithPieceLength(16_384)
+            .WithVersion(PeerSharp.Core.TorrentFileVersion.Hybrid)
+            .AddFile("Folder/a.bin", fileA)
+            .AddFile("Folder/b.bin", fileB);
+
+        var torrent = await builder.BuildAsync();
+
+        Assert.Equal("HybridTest", torrent.Name);
+        Assert.True(torrent.IsV2);
+        Assert.False(torrent.InfoHash.IsEmpty);
+        Assert.False(torrent.InfoHashV2.IsEmpty);
+        Assert.True(torrent.PieceCount > 0);
+    }
+    [Fact]
     public void BuildSingleFile_CreatesValidTorrent()
     {
         var fileName = "single.bin";

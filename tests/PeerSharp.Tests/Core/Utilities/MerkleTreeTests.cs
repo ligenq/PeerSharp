@@ -16,7 +16,7 @@ public class MerkleTreeTests
     }
 
     [Fact]
-    public void ComputeLeaves_PartialBlock_HashesUnpaddedData()
+    public void ComputeLeaves_PartialBlock_HashesPaddedData()
     {
         byte[] data = new byte[1234];
         Random.Shared.NextBytes(data);
@@ -24,7 +24,10 @@ public class MerkleTreeTests
         var leaves = MerkleTree.ComputeLeaves(data);
 
         Assert.Single(leaves);
-        Assert.Equal(SHA256.HashData(data), leaves[0]);
+
+        byte[] padded = new byte[MerkleTree.BlockSize];
+        data.CopyTo(padded);
+        Assert.Equal(SHA256.HashData(padded), leaves[0]);
     }
 
     [Fact]

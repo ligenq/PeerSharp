@@ -184,7 +184,7 @@ internal sealed class WebTorrentDataChannelStream : Stream
         {
             _pumpCts.Cancel();
             _incomingFrames.Writer.TryComplete();
-            
+
             _currentMemoryOwner?.Dispose();
             while (_incomingFrames.Reader.TryRead(out var owner))
             {

@@ -170,6 +170,147 @@ public class PeerProtocolTests
     }
 
     [Fact]
+    public void TryDecodeMessage_AllowedFast_DecodesCorrectly()
+    {
+        byte[] data = new byte[9];
+        BinaryPrimitives.WriteInt32BigEndian(data, 5);
+        data[4] = (byte)MessageId.AllowedFast;
+        BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(5), 42);
+        var buffer = new ReadOnlySequence<byte>(data);
+
+        bool result = PeerProtocol.TryDecodeMessage(ref buffer, out var message, out int bytesConsumed);
+
+        Assert.True(result);
+        Assert.NotNull(message);
+        Assert.Equal(MessageId.AllowedFast, message.Id);
+        Assert.Equal(42, message.PieceIndex);
+        Assert.Equal(9, bytesConsumed);
+    }
+
+    [Fact]
+    public void WriteMessage_AllowedFast_EncodesCorrectly()
+    {
+        var msg = new PeerMessage(MessageId.AllowedFast) { PieceIndex = 42 };
+        byte[] destination = new byte[PeerProtocol.GetMessageLength(msg)];
+        int written = PeerProtocol.WriteMessage(msg, destination);
+
+        Assert.Equal(9, written);
+        Assert.Equal(5, BinaryPrimitives.ReadInt32BigEndian(destination));
+        Assert.Equal((byte)MessageId.AllowedFast, destination[4]);
+        Assert.Equal(42, BinaryPrimitives.ReadInt32BigEndian(destination.AsSpan(5)));
+    }
+
+    [Fact]
+    public void TryDecodeMessage_Suggest_DecodesCorrectly()
+    {
+        byte[] data = new byte[9];
+        BinaryPrimitives.WriteInt32BigEndian(data, 5);
+        data[4] = (byte)MessageId.Suggest;
+        BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(5), 99);
+        var buffer = new ReadOnlySequence<byte>(data);
+
+        bool result = PeerProtocol.TryDecodeMessage(ref buffer, out var message, out int bytesConsumed);
+
+        Assert.True(result);
+        Assert.NotNull(message);
+        Assert.Equal(MessageId.Suggest, message.Id);
+        Assert.Equal(99, message.PieceIndex);
+        Assert.Equal(9, bytesConsumed);
+    }
+
+    [Fact]
+    public void WriteMessage_Suggest_EncodesCorrectly()
+    {
+        var msg = new PeerMessage(MessageId.Suggest) { PieceIndex = 99 };
+        byte[] destination = new byte[PeerProtocol.GetMessageLength(msg)];
+        int written = PeerProtocol.WriteMessage(msg, destination);
+
+        Assert.Equal(9, written);
+        Assert.Equal(5, BinaryPrimitives.ReadInt32BigEndian(destination));
+        Assert.Equal((byte)MessageId.Suggest, destination[4]);
+        Assert.Equal(99, BinaryPrimitives.ReadInt32BigEndian(destination.AsSpan(5)));
+    }
+
+    [Fact]
+    public void TryDecodeMessage_Reject_DecodesCorrectly()
+    {
+        byte[] data = new byte[17];
+        BinaryPrimitives.WriteInt32BigEndian(data, 13);
+        data[4] = (byte)MessageId.Reject;
+        BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(5), 1);
+        BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(9), 16384);
+        BinaryPrimitives.WriteInt32BigEndian(data.AsSpan(13), 8192);
+        var buffer = new ReadOnlySequence<byte>(data);
+
+        bool result = PeerProtocol.TryDecodeMessage(ref buffer, out var message, out int bytesConsumed);
+
+        Assert.True(result);
+        Assert.NotNull(message);
+        Assert.Equal(MessageId.Reject, message.Id);
+        Assert.Equal(1, message.PieceIndex);
+        Assert.Equal(16384, message.BlockOffset);
+        Assert.Equal(8192, message.BlockLength);
+        Assert.Equal(17, bytesConsumed);
+    }
+
+    [Fact]
+    public void WriteMessage_Reject_EncodesCorrectly()
+    {
+        var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 1, BlockOffset = 16384, BlockLength = 8192 };
+        byte[] destination = new byte[PeerProtocol.GetMessageLength(msg)];
+        int written = PeerProtocol.WriteMessage(msg, destination);
+
+        Assert.Equal(17, written);
+        Assert.Equal(13, BinaryPrimitives.ReadInt32BigEndian(destination));
+        Assert.Equal((byte)MessageId.Reject, destination[4]);
+        Assert.Equal(1, BinaryPrimitives.ReadInt32BigEndian(destination.AsSpan(5)));
+        Assert.Equal(16384, BinaryPrimitives.ReadInt32BigEndian(destination.AsSpan(9)));
+        Assert.Equal(8192, BinaryPrimitives.ReadInt32BigEndian(destination.AsSpan(13)));
+    }
+
+    [Fact]
+    public void WriteMessage_HaveNone_EncodesCorrectly()
+    {
+        var msg = new PeerMessage(MessageId.HaveNone);
+        byte[] destination = new byte[PeerProtocol.GetMessageLength(msg)];
+        int written = PeerProtocol.WriteMessage(msg, destination);
+
+        Assert.Equal(5, written);
+        Assert.Equal(1, BinaryPrimitives.ReadInt32BigEndian(destination));
+        Assert.Equal((byte)MessageId.HaveNone, destination[4]);
+    }
+
+    [Fact]
+    public void WriteAndDecode_HashReject_RoundTrips()
+    {
+        byte[] root = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+        var msg = new PeerMessage(MessageId.HashReject)
+        {
+            HashPiecesRoot = root,
+            HashBaseLayer = 4,
+            HashIndex = 8,
+            HashLength = 16,
+            HashProofLayers = 2
+        };
+        byte[] destination = new byte[PeerProtocol.GetMessageLength(msg)];
+
+        int written = PeerProtocol.WriteMessage(msg, destination);
+        var buffer = new ReadOnlySequence<byte>(destination);
+        bool decoded = PeerProtocol.TryDecodeMessage(ref buffer, out var parsed, out int consumed);
+
+        Assert.Equal(53, written);
+        Assert.True(decoded);
+        Assert.Equal(written, consumed);
+        Assert.NotNull(parsed);
+        Assert.Equal(MessageId.HashReject, parsed.Id);
+        Assert.Equal(root, parsed.HashPiecesRoot);
+        Assert.Equal(4, parsed.HashBaseLayer);
+        Assert.Equal(8, parsed.HashIndex);
+        Assert.Equal(16, parsed.HashLength);
+        Assert.Equal(2, parsed.HashProofLayers);
+    }
+
+    [Fact]
     public void WriteAndDecode_HashRequest_RoundTrips()
     {
         byte[] root = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
