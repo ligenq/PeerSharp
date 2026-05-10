@@ -174,6 +174,11 @@ internal class UtpStream : Stream
     public IPEndPoint RemoteEndPoint { get; }
     internal ushort ConnectionIdRecv { get; }
     internal ushort ConnectionIdSend { get; }
+    internal UtpState State => _state;
+    internal uint Rtt => _rtt;
+    internal int SentPacketsCount => _sentPackets.Count;
+    internal ushort AckNr => _ackNr;
+    internal ushort SeqNr => _seqNr;
 
     public void CheckTimeout()
     {

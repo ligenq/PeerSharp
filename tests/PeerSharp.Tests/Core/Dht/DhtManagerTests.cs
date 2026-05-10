@@ -463,6 +463,168 @@ public class DhtManagerTests
         // Should not send any response for invalid token
         Assert.Empty(_listener.SentPackets);
     }
+
+    [Fact(Timeout = 10000)]
+    public async Task Maintenance_CleansUpExpiredTransactions()
+    {
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback);
+        await dht.StartAsync();
+
+        var transactionsField = typeof(DhtManager).GetField("_transactions", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+
+        // Use the real FindPeers path to register a transaction, then age it via reflection
+        var infoHash = InfoHash.CreateRandom();
+        dht.FindPeers(infoHash);
+
+        // Force the timestamp back via reflection on the Transaction object
+        var txDict = transactionsField.GetValue(dht)!;
+        var txDictType = txDict.GetType();
+        // Get all values from the ConcurrentDictionary
+        var values = (System.Collections.IEnumerable)txDictType.GetProperty("Values")!.GetValue(txDict)!;
+        foreach (var tx in values)
+        {
+            var tsProp = tx.GetType().GetProperty("Timestamp")!;
+            tsProp.SetValue(tx, _timeProvider.GetUtcNow().AddMinutes(-3));
+        }
+
+        // Advance time by 15 seconds to trigger maintenance
+        _timeProvider.Advance(TimeSpan.FromSeconds(16));
+        await Task.Delay(100); // Let maintenance run
+
+        var count = (int)txDictType.GetProperty("Count")!.GetValue(txDict)!;
+        Assert.Equal(0, count);
+
+        await dht.StopAsync();
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task Maintenance_CleansUpExpiredPeers()
+    {
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback);
+        await dht.StartAsync();
+
+        var peersField = typeof(DhtManager).GetField("_peers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var peers = peersField.GetValue(dht)!;
+        var peersType = peers.GetType();
+
+        // Inject a peer via get_peers announce
+        var infoHash = InfoHash.CreateRandom();
+        var hashStr = BitConverter.ToString(infoHash.ToArray()).Replace("-", "").ToLower();
+        var senderEp = new IPEndPoint(IPAddress.Parse("1.2.3.4"), 6881);
+
+        // First do a get_peers to create a token, then announce
+        var query = new BDict();
+        query.Dict["t"] = new BString("bb"u8.ToArray());
+        query.Dict["y"] = new BString("q"u8.ToArray());
+        query.Dict["q"] = new BString("get_peers"u8.ToArray());
+        var a = new BDict();
+        a.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        a.Dict["info_hash"] = new BString(infoHash.ToArray());
+        query.Dict["a"] = a;
+        dht.Receive(BencodeWriter.Write(query), senderEp);
+
+        // Extract the token from the response
+        Assert.NotEmpty(_listener.SentPackets);
+        var response = BencodeParser.Parse(_listener.SentPackets[^1].Data);
+        var token = ((BDict)response).Get("r") is BDict r ? r.Get("token") as BString : null;
+        Assert.NotNull(token);
+        _listener.SentPackets.Clear();
+
+        // Announce with valid token
+        var announce = new BDict();
+        announce.Dict["t"] = new BString("cc"u8.ToArray());
+        announce.Dict["y"] = new BString("q"u8.ToArray());
+        announce.Dict["q"] = new BString("announce_peer"u8.ToArray());
+        var aa = new BDict();
+        aa.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        aa.Dict["info_hash"] = new BString(infoHash.ToArray());
+        aa.Dict["port"] = new BNumber(6881);
+        aa.Dict["token"] = token;
+        announce.Dict["a"] = aa;
+        dht.Receive(BencodeWriter.Write(announce), senderEp);
+
+        // Verify peer was stored
+        var count = (int)peersType.GetProperty("Count")!.GetValue(peers)!;
+        Assert.Equal(1, count);
+
+        // Age the peer via reflection
+        var values = (System.Collections.IEnumerable)peersType.GetProperty("Values")!.GetValue(peers)!;
+        foreach (var peerList in values)
+        {
+            var list = (System.Collections.IList)peerList;
+            foreach (var peer in list)
+            {
+                peer.GetType().GetProperty("LastSeen")!.SetValue(peer, _timeProvider.GetUtcNow().AddMinutes(-31));
+            }
+        }
+
+        // Trigger maintenance
+        _timeProvider.Advance(TimeSpan.FromSeconds(16));
+        await Task.Delay(100);
+
+        count = (int)peersType.GetProperty("Count")!.GetValue(peers)!;
+        Assert.Equal(0, count);
+
+        await dht.StopAsync();
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task Maintenance_CleansUpExpiredRecentQueryDedup()
+    {
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback);
+        await dht.StartAsync();
+
+        var recentField = typeof(DhtManager).GetField("_recentGetPeersQueries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var recent = recentField.GetValue(dht)!;
+        var recentType = recent.GetType();
+        var addMethod = recentType.GetMethod("TryAdd", new[] { typeof(string), typeof(DateTimeOffset) })!;
+
+        // Inject an old entry (3 minutes ago = beyond the 2-minute threshold)
+        addMethod.Invoke(recent, new object[] { "old-key-1", _timeProvider.GetUtcNow().AddMinutes(-3) });
+        // Inject a fresh entry
+        addMethod.Invoke(recent, new object[] { "fresh-key-1", _timeProvider.GetUtcNow() });
+
+        // Trigger maintenance
+        _timeProvider.Advance(TimeSpan.FromSeconds(16));
+        await Task.Delay(100);
+
+        var count = (int)recentType.GetProperty("Count")!.GetValue(recent)!;
+        // Old entry cleaned, fresh entry kept
+        Assert.Equal(1, count);
+
+        await dht.StopAsync();
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task Maintenance_HardCapOnRecentQueries_ClearsOldEntries()
+    {
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback);
+        await dht.StartAsync();
+
+        var recentField = typeof(DhtManager).GetField("_recentGetPeersQueries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var recent = recentField.GetValue(dht)!;
+        var recentType = recent.GetType();
+        var addMethod = recentType.GetMethod("TryAdd", new[] { typeof(string), typeof(DateTimeOffset) })!;
+
+        // Inject 10001 entries that are 2 minutes old (older than the hard-cap cutoff of 1 min)
+        var oldTime = _timeProvider.GetUtcNow().AddMinutes(-2);
+        for (int i = 0; i < 10001; i++)
+        {
+            addMethod.Invoke(recent, new object[] { $"key-{i}", oldTime });
+        }
+
+        var countBefore = (int)recentType.GetProperty("Count")!.GetValue(recent)!;
+        Assert.Equal(10001, countBefore);
+
+        // Trigger maintenance — hard cap (>10000) path fires
+        _timeProvider.Advance(TimeSpan.FromSeconds(16));
+        await Task.Delay(200);
+
+        var countAfter = (int)recentType.GetProperty("Count")!.GetValue(recent)!;
+        Assert.True(countAfter < countBefore, $"Expected entries to be pruned, got {countAfter}");
+
+        await dht.StopAsync();
+    }
 }
 
 

@@ -625,6 +625,202 @@ public class PeerManagerTests
         await CleanupAsync(ctx);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task HandshakeFinishedAsync_NoPieces_SendsNothing()
+    {
+        var ctx = CreateContext();
+        var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System);
+        SetPrivateField(peer, "_connected", 1);
+        // Pieces.ReceivedCount = 0 by default
+
+        await ctx.Manager.HandshakeFinishedAsync(peer);
+
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        // No bitfield/HaveAll/HaveNone expected when we have no pieces
+        // Port may or may not be enqueued depending on DHT config, so filter those out
+        var nonPortMessages = new List<PeerMessage>();
+        while (queue.TryDequeue(out var msg))
+        {
+            if (msg!.Id != MessageId.Port) nonPortMessages.Add(msg);
+        }
+        Assert.Empty(nonPortMessages);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task HandshakeFinishedAsync_AllPieces_FastPeer_SendsHaveAll()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Pieces.SetHaveAll();
+
+        var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System);
+        SetPrivateField(peer, "_connected", 1);
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
+
+        await ctx.Manager.HandshakeFinishedAsync(peer);
+
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        var messages = new List<PeerMessage>();
+        while (queue.TryDequeue(out var msg)) messages.Add(msg!);
+
+        Assert.Contains(messages, m => m.Id == MessageId.HaveAll);
+        Assert.DoesNotContain(messages, m => m.Id == MessageId.Bitfield);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task HandshakeFinishedAsync_AllPieces_NonFastPeer_SendsBitfield()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Pieces.SetHaveAll();
+
+        var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System);
+        SetPrivateField(peer, "_connected", 1);
+        // RemoteSupportsFastExtension = false (default)
+
+        await ctx.Manager.HandshakeFinishedAsync(peer);
+
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        var messages = new List<PeerMessage>();
+        while (queue.TryDequeue(out var msg)) messages.Add(msg!);
+
+        Assert.Contains(messages, m => m.Id == MessageId.Bitfield);
+        Assert.DoesNotContain(messages, m => m.Id == MessageId.HaveAll);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task HandshakeFinishedAsync_SomePieces_SendsBitfield()
+    {
+        // Need 2 pieces so AddPiece(0) gives ReceivedCount=1 < TotalPieces=2
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Version = TorrentVersion.V1;
+        metadata.Info.Hash = new InfoHash(Enumerable.Range(0, 20).Select(i => (byte)i).ToArray());
+        metadata.Info.PieceSize = ProtocolConstants.BlockSize;
+        metadata.Info.FullSize = ProtocolConstants.BlockSize * 2;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = ProtocolConstants.BlockSize * 2, Offset = 0 });
+
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        torrent.Settings.Connection.Encryption = Encryption.Refuse;
+        var governor = new FakeConnectionGovernor();
+        var manager = new PeerManager(torrent, new FakeGeoIpService(), new RealPeerFactory(), TimeProvider.System, governor);
+        var ctx = new PeerManagerContext(torrent, manager, governor, path);
+
+        torrent.Pieces.AddPiece(0); // 1 of 2 pieces
+
+        var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System);
+        SetPrivateField(peer, "_connected", 1);
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
+
+        await ctx.Manager.HandshakeFinishedAsync(peer);
+
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        var messages = new List<PeerMessage>();
+        while (queue.TryDequeue(out var msg)) messages.Add(msg!);
+
+        Assert.Contains(messages, m => m.Id == MessageId.Bitfield);
+        Assert.DoesNotContain(messages, m => m.Id == MessageId.HaveAll);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ExtendedMessageReceivedAsync_UnknownExtensionId_DoesNotThrow()
+    {
+        var ctx = CreateContext();
+        var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System);
+        // LocalMessageId is null (never set) so unknown type 99 won't match
+
+        var ex = await Record.ExceptionAsync(() => ctx.Manager.ExtendedMessageReceivedAsync(peer, 99, Array.Empty<byte>()));
+        Assert.Null(ex);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ExtendedMessageReceivedAsync_UtMetadataId_DoesNotThrowOnEmptyPayload()
+    {
+        var ctx = CreateContext();
+        var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System);
+        peer.UtMetadata.SetLocalMessageId(5);
+
+        // Send an empty/invalid payload — should not throw
+        var ex = await Record.ExceptionAsync(() => ctx.Manager.ExtendedMessageReceivedAsync(peer, 5, Array.Empty<byte>()));
+        Assert.Null(ex);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddIncomingPeerAsync_AtConnectionLimit_Rejects()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.MaxPeersPerTorrent = 0; // limit is 0, so any connection is rejected
+
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        using var serverClient = await listener.AcceptTcpClientAsync();
+
+        byte[] handshake = BuildHandshake(ctx.Torrent.InfoFile.Info.Hash.Span, ctx.Torrent.Settings.PeerId);
+        await ctx.Manager.AddIncomingPeerAsync(serverClient, handshake);
+
+        Assert.Equal(0, ctx.Manager.ConnectedCount);
+        Assert.Equal(0, ctx.Governor.AcquiredConnections);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddIncomingPeerAsync_GlobalGovernorAtLimit_Rejects()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.MaxPeersPerTorrent = 100;
+
+        // Use a governor that denies slots
+        var denyGovernor = new DenyAllGovernor();
+        var manager = new PeerManager(ctx.Torrent, new FakeGeoIpService(), new RealPeerFactory(), TimeProvider.System, denyGovernor);
+
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        using var serverClient = await listener.AcceptTcpClientAsync();
+
+        byte[] handshake = BuildHandshake(ctx.Torrent.InfoFile.Info.Hash.Span, ctx.Torrent.Settings.PeerId);
+        await manager.AddIncomingPeerAsync(serverClient, handshake);
+
+        Assert.Equal(0, manager.ConnectedCount);
+
+        await manager.StopAsync();
+        await ctx.Torrent.DisposeAsync();
+        try { if (Directory.Exists(ctx.Path)) Directory.Delete(ctx.Path, true); } catch { }
+    }
+
+    private static void SetPrivateProperty(object target, string propertyName, object value)
+    {
+        var prop = target.GetType().GetProperty(propertyName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+        if (prop?.SetMethod == null) throw new InvalidOperationException($"Property '{propertyName}' not settable on {target.GetType().Name}");
+        prop.SetValue(target, value);
+    }
+
+    private sealed class DenyAllGovernor : IConnectionGovernor
+    {
+        public int ActiveConnections => 0;
+        public int PendingConnections => 0;
+        public bool TryAcquireConnectionSlot() => false;
+        public bool TryAcquirePendingSlot() => false;
+        public void ReleaseConnectionSlot() { }
+        public void ReleasePendingSlot() { }
+    }
+
     private static PeerManagerContext CreateContext()
     {
         var metadata = new TorrentFileMetadata();
