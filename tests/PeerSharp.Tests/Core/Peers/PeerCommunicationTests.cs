@@ -687,6 +687,83 @@ public class PeerCommunicationTests
         }
     }
 
+    [Fact]
+    public async Task SendHaveNoneAsync_FastExtensionPeer_ReturnsTrueAndEnqueuesMessage()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
+        SetPrivateField(peer, "_connected", 1);
+
+        bool result = await peer.SendHaveNoneAsync();
+
+        Assert.True(result);
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        Assert.True(queue.TryDequeue(out var msg));
+        Assert.Equal(MessageId.HaveNone, msg!.Id);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task SendHaveNoneAsync_NonFastPeer_ReturnsFalseNoMessage()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        SetPrivateField(peer, "_connected", 1);
+        // RemoteSupportsFastExtension is false by default
+
+        bool result = await peer.SendHaveNoneAsync();
+
+        Assert.False(result);
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        Assert.False(queue.TryDequeue(out _));
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task SendPortAsync_WhenConnected_EnqueuesPortMessage()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        SetPrivateField(peer, "_connected", 1);
+
+        await peer.SendPortAsync(6881);
+
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        Assert.True(queue.TryDequeue(out var msg));
+        Assert.Equal(MessageId.Port, msg!.Id);
+        Assert.Equal((ushort)6881, msg.Port);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_WhenNotConnected_CompletesCleanly()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        var ex = await Record.ExceptionAsync(() => peer.DisposeAsync().AsTask());
+
+        Assert.Null(ex);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
     private sealed class TestPeerListener : IPeerListener
     {
         public Task HandshakeFinishedAsync(IPeerCommunication peer) => Task.CompletedTask;

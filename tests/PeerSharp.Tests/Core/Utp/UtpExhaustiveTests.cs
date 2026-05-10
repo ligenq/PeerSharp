@@ -435,11 +435,7 @@ public class UtpExhaustiveTests
         // 60 seconds inactivity timeout
         _time.Advance(TimeSpan.FromSeconds(61));
 
-        // Check state
-        var stateField = typeof(UtpStream).GetField("_state", BindingFlags.NonPublic | BindingFlags.Instance);
-        var state = stateField!.GetValue(stream);
-
-        Assert.Equal("Closed", state!.ToString());
+        Assert.Equal(UtpState.Closed, stream.State);
     }
 
     [Fact]
@@ -502,9 +498,7 @@ public class UtpExhaustiveTests
             nextTimeoutField.SetValue(stream, _time.GetUtcNow().AddMilliseconds(-1));
         }
 
-        var stateField = typeof(UtpStream).GetField("_state", BindingFlags.NonPublic | BindingFlags.Instance);
-        var state = stateField!.GetValue(stream);
-        Assert.Equal("Closed", state!.ToString());
+        Assert.Equal(UtpState.Closed, stream.State);
     }
 
     [Fact(Timeout = 30000)]
@@ -571,6 +565,192 @@ public class UtpExhaustiveTests
 
 
 
+    [Fact(Timeout = 10000)]
+    public async Task ConnectAsync_PreCancelledToken_ThrowsOperationCancelled()
+    {
+        var stream = _manager.CreateStream(_remoteParams);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.ConnectAsync(cts.Token));
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task ConnectAsync_CancelledDuringHandshake_ThrowsOperationCancelled()
+    {
+        var stream = _manager.CreateStream(_remoteParams);
+        using var cts = new CancellationTokenSource();
+
+        var connectTask = stream.ConnectAsync(cts.Token);
+        // SYN is sent but no SYN-ACK comes; cancel instead
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => connectTask);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task DisposeAsync_WhenConnected_CleansUpResources()
+    {
+        var stream = await ConnectStream();
+
+        await stream.DisposeAsync();
+
+        await Assert.ThrowsAnyAsync<Exception>(() => stream.WriteAsync(new byte[1]).AsTask());
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task CheckTimeout_ConnectedIdle_SendsKeepAlive()
+    {
+        var stream = await ConnectStream();
+
+        // Move last-send timestamp 30s into the past so the keep-alive threshold is met.
+        // _nextTimeout is already t_0+1000ms (set during handshake), so now=t_0 < _nextTimeout:
+        // CheckTimeout() goes to the else-if(Connected) branch, not the packet-timeout branch.
+        var lastSendField = typeof(UtpStream).GetField("_lastSendTime", BindingFlags.NonPublic | BindingFlags.Instance);
+        lastSendField!.SetValue(stream, _time.GetUtcNow().AddSeconds(-30));
+
+        _listener.SentPackets.Clear();
+        stream.CheckTimeout(); // call directly; (now - _lastSendTime) = 30s > 29s threshold
+
+        Assert.True(_listener.SentPackets.TryDequeue(out var keepAlive));
+        var header = ParseHeader(keepAlive.Data);
+        Assert.Equal(2, header.Type); // ST_STATE
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task CheckTimeout_SynSendMaxRetries_ClosesStreamWithTimeout()
+    {
+        var stream = _manager.CreateStream(_remoteParams);
+
+        // Set up SynSend state via reflection WITHOUT calling ConnectAsync, so _sentPackets stays
+        // empty. This lets CheckTimeout enter the SynSend-specific branch (not the generic resend branch).
+        var stateField = typeof(UtpStream).GetField("_state", BindingFlags.NonPublic | BindingFlags.Instance);
+        var connectTcsField = typeof(UtpStream).GetField("_connectTcs", BindingFlags.NonPublic | BindingFlags.Instance);
+        var nextTimeoutField = typeof(UtpStream).GetField("_nextTimeout", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        stateField!.SetValue(stream, UtpState.SynSend);
+        connectTcsField!.SetValue(stream, tcs);
+        nextTimeoutField!.SetValue(stream, _time.GetUtcNow().AddMilliseconds(-1));
+
+        // MaxSynRetries = 2; calls 1 and 2 increment _timeoutCount, call 3 triggers close
+        for (int i = 0; i < 3; i++)
+        {
+            stream.CheckTimeout();
+            nextTimeoutField.SetValue(stream, _time.GetUtcNow().AddMilliseconds(-1));
+        }
+
+        Assert.Equal(UtpState.Closed, stream.State);
+        await Assert.ThrowsAnyAsync<Exception>(() => tcs.Task);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task SackAck_SelectivelyAcknowledgesOutOfOrderPackets()
+    {
+        var stream = await ConnectStream();
+
+        // Widen the window so all three sends go out immediately
+        var cwndField = typeof(UtpStream).GetField("_cwnd", BindingFlags.NonPublic | BindingFlags.Instance);
+        cwndField!.SetValue(stream, 100_000.0);
+
+        byte[] payload = new byte[100];
+        await stream.WriteAsync(payload);
+        await stream.WriteAsync(payload);
+        await stream.WriteAsync(payload);
+
+        Assert.True(_listener.SentPackets.TryDequeue(out var pkt1));
+        Assert.True(_listener.SentPackets.TryDequeue(out var pkt2));
+        Assert.True(_listener.SentPackets.TryDequeue(out var pkt3));
+        _listener.SentPackets.Clear();
+
+        var h1 = ParseHeader(pkt1.Data);
+
+        // SACK ACK: cumulative ack = seq1, SACK bit 0 = seq1+2 = seq3
+        // bit 0 in the bitmask represents ackNr+2 per BEP-29
+        var sackPacket = CreateSackPacket(2, GetRecvId(stream), 1, h1.SeqNr, sackBitmask: 0x01);
+        _listener.SimulateReceive(sackPacket, _remoteParams);
+
+        // seq1 removed by cumulative ACK; seq3 removed by SACK; seq2 still in flight
+        Assert.Equal(1, stream.SentPacketsCount);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task MultipleOutOfOrder_AllDeliveredInSequence()
+    {
+        var stream = await ConnectStream();
+        ushort startSeq = GetNextSeq(stream);
+        ushort connId = GetRecvId(stream);
+        ushort ackNr = GetLastSentSeq(stream);
+
+        // Deliver seq+3, seq+4, seq+2 before seq+1
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 3), ackNr, new byte[] { 3 }), _remoteParams);
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 4), ackNr, new byte[] { 4 }), _remoteParams);
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 2), ackNr, new byte[] { 2 }), _remoteParams);
+
+        byte[] buffer = new byte[10];
+        var readTask = stream.ReadAsync(buffer).AsTask();
+        await Task.Delay(50);
+        Assert.False(readTask.IsCompleted); // still waiting for seq+1
+
+        // Fill the gap — should flush the entire reorder buffer
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 1), ackNr, new byte[] { 1 }), _remoteParams);
+
+        int total = await readTask.WaitAsync(TimeSpan.FromSeconds(5));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        while (total < 4)
+        {
+            int r = await stream.ReadAsync(buffer.AsMemory(total, 4 - total), cts.Token);
+            if (r == 0) break;
+            total += r;
+        }
+
+        Assert.Equal(4, total);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, buffer[..4]);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task Dispose_WhileReorderBufferHasPendingPackets_DoesNotThrow()
+    {
+        var stream = await ConnectStream();
+        ushort startSeq = GetNextSeq(stream);
+        ushort connId = GetRecvId(stream);
+        ushort ackNr = GetLastSentSeq(stream);
+
+        // Put seq+2 in the reorder buffer (seq+1 is still missing)
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 2), ackNr, new byte[] { 2 }), _remoteParams);
+
+        var ex = await Record.ExceptionAsync(() => stream.DisposeAsync().AsTask());
+        Assert.Null(ex);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task UpdateRtt_MeasuredFromAck_UpdatesPacketTimeout()
+    {
+        var stream = await ConnectStream();
+
+        var sentPacketsField = typeof(UtpStream).GetField("_sentPackets", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        byte[] data = new byte[100];
+        await stream.WriteAsync(data);
+        Assert.True(_listener.SentPackets.TryDequeue(out var pkt));
+        var h = ParseHeader(pkt.Data);
+
+        // Backdate SendTime on the in-flight packet so (now - SendTime) = 100ms > 0.
+        // This gives a valid RTT sample when the ACK is processed without needing to advance fake time.
+        var sentPktsDict = sentPacketsField!.GetValue(stream)!;
+        var values = (System.Collections.IEnumerable)sentPktsDict.GetType().GetProperty("Values")!.GetValue(sentPktsDict)!;
+        foreach (var sp in values)
+        {
+            sp.GetType().GetProperty("SendTime")!.SetValue(sp, _time.GetUtcNow().AddMilliseconds(-100));
+            break;
+        }
+
+        byte[] ack = CreatePacket(2, 0, GetRecvId(stream), 1, h.SeqNr);
+        _listener.SimulateReceive(ack, _remoteParams);
+
+        Assert.True(stream.Rtt > 0, $"Expected Rtt > 0 after RTT sample, got {stream.Rtt}");
+    }
+
     #endregion
 
     #region Helpers
@@ -591,30 +771,13 @@ public class UtpExhaustiveTests
         return stream;
     }
 
-    private static ushort GetNextSeq(UtpStream stream)
-    {
-        var f = typeof(UtpStream).GetField("_ackNr", BindingFlags.NonPublic | BindingFlags.Instance);
-        return (ushort)f!.GetValue(stream)!;
-    }
+    private static ushort GetNextSeq(UtpStream stream) => stream.AckNr;
 
-    private static ushort GetRecvId(UtpStream stream)
-    {
-        var p = typeof(UtpStream).GetProperty("ConnectionIdRecv", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-        return (ushort)p!.GetValue(stream)!;
-    }
+    private static ushort GetRecvId(UtpStream stream) => stream.ConnectionIdRecv;
 
-    private static ushort GetSendId(UtpStream stream)
-    {
-        var p = typeof(UtpStream).GetProperty("ConnectionIdSend", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-        return (ushort)p!.GetValue(stream)!;
-    }
+    private static ushort GetSendId(UtpStream stream) => stream.ConnectionIdSend;
 
-    private static ushort GetLastSentSeq(UtpStream stream)
-    {
-        var f = typeof(UtpStream).GetField("_seqNr", BindingFlags.NonPublic | BindingFlags.Instance);
-        ushort nextSeq = (ushort)f!.GetValue(stream)!;
-        return (ushort)(nextSeq - 1);
-    }
+    private static ushort GetLastSentSeq(UtpStream stream) => (ushort)(stream.SeqNr - 1);
 
     private static (byte Type, byte Version, byte Extension, ushort ConnectionId, uint Timestamp, uint TimestampDiff, uint Wnd, ushort SeqNr, ushort AckNr) ParseHeader(byte[] data)
     {
@@ -685,6 +848,24 @@ public class UtpExhaustiveTests
         buffer[21] = 8; // Length
         Array.Copy(extensionBits, 0, buffer, 22, 8);
 
+        return buffer;
+    }
+
+    private static byte[] CreateSackPacket(byte type, ushort connId, ushort seq, ushort ack, byte sackBitmask)
+    {
+        byte[] buffer = new byte[26]; // 20-byte header + 2-byte ext header + 4-byte bitmask
+        buffer[0] = (byte)((type << 4) | 1);
+        buffer[1] = 1; // Extension type 1 = SACK
+        UtpManager.WriteUInt16BigEndian(buffer, 2, connId);
+        UtpManager.WriteUInt32BigEndian(buffer, 4, 0);
+        UtpManager.WriteUInt32BigEndian(buffer, 8, 0);
+        UtpManager.WriteUInt32BigEndian(buffer, 12, 65535);
+        UtpManager.WriteUInt16BigEndian(buffer, 16, seq);
+        UtpManager.WriteUInt16BigEndian(buffer, 18, ack);
+        buffer[20] = 0; // next extension = none
+        buffer[21] = 4; // bitmask length = 4 bytes
+        buffer[22] = sackBitmask;
+        // bytes 23-25 = 0
         return buffer;
     }
 
