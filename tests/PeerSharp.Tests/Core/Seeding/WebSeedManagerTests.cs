@@ -212,6 +212,99 @@ public class WebSeedManagerTests
         Assert.Equal(2, stats.AvailableSources);
         Assert.Equal(0, stats.ActiveDownloads);
     }
+
+    [Fact]
+    public async Task DownloadSingleFilePieceAsync_416_ReturnsNull()
+    {
+        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        manager.SetTestClient(_mockHttp);
+        _mockHttp.StatusCode = HttpStatusCode.RequestedRangeNotSatisfiable;
+
+        var source = new WebSeedManager.WebSeedSource("http://seed.com", false);
+        var data = await manager.DownloadSingleFilePieceAsync(source, 0, 16384, CancellationToken.None);
+
+        Assert.Null(data);
+    }
+
+    [Fact]
+    public async Task DownloadSingleFilePieceAsync_UnexpectedStatus_ReturnsNull()
+    {
+        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        manager.SetTestClient(_mockHttp);
+        _mockHttp.StatusCode = HttpStatusCode.ServiceUnavailable;
+
+        var source = new WebSeedManager.WebSeedSource("http://seed.com", false);
+        var data = await manager.DownloadSingleFilePieceAsync(source, 0, 16384, CancellationToken.None);
+
+        Assert.Null(data);
+    }
+
+    [Fact]
+    public async Task DownloadMultiFilePieceAsync_SkipsPaddingFile_ZeroFillsBytes()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Name = "multi";
+        metadata.Info.PieceSize = 10;
+        metadata.Info.FullSize = 10;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "a.bin", Size = 3, Offset = 0 });
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = ".pad/3", Size = 3, Offset = 3, IsPadding = true });
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "b.bin", Size = 4, Offset = 6 });
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        var aData = new byte[] { 1, 2, 3 };
+        var bData = new byte[] { 101, 102, 103, 104 };
+
+        var handler = new MockHttpClient
+        {
+            Handler = request =>
+            {
+                var url = request.RequestUri?.ToString() ?? string.Empty;
+                var range = request.Headers.Range?.Ranges.First();
+                long start = range?.From ?? 0;
+                long end = range?.To ?? -1;
+                byte[] src = url.Contains("a.bin", StringComparison.OrdinalIgnoreCase) ? aData : bData;
+                int length = (int)(end - start + 1);
+                return new HttpResponseMessage(HttpStatusCode.PartialContent)
+                {
+                    Content = new ByteArrayContent(src.AsSpan((int)start, length).ToArray())
+                };
+            }
+        };
+
+        var manager = new WebSeedManager(torrent, new[] { "http://seed.com" }, _timeProvider);
+        manager.SetTestClient(handler);
+
+        var source = new WebSeedManager.WebSeedSource("http://seed.com", false);
+        var data = await manager.DownloadMultiFilePieceAsync(source, 0, 0, 10, CancellationToken.None);
+
+        Assert.NotNull(data);
+        Assert.Equal(10, data.Length);
+        Assert.Equal(new byte[] { 1, 2, 3, 0, 0, 0, 101, 102, 103, 104 }, data);
+        // Only real files get HTTP requests — padding is zero-filled without a request
+        Assert.Equal(2, handler.SentRequests.Count);
+        Assert.DoesNotContain(".pad", handler.SentRequests.Select(r => r.RequestUri?.ToString() ?? ""));
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task DisposeAsync_CompletesSuccessfully()
+    {
+        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        manager.Start();
+
+        await manager.DisposeAsync();
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task DisposeAsync_IsIdempotent()
+    {
+        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        manager.Start();
+
+        await manager.DisposeAsync();
+        await manager.DisposeAsync(); // Second call must not throw
+    }
 }
 
 

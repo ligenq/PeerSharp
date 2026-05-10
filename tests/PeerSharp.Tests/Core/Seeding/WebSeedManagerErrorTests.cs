@@ -158,4 +158,44 @@ public class WebSeedManagerErrorTests
         timeProvider.Advance(TimeSpan.FromSeconds(30));
         await manager.StopAsync();
     }
+
+    [Fact(Timeout = 30000)]
+    public async Task WorkerLoopAsync_FallsBackToSecondSource_WhenFirstExhausted()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var torrent = CreateTorrentWithPieces();
+        // Two seeds — first will be exhausted after MaxRetries (3) failures
+        var manager = new WebSeedManager(torrent, new[] { "http://seed1.com/file.bin", "http://seed2.com/file.bin" }, timeProvider);
+        var mockHttp = new MockHttpClient();
+        manager.SetTestClient(mockHttp);
+
+        // Queue enough failures for both seeds
+        for (int i = 0; i < 10; i++)
+        {
+            mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+
+        manager.Start();
+
+        // Wait until seed2 receives at least one request (means seed1 was exhausted)
+        var deadline = Environment.TickCount64 + 10000;
+        while (!mockHttp.RequestedUrls.Any(u => u.Contains("seed2.com")) && Environment.TickCount64 < deadline)
+        {
+            timeProvider.Advance(TimeSpan.FromSeconds(1));
+            await Task.Delay(20);
+        }
+        await Task.Delay(50);
+
+        var seed1Requests = mockHttp.RequestedUrls.Count(u => u.Contains("seed1.com"));
+        var seed2Requests = mockHttp.RequestedUrls.Count(u => u.Contains("seed2.com"));
+
+        // seed1 should have exactly MaxRetries (3) failures before becoming unavailable
+        Assert.Equal(3, seed1Requests);
+        // seed2 should have picked up at least one request after seed1 was exhausted
+        Assert.True(seed2Requests >= 1, $"Expected seed2 to get requests but got {seed2Requests}");
+
+        timeProvider.Advance(TimeSpan.FromSeconds(30));
+        await manager.StopAsync();
+        await torrent.DisposeAsync();
+    }
 }

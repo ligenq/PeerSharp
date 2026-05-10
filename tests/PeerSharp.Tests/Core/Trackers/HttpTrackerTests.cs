@@ -320,6 +320,127 @@ public class HttpTrackerTests
         Assert.Equal(1, CountOccurrences(_mockHttp.LastUrl, "info_hash="));
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task MultiScrapeAsync_EmptyList_DoesNotRaiseResult()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        await tracker.MultiScrapeAsync(Array.Empty<InfoHash>(), CancellationToken.None);
+
+        // Early-return branch — no callback should have been fired
+        Assert.Null(_callback.MultiScrapeResponse);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task MultiScrapeAsync_NonAnnounceUrl_DoesNotRaiseResult()
+    {
+        var tracker = new HttpTracker();
+        // URL without "announce" path segment → scrape URL cannot be derived
+        tracker.Init("http://tracker.com/peers", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var hash = new InfoHash(Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray());
+        await tracker.MultiScrapeAsync(new[] { hash }, CancellationToken.None);
+
+        Assert.Null(_callback.MultiScrapeResponse);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task MultiScrapeAsync_HttpError_RaisesFailure()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+        _mockHttp.Exception = new HttpRequestException("503 Service Unavailable");
+
+        var hash = new InfoHash(Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray());
+        await tracker.MultiScrapeAsync(new[] { hash }, CancellationToken.None);
+
+        Assert.False(_callback.Success);
+        Assert.NotNull(_callback.MultiScrapeResponse);
+        Assert.Empty(_callback.MultiScrapeResponse.Results);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task MultiScrapeAsync_PartialResponse_ReturnsOnlyAvailableStats()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var hashA = Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray();
+        var hashB = Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 50)).ToArray();
+        var hashC = Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(100 + i)).ToArray();
+
+        // Tracker only replies for hashA and hashB, omits hashC
+        var files = new BDict();
+        files.Dict[Encoding.Latin1.GetString(hashA)] = CreateScrapeStats(5, 2, 10);
+        files.Dict[Encoding.Latin1.GetString(hashB)] = CreateScrapeStats(3, 1, 7);
+        var root = new BDict();
+        root.Dict["files"] = files;
+        _mockHttp.ResponseBytes = BencodeWriter.Write(root);
+
+        await tracker.MultiScrapeAsync(
+            new[] { new InfoHash(hashA), new InfoHash(hashB), new InfoHash(hashC) },
+            CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.NotNull(_callback.MultiScrapeResponse);
+        Assert.Equal(2, _callback.MultiScrapeResponse.Results.Count);
+        Assert.True(_callback.MultiScrapeResponse.Results.ContainsKey(Convert.ToHexString(hashA)));
+        Assert.True(_callback.MultiScrapeResponse.Results.ContainsKey(Convert.ToHexString(hashB)));
+        Assert.False(_callback.MultiScrapeResponse.Results.ContainsKey(Convert.ToHexString(hashC)));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task MultiScrapeAsync_UnknownHashInResponse_IncludedInResults()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var requested = Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray();
+        var extra = Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(200 - i)).ToArray();
+
+        // Tracker returns stats for the requested hash plus one unrequested hash
+        var files = new BDict();
+        files.Dict[Encoding.Latin1.GetString(requested)] = CreateScrapeStats(8, 4, 20);
+        files.Dict[Encoding.Latin1.GetString(extra)] = CreateScrapeStats(1, 0, 2);
+        var root = new BDict();
+        root.Dict["files"] = files;
+        _mockHttp.ResponseBytes = BencodeWriter.Write(root);
+
+        await tracker.MultiScrapeAsync(new[] { new InfoHash(requested) }, CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.NotNull(_callback.MultiScrapeResponse);
+        // ParseMultiScrapeResponse passes through everything in the files dict
+        Assert.Equal(2, _callback.MultiScrapeResponse.Results.Count);
+        Assert.True(_callback.MultiScrapeResponse.Results.ContainsKey(Convert.ToHexString(requested)));
+        Assert.True(_callback.MultiScrapeResponse.Results.ContainsKey(Convert.ToHexString(extra)));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task MultiScrapeAsync_FailureReasonResponse_RaisesFailure()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var root = new BDict();
+        root.Dict["failure reason"] = new BString(Encoding.UTF8.GetBytes("rate limit exceeded"));
+        _mockHttp.ResponseBytes = BencodeWriter.Write(root);
+
+        var hash = new InfoHash(Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray());
+        await tracker.MultiScrapeAsync(new[] { hash }, CancellationToken.None);
+
+        Assert.False(_callback.Success);
+        Assert.NotNull(_callback.MultiScrapeResponse);
+        Assert.Empty(_callback.MultiScrapeResponse.Results);
+    }
+
     private static BDict CreateScrapeStats(long complete, long incomplete, long downloaded)
     {
         var stats = new BDict();
