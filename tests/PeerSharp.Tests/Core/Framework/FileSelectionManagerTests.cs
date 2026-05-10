@@ -77,6 +77,91 @@ public class FileSelectionManagerTests
         Assert.Equal(1.0f / 3.0f, _manager.CalculateSelectionProgress());
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task SetAllFilesPriorityAsync_SetsAllFiles_AndNotifiesObserver()
+    {
+        var pieces = new PiecesProgress(3);
+        _manager.Initialize(null, pieces);
+
+        var observer = new MockObserver();
+        _manager.SetObserver(observer);
+
+        await _manager.SetAllFilesPriorityAsync(Priority.Normal);
+
+        var selections = _manager.GetAllFileSelections();
+        Assert.All(selections, s =>
+        {
+            Assert.Equal(Priority.Normal, s.Priority);
+            Assert.True(s.Selected);
+        });
+        Assert.True(observer.Changed);
+        Assert.Equal(1, observer.CallCount);
+        Assert.NotNull(observer.LastSelection);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SetAllFilesPriorityAsync_DoNotDownload_DeselectsAllFiles()
+    {
+        var pieces = new PiecesProgress(3);
+        _manager.Initialize(null, pieces);
+
+        var observer = new MockObserver();
+        _manager.SetObserver(observer);
+
+        await _manager.SetAllFilesPriorityAsync(Priority.DoNotDownload);
+
+        var selections = _manager.GetAllFileSelections();
+        Assert.All(selections, s =>
+        {
+            Assert.Equal(Priority.DoNotDownload, s.Priority);
+            Assert.False(s.Selected);
+        });
+        Assert.Equal(0, _manager.TotalSelectedPieces);
+        Assert.True(observer.Changed);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SetAllFilesPriorityAsync_SkipsPaddingFiles()
+    {
+        var meta = new TorrentFileMetadata();
+        meta.Info.PieceSize = 100;
+        meta.Info.FullSize = 300;
+        meta.Info.Files.Add(new Internals.TorrentFileEntry { Path = "f1", Size = 100, Offset = 0 });
+        meta.Info.Files.Add(new Internals.TorrentFileEntry { Path = ".pad/50", Size = 50, Offset = 100, IsPadding = true });
+        meta.Info.Files.Add(new Internals.TorrentFileEntry { Path = "f2", Size = 150, Offset = 150 });
+        meta.Info.Pieces.Add(new byte[20]);
+        meta.Info.Pieces.Add(new byte[20]);
+        meta.Info.Pieces.Add(new byte[20]);
+
+        var localManager = new FileSelectionManager(meta);
+        localManager.Initialize(null, new PiecesProgress(3));
+
+        await localManager.SetAllFilesPriorityAsync(Priority.Normal);
+
+        var selections = localManager.GetAllFileSelections();
+        // File index 0 (f1) and 2 (f2) should be Normal/selected
+        Assert.Equal(Priority.Normal, selections[0].Priority);
+        Assert.True(selections[0].Selected);
+        // File index 1 is padding — must stay DoNotDownload/deselected
+        Assert.Equal(Priority.DoNotDownload, selections[1].Priority);
+        Assert.False(selections[1].Selected);
+        Assert.Equal(Priority.Normal, selections[2].Priority);
+        Assert.True(selections[2].Selected);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SetAllFilesPriorityAsync_WithoutObserver_DoesNotThrow()
+    {
+        var pieces = new PiecesProgress(3);
+        _manager.Initialize(null, pieces);
+
+        // No observer set — should not throw
+        await _manager.SetAllFilesPriorityAsync(Priority.High);
+
+        var selections = _manager.GetAllFileSelections();
+        Assert.All(selections, s => Assert.Equal(Priority.High, s.Priority));
+    }
+
     private class MockObserver : IFileSelectionObserver
     {
         public bool Changed { get; private set; }

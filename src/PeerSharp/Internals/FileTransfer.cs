@@ -517,13 +517,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         _logger.LogDebug("Request rejected by {RemoteEndPoint}: {PieceIndex}:{BlockOffset}", peer.RemoteEndPoint, msg.PieceIndex, msg.BlockOffset);
 
-        if (_requestTracker.TryGetPeerRequests(peer, out var requests))
+        var key = (msg.PieceIndex, msg.BlockOffset);
+        if (_requestTracker.TryRemovePeerRequest(peer, key, out var r))
         {
-            var key = (msg.PieceIndex, msg.BlockOffset);
-            if (requests.TryRemove(key, out var r))
-            {
-                RemoveBlockRequest(r.PieceIndex, r.Offset, peer);
-            }
+            RemoveBlockRequest(r.PieceIndex, r.Offset, peer);
         }
 
         // Immediately try to re-request rejected blocks from other peers

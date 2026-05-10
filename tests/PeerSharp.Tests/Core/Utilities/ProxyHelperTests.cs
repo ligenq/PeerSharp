@@ -193,6 +193,53 @@ public class ProxyHelperTests
         controlClient.Dispose();
     }
 
+    [Fact]
+    public async Task ConnectSocks5UdpAsync_ThrowsOnErrorResponseCode()
+    {
+        using var server = new Socks5TestServer(Socks5Mode.UdpAssociateErrorCode);
+        var ex = await Assert.ThrowsAsync<IOException>(() =>
+            ProxyHelper.ConnectSocks5UdpAsync(
+                server.Host,
+                server.Port,
+                null,
+                null,
+                CancellationToken.None));
+
+        Assert.Contains("error: 2", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ConnectSocks5UdpAsync_IPv6RelayAddress_ParsedCorrectly()
+    {
+        using var server = new Socks5TestServer(Socks5Mode.UdpAssociateIPv6);
+        var (udpClient, udpEndpoint, controlClient) = await ProxyHelper.ConnectSocks5UdpAsync(
+            server.Host,
+            server.Port,
+            null,
+            null,
+            CancellationToken.None);
+
+        Assert.Equal(AddressFamily.InterNetworkV6, udpEndpoint.AddressFamily);
+        Assert.Equal(IPAddress.IPv6Loopback, udpEndpoint.Address);
+        Assert.Equal(server.UdpPort, udpEndpoint.Port);
+
+        udpClient.Dispose();
+        controlClient.Dispose();
+    }
+
+    [Fact]
+    public async Task ConnectSocks5UdpAsync_ThrowsWhenConnectionClosedMidAssociation()
+    {
+        using var server = new Socks5TestServer(Socks5Mode.UdpAssociateConnectionReset);
+        await Assert.ThrowsAsync<IOException>(() =>
+            ProxyHelper.ConnectSocks5UdpAsync(
+                server.Host,
+                server.Port,
+                null,
+                null,
+                CancellationToken.None));
+    }
+
     private sealed class HttpProxyTestServer : IDisposable
     {
         private readonly TcpListener _listener;
@@ -298,7 +345,7 @@ public class ProxyHelperTests
             _listener.Start();
             Host = "127.0.0.1";
             Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-            if (mode == Socks5Mode.UdpAssociate)
+            if (mode == Socks5Mode.UdpAssociate || mode == Socks5Mode.UdpAssociateIPv6)
             {
                 _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
                 UdpPort = ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
@@ -393,6 +440,28 @@ public class ProxyHelperTests
                     };
                     await stream.WriteAsync(response, _cts.Token).ConfigureAwait(false);
                 }
+
+                if (_mode == Socks5Mode.UdpAssociateErrorCode)
+                {
+                    // REP=0x02: connection not allowed by ruleset
+                    byte[] response = { 0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+                    await stream.WriteAsync(response, _cts.Token).ConfigureAwait(false);
+                }
+
+                if (_mode == Socks5Mode.UdpAssociateIPv6)
+                {
+                    // IPv6 relay address ::1 (loopback) — ATYP=0x04
+                    var addr6 = IPAddress.IPv6Loopback.GetAddressBytes();
+                    int port = UdpPort;
+                    var response = new byte[4 + 16 + 2];
+                    response[0] = 0x05; response[1] = 0x00; response[2] = 0x00; response[3] = 0x04;
+                    addr6.CopyTo(response, 4);
+                    response[20] = (byte)(port >> 8);
+                    response[21] = (byte)(port & 0xFF);
+                    await stream.WriteAsync(response, _cts.Token).ConfigureAwait(false);
+                }
+
+                // UdpAssociateConnectionReset: fall through — stream disposal signals EOF to client
             }
         }
 
@@ -417,7 +486,10 @@ public class ProxyHelperTests
     {
         NoAuthConnect,
         RequireAuth,
-        UdpAssociate
+        UdpAssociate,
+        UdpAssociateErrorCode,
+        UdpAssociateIPv6,
+        UdpAssociateConnectionReset
     }
 }
 
