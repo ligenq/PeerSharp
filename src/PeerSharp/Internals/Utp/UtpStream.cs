@@ -442,58 +442,9 @@ internal class UtpStream : Stream
         throw new NotSupportedException("Synchronous Write is not supported. Use WriteAsync instead.");
     }
 
-    public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
-        // Validate stream state before writing
-        lock (_lock)
-        {
-            if (_state != UtpState.Connected)
-            {
-                throw new InvalidOperationException($"Cannot write: stream is in state {_state}, expected Connected");
-            }
-        }
-
-        int sent = 0;
-        while (sent < count)
-        {
-            // Wait for window space - check under lock to avoid race conditions
-            bool canSend;
-            lock (_lock)
-            {
-                // Re-check state in case connection was closed while waiting
-                if (_state != UtpState.Connected)
-                {
-                    throw new IOException("Connection closed while writing");
-                }
-                double effectiveWindow = Math.Min(_wndSize, _cwnd);
-                canSend = _sentBytesUnacked < effectiveWindow;
-                if (!canSend)
-                {
-                    _lastMaxedOutWindow = _timeProvider.GetUtcNow();
-                }
-            }
-
-            while (!canSend)
-            {
-                await _writeSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
-                lock (_lock)
-                {
-                    double effectiveWindow = Math.Min(_wndSize, _cwnd);
-                    canSend = _sentBytesUnacked < effectiveWindow;
-                    if (!canSend)
-                    {
-                        _lastMaxedOutWindow = _timeProvider.GetUtcNow();
-                    }
-                }
-            }
-
-            lock (_lock)
-            {
-                int chunk = Math.Min(count - sent, GetPayloadMss(0));
-                SendPacket(MessageType.ST_DATA, buffer.AsMemory(offset + sent, chunk));
-                sent += chunk;
-            }
-        }
+        return WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     }
 
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
@@ -532,6 +483,10 @@ internal class UtpStream : Stream
                 await _writeSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
                 lock (_lock)
                 {
+                    if (_state != UtpState.Connected)
+                    {
+                        throw new IOException("Connection closed while writing");
+                    }
                     double effectiveWindow = Math.Min(_wndSize, _cwnd);
                     canSend = _sentBytesUnacked < effectiveWindow;
                     if (!canSend)
@@ -790,6 +745,19 @@ internal class UtpStream : Stream
 
             CheckIfClosed();
             _connectTcs?.TrySetCanceled();
+
+            // Wake up any pending writes so they can observe the closed state
+            try
+            {
+                if (_writeSemaphore.CurrentCount == 0)
+                {
+                    _writeSemaphore.Release();
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // Expected if the semaphore is already disposed during shutdown
+            }
         }
     }
 

@@ -136,7 +136,7 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
         var payload = CreateAnnounceBasePayload();
         payload["to_peer_id"] = toPeerId;
         payload["offer_id"] = offerId;
-        
+
         // signalData should be either "answer" or "candidate"
         foreach (var property in signalData)
         {
@@ -185,7 +185,7 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
                 if (socket == null) break;
 
                 string message = await socket.ReceiveTextAsync(cancellationToken).ConfigureAwait(false);
-                
+
                 lock (_runtime.SyncRoot)
                 {
                     if (_runtime.Generation != generation || !ReferenceEquals(_runtime.Socket, socket)) return;
@@ -225,7 +225,7 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await _cts.CancelAsync().ConfigureAwait(false);
-        
+
         IWebSocketConnection? socket;
         Task? receiveTask;
         lock (_runtime.SyncRoot)

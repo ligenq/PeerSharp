@@ -14,6 +14,7 @@ public class TrackerManagerTests
         public int DeinitCount { get; private set; }
         public TrackerEvent LastEvent { get; private set; }
         private readonly SemaphoreSlim _announceSemaphore = new(0);
+        private readonly SemaphoreSlim _deinitSemaphore = new(0);
 
         public void Init(string url, Torrent torrent, ITrackerCallback callback)
         {
@@ -24,11 +25,17 @@ public class TrackerManagerTests
         public void Deinit()
         {
             DeinitCount++;
+            _deinitSemaphore.Release();
         }
 
         public async Task WaitAnnounceAsync(TimeSpan timeout)
         {
             await _announceSemaphore.WaitAsync(timeout);
+        }
+
+        public async Task WaitDeinitAsync(TimeSpan timeout)
+        {
+            await _deinitSemaphore.WaitAsync(timeout);
         }
 
         public Task AnnounceAsync(TrackerEvent evt = TrackerEvent.None, CancellationToken ct = default)
@@ -103,7 +110,7 @@ public class TrackerManagerTests
         var tracker = _factory.Trackers[url];
 
         Assert.True(manager.RemoveTracker(url));
-        await Task.Delay(50);
+        await tracker.WaitDeinitAsync(TimeSpan.FromSeconds(1));
 
         Assert.Equal(0, tracker.AnnounceCount);
         Assert.Equal(1, tracker.DeinitCount);
@@ -123,6 +130,7 @@ public class TrackerManagerTests
 
         Assert.True(manager.RemoveTracker(url));
         await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+        await tracker.WaitDeinitAsync(TimeSpan.FromSeconds(1));
 
         Assert.Equal(2, tracker.AnnounceCount);
         Assert.Equal(TrackerEvent.Stopped, tracker.LastEvent);

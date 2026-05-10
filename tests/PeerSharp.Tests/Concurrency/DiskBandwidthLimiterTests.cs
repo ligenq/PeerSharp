@@ -64,4 +64,112 @@ public class DiskBandwidthLimiterTests
             bandwidth.DisposeAsync().AsTask().Wait();
         });
     }
+
+    [Fact]
+    public async Task RequestReadAsync_NoGlobalLimit_ReturnsFull()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var bandwidth = new BandwidthManager(10, timeProvider);
+        // No disk limits set — unlimited path
+        var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
+
+        int result = await limiter.RequestReadAsync(1000, CancellationToken.None);
+
+        Assert.Equal(1000, result);
+        await bandwidth.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task RequestWriteAsync_NoGlobalLimit_ReturnsFull()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var bandwidth = new BandwidthManager(10, timeProvider);
+        var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
+
+        int result = await limiter.RequestWriteAsync(500, CancellationToken.None);
+
+        Assert.Equal(500, result);
+        await bandwidth.DisposeAsync();
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task RequestReadAsync_WithGlobalLimit_QueuesUntilQuotaReplenished()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var bandwidth = new BandwidthManager(10, timeProvider);
+        bandwidth.SetGlobalDiskLimits(1_000_000, 0); // 1 MB/s read limit
+
+        var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
+
+        // Quota starts at 0, so the request should block
+        var task = limiter.RequestReadAsync(100, CancellationToken.None);
+        Assert.False(task.IsCompleted);
+
+        // Simulate 1 s of elapsed time → 1 MB of quota replenished
+        timeProvider.Advance(TimeSpan.FromSeconds(1));
+        bandwidth.Update(null);
+
+        int result = await task;
+        Assert.Equal(100, result);
+        await bandwidth.DisposeAsync();
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task RequestWriteAsync_WithGlobalLimit_QueuesUntilQuotaReplenished()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var bandwidth = new BandwidthManager(10, timeProvider);
+        bandwidth.SetGlobalDiskLimits(0, 1_000_000); // 1 MB/s write limit
+
+        var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
+
+        var task = limiter.RequestWriteAsync(100, CancellationToken.None);
+        Assert.False(task.IsCompleted);
+
+        timeProvider.Advance(TimeSpan.FromSeconds(1));
+        bandwidth.Update(null);
+
+        int result = await task;
+        Assert.Equal(100, result);
+        await bandwidth.DisposeAsync();
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task ReturnRead_WithGlobalLimit_DoesNotThrow()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var bandwidth = new BandwidthManager(10, timeProvider);
+        bandwidth.SetGlobalDiskLimits(1_000_000, 0);
+
+        var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
+
+        // Replenish so the request completes synchronously via fast path after update
+        timeProvider.Advance(TimeSpan.FromSeconds(1));
+        bandwidth.Update(null);
+
+        int granted = await limiter.RequestReadAsync(100, CancellationToken.None);
+        Assert.Equal(100, granted);
+
+        limiter.ReturnRead(granted); // should not throw
+        await bandwidth.DisposeAsync();
+    }
+
+    [Fact(Timeout = 5000)]
+    public async Task ReturnWrite_WithGlobalLimit_DoesNotThrow()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var bandwidth = new BandwidthManager(10, timeProvider);
+        bandwidth.SetGlobalDiskLimits(0, 1_000_000);
+
+        var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
+
+        timeProvider.Advance(TimeSpan.FromSeconds(1));
+        bandwidth.Update(null);
+
+        int granted = await limiter.RequestWriteAsync(100, CancellationToken.None);
+        Assert.Equal(100, granted);
+
+        limiter.ReturnWrite(granted); // should not throw
+        await bandwidth.DisposeAsync();
+    }
 }

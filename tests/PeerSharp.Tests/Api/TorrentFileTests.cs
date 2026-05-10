@@ -45,6 +45,27 @@ public class TorrentFileTests
         Assert.True(torrentA.Equals(torrentB));
         Assert.True(torrentA == torrentB);
     }
+
+    [Fact]
+    public void Load_FromPath_ParsesValidTorrent()
+    {
+        var data = Enumerable.Range(0, 1024).Select(i => (byte)i).ToArray();
+        var original = new TorrentFileBuilder().AddFile("a.bin", data).Build();
+
+        string tempPath = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllBytes(tempPath, original.RawData.ToArray());
+            var loaded = TorrentFile.Load(tempPath);
+
+            Assert.Equal(original.InfoHash, loaded.InfoHash);
+            Assert.Equal(original.Name, loaded.Name);
+        }
+        finally
+        {
+            File.Delete(tempPath);
+        }
+    }
 }
 
 

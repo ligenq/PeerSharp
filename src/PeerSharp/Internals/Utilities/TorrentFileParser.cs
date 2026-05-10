@@ -159,9 +159,14 @@ internal static class TorrentFileParser
                 continue;
             }
 
-            if (file.PiecesRoot?.Length != MerkleTree.HashSize)
+            if (file.PiecesRoot == null)
             {
-                throw new FormatException("BEP 52 non-empty files must have a 32-byte pieces root.");
+                throw new FormatException($"BEP 52 non-empty file '{file.Path}' is missing 'pieces root'.");
+            }
+
+            if (file.PiecesRoot.Length != MerkleTree.HashSize)
+            {
+                throw new FormatException($"BEP 52 non-empty file '{file.Path}' has invalid 'pieces root' length: {file.PiecesRoot.Length} (expected {MerkleTree.HashSize}).");
             }
 
             if (file.Size > metadata.Info.PieceSize)
@@ -203,7 +208,8 @@ internal static class TorrentFileParser
             if (kvp.Value is BDict nodeDict)
             {
                 // Check if this is a file (has empty string key with length) or directory
-                if (nodeDict.Get("") is BDict fileInfo)
+                var fileInfoNode = nodeDict.Get("");
+                if (fileInfoNode is BDict fileInfo)
                 {
                     // This is a file
                     long length = fileInfo.GetLong("length") ?? 0;
@@ -343,7 +349,9 @@ internal static class TorrentFileParser
             metadata.Info.FullSize = endOffset;
         }
 
-        if (metadata.Info.IsV1 || (metadata.Info.Version == TorrentVersion.Hybrid && metadata.Info.Files.Count == 0))
+        // Only parse V1 file structure if we haven't already populated the files from a V2 file tree.
+        // For Hybrid torrents, we prefer the V2 file tree as it contains piece-layer information.
+        if (metadata.Info.Files.Count == 0 && (metadata.Info.IsV1 || metadata.Info.Version == TorrentVersion.Hybrid))
         {
             // Parse V1 file structure
             if (info.Get("files") is BList files)

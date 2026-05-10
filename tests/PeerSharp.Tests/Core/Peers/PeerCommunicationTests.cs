@@ -424,6 +424,117 @@ public class PeerCommunicationTests
     }
 
     [Fact]
+    public async Task HandleHashRequestAsync_V2_RepliesWithHashes()
+    {
+        var metadata = CreateMetadataV2();
+        string path = CreateTempPath();
+
+        byte[] v2Root = metadata.Info.HashV2.Span.ToArray();
+        metadata.Info.Files[0].PiecesRoot = v2Root;
+        // Directly set PieceLayers to bypass TryAddV2Hashes logic for testing HandleHashRequestAsync
+        byte[] hash1 = new byte[32], hash2 = new byte[32];
+        metadata.Info.Files[0].PieceLayers = new List<byte[]> { hash1, hash2 };
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        int baseLayer = PeerSharp.Internals.Utilities.MerkleTree.GetPieceLayerDepth(metadata.Info.PieceSize);
+
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        SetPrivateProperty(peer, "RemoteSupportsV2", true);
+        SetPrivateField(peer, "_connected", 1);
+
+        var request = new PeerMessage(MessageId.HashRequest)
+        {
+            HashPiecesRoot = v2Root,
+            HashBaseLayer = baseLayer,
+            HashIndex = 0,
+            HashLength = 2,
+            HashProofLayers = 0
+        };
+
+        await InvokePrivate<Task>(peer, "HandleHashRequestAsync", request);
+
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        bool dequeued = queue.TryDequeue(out PeerMessage? reply);
+        Assert.True(dequeued);
+        Assert.NotNull(reply);
+
+        Assert.Equal(MessageId.Hashes, reply.Id);
+        Assert.Equal(v2Root, reply.HashPiecesRoot);
+        // Should contain the 2 hashes we set in PieceLayers
+        byte[] expectedHashes = new byte[64];
+        Assert.Equal(expectedHashes, reply.Data);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task HandleHashRequestAsync_InvalidRoot_RepliesWithHashReject()
+    {
+        var metadata = CreateMetadataV2();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        SetPrivateProperty(peer, "RemoteSupportsV2", true);
+        SetPrivateField(peer, "_connected", 1);
+
+        var request = new PeerMessage(MessageId.HashRequest)
+        {
+            HashPiecesRoot = new byte[32], // invalid
+            HashBaseLayer = 0,
+            HashIndex = 0,
+            HashLength = 2,
+            HashProofLayers = 0
+        };
+
+        await InvokePrivate<Task>(peer, "HandleHashRequestAsync", request);
+
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        bool dequeued = queue.TryDequeue(out PeerMessage? reply);
+        Assert.True(dequeued);
+        Assert.NotNull(reply);
+
+        Assert.Equal(MessageId.HashReject, reply.Id);
+        Assert.Equal(request.HashPiecesRoot, reply.HashPiecesRoot);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task SendMessageMethods_EnqueueCorrectMessages()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
+        SetPrivateProperty(peer, "RemoteSupportsV2", true);
+        SetPrivateField(peer, "_connected", 1); // Set connected to 1 to allow messages
+
+        await peer.SendAllowedFastAsync(42);
+        await peer.SendSuggestAsync(99);
+        await peer.SendRejectAsync(new BlockRequest { PieceIndex = 1, Offset = 16384, Length = 8192 });
+        await peer.SendHashRequestAsync(new byte[32], 4, 8, 16, 2);
+
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        var messages = new List<PeerMessage>();
+        while (queue.TryDequeue(out PeerMessage? reply))
+        {
+            messages.Add(reply!);
+        }
+
+        Assert.Contains(messages, m => m.Id == MessageId.AllowedFast && m.PieceIndex == 42);
+        Assert.Contains(messages, m => m.Id == MessageId.Suggest && m.PieceIndex == 99);
+        Assert.Contains(messages, m => m.Id == MessageId.Reject && m.PieceIndex == 1 && m.BlockOffset == 16384 && m.BlockLength == 8192);
+        Assert.Contains(messages, m => m.Id == MessageId.HashRequest && m.HashBaseLayer == 4 && m.HashIndex == 8);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
     public async Task SendMessageAsync_DropsNonCriticalWhenQueueIsFull()
     {
         var metadata = CreateMetadataV1();
@@ -468,8 +579,8 @@ public class PeerCommunicationTests
         metadata.Info.Version = TorrentVersion.V2;
         metadata.Info.HashV2 = InfoHash.CreateRandomV2();
         metadata.Info.PieceSize = ProtocolConstants.BlockSize;
-        metadata.Info.FullSize = ProtocolConstants.BlockSize;
-        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = ProtocolConstants.BlockSize, Offset = 0 });
+        metadata.Info.FullSize = ProtocolConstants.BlockSize * 2;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = ProtocolConstants.BlockSize * 2, Offset = 0 });
         return metadata;
     }
 

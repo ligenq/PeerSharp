@@ -95,6 +95,170 @@ public class EncryptedStreamTests
         Assert.Equal(0, manager.ReturnedDownload);
     }
 
+    [Fact]
+    public async Task ReadAsync_ByteArrayOverload_DecryptsData()
+    {
+        byte[] key = { 3, 1, 4, 1, 5, 9, 2, 6 };
+        byte[] plain = new byte[32];
+        Random.Shared.NextBytes(plain);
+
+        byte[] cipher = plain.ToArray();
+        var encryptor = new RC4();
+        encryptor.Init(key);
+        encryptor.Encrypt(cipher);
+
+        await using var inner = new MemoryStream(cipher);
+        var pe = new ProtocolEncryption();
+        pe.RC4In.Init(key);
+
+        var manager = new TestBandwidthManager();
+        var user = new TestBandwidthUser();
+
+        await using var stream = new EncryptedStream(
+            inner, pe, user, manager,
+            new[] { DownloadChannel }, new[] { UploadChannel },
+            leaveInnerOpen: true);
+
+        byte[] buffer = new byte[plain.Length];
+        int read = await stream.ReadAsync(buffer, 0, buffer.Length, CancellationToken.None);
+
+        Assert.Equal(plain.Length, read);
+        Assert.Equal(plain, buffer);
+    }
+
+    [Fact]
+    public void Dispose_LeaveInnerOpenFalse_DisposesInner()
+    {
+        var inner = new MemoryStream(new byte[16]);
+        var pe = new ProtocolEncryption();
+        var manager = new TestBandwidthManager();
+        var user = new TestBandwidthUser();
+
+        var stream = new EncryptedStream(
+            inner, pe, user, manager,
+            new[] { DownloadChannel }, new[] { UploadChannel },
+            leaveInnerOpen: false);
+
+        stream.Dispose();
+
+        // Inner was closed: reading after dispose should throw
+        Assert.Throws<ObjectDisposedException>(() => inner.ReadByte());
+    }
+
+    [Fact]
+    public void Properties_ReturnExpectedValues()
+    {
+        var inner = new MemoryStream(new byte[64], writable: true);
+        var pe = new ProtocolEncryption();
+        var manager = new TestBandwidthManager();
+        var user = new TestBandwidthUser();
+
+        using var stream = new EncryptedStream(
+            inner, pe, user, manager,
+            new[] { DownloadChannel }, new[] { UploadChannel },
+            leaveInnerOpen: true);
+
+        Assert.True(stream.CanRead);
+        Assert.False(stream.CanSeek);
+        Assert.True(stream.CanWrite);
+        Assert.Equal(64, stream.Length);
+        Assert.Equal(0, stream.Position);
+    }
+
+    [Fact]
+    public void Position_Setter_ThrowsNotSupported()
+    {
+        var inner = new MemoryStream(new byte[16]);
+        var pe = new ProtocolEncryption();
+        var manager = new TestBandwidthManager();
+        var user = new TestBandwidthUser();
+
+        using var stream = new EncryptedStream(
+            inner, pe, user, manager,
+            new[] { DownloadChannel }, new[] { UploadChannel },
+            leaveInnerOpen: true);
+
+        Assert.Throws<NotSupportedException>(() => { stream.Position = 0; });
+    }
+
+    [Fact]
+    public void Flush_DoesNotThrow()
+    {
+        var inner = new MemoryStream();
+        var pe = new ProtocolEncryption();
+        var manager = new TestBandwidthManager();
+        var user = new TestBandwidthUser();
+
+        using var stream = new EncryptedStream(
+            inner, pe, user, manager,
+            new[] { DownloadChannel }, new[] { UploadChannel },
+            leaveInnerOpen: true);
+
+        stream.Flush(); // must not throw
+    }
+
+    [Fact]
+    public void Read_Sync_DecryptsData()
+    {
+        byte[] key = { 5, 6, 7, 8, 1, 2, 3, 4 };
+        byte[] plain = new byte[64];
+        Random.Shared.NextBytes(plain);
+
+        byte[] cipher = plain.ToArray();
+        var encryptor = new RC4();
+        encryptor.Init(key);
+        encryptor.Encrypt(cipher);
+
+        var inner = new MemoryStream(cipher);
+        var pe = new ProtocolEncryption();
+        pe.RC4In.Init(key);
+
+        var manager = new TestBandwidthManager();
+        var user = new TestBandwidthUser();
+
+        using var stream = new EncryptedStream(
+            inner, pe, user, manager,
+            new[] { DownloadChannel }, new[] { UploadChannel },
+            leaveInnerOpen: true);
+
+        byte[] buffer = new byte[plain.Length];
+        int read = stream.Read(buffer, 0, buffer.Length);
+
+        Assert.Equal(plain.Length, read);
+        Assert.Equal(plain, buffer);
+    }
+
+    [Fact]
+    public void Write_Sync_EncryptsData()
+    {
+        byte[] key = { 11, 22, 33, 44, 55, 66, 77, 88 };
+        byte[] plain = new byte[64];
+        Random.Shared.NextBytes(plain);
+
+        var inner = new MemoryStream();
+        var pe = new ProtocolEncryption();
+        pe.RC4Out.Init(key);
+
+        var manager = new TestBandwidthManager();
+        var user = new TestBandwidthUser();
+
+        using var stream = new EncryptedStream(
+            inner, pe, user, manager,
+            new[] { DownloadChannel }, new[] { UploadChannel },
+            leaveInnerOpen: true);
+
+        stream.Write(plain, 0, plain.Length);
+
+        byte[] cipher = inner.ToArray();
+        Assert.False(plain.SequenceEqual(cipher));
+
+        var decryptor = new RC4();
+        decryptor.Init(key);
+        decryptor.Decrypt(cipher);
+
+        Assert.Equal(plain, cipher);
+    }
+
     private sealed class TestBandwidthUser : IBandwidthUser
     {
         public string Name => "test";

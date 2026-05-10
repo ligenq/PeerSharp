@@ -81,6 +81,7 @@ internal class EncryptedStream : Stream
 
     // CRITICAL FIX: Finalizer ensures bandwidth is returned even if Dispose is not called
     // This prevents permanent bandwidth leaks when exceptions cause objects to be GC'd
+    [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
     ~EncryptedStream()
     {
         Dispose(false);
@@ -160,16 +161,18 @@ internal class EncryptedStream : Stream
         return r;
     }
 
-    public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
-        return await ReadAsync(buffer.AsMemory(offset, count), cancellationToken).ConfigureAwait(false);
+        return ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     }
 
+    [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
     public override long Seek(long offset, SeekOrigin origin)
     {
         throw new NotSupportedException();
     }
 
+    [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
     public override void SetLength(long value)
     {
         throw new NotSupportedException();

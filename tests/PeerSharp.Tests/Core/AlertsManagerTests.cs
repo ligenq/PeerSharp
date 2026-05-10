@@ -95,6 +95,40 @@ public class AlertsManagerTests
     }
 
     [Fact]
+    public async Task GetAlertsAsync_YieldsAlertsAsTheyArrive()
+    {
+        _alertsManager.RegisterAlerts(uint.MaxValue);
+
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var tcs = new TaskCompletionSource();
+        var alertsList = new List<Alert>();
+
+        var consumeTask = Task.Run(async () =>
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            try
+            {
+                await foreach (var alert in _alertsManager.GetAlertsAsync(cancellationToken: cts.Token))
+                {
+                    alertsList.Add(alert);
+                    if (alertsList.Count == 2)
+                        tcs.SetResult();
+                }
+            }
+            catch (OperationCanceledException) { }
+        });
+
+        _alertsManager.TorrentAlert(AlertId.TorrentAdded, torrent);
+        _alertsManager.TorrentAlert(AlertId.TorrentStarted, torrent);
+
+        await tcs.Task;
+
+        Assert.Equal(2, alertsList.Count);
+        Assert.Equal(AlertId.TorrentAdded, alertsList[0].Id);
+        Assert.Equal(AlertId.TorrentStarted, alertsList[1].Id);
+    }
+
+    [Fact]
     public void SpecializedAlertMethods_Work()
     {
         _alertsManager.RegisterAlerts(uint.MaxValue);

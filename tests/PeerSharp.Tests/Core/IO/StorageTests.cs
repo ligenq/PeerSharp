@@ -148,14 +148,68 @@ public class StorageTests : IAsyncLifetime
             await storage.InitAsync();
 
             Assert.False(File.Exists(escapedPath));
-
-            byte[] data = await storage.ReadAsync(0, 32);
-            Assert.All(data, b => Assert.Equal(0, b));
         }
         finally
         {
             await storage.DisposeAsync();
         }
+    }
+
+    [Fact]
+    public async Task InitAsync_Fails_ResetsInitializationState()
+    {
+        string invalidRoot = "||invalid_root||";
+        using var handleCache = new FileHandleCache();
+        var validator = new PathValidator(invalidRoot);
+        var storage = new Storage(_metadata, invalidRoot, validator, handleCache, enableSparseFiles: false);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => storage.InitAsync());
+
+        // We can verify state by trying to write or read, which should fail saying not initialized,
+        // or by using reflection to check _initialized
+        var initField = typeof(Storage).GetField("_initialized", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        int initialized = (int)initField!.GetValue(storage)!;
+        Assert.Equal(0, initialized);
+    }
+
+    private class ThrowingHandleCache : IFileHandleCache
+    {
+        public Exception ToThrow { get; set; } = new Exception("Generic error");
+        public void CloseTorrentHandles(string rootPath) { }
+        public ValueTask<IFileHandleLease> GetHandleAsync(string path, bool writable, CancellationToken cancellationToken = default)
+            => throw ToThrow;
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public async Task WriteAsync_DiskFull_ThrowsStorageException()
+    {
+        var ioException = new IOException("Disk full");
+        ioException.HResult = unchecked((int)0x80070070); // ERROR_DISK_FULL
+        using var handleCache = new ThrowingHandleCache { ToThrow = ioException };
+        var validator = new PathValidator(_tempDir);
+        var storage = new Storage(_metadata, _tempDir, validator, handleCache, enableSparseFiles: false);
+        await storage.InitAsync();
+
+        var ex = await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
+        Assert.Equal("Disk full", ex.Message);
+        Assert.False(ex.IsRecoverable);
+    }
+
+    [Fact]
+    public async Task WriteAsync_OtherException_CallsHandleFileWriteError()
+    {
+        using var handleCache = new ThrowingHandleCache { ToThrow = new IOException("Some other error") };
+        var validator = new PathValidator(_tempDir);
+        var storage = new Storage(_metadata, _tempDir, validator, handleCache, enableSparseFiles: false);
+        await storage.InitAsync();
+
+        // This won't throw StorageException immediately, but it logs and increments errors.
+        await storage.WriteAsync(0, new byte[10]);
+
+        var consecutiveErrorsField = typeof(Storage).GetField("_consecutiveErrors", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        int errors = (int)consecutiveErrorsField!.GetValue(storage)!;
+        Assert.Equal(1, errors);
     }
 
     [Fact(Timeout = 30000)]

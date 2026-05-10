@@ -55,13 +55,13 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
         var connection = _rtcFactory.Create();
         var channel = connection.CreateDataChannel(_options.DataChannelLabel);
         var pending = new PendingPeer(offerId, connection, channel, initiator: true, runtime, _options.TimeProvider.GetUtcNow() + PendingPeerTimeout);
-        
+
         ConfigurePendingPeer(pending);
         _connections[offerId] = pending;
 
         var offer = await connection.CreateOfferAsync(cancellationToken).ConfigureAwait(false);
         await connection.SetLocalDescriptionAsync(offer, cancellationToken).ConfigureAwait(false);
-        
+
         return (pending, offer);
     }
 
@@ -86,14 +86,14 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
         {
             pending.RemotePeerId = signal.PeerId;
             pending.LocalCandidateSignalingReady = true;
-            
+
             var answer = new WebRtcSessionDescription(WebRtcSessionDescriptionType.Answer, IceCandidateFilter.FilterUnsupportedIceCandidates(signal.AnswerSdp!));
             await pending.Connection.SetRemoteDescriptionAsync(answer, cancellationToken).ConfigureAwait(false);
             pending.RemoteDescriptionSet = true;
 
             FlushBufferedLocalCandidates(pending);
             await FlushBufferedRemoteCandidatesAsync(pending, cancellationToken).ConfigureAwait(false);
-            
+
             bool connected = await pending.Connection.ConnectAsync(cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("ConnectAsync returned {Connected} for peer {PeerId}", connected, signal.PeerId);
             if (!connected)
@@ -134,7 +134,7 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
         {
             RemotePeerId = peerId
         };
-        
+
         ConfigurePendingPeer(pending);
         _connections[offerId] = pending;
 
@@ -143,10 +143,10 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
             var offer = new WebRtcSessionDescription(WebRtcSessionDescriptionType.Offer, IceCandidateFilter.FilterUnsupportedIceCandidates(offerSdp));
             await connection.SetRemoteDescriptionAsync(offer, cancellationToken).ConfigureAwait(false);
             pending.RemoteDescriptionSet = true;
-            
+
             var answer = await connection.CreateAnswerAsync(cancellationToken).ConfigureAwait(false);
             await connection.SetLocalDescriptionAsync(answer, cancellationToken).ConfigureAwait(false);
-            
+
             var trackerAnswer = new WebRtcSessionDescription(answer.Type, IceCandidateFilter.FilterUnsupportedIceCandidates(answer.Sdp));
             bool answerSent = await sendAnswerFunc(pending, trackerAnswer, cancellationToken).ConfigureAwait(false);
             if (!answerSent)
@@ -162,7 +162,7 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
 
             FlushBufferedLocalCandidates(pending);
             await FlushBufferedRemoteCandidatesAsync(pending, cancellationToken).ConfigureAwait(false);
-            
+
             bool connected = await connection.ConnectAsync(cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("ConnectAsync returned {Connected} for inbound peer {PeerId}", connected, peerId);
             if (!connected)
