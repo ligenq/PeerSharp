@@ -127,6 +127,72 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SaveAllAsync_MultipleTorrents_SavesEachEntry()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+
+        var hash1 = new InfoHash(Enumerable.Repeat((byte)0x11, 20).ToArray());
+        var hash2 = new InfoHash(Enumerable.Repeat((byte)0x22, 20).ToArray());
+        var hash3 = new InfoHash(Enumerable.Repeat((byte)0x33, 20).ToArray());
+
+        var entries = new[]
+        {
+            new SavedTorrentEntry(hash1, new byte[] { 1, 2, 3 }, "magnet:?xt=urn:btih:HASH1"),
+            new SavedTorrentEntry(hash2, new byte[] { 4, 5, 6 }, "magnet:?xt=urn:btih:HASH2"),
+            new SavedTorrentEntry(hash3, new byte[] { 7, 8, 9 }, "magnet:?xt=urn:btih:HASH3")
+        };
+
+        await persistence.SaveAllAsync(entries);
+
+        var loaded = await persistence.LoadAllAsync();
+        Assert.Equal(3, loaded.Count);
+
+        var byHash = loaded.ToDictionary(e => e.Hash);
+        Assert.Equal(new byte[] { 1, 2, 3 }, byHash[hash1].TorrentFileData);
+        Assert.Equal("magnet:?xt=urn:btih:HASH2", byHash[hash2].MagnetLink);
+        Assert.Equal(new byte[] { 7, 8, 9 }, byHash[hash3].TorrentFileData);
+    }
+
+    [Fact]
+    public async Task SaveAllAsync_EmptyEnumerable_NoEntriesSaved()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+
+        await persistence.SaveAllAsync(Array.Empty<SavedTorrentEntry>());
+
+        var loaded = await persistence.LoadAllAsync();
+        Assert.Empty(loaded);
+    }
+
+    [Fact]
+    public async Task SaveAllAsync_NullEntries_ThrowsArgumentNullException()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() =>
+            persistence.SaveAllAsync(null!));
+    }
+
+    [Fact]
+    public async Task SaveAllAsync_CancelledToken_ThrowsBeforeSavingAnything()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+
+        var hash = new InfoHash(Enumerable.Repeat((byte)0xAA, 20).ToArray());
+        var entries = new[] { new SavedTorrentEntry(hash, new byte[] { 1, 2, 3 }) };
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            persistence.SaveAllAsync(entries, cts.Token));
+
+        // Cancellation fires before SaveAsync is reached — no entry should have been written
+        var loaded = await persistence.LoadAllAsync();
+        Assert.Empty(loaded);
+    }
+
+    [Fact]
     public async Task SaveAndLoad_DhtState_RoundTripsData()
     {
         var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
