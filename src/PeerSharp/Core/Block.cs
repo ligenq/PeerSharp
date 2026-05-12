@@ -10,10 +10,12 @@ internal sealed class Block : IDisposable
 {
     /// <summary>
     /// Dedicated pool for block buffers, capped to prevent unbounded memory growth.
-    /// 256 arrays x 16KB = 4MB max pool retention vs unbounded with ArrayPool.Shared.
+    /// 4096 arrays x 16KB = 64MB max pool retention vs unbounded with ArrayPool.Shared.
+    /// The higher cap (vs. 256) reduces GC pressure during active multi-peer downloads
+    /// where hundreds of 16KB blocks are allocated and freed per second.
     /// </summary>
     private static readonly ArrayPool<byte> BlockPool =
-        ArrayPool<byte>.Create(maxArrayLength: 16384, maxArraysPerBucket: 256);
+        ArrayPool<byte>.Create(maxArrayLength: 16384, maxArraysPerBucket: 4096);
 
     private byte[]? _buffer;
     private AtomicDisposal _disposal = new();

@@ -81,32 +81,40 @@ internal class PieceChecker : IAsyncDisposable
 
             try
             {
-                var pieceData = new byte[pieceSize];
-                await _files.ReadAsync(pieceOffset, pieceData, ct).ConfigureAwait(false);
+                byte[] pieceBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)pieceSize);
+                try
+                {
+                    var pieceData = pieceBuffer.AsMemory(0, (int)pieceSize);
+                    await _files.ReadAsync(pieceOffset, pieceData, ct).ConfigureAwait(false);
 
-                bool isValid;
-                if (isMerkle || isV2)
-                {
-                    isValid = _context.VerifyPiece(pieceIndex, pieceData);
-                }
-                else
-                {
-                    var expected = _context.GetExpectedHash(pieceIndex);
-                    if (expected != null)
+                    bool isValid;
+                    if (isMerkle || isV2)
                     {
-                        var computed = SHA1.HashData(pieceData);
-                        isValid = computed.SequenceEqual(expected);
+                        isValid = _context.VerifyPiece(pieceIndex, pieceData.Span);
                     }
                     else
                     {
-                        isValid = false;
+                        var expected = _context.GetExpectedHash(pieceIndex);
+                        if (expected != null)
+                        {
+                            var computed = SHA1.HashData(pieceData.Span);
+                            isValid = computed.SequenceEqual(expected);
+                        }
+                        else
+                        {
+                            isValid = false;
+                        }
+                    }
+
+                    if (isValid)
+                    {
+                        _context.AddPiece(pieceIndex);
+                        validPieces++;
                     }
                 }
-
-                if (isValid)
+                finally
                 {
-                    _context.AddPiece(pieceIndex);
-                    validPieces++;
+                    System.Buffers.ArrayPool<byte>.Shared.Return(pieceBuffer);
                 }
             }
             catch
@@ -154,34 +162,42 @@ internal class PieceChecker : IAsyncDisposable
             try
             {
                 // Read piece data from storage
-                var pieceData = new byte[pieceSize];
-                await _files.ReadAsync(pieceOffset, pieceData, ct).ConfigureAwait(false);
+                byte[] pieceBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)pieceSize);
+                try
+                {
+                    var pieceData = pieceBuffer.AsMemory(0, (int)pieceSize);
+                    await _files.ReadAsync(pieceOffset, pieceData, ct).ConfigureAwait(false);
 
-                bool isValid;
-                if (isMerkle || isV2)
-                {
-                    isValid = _context.VerifyPiece(pieceIndex, pieceData);
-                }
-                else
-                {
-                    var expected = _context.GetExpectedHash(pieceIndex);
-                    if (expected != null)
+                    bool isValid;
+                    if (isMerkle || isV2)
                     {
-                        // Standard SHA-1 verification
-                        var computed = SHA1.HashData(pieceData);
-                        isValid = computed.SequenceEqual(expected);
+                        isValid = _context.VerifyPiece(pieceIndex, pieceData.Span);
                     }
                     else
                     {
-                        // No hash available - skip
-                        isValid = false;
+                        var expected = _context.GetExpectedHash(pieceIndex);
+                        if (expected != null)
+                        {
+                            // Standard SHA-1 verification
+                            var computed = SHA1.HashData(pieceData.Span);
+                            isValid = computed.SequenceEqual(expected);
+                        }
+                        else
+                        {
+                            // No hash available - skip
+                            isValid = false;
+                        }
+                    }
+
+                    if (isValid)
+                    {
+                        newProgress.AddPiece(pieceIndex);
+                        validPieces++;
                     }
                 }
-
-                if (isValid)
+                finally
                 {
-                    newProgress.AddPiece(pieceIndex);
-                    validPieces++;
+                    System.Buffers.ArrayPool<byte>.Shared.Return(pieceBuffer);
                 }
 
                 checkedPieces++;

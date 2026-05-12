@@ -214,17 +214,17 @@ internal class BlockCache : IBlockCache
 
     private void AddToCache(long offset, ReadOnlySpan<byte> data)
     {
-        byte[]? buffer = null;
+        byte[] buffer = CachePool.Rent(BlockSize);
+        data.CopyTo(buffer);
+
         lock (_lock)
         {
-            if (_blocks.ContainsKey(offset))
+            if (_blocks.TryGetValue(offset, out var existing))
             {
                 // Already in cache, maybe update MRU?
-                if (_blocks.TryGetValue(offset, out var existing))
-                {
-                    _lruList.Remove(existing.Node);
-                    _lruList.AddLast(existing.Node);
-                }
+                _lruList.Remove(existing.Node);
+                _lruList.AddLast(existing.Node);
+                CachePool.Return(buffer);
                 return;
             }
 
@@ -237,11 +237,9 @@ internal class BlockCache : IBlockCache
             if (_currentBytes + BlockSize > _capacityBytes)
             {
                 // Still no room (capacity too small?)
+                CachePool.Return(buffer);
                 return;
             }
-
-            buffer = CachePool.Rent(BlockSize);
-            data.CopyTo(buffer);
 
             var node = _lruList.AddLast(offset);
             _blocks.Add(offset, new CachedBlock(buffer, node));

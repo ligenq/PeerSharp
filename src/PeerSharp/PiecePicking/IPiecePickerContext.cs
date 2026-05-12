@@ -56,7 +56,7 @@ internal interface IPieceCheckerContext
 
     void UpdatePiecesFromBitfield(byte[] bitfield);
 
-    bool VerifyPiece(int pieceIndex, byte[] pieceData);
+    bool VerifyPiece(int pieceIndex, ReadOnlySpan<byte> pieceData);
 }
 
 /// <summary>
@@ -149,11 +149,11 @@ internal class TorrentPieceCheckerContext : IPieceCheckerContext
         _torrent.Pieces.FromBitfield(bitfield);
     }
 
-    public bool VerifyPiece(int pieceIndex, byte[] pieceData)
+    public bool VerifyPiece(int pieceIndex, ReadOnlySpan<byte> pieceData)
     {
         if (IsMerkle)
         {
-            return _torrent.MerkleTree?.VerifyPiece(pieceIndex, pieceData) ?? false;
+            return _torrent.MerkleTree?.VerifyPiece(pieceIndex, pieceData.ToArray()) ?? false;
         }
 
         if (IsV2)

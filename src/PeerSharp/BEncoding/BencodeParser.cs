@@ -16,6 +16,27 @@ internal static class BencodeParser
     // SECURITY: Maximum total elements across entire structure to prevent DoS
     private const int MaxTotalElements = 500000;
 
+    private static readonly KeyValuePair<byte[], string>[] CommonKeys = new string[]
+    {
+        "length", "path", "name", "piece length", "pieces", "files", "info",
+        "announce", "announce-list", "creation date", "comment", "created by", "encoding",
+        "ed2k", "filehash", "attr", "sha1", "md5sum", "mtime", "symlink path",
+        "url-list", "httpseeds", "publisher", "publisher-url",
+        "nodes", "nodes6", "id", "q", "t", "y", "v", "e", "a", "r", "ip", "port", "token", "values", "want"
+    }.Select(x => new KeyValuePair<byte[], string>(Encoding.Latin1.GetBytes(x), x)).ToArray();
+
+    private static string GetDictionaryKey(ReadOnlySpan<byte> span)
+    {
+        foreach (var kvp in CommonKeys)
+        {
+            if (span.SequenceEqual(kvp.Key))
+            {
+                return kvp.Value;
+            }
+        }
+        return Encoding.Latin1.GetString(span);
+    }
+
     public static IBNode? Parse(byte[] data)
     {
         int pos = 0;
@@ -89,7 +110,7 @@ internal static class BencodeParser
             var keyNode = ParseString(data, ref pos);
             // Use Latin1 encoding for dictionary keys because bencode keys are arbitrary
             // byte strings (not UTF8). Latin1 preserves all byte values 0-255.
-            var key = Encoding.Latin1.GetString(keyNode.Value.Span);
+            var key = GetDictionaryKey(keyNode.Value.Span);
             var val = Parse(data, ref pos, depth + 1, ref elementCount);
             if (val != null)
             {
