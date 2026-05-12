@@ -92,9 +92,9 @@ public class PieceCheckerTests
             VerifiedPieces.Add(pieceIndex);
         }
 
-        public bool VerifyPiece(int pieceIndex, byte[] pieceData)
+        public bool VerifyPiece(int pieceIndex, ReadOnlySpan<byte> pieceData)
         {
-            VerifyPieceCalls.Add((pieceIndex, pieceData));
+            VerifyPieceCalls.Add((pieceIndex, pieceData.ToArray()));
             return MerkleValidPieces.Contains(pieceIndex);
         }
     }

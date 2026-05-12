@@ -216,7 +216,9 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             {
                 try
                 {
-                    await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                    // 15s: torrent disposal flushes the block cache and closes file handles,
+                    // which can take several seconds on slow storage or large write queues.
+                    await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {

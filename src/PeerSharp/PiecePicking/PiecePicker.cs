@@ -28,7 +28,7 @@ internal class PiecePicker : IDisposable
 
     private readonly Random _random;
     private readonly Lock _selectionLock = new();
-    private readonly List<int> _sortedPieces = new();
+    private List<int> _sortedPieces = new();
     private readonly TimeProvider _timeProvider;
     private AtomicDisposal _disposal = new();
     private IReadOnlyList<FileSelection>? _fileSelectionSnapshot;
@@ -53,10 +53,13 @@ internal class PiecePicker : IDisposable
             return;
         }
 
-        EnsureCapacity(pieceIndex + 1);
-        if (pieceIndex < _pieceAvailability.Length)
+        lock (_selectionLock)
         {
-            Interlocked.Decrement(ref _pieceAvailability[pieceIndex]);
+            EnsureCapacity(pieceIndex + 1);
+            if (pieceIndex < _pieceAvailability.Length)
+            {
+                _pieceAvailability[pieceIndex]--;
+            }
         }
     }
 
@@ -73,30 +76,27 @@ internal class PiecePicker : IDisposable
             return 0;
         }
 
-        EnsureCapacity(pieceIndex + 1);
-        if (pieceIndex < _pieceAvailability.Length)
+        lock (_selectionLock)
         {
-            return Interlocked.CompareExchange(ref _pieceAvailability[pieceIndex], 0, 0);
+            EnsureCapacity(pieceIndex + 1);
+            if (pieceIndex < _pieceAvailability.Length)
+            {
+                return _pieceAvailability[pieceIndex];
+            }
+            return 0;
         }
-        return 0;
     }
 
-    public List<int> GetCandidates()
+    public IReadOnlyList<int> GetCandidates()
     {
         lock (_selectionLock)
         {
-            // Return a copy or the list itself?
-            // Since we are locking, returning a copy is safer if the caller iterates outside the lock.
-            // But creating a copy every time is expensive.
-            // Given the usage in FileTransfer, we can return the list but the caller must be aware it might change?
-            // Or better, we expose a method to Pick pieces.
-
             if (_selectionInvalidated || (_timeProvider.GetUtcNow() - _lastSelectionRefresh).TotalSeconds > ProtocolConstants.PieceSelectionRefreshIntervalSeconds)
             {
                 RefreshSelection();
             }
 
-            return new List<int>(_sortedPieces);
+            return _sortedPieces;
         }
     }
 
@@ -115,10 +115,13 @@ internal class PiecePicker : IDisposable
             return;
         }
 
-        EnsureCapacity(pieceIndex + 1);
-        if (pieceIndex < _pieceAvailability.Length)
+        lock (_selectionLock)
         {
-            Interlocked.Increment(ref _pieceAvailability[pieceIndex]);
+            EnsureCapacity(pieceIndex + 1);
+            if (pieceIndex < _pieceAvailability.Length)
+            {
+                _pieceAvailability[pieceIndex]++;
+            }
         }
     }
 
@@ -207,6 +210,7 @@ internal class PiecePicker : IDisposable
             }
         }
 
+        List<int> currentPieces;
         lock (_selectionLock)
         {
             if (_selectionInvalidated || (_timeProvider.GetUtcNow() - _lastSelectionRefresh).TotalSeconds > ProtocolConstants.PieceSelectionRefreshIntervalSeconds)
@@ -215,13 +219,15 @@ internal class PiecePicker : IDisposable
                 selection = _fileSelectionSnapshot; // Update local snapshot after refresh
             }
 
-            foreach (int i in _sortedPieces)
+            currentPieces = _sortedPieces;
+        }
+
+        foreach (int i in currentPieces)
+        {
+            if (CanPick(i, peer, selection))
             {
-                if (CanPick(i, peer, selection))
-                {
-                    pieceIndex = i;
-                    return true;
-                }
+                pieceIndex = i;
+                return true;
             }
         }
 
@@ -230,116 +236,116 @@ internal class PiecePicker : IDisposable
 
     public void RefreshSelection()
     {
-        lock (_selectionLock)
+        // Caller must hold _selectionLock. Note: Monitor.IsEntered() does not work with
+        // System.Threading.Lock, so this contract is enforced by convention only.
+        EnsureCapacity(_context.PieceCount);
+
+        _fileSelectionSnapshot ??= _context.GetFileSelectionSnapshot();
+        var selection = _fileSelectionSnapshot;
+
+        var highPriority = new List<int>();
+        var normalPriority = new List<int>();
+        var lowPriority = new List<int>();
+
+        for (int i = 0; i < _context.PieceCount; i++)
         {
-            EnsureCapacity(_context.PieceCount);
-
-            // Snapshot the availability to avoid tearing during sort (though exactness isn't critical)
-            var availability = new int[_pieceAvailability.Length];
-            // Note: This copy is not atomic across the whole array, but individual reads are atomic.
-            // It's acceptable for piece selection heuristics.
-            for (int i = 0; i < _pieceAvailability.Length; i++)
+            if (!_context.HasPiece(i))
             {
-                availability[i] = _pieceAvailability[i];
-            }
-
-            _fileSelectionSnapshot ??= _context.GetFileSelectionSnapshot();
-            var selection = _fileSelectionSnapshot;
-
-            var highPriority = new List<int>();
-            var normalPriority = new List<int>();
-            var lowPriority = new List<int>();
-
-            for (int i = 0; i < _context.PieceCount; i++)
-            {
-                if (!_context.HasPiece(i))
+                if (!_context.IsPieceNeeded(i, selection))
                 {
-                    if (!_context.IsPieceNeeded(i, selection))
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    var priority = _context.GetPiecePriority(i, selection);
-                    switch (priority)
-                    {
-                        case Priority.High:
-                            highPriority.Add(i);
-                            break;
+                var priority = _context.GetPiecePriority(i, selection);
+                switch (priority)
+                {
+                    case Priority.High:
+                        highPriority.Add(i);
+                        break;
 
-                        case Priority.Normal:
-                            normalPriority.Add(i);
-                            break;
+                    case Priority.Normal:
+                        normalPriority.Add(i);
+                        break;
 
-                        case Priority.Low:
-                            lowPriority.Add(i);
-                            break;
-                    }
+                    case Priority.Low:
+                        lowPriority.Add(i);
+                        break;
                 }
             }
-
-            // RAREST FIRST: Sort by availability in ascending order using bucket sort (O(N))
-            // This is much faster than O(N log N) sort for large number of pieces
-            BucketSort(highPriority, availability);
-            BucketSort(normalPriority, availability);
-            BucketSort(lowPriority, availability);
-
-            _sortedPieces.Clear();
-            _sortedPieces.AddRange(highPriority);
-            _sortedPieces.AddRange(normalPriority);
-            _sortedPieces.AddRange(lowPriority);
-
-            _lastSelectionRefresh = _timeProvider.GetUtcNow();
-            _selectionInvalidated = false;
-
-            _logger.LogDebug("Selection refreshed: {HighPriorityCount} high, {NormalPriorityCount} normal, {LowPriorityCount} low priority pieces",
-                highPriority.Count, normalPriority.Count, lowPriority.Count);
         }
+
+        // RAREST FIRST: Sort by availability in ascending order using bucket sort (O(N))
+        // This is much faster than O(N log N) sort for large number of pieces
+        BucketSort(highPriority, _pieceAvailability);
+        BucketSort(normalPriority, _pieceAvailability);
+        BucketSort(lowPriority, _pieceAvailability);
+
+        var newSortedPieces = new List<int>(highPriority.Count + normalPriority.Count + lowPriority.Count);
+        newSortedPieces.AddRange(highPriority);
+        newSortedPieces.AddRange(normalPriority);
+        newSortedPieces.AddRange(lowPriority);
+
+        _sortedPieces = newSortedPieces;
+
+        _lastSelectionRefresh = _timeProvider.GetUtcNow();
+        _selectionInvalidated = false;
+
+        _logger.LogDebug("Selection refreshed: {HighPriorityCount} high, {NormalPriorityCount} normal, {LowPriorityCount} low priority pieces",
+            highPriority.Count, normalPriority.Count, lowPriority.Count);
     }
 
     public void RegisterPeerAvailability(PeerCommunication peer)
     {
-        EnsureCapacity(_context.PieceCount);
         var peerPieces = peer.PeerPieces;
-        int count = Math.Min(_pieceAvailability.Length, peerPieces.Count);
 
-        if (peerPieces.IsFull)
+        lock (_selectionLock)
         {
+            EnsureCapacity(_context.PieceCount);
+            int count = Math.Min(_pieceAvailability.Length, peerPieces.Count);
+
+            if (peerPieces.IsFull)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    _pieceAvailability[i]++;
+                }
+                return;
+            }
+
             for (int i = 0; i < count; i++)
             {
-                Interlocked.Increment(ref _pieceAvailability[i]);
-            }
-            return;
-        }
-
-        for (int i = 0; i < count; i++)
-        {
-            if (peerPieces.HasPiece(i))
-            {
-                Interlocked.Increment(ref _pieceAvailability[i]);
+                if (peerPieces.HasPiece(i))
+                {
+                    _pieceAvailability[i]++;
+                }
             }
         }
     }
 
     public void UnregisterPeerAvailability(PeerCommunication peer)
     {
-        EnsureCapacity(_context.PieceCount);
         var peerPieces = peer.PeerPieces;
-        int count = Math.Min(_pieceAvailability.Length, peerPieces.Count);
 
-        if (peerPieces.IsFull)
+        lock (_selectionLock)
         {
+            EnsureCapacity(_context.PieceCount);
+            int count = Math.Min(_pieceAvailability.Length, peerPieces.Count);
+
+            if (peerPieces.IsFull)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    _pieceAvailability[i]--;
+                }
+                return;
+            }
+
             for (int i = 0; i < count; i++)
             {
-                Interlocked.Decrement(ref _pieceAvailability[i]);
-            }
-            return;
-        }
-
-        for (int i = 0; i < count; i++)
-        {
-            if (peerPieces.HasPiece(i))
-            {
-                Interlocked.Decrement(ref _pieceAvailability[i]);
+                if (peerPieces.HasPiece(i))
+                {
+                    _pieceAvailability[i]--;
+                }
             }
         }
     }
@@ -407,18 +413,10 @@ internal class PiecePicker : IDisposable
             return;
         }
 
-        lock (_selectionLock)
-        {
-            if (pieceCount <= _pieceAvailability.Length)
-            {
-                return;
-            }
-
-            var next = new int[pieceCount];
-            Array.Copy(_pieceAvailability, next, _pieceAvailability.Length);
-            _pieceAvailability = next;
-            _selectionInvalidated = true;
-        }
+        var next = new int[pieceCount];
+        Array.Copy(_pieceAvailability, next, _pieceAvailability.Length);
+        _pieceAvailability = next;
+        _selectionInvalidated = true;
     }
 
     private bool CanPick(int i, IPeerPieceInfo peer, IReadOnlyList<FileSelection>? selection)
