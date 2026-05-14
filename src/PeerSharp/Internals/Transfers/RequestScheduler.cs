@@ -98,7 +98,12 @@ internal sealed class RequestScheduler
 
         if (sent < needed && _pieceStateManager.Count < _pieceStateManager.MaxActivePieces)
         {
-            int loopLimit = 3;
+            int activePieceSlotsAvailable = _pieceStateManager.MaxActivePieces - _pieceStateManager.Count;
+            int loopLimit = RequestQueuePolicy.CalculateNewPieceStartLimit(
+                needed - sent,
+                activePieceSlotsAvailable,
+                GetTypicalBlocksPerPiece());
+
             while (sent < needed && loopLimit > 0 && _pieceStateManager.Count < _pieceStateManager.MaxActivePieces)
             {
                 if (_piecePicker.PickNextPiece(peer, out int pieceIndex))
@@ -125,6 +130,12 @@ internal sealed class RequestScheduler
         {
             _logger.LogTrace("Sent {SentCount} requests to {RemoteEndPoint}", sent, peer.RemoteEndPoint);
         }
+    }
+
+    private int GetTypicalBlocksPerPiece()
+    {
+        long pieceSize = Math.Max(1, _torrent.InfoFile.Info.PieceSize);
+        return (int)Math.Max(1, (pieceSize + _blockSize - 1) / _blockSize);
     }
 
     private bool HasWantedPieces(PeerCommunication peer)
