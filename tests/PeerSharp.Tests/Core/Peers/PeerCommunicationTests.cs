@@ -273,6 +273,79 @@ public class PeerCommunicationTests
     }
 
     [Fact]
+    public async Task Unchoke_SetsLastUnchokedAt_OnFirstTransition()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2030-01-01T12:00:00Z"));
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), time);
+
+        Assert.Equal(DateTimeOffset.MinValue, peer.LastUnchokedAt);
+
+        peer.Unchoke();
+
+        Assert.Equal(DateTimeOffset.Parse("2030-01-01T12:00:00Z"), peer.LastUnchokedAt);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Unchoke_AlreadyUnchoked_DoesNotUpdateLastUnchokedAt()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2030-01-01T12:00:00Z"));
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), time);
+
+        peer.Unchoke();
+        var firstUnchoke = peer.LastUnchokedAt;
+
+        time.Advance(TimeSpan.FromMinutes(5));
+        peer.Unchoke(); // no-op: already unchoked
+
+        Assert.Equal(firstUnchoke, peer.LastUnchokedAt);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task UploadedSinceUnchoked_AccumulatesAfterUnchoke()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        peer.Unchoke();
+        Assert.Equal(0, peer.UploadedSinceUnchoked);
+
+        peer.AddUploaded(100);
+        peer.AddUploaded(200);
+
+        Assert.Equal(300, peer.UploadedSinceUnchoked);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task UploadedSinceUnchoked_ResetsToZeroOnReunchoke()
+    {
+        var time = new FakeTimeProvider(DateTimeOffset.Parse("2030-06-01T00:00:00Z"));
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), time);
+
+        peer.Unchoke();
+        peer.AddUploaded(1_000_000);
+        Assert.Equal(1_000_000, peer.UploadedSinceUnchoked);
+
+        // Advance past cooldown and choke, then advance again and unchoke.
+        time.Advance(TimeSpan.FromSeconds(11));
+        peer.Choke();
+        time.Advance(TimeSpan.FromSeconds(11));
+        peer.Unchoke();
+
+        Assert.Equal(0, peer.UploadedSinceUnchoked);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
     public async Task AddDownloadedAndUploaded_AreCumulative()
     {
         var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());

@@ -1669,14 +1669,24 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private async Task SendAllowedFastSetAsync(PeerCommunication peer)
     {
         var remoteEndPoint = peer.RemoteEndPoint;
-        if (remoteEndPoint == null) return;
+        if (remoteEndPoint == null)
+        {
+            return;
+        }
 
         int numPieces = _torrent.Pieces.Count;
-        if (numPieces == 0) return;
+        if (numPieces == 0)
+        {
+            return;
+        }
 
         // BEP-6: SHA1(IP_bytes + info_hash) generates deterministic piece indices for the allowed-fast set.
         var ip = remoteEndPoint.Address;
-        if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+        if (ip.IsIPv4MappedToIPv6)
+        {
+            ip = ip.MapToIPv4();
+        }
+
         byte[] ipBytes = ip.GetAddressBytes();
 
         byte[] input = new byte[ipBytes.Length + InfoHash.V1Length];
@@ -1699,7 +1709,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
                 if (sent.Contains(pieceIndex))
                 {
-                    if (++loops > 500) return;
+                    if (++loops > 500)
+                    {
+                        return;
+                    }
+
                     continue;
                 }
 
@@ -1709,7 +1723,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     sent.Add(pieceIndex);
                 }
 
-                if (++attempts >= AllowedFastSetSize) return;
+                if (++attempts >= AllowedFastSetSize)
+                {
+                    return;
+                }
             }
 
             hash = SHA1.HashData(hash);
@@ -2034,8 +2051,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
         if (isSeeding)
         {
-            // Seeding: Tit-for-tat (efficiency) -> Prioritize peers accepting data fastest
-            candidates.Sort((a, b) => b.UploadSpeed.CompareTo(a.UploadSpeed));
+            // Seeding: round-robin rotation.
+            // Peers that have exceeded their piece quota and been unchoked for at least
+            // one minute are de-prioritized so that waiting peers can rotate in.
+            long pieceLength = _torrent.PieceSize;
+            var now = _timeProvider.GetUtcNow();
+            candidates.Sort((a, b) => SeedingChoker.Compare(
+                SeedingChoker.FromPeer(a), SeedingChoker.FromPeer(b),
+                pieceLength, SeedingChoker.DefaultPieceQuota, now));
         }
         else
         {
