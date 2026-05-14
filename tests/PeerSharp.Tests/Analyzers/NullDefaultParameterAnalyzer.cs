@@ -263,7 +263,7 @@ public sealed class NullDefaultParameterAnalyzer
                 // For "paramName == null", "paramName is null", etc.
                 if (bodyText.Contains($"{paramName} {pattern}") ||
                     bodyText.Contains($"({paramName} {pattern}") ||
-                    bodyText.Contains($"!{paramName}") && pattern == "!= null")
+                    (bodyText.Contains($"!{paramName}") && pattern == "!= null"))
                 {
                     return $"{paramName} {pattern}";
                 }

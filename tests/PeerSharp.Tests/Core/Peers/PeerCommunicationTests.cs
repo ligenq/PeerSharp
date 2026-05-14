@@ -210,10 +210,10 @@ public class PeerCommunicationTests
         Assert.Equal(100, peer.SmoothedRttMs);
 
         peer.RecordRtt(200);
-        Assert.Equal((100 * 7 + 200) / 8, peer.SmoothedRttMs); // 112
+        Assert.Equal(((100 * 7) + 200) / 8, peer.SmoothedRttMs); // 112
 
         peer.RecordRtt(50);
-        Assert.Equal((112 * 7 + 50) / 8, peer.SmoothedRttMs); // 104
+        Assert.Equal(((112 * 7) + 50) / 8, peer.SmoothedRttMs); // 104
 
         // Lower clamp to 10ms (impossible to fall below even when sample = 0 from start of 10)
         SetPrivateField(peer, "_smoothedRttMs", 10);

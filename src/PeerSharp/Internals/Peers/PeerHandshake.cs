@@ -38,6 +38,7 @@ internal static class PeerHandshake
         Encoding.ASCII.GetBytes(ProtocolName).CopyTo(handshake, 1);
 
         handshake[25] |= 0x10; // BEP-10 extension protocol
+        handshake[27] |= 0x01; // BEP-5 DHT
         handshake[27] |= 0x04; // BEP-6 fast extension
         if (info.IsV2)
         {
