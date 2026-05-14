@@ -333,6 +333,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private DateTimeOffset _lastChokeChange = DateTimeOffset.MinValue;
     private long _lastDownloaded;
+    private DateTimeOffset _lastUnchokedAt = DateTimeOffset.MinValue;
+    private long _uploadedAtLastUnchoke;
     private DateTimeOffset _lastSendQueueLog = DateTimeOffset.MinValue;
     private long _lastUploaded;
     private int _messagesSentSinceLastLog = 0;
@@ -397,6 +399,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     public bool AmChoking => Volatile.Read(ref _amChoking) == 1;
     public bool AmInterested => Volatile.Read(ref _amInterested) == 1;
+    public DateTimeOffset LastUnchokedAt => _lastUnchokedAt;
+    public long UploadedSinceUnchoked => Uploaded - Interlocked.Read(ref _uploadedAtLastUnchoke);
     public string Country { get; set; } = "";
     public long Downloaded => Interlocked.Read(ref _downloaded);
     public int DownloadSpeed { get; private set; }
@@ -1225,6 +1229,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             return;
         }
+
+        _lastUnchokedAt = now;
+        Interlocked.Exchange(ref _uploadedAtLastUnchoke, Uploaded);
 
         _logger.LogDebug("UNCHOKING peer {PeerName} (speed={DownloadSpeed}B/s, interested={PeerInterested})", Name, DownloadSpeed, PeerInterested);
         _ = SendMessageAsync(new PeerMessage(MessageId.Unchoke));

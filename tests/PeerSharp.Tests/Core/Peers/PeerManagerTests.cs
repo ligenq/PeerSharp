@@ -833,7 +833,10 @@ public class PeerManagerTests
 
         var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
         var messages = new List<PeerMessage>();
-        while (queue.TryDequeue(out var msg)) messages.Add(msg!);
+        while (queue.TryDequeue(out var msg))
+        {
+            messages.Add(msg!);
+        }
 
         Assert.Contains(messages, m => m.Id == MessageId.AllowedFast);
 
