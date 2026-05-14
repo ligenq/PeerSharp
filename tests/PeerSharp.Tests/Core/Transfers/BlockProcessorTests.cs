@@ -7,6 +7,7 @@ using PeerSharp.PiecePicking;
 using System.Net;
 
 using TransferStats = PeerSharp.Internals.TransferStats;
+using PeerSharp.Internals.Transfers;
 
 namespace PeerSharp.Tests.Core.Transfers;
 

@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Peers;
 
-namespace PeerSharp.Internals;
+namespace PeerSharp.Internals.Transfers;
 
 internal sealed class BlockProcessor
 {

@@ -8,7 +8,7 @@ internal static class Base32
     {
         if (string.IsNullOrEmpty(input))
         {
-            return Array.Empty<byte>();
+            return [];
         }
 
         // Normalize

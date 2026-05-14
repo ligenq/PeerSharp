@@ -62,8 +62,8 @@ internal static class DhtCompactPeerCodec
                 continue;
             }
 
-            var ip = new IPAddress(value.Slice(0, addressLength).Span);
-            int port = BinaryPrimitives.ReadUInt16BigEndian(value.Span.Slice(addressLength));
+            var ip = new IPAddress(value[..addressLength].Span);
+            int port = BinaryPrimitives.ReadUInt16BigEndian(value.Span[addressLength..]);
             result.Add(new IPEndPoint(ip, port));
         }
 

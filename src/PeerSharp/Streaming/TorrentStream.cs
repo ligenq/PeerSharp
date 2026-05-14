@@ -144,7 +144,7 @@ internal class TorrentStream : Stream
             return 0;
         }
         long absoluteOffset = _fileStartOffset + _position;
-        await _torrent.FilesInternal.ReadAsync(absoluteOffset, buffer.Slice(0, available), cancellationToken).ConfigureAwait(false);
+        await _torrent.FilesInternal.ReadAsync(absoluteOffset, buffer[..available], cancellationToken).ConfigureAwait(false);
 
         _position += available;
 

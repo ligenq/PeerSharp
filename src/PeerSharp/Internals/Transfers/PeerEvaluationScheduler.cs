@@ -3,7 +3,7 @@ using PeerSharp.Internals.Peers;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 
-namespace PeerSharp.Internals;
+namespace PeerSharp.Internals.Transfers;
 
 internal sealed class PeerEvaluationScheduler
 {

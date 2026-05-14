@@ -150,12 +150,12 @@ internal class EncryptedStream : Stream
 
         // Note: We don't catch OperationCanceledException here to return canRead because the reservation
         // is still tracked in _reservedDownloadBandwidth and will be returned on Dispose().
-        int r = await _inner.ReadAsync(buffer.Slice(0, canRead), cancellationToken).ConfigureAwait(false);
+        int r = await _inner.ReadAsync(buffer[..canRead], cancellationToken).ConfigureAwait(false);
 
         if (r > 0)
         {
             _reservedDownloadBandwidth -= r;
-            _pe.Decrypt(buffer.Span.Slice(0, r));
+            _pe.Decrypt(buffer.Span[..r]);
         }
 
         return r;
@@ -342,7 +342,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private int _peerChoking = 1;
     private int _peerInterested;
     private byte[]? _plaintextBuffer;
-    private byte[] _preReadHandshake = Array.Empty<byte>();
+    private byte[] _preReadHandshake = [];
     private int _receiveLoopState = 0;
 
     // CRITICAL FIX: Track background tasks to eliminate fire-and-forget patterns
@@ -1371,7 +1371,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
         var span = data.Span;
         byte id = span[0];
-        byte[] payload = data.Length > 1 ? data.Slice(1).ToArray() : Array.Empty<byte>();
+        byte[] payload = data.Length > 1 ? data[1..].ToArray() : [];
 
         if (id == 0) // Handshake
         {
@@ -1827,7 +1827,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 break;
 
             case MessageId.HashReject:
-                _logger.LogDebug("{PeerName} rejected BEP 52 hash request for root {PiecesRoot}", Name, Convert.ToHexString(msg.HashPiecesRoot ?? Array.Empty<byte>()));
+                _logger.LogDebug("{PeerName} rejected BEP 52 hash request for root {PiecesRoot}", Name, Convert.ToHexString(msg.HashPiecesRoot ?? []));
                 break;
 
             case MessageId.Extended:

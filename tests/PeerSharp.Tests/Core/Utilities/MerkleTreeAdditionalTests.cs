@@ -80,7 +80,7 @@ public class MerkleTreeAdditionalTests
     [Fact]
     public void ParsePieceLayer_Empty_ReturnsEmptyList()
     {
-        var result = MerkleTree.ParsePieceLayer(Array.Empty<byte>());
+        var result = MerkleTree.ParsePieceLayer([]);
         Assert.Empty(result);
     }
 
@@ -244,7 +244,7 @@ public class MerkleTreeAdditionalTests
     [Fact]
     public void ComputeLeaves_EmptyData_ReturnsEmptyList()
     {
-        var leaves = MerkleTree.ComputeLeaves(ReadOnlySpan<byte>.Empty);
+        var leaves = MerkleTree.ComputeLeaves([]);
         Assert.Empty(leaves);
     }
 

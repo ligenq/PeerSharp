@@ -181,7 +181,7 @@ internal class UtHashPiece : IUtHashPiece
         }
 
         // First hash is the piece hash
-        byte[] pieceHash = hashes.Slice(0, MerkleTreeSha1.HashSize).ToArray();
+        byte[] pieceHash = hashes[..MerkleTreeSha1.HashSize].ToArray();
         _merkleTree.SetPieceHash(pieceIndex, pieceHash);
 
         // Remaining hashes are uncle hashes

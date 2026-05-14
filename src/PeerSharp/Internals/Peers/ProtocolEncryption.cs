@@ -109,7 +109,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         {
             if (_buffer == null || _bufferCount == 0)
             {
-                return Array.Empty<byte>();
+                return [];
             }
 
             byte[] trailing = new byte[_bufferCount];
@@ -149,7 +149,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
             {
                 if (_bufferCount < 96)
                 {
-                    return Array.Empty<byte>();
+                    return [];
                 }
 
                 byte[] keyB = new byte[96];
@@ -185,7 +185,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
             {
                 if (_bufferCount < 96)
                 {
-                    return Array.Empty<byte>();
+                    return [];
                 }
 
                 byte[] keyA = new byte[96];
@@ -214,7 +214,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
             }
         }
 
-        return Array.Empty<byte>();
+        return [];
     }
 
     public byte[] Initiate()
@@ -314,7 +314,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         }
 
         // ENCRYPT(VC, crypto_provide, len(PadC), PadC, len(IA), IA)
-        var ia = InitialPayload ?? Array.Empty<byte>();
+        var ia = InitialPayload ?? [];
         int padLen = Random.Shared.Next(MaxPaddingLength + 1);
 
         // Pre-calculate sizes: VC(8) + provide(4) + padLen(2) + pad + iaLen(2) + ia
@@ -403,14 +403,14 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
 
         if (foundAt == -1)
         {
-            return Array.Empty<byte>(); // Need more data?
+            return []; // Need more data?
         }
 
         // Check if we have enough data for synchronization and the first encrypted block
         // req1Hash (20) + verification (20) + VC (8) + crypto_provide (4) + len(PadC) (2) = 54
         if (_bufferCount < foundAt + 54)
         {
-            return Array.Empty<byte>();
+            return [];
         }
 
         // Found synchronization
@@ -449,7 +449,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         if (matchedHash == null)
         {
             _step = Step.Error;
-            return Array.Empty<byte>();
+            return [];
         }
 
         // Initialize RC4 if we just identified the hash (Receiver mode)
@@ -466,7 +466,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
                 if ((hash2[i] ^ req3Hash[i]) != expectedReq2[i])
                 {
                     _step = Step.Error;
-                    return Array.Empty<byte>();
+                    return [];
                 }
             }
         }
@@ -490,7 +490,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
             if (header[i] != 0)
             {
                 _step = Step.Error;
-                return Array.Empty<byte>();
+                return [];
             }
         }
 
@@ -505,7 +505,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         if (_bufferCount < encStart + 14 + padLen + 2)
         {
             Encryption.RC4In.Restore(rc4Snapshot);
-            return Array.Empty<byte>();
+            return [];
         }
 
         // Decrypt PadC (skip it)
@@ -530,7 +530,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         if (_bufferCount < encStart + 14 + padLen + 2 + iaLen)
         {
             Encryption.RC4In.Restore(rc4Snapshot);
-            return Array.Empty<byte>();
+            return [];
         }
 
         // Decrypt IA
@@ -602,12 +602,12 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         if (foundAt == -1)
         {
             Encryption.RC4In.Restore(rc4Snapshot);
-            return Array.Empty<byte>();
+            return [];
         }
 
         _step = Step.Established;
         ConsumeBuffer(foundAt + 14 + padLen);
-        return Array.Empty<byte>();
+        return [];
     }
 
     private void ThrowIfDisposed()

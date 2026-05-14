@@ -616,14 +616,14 @@ internal class UdpTracker : TrackerBase, IDisposable
         byte[] req = new byte[98];
         var span = req.AsSpan();
 
-        BinaryPrimitives.WriteInt64BigEndian(span.Slice(0), connId);
-        BinaryPrimitives.WriteInt32BigEndian(span.Slice(8), 1); // Action Announce
-        BinaryPrimitives.WriteInt32BigEndian(span.Slice(12), transId);
-        Torrent.InfoFile.Info.GetTrackerInfoHash().CopyTo(span.Slice(16));
-        Torrent.Settings.PeerId.CopyTo(span.Slice(36));
-        BinaryPrimitives.WriteInt64BigEndian(span.Slice(56), Torrent.FileTransfer.Downloaded);
-        BinaryPrimitives.WriteInt64BigEndian(span.Slice(64), Torrent.DataLeft);
-        BinaryPrimitives.WriteInt64BigEndian(span.Slice(72), Torrent.FileTransfer.Uploaded);
+        BinaryPrimitives.WriteInt64BigEndian(span[..], connId);
+        BinaryPrimitives.WriteInt32BigEndian(span[8..], 1); // Action Announce
+        BinaryPrimitives.WriteInt32BigEndian(span[12..], transId);
+        Torrent.InfoFile.Info.GetTrackerInfoHash().CopyTo(span[16..]);
+        Torrent.Settings.PeerId.CopyTo(span[36..]);
+        BinaryPrimitives.WriteInt64BigEndian(span[56..], Torrent.FileTransfer.Downloaded);
+        BinaryPrimitives.WriteInt64BigEndian(span[64..], Torrent.DataLeft);
+        BinaryPrimitives.WriteInt64BigEndian(span[72..], Torrent.FileTransfer.Uploaded);
 
         int eventId = 0;
         if (evt == TrackerEvent.Completed)
@@ -639,16 +639,16 @@ internal class UdpTracker : TrackerBase, IDisposable
             eventId = 3;
         }
 
-        BinaryPrimitives.WriteInt32BigEndian(span.Slice(80), eventId); // Event
-        BinaryPrimitives.WriteInt32BigEndian(span.Slice(84), 0); // IP Default
-        BinaryPrimitives.WriteInt32BigEndian(span.Slice(88), _random.Next()); // Key
+        BinaryPrimitives.WriteInt32BigEndian(span[80..], eventId); // Event
+        BinaryPrimitives.WriteInt32BigEndian(span[84..], 0); // IP Default
+        BinaryPrimitives.WriteInt32BigEndian(span[88..], _random.Next()); // Key
         int numwant = (int)Torrent.Settings.MaxPeersPerTrackerRequest;
         if (numwant <= 0)
         {
             numwant = -1;
         }
-        BinaryPrimitives.WriteInt32BigEndian(span.Slice(92), numwant);
-        BinaryPrimitives.WriteUInt16BigEndian(span.Slice(96), Torrent.Settings.Connection.TcpPort);
+        BinaryPrimitives.WriteInt32BigEndian(span[92..], numwant);
+        BinaryPrimitives.WriteUInt16BigEndian(span[96..], Torrent.Settings.Connection.TcpPort);
 
         await SendPacketAsync(req, ct).ConfigureAwait(false);
 

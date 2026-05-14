@@ -93,7 +93,7 @@ public class DhtIntegrationTests
             {
                 return new[] { ip };
             }
-            return _entries.TryGetValue(hostNameOrAddress, out var ips) ? ips : Array.Empty<IPAddress>();
+            return _entries.TryGetValue(hostNameOrAddress, out var ips) ? ips : [];
         }
     }
 

@@ -1,5 +1,3 @@
-using PeerSharp.Core;
-
 namespace PeerSharp.Tests.Core;
 
 public class TorrentFileInfoTests

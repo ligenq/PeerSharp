@@ -377,7 +377,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public byte[] GetPieceBitfield()
     {
-        return Pieces?.ToBitfield() ?? Array.Empty<byte>();
+        return Pieces?.ToBitfield() ?? [];
     }
 
     public TorrentResumeData GetResumeData()
@@ -732,7 +732,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         int downloadSpeed = 0;
         int uploadSpeed = 0;
 
-        foreach (var peer in PeersInternal?.GetConnectedPeersInternal() ?? Enumerable.Empty<PeerCommunication>())
+        foreach (var peer in PeersInternal?.GetConnectedPeersInternal() ?? [])
         {
             downloadSpeed += peer.DownloadSpeed;
             uploadSpeed += peer.UploadSpeed;

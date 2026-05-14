@@ -2,7 +2,7 @@ using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Messages;
 
-namespace PeerSharp.Internals;
+namespace PeerSharp.Internals.Transfers;
 
 internal sealed class PieceCompletionHandler
 {

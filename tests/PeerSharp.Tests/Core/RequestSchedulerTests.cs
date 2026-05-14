@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
+using PeerSharp.Internals.Transfers;
 using PeerSharp.Messages;
 using PeerSharp.PiecePicking;
 using System.Net;

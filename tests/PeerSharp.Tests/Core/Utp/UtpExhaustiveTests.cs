@@ -469,7 +469,7 @@ public class UtpExhaustiveTests
         sentQueue.Enqueue(0);
         sentQueue.Enqueue(1);
 
-        advanceMethod!.Invoke(stream, Array.Empty<object>());
+        advanceMethod!.Invoke(stream, []);
         ushort oldest = (ushort)oldestField.GetValue(stream)!;
         Assert.Equal((ushort)65534, oldest);
     }

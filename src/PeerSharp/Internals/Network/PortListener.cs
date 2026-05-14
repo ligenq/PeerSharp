@@ -218,7 +218,7 @@ internal class PortListener : IPortListener
                 var torrent = _resolver.GetTorrent(infoHash);
                 if (torrent is Torrent t)
                 {
-                    await t.PeersInternal.AddIncomingPeerAsync(client, pe.ReceivedPayload ?? Array.Empty<byte>(), pe.Encryption).ConfigureAwait(false);
+                    await t.PeersInternal.AddIncomingPeerAsync(client, pe.ReceivedPayload ?? [], pe.Encryption).ConfigureAwait(false);
                     return true;
                 }
             }

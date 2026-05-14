@@ -277,7 +277,7 @@ internal class TorrentFileInfo
 
         foreach (var file in Files)
         {
-            if (file.PiecesRoot == null || !file.PiecesRoot.AsSpan().SequenceEqual(piecesRoot))
+            if (file.PiecesRoot?.AsSpan().SequenceEqual(piecesRoot) != true)
             {
                 continue;
             }
@@ -318,7 +318,7 @@ internal class TorrentFileInfo
 
         foreach (var file in Files)
         {
-            if (file.PiecesRoot == null || !file.PiecesRoot.AsSpan().SequenceEqual(piecesRoot))
+            if (file.PiecesRoot?.AsSpan().SequenceEqual(piecesRoot) != true)
             {
                 continue;
             }
@@ -341,10 +341,10 @@ internal class TorrentFileInfo
                 return false;
             }
 
-            var received = Utilities.MerkleTree.ParsePieceLayer(hashes.Slice(0, length * Utilities.MerkleTree.HashSize).ToArray());
+            var received = Utilities.MerkleTree.ParsePieceLayer(hashes[..(length * Utilities.MerkleTree.HashSize)].ToArray());
             var proof = proofHashCount == 0
                 ? []
-                : Utilities.MerkleTree.ParsePieceLayer(hashes.Slice(length * Utilities.MerkleTree.HashSize).ToArray());
+                : Utilities.MerkleTree.ParsePieceLayer(hashes[(length * Utilities.MerkleTree.HashSize)..].ToArray());
 
             if (!Utilities.MerkleTree.VerifyPieceLayerSubsetAgainstRoot(
                     received, file.PiecesRoot, PieceSize, file.Size, index, proofLayers, proof))

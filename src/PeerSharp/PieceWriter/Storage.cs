@@ -203,7 +203,7 @@ internal sealed class Storage : IStorage
         // access through the array would throw ObjectDisposedException. _files holds POCOs
         // (paths/sizes only — handles live in _handleCache, already closed via CloseTorrentHandles),
         // so it's safe to leave intact for any in-flight readers about to bail out.
-        _fileLocks = Array.Empty<SemaphoreSlim>();
+        _fileLocks = [];
 
         GC.SuppressFinalize(this);
     }
@@ -496,10 +496,10 @@ internal sealed class Storage : IStorage
             }
         }
 
-        _files = Array.Empty<FileEntry>();
-        _fileSkipped = Array.Empty<bool>();
-        _fileFailed = Array.Empty<bool>();
-        _fileLocks = Array.Empty<SemaphoreSlim>();
+        _files = [];
+        _fileSkipped = [];
+        _fileFailed = [];
+        _fileLocks = [];
         _fileMapper = null;
         _initialized = 0;
     }

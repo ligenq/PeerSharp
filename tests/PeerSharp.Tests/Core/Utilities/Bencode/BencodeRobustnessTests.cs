@@ -59,7 +59,7 @@ public class BencodeRobustnessTests
     [Fact]
     public void Parse_EmptyInput_ThrowsException()
     {
-        Assert.Throws<FormatException>(() => BencodeParser.Parse(Array.Empty<byte>()));
+        Assert.Throws<FormatException>(() => BencodeParser.Parse([]));
     }
 
     [Fact]

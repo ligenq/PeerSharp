@@ -42,7 +42,7 @@ public sealed class NatPmpTests
     [Fact]
     public async Task GetStatus_NoGateways_ReturnsFailed()
     {
-        var mapper = new NatPmpPortMapping(() => Enumerable.Empty<IPAddress>(), 5351);
+        var mapper = new NatPmpPortMapping(() => [], 5351);
         await mapper.StartAsync(CancellationToken.None);
 
         var status = mapper.GetStatus();

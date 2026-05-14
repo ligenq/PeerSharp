@@ -5,6 +5,7 @@ using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Extensions;
 using System.Net;
 using System.Threading.Channels;
+using PeerSharp.Internals.Transfers;
 
 namespace PeerSharp.Tests.Core.Transfers;
 

@@ -108,7 +108,7 @@ public class NetworkManagerTests
     {
         public IEnumerable<IPortMapper> CreateMappers(Settings settings)
         {
-            return Enumerable.Empty<IPortMapper>();
+            return [];
         }
     }
 

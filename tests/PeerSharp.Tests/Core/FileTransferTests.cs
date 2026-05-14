@@ -6,6 +6,7 @@ using Microsoft.Extensions.Time.Testing;
 using System.Net;
 using System.Reflection;
 using PeerSharp.Messages;
+using PeerSharp.Internals.Transfers;
 
 namespace PeerSharp.Tests.Core;
 

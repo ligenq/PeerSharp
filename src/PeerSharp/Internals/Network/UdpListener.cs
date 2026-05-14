@@ -27,7 +27,7 @@ internal class UdpListener : IUdpListener
     private TcpClient? _proxyControlClient;
     private IPEndPoint? _proxyUdpEndPoint;
     private Channel<(byte[] Data, IPEndPoint Remote)>? _receiveChannel;
-    private IUdpReceiver[] _receivers = Array.Empty<IUdpReceiver>();
+    private IUdpReceiver[] _receivers = [];
     private Task? _receiveTask;
     private bool _running;
 

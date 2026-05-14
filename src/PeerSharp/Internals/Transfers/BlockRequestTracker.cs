@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using PeerSharp.Internals.Peers;
 
-namespace PeerSharp.Internals;
+namespace PeerSharp.Internals.Transfers;
 
 internal sealed class PeerRequestCollection
 {

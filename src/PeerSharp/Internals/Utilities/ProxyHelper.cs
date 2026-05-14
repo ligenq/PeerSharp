@@ -390,7 +390,7 @@ internal static class ProxyHelper
             destination[21] = (byte)(target.Port & 0xFF);
         }
 
-        payload.CopyTo(destination.Slice(headerLength));
+        payload.CopyTo(destination[headerLength..]);
         return totalLength;
     }
 

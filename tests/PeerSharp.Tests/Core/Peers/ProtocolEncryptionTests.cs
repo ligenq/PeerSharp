@@ -33,7 +33,7 @@ public class ProtocolEncryptionTests
         public uint PieceSize => 0;
         public int PieceCount => 0;
         public int PiecesReceived => 0;
-        public byte[] GetPieceBitfield() => Array.Empty<byte>();
+        public byte[] GetPieceBitfield() => [];
         public TorrentResumeData GetResumeData() => throw new NotImplementedException();
         public IFiles Files => throw new NotImplementedException();
         public ITrackers Trackers => throw new NotImplementedException();

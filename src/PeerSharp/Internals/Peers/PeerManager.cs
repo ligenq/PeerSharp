@@ -52,7 +52,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     // 1 second base loop
     private const int WatchdogIntervalSeconds = 5;
 
-    private static readonly Random _pexRandom = new();
+    private static readonly Random PexRandom = new();
 
     // Track active connection attempts for clean shutdown
     private readonly ConcurrentDictionary<Task, byte> _activeConnectionTasks = new();
@@ -484,7 +484,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     {
         var p = (PeerCommunication)peer;
         var fileTransfer = _torrent.FileTransferInternal;
-        if (fileTransfer != null && !fileTransfer.IsDisposed)
+        if (fileTransfer?.IsDisposed == false)
         {
             fileTransfer.UnregisterPeerAvailability(p);
         }
@@ -673,7 +673,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
                     if (msgType == (int)UtMetadata.MessageType.Data)
                     {
-                        byte[] payload = data.Length > consumed ? data[consumed..] : Array.Empty<byte>();
+                        byte[] payload = data.Length > consumed ? data[consumed..] : [];
                         if (_torrent.MetadataDownloadInternal != null)
                         {
                             await _torrent.MetadataDownloadInternal.MetadataPieceReceivedAsync(p, piece, payload).ConfigureAwait(false);
@@ -717,7 +717,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
                     if (msgType == (int)UtMetadata.MessageType.Data)
                     {
-                        byte[] payload = data.Length > res.Consumed ? data[res.Consumed..] : Array.Empty<byte>();
+                        byte[] payload = data.Length > res.Consumed ? data[res.Consumed..] : [];
                         if (_torrent.MetadataDownloadInternal != null)
                         {
                             await _torrent.MetadataDownloadInternal.MetadataPieceReceivedAsync(p, piece, payload).ConfigureAwait(false);
@@ -1013,9 +1013,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 break;
 
             case MessageId.Cancel:
-                // BEP-3: Peer cancelled a previously requested block
-                // Remove from our pending upload queue
-                FileTransfer.BlockRequestCancelled(p, msg);
+                // BEP-3: Peer no longer wants this block
+                _torrent.FileTransferInternal.BlockRequestCancelled(p, msg);
                 break;
         }
     }
@@ -1295,7 +1294,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         int takeCount = Math.Min(50, knownCandidates.Count);
         for (int i = 0; i < takeCount; i++)
         {
-            int j = i + _pexRandom.Next(knownCandidates.Count - i);
+            int j = i + PexRandom.Next(knownCandidates.Count - i);
             (knownCandidates[i], knownCandidates[j]) = (knownCandidates[j], knownCandidates[i]);
         }
 

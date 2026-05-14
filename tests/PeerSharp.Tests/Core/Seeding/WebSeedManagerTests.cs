@@ -17,7 +17,7 @@ public class WebSeedManagerTests
 
         public Task<byte[]> GetByteArrayAsync(string url, CancellationToken cancellationToken)
         {
-            return Task.FromResult(ResponseBytes ?? Array.Empty<byte>());
+            return Task.FromResult(ResponseBytes ?? []);
         }
 
         public Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, HttpCompletionOption completionOption, CancellationToken cancellationToken)

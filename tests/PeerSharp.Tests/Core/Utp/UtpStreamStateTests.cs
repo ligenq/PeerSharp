@@ -66,7 +66,7 @@ public class UtpStreamStateTests
         var (stream, _, _) = CreateStream();
         var header = MakeHeader(MessageType.ST_SYN, seqNr: 1, ackNr: 0);
 
-        stream.ProcessPacketWithSack(header, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(header, [], 0, null, null, RemoteEndPoint);
 
         Assert.Equal(UtpState.SynRecv, stream.State);
     }
@@ -77,7 +77,7 @@ public class UtpStreamStateTests
         var (stream, manager, _) = CreateStream();
         var header = MakeHeader(MessageType.ST_SYN, seqNr: 1, ackNr: 0);
 
-        stream.ProcessPacketWithSack(header, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(header, [], 0, null, null, RemoteEndPoint);
 
         Assert.True(manager.SendCallCount >= 1);
     }
@@ -89,14 +89,14 @@ public class UtpStreamStateTests
 
         // First SYN transitions to SynRecv
         var syn1 = MakeHeader(MessageType.ST_SYN, seqNr: 42, ackNr: 0);
-        stream.ProcessPacketWithSack(syn1, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(syn1, [], 0, null, null, RemoteEndPoint);
 
         Assert.Equal(UtpState.SynRecv, stream.State);
         int sendCountAfterFirst = manager.SendCallCount;
 
         // Duplicate SYN with same SeqNr (= stream.AckNr after first SYN)
         var syn2 = MakeHeader(MessageType.ST_SYN, seqNr: stream.AckNr, ackNr: 0);
-        stream.ProcessPacketWithSack(syn2, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(syn2, [], 0, null, null, RemoteEndPoint);
 
         Assert.Equal(UtpState.SynRecv, stream.State);
         Assert.True(manager.SendCallCount > sendCountAfterFirst, "Expected SendAsync to be called again for duplicate SYN");
@@ -108,7 +108,7 @@ public class UtpStreamStateTests
         var (stream, _, _) = CreateStream();
         var header = MakeHeader(MessageType.ST_SYN, seqNr: 1, ackNr: 0);
 
-        stream.ProcessPacketWithSack(header, Array.Empty<byte>(), 0, null, null, OtherEndPoint);
+        stream.ProcessPacketWithSack(header, [], 0, null, null, OtherEndPoint);
 
         Assert.Equal(UtpState.None, stream.State);
     }
@@ -124,7 +124,7 @@ public class UtpStreamStateTests
         // AckNr = seqNr - 1 equals lastSent (the SYN packet seq)
         ushort ackNr = (ushort)(stream.SeqNr - 1);
         var stateHeader = MakeHeader(MessageType.ST_STATE, seqNr: 10, ackNr: ackNr);
-        stream.ProcessPacketWithSack(stateHeader, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(stateHeader, [], 0, null, null, RemoteEndPoint);
 
         await connectTask;
 
@@ -140,7 +140,7 @@ public class UtpStreamStateTests
 
         ushort ackNr = (ushort)(stream.SeqNr - 1);
         var resetHeader = MakeHeader(MessageType.ST_RESET, seqNr: 1, ackNr: ackNr);
-        stream.ProcessPacketWithSack(resetHeader, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(resetHeader, [], 0, null, null, RemoteEndPoint);
 
         Assert.Equal(UtpState.Closed, stream.State);
 
@@ -155,12 +155,12 @@ public class UtpStreamStateTests
 
         // First get to SynRecv via ST_SYN
         var syn = MakeHeader(MessageType.ST_SYN, seqNr: 5, ackNr: 0);
-        stream.ProcessPacketWithSack(syn, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(syn, [], 0, null, null, RemoteEndPoint);
         Assert.Equal(UtpState.SynRecv, stream.State);
 
         // SentPacketsCount == 0 in SynRecv (ST_STATE is not a reliability packet), so any AckNr is valid
         var stateHeader = MakeHeader(MessageType.ST_STATE, seqNr: 20, ackNr: 0);
-        stream.ProcessPacketWithSack(stateHeader, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(stateHeader, [], 0, null, null, RemoteEndPoint);
 
         Assert.Equal(UtpState.Connected, stream.State);
     }
@@ -172,16 +172,16 @@ public class UtpStreamStateTests
 
         // Get to SynRecv
         var syn = MakeHeader(MessageType.ST_SYN, seqNr: 5, ackNr: 0);
-        stream.ProcessPacketWithSack(syn, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(syn, [], 0, null, null, RemoteEndPoint);
 
         // Get to Connected
         var stateHeader = MakeHeader(MessageType.ST_STATE, seqNr: 20, ackNr: 0);
-        stream.ProcessPacketWithSack(stateHeader, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(stateHeader, [], 0, null, null, RemoteEndPoint);
         Assert.Equal(UtpState.Connected, stream.State);
 
         // Now send RESET
         var resetHeader = MakeHeader(MessageType.ST_RESET, seqNr: 1, ackNr: 0);
-        stream.ProcessPacketWithSack(resetHeader, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(resetHeader, [], 0, null, null, RemoteEndPoint);
 
         Assert.Equal(UtpState.Closed, stream.State);
 
@@ -208,7 +208,7 @@ public class UtpStreamStateTests
         // Clean up: send a state response to complete the connect task
         ushort ackNr = (ushort)(stream.SeqNr - 1);
         var stateHeader = MakeHeader(MessageType.ST_STATE, seqNr: 10, ackNr: ackNr);
-        stream.ProcessPacketWithSack(stateHeader, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(stateHeader, [], 0, null, null, RemoteEndPoint);
         await connectTask;
     }
 
@@ -240,10 +240,10 @@ public class UtpStreamStateTests
 
         // Get to Connected state via SYN->SynRecv->Connected
         var syn = MakeHeader(MessageType.ST_SYN, seqNr: 5, ackNr: 0);
-        stream.ProcessPacketWithSack(syn, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(syn, [], 0, null, null, RemoteEndPoint);
 
         var stateHeader = MakeHeader(MessageType.ST_STATE, seqNr: 20, ackNr: 0);
-        stream.ProcessPacketWithSack(stateHeader, Array.Empty<byte>(), 0, null, null, RemoteEndPoint);
+        stream.ProcessPacketWithSack(stateHeader, [], 0, null, null, RemoteEndPoint);
         Assert.Equal(UtpState.Connected, stream.State);
 
         // Advance time past 60s inactivity threshold without any received packets

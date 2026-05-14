@@ -163,7 +163,7 @@ internal static class UpnpDiscovery
         {
             if (line.StartsWith(header + ":", StringComparison.OrdinalIgnoreCase))
             {
-                return line.Substring(header.Length + 1).Trim();
+                return line[(header.Length + 1)..].Trim();
             }
         }
         return null;

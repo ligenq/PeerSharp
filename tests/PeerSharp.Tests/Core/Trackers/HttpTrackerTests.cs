@@ -23,7 +23,7 @@ public class HttpTrackerTests
                 throw Exception;
             }
 
-            return Task.FromResult(ResponseBytes ?? Array.Empty<byte>());
+            return Task.FromResult(ResponseBytes ?? []);
         }
 
         public Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, HttpCompletionOption completionOption, CancellationToken cancellationToken)
@@ -245,7 +245,7 @@ public class HttpTrackerTests
         var dict = new BDict();
         dict.Dict["interval"] = new BNumber(1800);
         dict.Dict["min interval"] = new BNumber(300);
-        dict.Dict["peers"] = new BString(Array.Empty<byte>());
+        dict.Dict["peers"] = new BString([]);
         _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
 
         await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);

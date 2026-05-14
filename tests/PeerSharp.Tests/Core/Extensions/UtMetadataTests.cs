@@ -211,7 +211,7 @@ public class UtMetadataTests
         utMetadata.Init(handshake);
 
         // Act
-        utMetadata.SendData(0, Array.Empty<byte>(), 0);
+        utMetadata.SendData(0, [], 0);
 
         // Assert
         Assert.Single(mockPeer.SentMessages);

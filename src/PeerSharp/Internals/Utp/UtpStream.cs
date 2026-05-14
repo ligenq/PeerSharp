@@ -1392,7 +1392,7 @@ internal class UtpStream : Stream
         {
             buffer[20] = 0; // No more extensions
             buffer[21] = (byte)(extensionLen - 2);
-            bitmask.Slice(0, extensionLen - 2).CopyTo(buffer.AsSpan(22));
+            bitmask[..(extensionLen - 2)].CopyTo(buffer.AsSpan(22));
 
             _logger.LogDebug("SACK {Remote}: Sending SACK extension with {Count} out-of-order packets, {Len} bytes",
                 RemoteEndPoint, _reorderBufferSeqs.Count, extensionLen - 2);

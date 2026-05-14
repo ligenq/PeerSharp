@@ -14,7 +14,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private AtomicDisposal _disposal = new();
 
     private float _lastReportedProgress = -1f;
-    private byte[] _metadataBuffer = Array.Empty<byte>();
+    private byte[] _metadataBuffer = [];
     private int _metadataSize = 0;
     private int MetadataRequestTimeoutSeconds => Math.Max(1, _torrent.Settings.Transfer.MetadataRequestTimeoutSeconds);
     private int MetadataRequestPipeline => Math.Clamp(_torrent.Settings.Transfer.MetadataRequestPipeline, 1, 32);

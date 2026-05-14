@@ -2,7 +2,7 @@ using System.Buffers;
 using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Utilities;
 
-namespace PeerSharp.Internals;
+namespace PeerSharp.Internals.Transfers;
 
 internal sealed class PieceVerificationOutcome : IDisposable
 {

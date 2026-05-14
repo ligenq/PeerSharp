@@ -302,7 +302,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
             {
                 await _peerManager.HandleOfferAsync(signal.OfferId, signal.PeerId!, signal.AnswerSdp, runtime, SendAnswerAsync, _cts.Token).ConfigureAwait(false);
             }
-            else if (signal.AnswerSdp != null && signal.OfferId != null && (signal.AnswerType == null || signal.AnswerType.Equals("answer", StringComparison.OrdinalIgnoreCase)))
+            else if (signal.AnswerSdp != null && signal.OfferId != null && (signal.AnswerType?.Equals("answer", StringComparison.OrdinalIgnoreCase) != false))
             {
                 await _peerManager.HandleAnswerAsync(signal, _cts.Token).ConfigureAwait(false);
             }

@@ -32,7 +32,7 @@ internal static class RemoteSdpReachability
                         continue;
                     }
 
-                    if (info.IPv4Mask is null || info.IPv4Mask.Equals(IPAddress.Any))
+                    if (info.IPv4Mask?.Equals(IPAddress.Any) != false)
                     {
                         continue;
                     }
@@ -70,7 +70,7 @@ internal static class RemoteSdpReachability
                 continue;
             }
 
-            var parts = line.Substring("a=candidate:".Length).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var parts = line["a=candidate:".Length..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
             int typIndex = Array.IndexOf(parts, "typ");
             if (typIndex < 0 || typIndex + 1 >= parts.Length || parts.Length < 5)
             {

@@ -747,7 +747,7 @@ public class PeerManagerTests
         var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System);
         // LocalMessageId is null (never set) so unknown type 99 won't match
 
-        var ex = await Record.ExceptionAsync(() => ctx.Manager.ExtendedMessageReceivedAsync(peer, 99, Array.Empty<byte>()));
+        var ex = await Record.ExceptionAsync(() => ctx.Manager.ExtendedMessageReceivedAsync(peer, 99, []));
         Assert.Null(ex);
 
         await CleanupAsync(ctx);
@@ -761,7 +761,7 @@ public class PeerManagerTests
         peer.UtMetadata.SetLocalMessageId(5);
 
         // Send an empty/invalid payload — should not throw
-        var ex = await Record.ExceptionAsync(() => ctx.Manager.ExtendedMessageReceivedAsync(peer, 5, Array.Empty<byte>()));
+        var ex = await Record.ExceptionAsync(() => ctx.Manager.ExtendedMessageReceivedAsync(peer, 5, []));
         Assert.Null(ex);
 
         await CleanupAsync(ctx);

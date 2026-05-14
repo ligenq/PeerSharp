@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
+using PeerSharp.Internals.Transfers;
 using PeerSharp.PiecePicking;
 
 namespace PeerSharp.Tests.Core;

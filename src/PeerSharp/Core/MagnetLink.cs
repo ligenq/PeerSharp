@@ -165,7 +165,7 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
                     if (xt.StartsWith("urn:btih:", StringComparison.OrdinalIgnoreCase))
                     {
                         // V1 info hash (SHA-1, 20 bytes)
-                        var hashStr = xt.Substring(9);
+                        var hashStr = xt[9..];
                         if (hashStr.Length == 40) // Hex
                         {
                             if (InfoHash.TryFromHex(hashStr, out var hash))
@@ -188,8 +188,8 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
                     else if (xt.StartsWith("urn:btmh:", StringComparison.OrdinalIgnoreCase))
                     {
                         // BEP 52: V2 info hash (multihash format)
-                        var multihash = xt.Substring(9);
-                        if (multihash.StartsWith("1220", StringComparison.OrdinalIgnoreCase) && multihash.Length == 68 && InfoHash.TryFromHex(multihash.Substring(4), out var hashV2))
+                        var multihash = xt[9..];
+                        if (multihash.StartsWith("1220", StringComparison.OrdinalIgnoreCase) && multihash.Length == 68 && InfoHash.TryFromHex(multihash[4..], out var hashV2))
                         {
                             infoHashV2 = hashV2;
                         }
@@ -278,8 +278,8 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
                 return false;
             }
 
-            host = value.Substring(1, end - 1);
-            portStr = value.Substring(end + 2);
+            host = value[1..end];
+            portStr = value[(end + 2)..];
         }
         else
         {
@@ -289,8 +289,8 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
                 return false;
             }
 
-            host = value.Substring(0, lastColon);
-            portStr = value.Substring(lastColon + 1);
+            host = value[..lastColon];
+            portStr = value[(lastColon + 1)..];
         }
 
         if (!int.TryParse(portStr, out int port) || port <= 0 || port > 65535)
