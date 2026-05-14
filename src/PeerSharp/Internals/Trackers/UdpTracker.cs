@@ -40,7 +40,6 @@ internal class UdpTracker : TrackerBase, IDisposable
     private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(15);
     private static readonly int[] RetryDelaysMs = { 1000, 2000, 4000 };
     private readonly ILogger<UdpTracker> _logger = TorrentLoggerFactory.CreateLogger<UdpTracker>();
-    private readonly Random _random = new Random();
     private readonly IUdpSocketFactory _socketFactory;
 
     private readonly SemaphoreSlim _syncLock = new SemaphoreSlim(1, 1);
@@ -421,7 +420,7 @@ internal class UdpTracker : TrackerBase, IDisposable
             throw new InvalidOperationException("UDP tracker client not initialized - call EnsureConnectedAsyncUnsafe first");
         }
 
-        int transId = _random.Next();
+        int transId = Random.Shared.Next();
 
         // Request: ProtocolId (8) + Action (4) + TransId (4)
         byte[] req = new byte[16];
@@ -595,7 +594,7 @@ internal class UdpTracker : TrackerBase, IDisposable
             throw new InvalidOperationException("UDP tracker client not initialized - call EnsureConnectedAsyncUnsafe first");
         }
 
-        int transId = _random.Next();
+        int transId = Random.Shared.Next();
 
         // Request:
         // ConnId (8)
@@ -640,7 +639,7 @@ internal class UdpTracker : TrackerBase, IDisposable
 
         BinaryPrimitives.WriteInt32BigEndian(span[80..], eventId); // Event
         BinaryPrimitives.WriteInt32BigEndian(span[84..], 0); // IP Default
-        BinaryPrimitives.WriteInt32BigEndian(span[88..], _random.Next()); // Key
+        BinaryPrimitives.WriteInt32BigEndian(span[88..], Random.Shared.Next()); // Key
         int numwant = (int)Torrent.Settings.MaxPeersPerTrackerRequest;
         if (numwant <= 0)
         {
@@ -761,7 +760,7 @@ internal class UdpTracker : TrackerBase, IDisposable
             throw new InvalidOperationException("UDP tracker client not initialized - call EnsureConnectedAsyncUnsafe first");
         }
 
-        int transId = _random.Next();
+        int transId = Random.Shared.Next();
         int hashCount = Math.Min(infoHashes.Count, UdpTrackerScrapeCodec.MaxHashesPerRequest);
         byte[] req = UdpTrackerScrapeCodec.BuildRequest(connId, transId, infoHashes);
 
