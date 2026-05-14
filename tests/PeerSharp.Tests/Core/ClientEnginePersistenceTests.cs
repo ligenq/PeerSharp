@@ -37,7 +37,10 @@ public class ClientEnginePersistenceTests
         public Task SaveAllAsync(IEnumerable<SavedTorrentEntry> entries, CancellationToken cancellationToken = default)
         {
             foreach (var e in entries)
+            {
                 SaveAsync(e, cancellationToken);
+            }
+
             return Task.CompletedTask;
         }
 

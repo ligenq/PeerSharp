@@ -17,7 +17,7 @@ internal class AdaptiveTimeout
     private readonly double _beta;
 
     // Per-endpoint statistics for more granular adaptation
-    private readonly Dictionary<string, EndpointStats> _endpointStats = new();
+    private readonly Dictionary<string, EndpointStats> _endpointStats = [];
 
     private readonly int _initialTimeoutMs;
 

@@ -27,7 +27,7 @@ public class TorrentFileSerializerTests
         metadata.InfoBytes = BencodeWriter.Write(info);
 
         metadata.Announce = "http://tracker.com/announce";
-        metadata.AnnounceTiers.Add(new List<string> { "http://tracker1.com/announce", "http://tracker2.com/announce" });
+        metadata.AnnounceTiers.Add(["http://tracker1.com/announce", "http://tracker2.com/announce"]);
         metadata.WebSeedUrls.Add("http://seed.com/file");
 
         var bytes = TorrentFileSerializer.BuildTorrentBytes(metadata);

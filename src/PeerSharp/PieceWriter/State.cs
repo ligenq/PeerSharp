@@ -22,11 +22,11 @@ internal class TorrentStateData
     public long SeedTimeSeconds { get; set; }
 
     // Selection: File priorities
-    public List<FileSelection> Selection { get; set; } = new();
+    public List<FileSelection> Selection { get; set; } = [];
 
     public bool Started { get; set; }
 
-    public List<UnfinishedPieceData> UnfinishedPieces { get; set; } = new();
+    public List<UnfinishedPieceData> UnfinishedPieces { get; set; } = [];
 
     public ulong Uploaded { get; set; }
 

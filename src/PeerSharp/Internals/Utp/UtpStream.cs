@@ -69,11 +69,11 @@ internal class UtpStream : Stream
     private readonly Task? _pipeWriteTask;
     private readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
     private readonly PriorityQueue<ReceivedPacket, ushort> _reorderBuffer = new(new SeqComparer());
-    private readonly HashSet<ushort> _reorderBufferSeqs = new();
+    private readonly HashSet<ushort> _reorderBufferSeqs = [];
 
     // SACK SUPPORT: Dictionary for O(1) lookup/removal on selective ACKs
     // Key = SeqNr, allows fast removal when SACK indicates receipt
-    private readonly Dictionary<ushort, SentPacket> _sentPackets = new();
+    private readonly Dictionary<ushort, SentPacket> _sentPackets = [];
 
     private readonly Queue<ushort> _sentSeqQueue = new();
     private readonly TimeProvider _timeProvider;
@@ -749,7 +749,15 @@ internal class UtpStream : Stream
             }
 
             CheckIfClosed();
-            _connectTcs?.TrySetCanceled();
+
+            if (error != null)
+            {
+                _connectTcs?.TrySetException(error);
+            }
+            else
+            {
+                _connectTcs?.TrySetCanceled();
+            }
 
             // Wake up any pending writes so they can observe the closed state
             try

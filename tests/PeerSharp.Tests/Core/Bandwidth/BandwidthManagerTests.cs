@@ -150,6 +150,101 @@ public class BandwidthManagerTests
         // Accessing the channel again will recreate it, but with the default limit (0, unlimited)
         Assert.Equal(0, manager.GetChannel($"{hash}_DL").GetLimit());
     }
+
+    [Fact]
+    public void SetTorrentDiskLimits_CreatesSpecificDiskChannels()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+        var torrent = TorrentTestUtility.CreateMinimal();
+
+        manager.SetTorrentDiskLimits(torrent, 1024, 2048);
+
+        var limits = manager.GetTorrentDiskLimits(torrent);
+        Assert.Equal(1024, limits.ReadLimit);
+        Assert.Equal(2048, limits.WriteLimit);
+
+        string hash = torrent.Hash.ToHexStringUpper();
+        Assert.Equal(1024, manager.GetChannel($"{hash}_DR").GetLimit());
+        Assert.Equal(2048, manager.GetChannel($"{hash}_DW").GetLimit());
+    }
+
+    [Fact]
+    public void GetTorrentDiskLimits_NoLimitsSet_ReturnsZero()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+        var torrent = TorrentTestUtility.CreateMinimal();
+
+        var limits = manager.GetTorrentDiskLimits(torrent);
+
+        Assert.Equal(0, limits.ReadLimit);
+        Assert.Equal(0, limits.WriteLimit);
+    }
+
+    [Fact]
+    public void Configure_AfterStart_ThrowsInvalidOperationException()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+        manager.Start();
+
+        Assert.Throws<InvalidOperationException>(() => manager.Configure(50));
+    }
+
+    [Fact]
+    public void Configure_BeforeStart_ChangesInterval()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+        manager.Configure(50);
+        // No exception — just confirming it applies without throwing.
+        manager.Start();
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RequestBandwidthAsync_CancelledToken_ReturnsCancelled()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => manager.RequestBandwidthAsync(new MockBandwidthUser(), 100, 0, new[] { BandwidthManager.GlobalDownload }, cts.Token));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RequestBandwidthAsync_CancelledWhileQueued_CompletesAsCancelled()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+        manager.SetGlobalLimits(10, 10);
+
+        using var cts = new CancellationTokenSource();
+        var user = new MockBandwidthUser();
+
+        var task = manager.RequestBandwidthAsync(user, 100, 0, new[] { BandwidthManager.GlobalDownload }, cts.Token);
+        Assert.False(task.IsCompleted);
+
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task DisposeAsync_CompletesCleanly()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+        manager.Start();
+
+        await manager.DisposeAsync();
+        // No exception = pass.
+    }
+
+    [Fact]
+    public void SetGlobalDiskLimits_UpdatesChannels()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+        manager.SetGlobalDiskLimits(512, 1024);
+
+        Assert.Equal(512, manager.GetChannel(BandwidthManager.GlobalDiskRead).GetLimit());
+        Assert.Equal(1024, manager.GetChannel(BandwidthManager.GlobalDiskWrite).GetLimit());
+    }
 }
 
 

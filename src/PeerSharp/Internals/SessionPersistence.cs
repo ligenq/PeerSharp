@@ -235,7 +235,7 @@ internal sealed class SessionPersistence : ISessionPersistence
     internal sealed class DhtStateDto
     {
         public string? NodeId { get; set; }
-        public List<DhtNodeDto> Nodes { get; set; } = new();
+        public List<DhtNodeDto> Nodes { get; set; } = [];
     }
 
     internal sealed class DhtNodeDto

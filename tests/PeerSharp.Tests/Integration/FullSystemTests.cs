@@ -232,7 +232,7 @@ public class FullSystemTests : IDisposable
 
 
 
-        leecherEngine.OnPeersFound(leecherTorrent.Hash, new List<IPEndPoint> { ipv6Endpoint });
+        leecherEngine.OnPeersFound(leecherTorrent.Hash, [ipv6Endpoint]);
 
 
 
@@ -346,7 +346,7 @@ public class FullSystemTests : IDisposable
 
         while (leecherTorrent.Peers.ConnectedCount == 0 && !cts.IsCancellationRequested)
         {
-            leecherEngine.OnPeersFound(leecherTorrent.Hash, new List<IPEndPoint> { seedEndpoint });
+            leecherEngine.OnPeersFound(leecherTorrent.Hash, [seedEndpoint]);
             try { await Task.Delay(200, cts.Token); } catch { break; }
         }
 

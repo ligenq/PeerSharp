@@ -520,7 +520,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
                 var hashStr = Convert.ToHexString(infoHash.Value.Span);
                 var ep = new IPEndPoint(remote.Address, p);
 
-                var peerList = _peers.GetOrAdd(hashStr, _ => new List<DhtPeer>());
+                var peerList = _peers.GetOrAdd(hashStr, _ => []);
                 lock (peerList)
                 {
                     var existing = peerList.FirstOrDefault(x => x.EndPoint.Equals(ep));
@@ -744,6 +744,79 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         }
     }
 
+    internal void PerformMaintenance(DateTimeOffset now)
+    {
+        // Cleanup transactions - direct enumeration is safe for ConcurrentDictionary
+        foreach (var kvp in _transactions)
+        {
+            if ((now - kvp.Value.Timestamp).TotalMinutes > ProtocolConstants.DhtTransactionTimeoutMinutes)
+            {
+                _transactions.TryRemove(kvp.Key, out _);
+            }
+        }
+
+        // Cleanup recent query deduplication cache
+        foreach (var kvp in _recentGetPeersQueries)
+        {
+            if ((now - kvp.Value).TotalMinutes > ProtocolConstants.DhtTransactionTimeoutMinutes)
+            {
+                _recentGetPeersQueries.TryRemove(kvp.Key, out _);
+            }
+        }
+
+        // Hard cap: if the dedup cache is too large, clear old entries aggressively
+        if (_recentGetPeersQueries.Count > MaxRecentQueries)
+        {
+            var cutoff = now.AddMinutes(-1);
+            foreach (var kvp in _recentGetPeersQueries)
+            {
+                if (kvp.Value < cutoff)
+                {
+                    _recentGetPeersQueries.TryRemove(kvp.Key, out _);
+                }
+            }
+        }
+
+        // Cleanup peers - direct enumeration
+        foreach (var kvp in _peers)
+        {
+            var key = kvp.Key;
+            var peerList = kvp.Value;
+
+            lock (peerList)
+            {
+                peerList.RemoveAll(p => (now - p.LastSeen).TotalMinutes > ProtocolConstants.DhtPeerCacheTimeoutMinutes);
+
+                if (peerList.Count == 0)
+                {
+                    // Use explicit ICollection remove for value equality check
+                    ((ICollection<KeyValuePair<string, List<DhtPeer>>>)_peers)
+                        .Remove(new KeyValuePair<string, List<DhtPeer>>(key, peerList));
+                }
+            }
+        }
+    }
+
+    internal int TransactionCount => _transactions.Count;
+    internal int RecentQueryCount => _recentGetPeersQueries.Count;
+    internal int PeerCacheEntryCount => _peers.Count;
+
+    internal void InjectTransaction(string key, DateTimeOffset timestamp)
+    {
+        _transactions[key] = new Transaction { Id = key, Type = "ping", InfoHash = InfoHash.Empty, Timestamp = timestamp };
+    }
+
+    internal void InjectRecentQuery(string key, DateTimeOffset timestamp)
+    {
+        _recentGetPeersQueries[key] = timestamp;
+    }
+
+    internal void InjectPeer(string infoHash, IPEndPoint ep, DateTimeOffset lastSeen)
+    {
+        var list = _peers.GetOrAdd(infoHash, _ => []);
+        lock (list) { list.Add(new DhtPeer { EndPoint = ep, LastSeen = lastSeen }); }
+    }
+
     private async Task RunMaintenanceAsync(CancellationToken token)
     {
         while (_running && !token.IsCancellationRequested)
@@ -759,57 +832,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
 
             try
             {
-                var now = _timeProvider.GetUtcNow();
-
-                // Cleanup transactions - direct enumeration is safe for ConcurrentDictionary
-                foreach (var kvp in _transactions)
-                {
-                    if ((now - kvp.Value.Timestamp).TotalMinutes > ProtocolConstants.DhtTransactionTimeoutMinutes)
-                    {
-                        _transactions.TryRemove(kvp.Key, out _);
-                    }
-                }
-
-                // Cleanup recent query deduplication cache
-                foreach (var kvp in _recentGetPeersQueries)
-                {
-                    if ((now - kvp.Value).TotalMinutes > ProtocolConstants.DhtTransactionTimeoutMinutes)
-                    {
-                        _recentGetPeersQueries.TryRemove(kvp.Key, out _);
-                    }
-                }
-
-                // Hard cap: if the dedup cache is too large, clear old entries aggressively
-                if (_recentGetPeersQueries.Count > MaxRecentQueries)
-                {
-                    var cutoff = now.AddMinutes(-1);
-                    foreach (var kvp in _recentGetPeersQueries)
-                    {
-                        if (kvp.Value < cutoff)
-                        {
-                            _recentGetPeersQueries.TryRemove(kvp.Key, out _);
-                        }
-                    }
-                }
-
-                // Cleanup peers - direct enumeration
-                foreach (var kvp in _peers)
-                {
-                    var key = kvp.Key;
-                    var peerList = kvp.Value;
-
-                    lock (peerList)
-                    {
-                        peerList.RemoveAll(p => (now - p.LastSeen).TotalMinutes > ProtocolConstants.DhtPeerCacheTimeoutMinutes);
-
-                        if (peerList.Count == 0)
-                        {
-                            // Use explicit ICollection remove for value equality check
-                            ((ICollection<KeyValuePair<string, List<DhtPeer>>>)_peers)
-                                .Remove(new KeyValuePair<string, List<DhtPeer>>(key, peerList));
-                        }
-                    }
-                }
+                PerformMaintenance(_timeProvider.GetUtcNow());
             }
             catch (Exception ex)
             {
@@ -940,14 +963,14 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     }
 
     // Storage for announced peers: InfoHash (hex) -> List of (Peer, LastSeen)
-    private sealed class DhtPeer
+    internal sealed class DhtPeer
     {
         public required IPEndPoint EndPoint { get; init; }
         public DateTimeOffset LastSeen { get; set; }
     }
 
     // Transaction tracking
-    private sealed class Transaction
+    internal sealed class Transaction
     {
         public bool Announce { get; init; }
         public required string Id { get; init; }

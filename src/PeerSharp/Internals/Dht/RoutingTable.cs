@@ -299,10 +299,10 @@ internal class RoutingTable
 
     private sealed class Bucket
     {
-        public List<BucketNode> Cache { get; } = new();
+        public List<BucketNode> Cache { get; } = [];
         public DateTimeOffset LastCacheUpdate { get; set; } = DateTimeOffset.MinValue;
         public DateTimeOffset LastUpdate { get; set; } = DateTimeOffset.MinValue;
-        public List<BucketNode> Nodes { get; } = new();
+        public List<BucketNode> Nodes { get; } = [];
 
         public BucketNode? Find(ReadOnlySpan<byte> id)
         {

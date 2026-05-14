@@ -2,7 +2,7 @@ namespace PeerSharp.BEncoding;
 
 internal class BList : IBNode
 {
-    public List<IBNode> List { get; } = new();
+    public List<IBNode> List { get; } = [];
     public BencodeType Type => BencodeType.List;
 
     public override string ToString()

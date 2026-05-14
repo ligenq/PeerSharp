@@ -1,4 +1,3 @@
-using System.Net.WebSockets;
 using Microsoft.Extensions.Logging;
 using PeerSharp.Interfaces;
 using PeerSharp.WebTorrent.Network;
@@ -179,19 +178,32 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
                 IWebSocketConnection? socket;
                 lock (_runtime.SyncRoot)
                 {
-                    if (_runtime.Generation != generation) return;
+                    if (_runtime.Generation != generation)
+                    {
+                        return;
+                    }
+
                     socket = _runtime.Socket;
                 }
-                if (socket == null) break;
+                if (socket == null)
+                {
+                    break;
+                }
 
                 string message = await socket.ReceiveTextAsync(cancellationToken).ConfigureAwait(false);
 
                 lock (_runtime.SyncRoot)
                 {
-                    if (_runtime.Generation != generation || !ReferenceEquals(_runtime.Socket, socket)) return;
+                    if (_runtime.Generation != generation || !ReferenceEquals(_runtime.Socket, socket))
+                    {
+                        return;
+                    }
                 }
 
-                if (string.IsNullOrWhiteSpace(message)) continue;
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    continue;
+                }
 
                 var signal = WebTorrentProtocolCodec.Parse(message);
                 if (signal.Interval.HasValue)
@@ -205,8 +217,15 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
                 }
 
                 string localHash = BinaryStringEncoding.Encode(_host.Hash.ToArray());
-                if (!string.Equals(signal.InfoHash, localHash, StringComparison.Ordinal)) continue;
-                if (string.Equals(signal.PeerId, BinaryStringEncoding.Encode(_host.PeerId), StringComparison.Ordinal)) continue;
+                if (!string.Equals(signal.InfoHash, localHash, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (string.Equals(signal.PeerId, BinaryStringEncoding.Encode(_host.PeerId), StringComparison.Ordinal))
+                {
+                    continue;
+                }
 
                 _onSignalReceived(signal);
             }

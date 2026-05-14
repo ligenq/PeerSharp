@@ -53,7 +53,7 @@ public class PeerExchangeTests : IDisposable
         // We explicitly add B as a peer to A.
         var portB = engineB.Settings.Connection.TcpPort;
         var epB = new IPEndPoint(IPAddress.Loopback, portB);
-        engineA.OnPeersFound(torrentA.Hash, new List<IPEndPoint> { epB });
+        engineA.OnPeersFound(torrentA.Hash, [epB]);
 
         // Wait for A and B to connect
         await WaitForConditionAsync(() => torrentA.Peers.ConnectedCount > 0 && torrentB.Peers.ConnectedCount > 0, TimeSpan.FromSeconds(5), "A <-> B connection");
@@ -62,7 +62,7 @@ public class PeerExchangeTests : IDisposable
         // We explicitly add C as a peer to B.
         var portC = engineC.Settings.Connection.TcpPort;
         var epC = new IPEndPoint(IPAddress.Loopback, portC);
-        engineB.OnPeersFound(torrentB.Hash, new List<IPEndPoint> { epC });
+        engineB.OnPeersFound(torrentB.Hash, [epC]);
 
         // Wait for B and C to connect
         await WaitForConditionAsync(() => torrentB.Peers.ConnectedCount >= 2 && torrentC.Peers.ConnectedCount > 0, TimeSpan.FromSeconds(5), "B <-> C connection");

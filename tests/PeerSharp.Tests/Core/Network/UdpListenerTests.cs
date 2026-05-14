@@ -9,7 +9,7 @@ public class UdpListenerTests
 {
     private class MockUdpSocket : IUdpSocket
     {
-        public List<byte[]> SentPackets { get; } = new();
+        public List<byte[]> SentPackets { get; } = [];
         private readonly System.Threading.Channels.Channel<UdpReceiveResult> _receiveChannel =
             System.Threading.Channels.Channel.CreateUnbounded<UdpReceiveResult>();
 
@@ -55,7 +55,7 @@ public class UdpListenerTests
 
     private class MockReceiver : IUdpReceiver
     {
-        public List<(byte[] Data, IPEndPoint Remote)> Received { get; } = new();
+        public List<(byte[] Data, IPEndPoint Remote)> Received { get; } = [];
         public void Receive(byte[] data, IPEndPoint remote)
         {
             Received.Add((data, remote));

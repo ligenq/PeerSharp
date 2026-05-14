@@ -14,7 +14,7 @@ internal class BlockCache : IBlockCache
 
     // Key: Global Torrent Offset (must be aligned to BlockSize)
     // Value: Cached Block
-    private readonly Dictionary<long, CachedBlock> _blocks = new();
+    private readonly Dictionary<long, CachedBlock> _blocks = [];
 
     private readonly int _capacityBytes;
     private readonly int _readAheadBlocks;

@@ -433,7 +433,7 @@ public class PeerCommunicationTests
         metadata.Info.Files[0].PiecesRoot = v2Root;
         // Directly set PieceLayers to bypass TryAddV2Hashes logic for testing HandleHashRequestAsync
         byte[] hash1 = new byte[32], hash2 = new byte[32];
-        metadata.Info.Files[0].PieceLayers = new List<byte[]> { hash1, hash2 };
+        metadata.Info.Files[0].PieceLayers = [hash1, hash2];
 
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
         int baseLayer = PeerSharp.Internals.Utilities.MerkleTree.GetPieceLayerDepth(metadata.Info.PieceSize);
@@ -762,6 +762,179 @@ public class PeerCommunicationTests
 
         await torrent.DisposeAsync();
         CleanupPath(path);
+    }
+
+    // ── ProcessMessageAsync — message switch cases ─────────────────────────
+
+    [Fact]
+    public async Task ProcessMessageAsync_CancelMessage_NotifiesListener()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var listener = new RecordingPeerListener();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, listener, TimeProvider.System);
+
+        var msg = new PeerMessage(MessageId.Cancel) { PieceIndex = 3, BlockOffset = 0, BlockLength = 16384 };
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
+
+        Assert.Contains(listener.Received, m => m.Id == MessageId.Cancel);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_SuggestMessage_AddsSuggestedPiece()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        var msg = new PeerMessage(MessageId.Suggest) { PieceIndex = 7 };
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
+
+        var suggested = peer.GetSuggestedPieces();
+        Assert.Contains(7, suggested);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_AllowedFastMessage_AddsAllowedFastPiece()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        var msg = new PeerMessage(MessageId.AllowedFast) { PieceIndex = 11 };
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
+
+        Assert.True(peer.IsAllowedFast(11));
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_RejectMessage_NotifiesListener()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var listener = new RecordingPeerListener();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, listener, TimeProvider.System);
+
+        var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 2, BlockOffset = 0, BlockLength = 16384 };
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
+
+        Assert.Contains(listener.Received, m => m.Id == MessageId.Reject);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_PortMessage_NotifiesPortReceived()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var listener = new RecordingPeerListener();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, listener, TimeProvider.System);
+
+        var msg = new PeerMessage(MessageId.Port) { Port = 6881 };
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
+
+        Assert.Contains(listener.ReceivedPorts, p => p == 6881);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_BitfieldAfterFirstMessage_ThrowsInvalidDataException()
+    {
+        var metadata = CreateMetadataV1WithPieces();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        // First send a Have to set _firstMessageProcessed = true
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", new PeerMessage(MessageId.Have) { HavePieceIndex = 0 });
+
+        // Now send Bitfield - should throw because firstMessageProcessed is true and torrent has metadata
+        var bitfieldMsg = new PeerMessage(MessageId.Bitfield) { Data = new byte[1] };
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            InvokePrivate<Task>(peer, "ProcessMessageAsync", bitfieldMsg));
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_RequestWhenAmChoking_MessageDroppedSilently()
+    {
+        var metadata = CreateMetadataV1();
+        string path = CreateTempPath();
+        var listener = new RecordingPeerListener();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, listener, TimeProvider.System);
+
+        // AmChoking is true by default
+        Assert.True(peer.AmChoking);
+
+        var msg = new PeerMessage(MessageId.Request) { PieceIndex = 1, BlockOffset = 0, BlockLength = 16384 };
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
+
+        // Listener should NOT receive a Request when we are choking
+        Assert.DoesNotContain(listener.Received, m => m.Id == MessageId.Request);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task ProcessMessageAsync_HashRejectMessage_LoggedWithoutException()
+    {
+        var metadata = CreateMetadataV2();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        var msg = new PeerMessage(MessageId.HashReject) { HashPiecesRoot = new byte[32] };
+        var ex = await Record.ExceptionAsync(() => InvokePrivate<Task>(peer, "ProcessMessageAsync", msg));
+
+        Assert.Null(ex);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    private static TorrentFileMetadata CreateMetadataV1WithPieces()
+    {
+        var metadata = CreateMetadataV1();
+        // Add a fake piece hash so HasMetadata returns true
+        metadata.Info.Pieces.Add(new byte[20]);
+        return metadata;
+    }
+
+    private sealed class RecordingPeerListener : IPeerListener
+    {
+        public List<PeerMessage> Received { get; } = [];
+        public List<ushort> ReceivedPorts { get; } = [];
+
+        public Task HandshakeFinishedAsync(IPeerCommunication peer) => Task.CompletedTask;
+        public Task ConnectionClosedAsync(IPeerCommunication peer, int code) => Task.CompletedTask;
+        public Task MessageReceivedAsync(IPeerCommunication peer, PeerMessage msg) { Received.Add(msg); return Task.CompletedTask; }
+        public Task ExtendedHandshakeFinishedAsync(IPeerCommunication peer, ExtensionHandshake handshake) => Task.CompletedTask;
+        public Task ExtendedMessageReceivedAsync(IPeerCommunication peer, int type, byte[] data) => Task.CompletedTask;
+        public Task PexReceivedAsync(IPeerCommunication peer, List<System.Net.IPEndPoint> added, List<byte> addedFlags, List<System.Net.IPEndPoint> dropped) => Task.CompletedTask;
+        public Task HolepunchMessageReceivedAsync(IPeerCommunication peer, UtHolepunch.MsgId id, System.Net.IPEndPoint endpoint, UtHolepunch.ErrorCode error) => Task.CompletedTask;
+        public Task PortReceivedAsync(IPeerCommunication peer, ushort dhtPort) { ReceivedPorts.Add(dhtPort); return Task.CompletedTask; }
     }
 
     private sealed class TestPeerListener : IPeerListener

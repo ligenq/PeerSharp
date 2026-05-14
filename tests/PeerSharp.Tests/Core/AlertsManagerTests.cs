@@ -112,7 +112,9 @@ public class AlertsManagerTests
                 {
                     alertsList.Add(alert);
                     if (alertsList.Count == 2)
+                    {
                         tcs.SetResult();
+                    }
                 }
             }
             catch (OperationCanceledException) { }

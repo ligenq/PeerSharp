@@ -76,7 +76,7 @@ public class TorrentConfigurationTests
 
     private class MockBandwidthManager : IBandwidthManager
     {
-        private readonly Dictionary<string, BandwidthChannel> _channels = new();
+        private readonly Dictionary<string, BandwidthChannel> _channels = [];
         public int LastDownloadLimit { get; private set; }
         public int LastDiskReadLimit { get; private set; }
         public int LastDiskWriteLimit { get; private set; }

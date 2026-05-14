@@ -10,9 +10,17 @@ public class PieceCheckerTests
     {
         public bool Checking { get; set; }
         public string DownloadPath => "";
-        public List<(long Offset, byte[] Data)> Writes { get; } = new();
-        public Dictionary<long, byte[]> Data { get; } = new();
-        public HashSet<long> ThrowOnReadOffsets { get; } = new();
+        public List<(long Offset, byte[] Data)> Writes { get; } = [];
+        public Dictionary<long, byte[]> Data { get; } = [];
+        public HashSet<long> ThrowOnReadOffsets { get; } = [];
+
+        // When true, each ReadAsync yields to the task scheduler before returning,
+        // making CheckAllPiecesAsync truly asynchronous.
+        public bool YieldOnRead { get; set; }
+
+        // When set, each ReadAsync (Memory<byte> overload) must acquire one permit before
+        // reading. Use to prevent the check from completing before a specific test action.
+        public SemaphoreSlim? ReadGate { get; set; }
 
         public void DeleteFiles() { }
 
@@ -29,16 +37,24 @@ public class PieceCheckerTests
                 throw new IOException("read failed");
             }
 
-            if (Data.TryGetValue(offset, out var bytes))
-            {
-                return Task.FromResult(bytes);
-            }
-
-            return Task.FromResult(new byte[length]);
+            var bytes = Data.TryGetValue(offset, out var d) ? d : new byte[length];
+            return Task.FromResult(bytes);
         }
 
-        public Task ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
+        public async Task ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
         {
+            if (YieldOnRead)
+            {
+                await Task.Yield();
+            }
+
+            if (ReadGate != null)
+            {
+                await ReadGate.WaitAsync(ct);
+            }
+
+            ct.ThrowIfCancellationRequested();
+
             if (ThrowOnReadOffsets.Contains(offset))
             {
                 throw new IOException("read failed");
@@ -52,7 +68,6 @@ public class PieceCheckerTests
             {
                 buffer.Span.Clear();
             }
-            return Task.CompletedTask;
         }
     }
 
@@ -65,17 +80,18 @@ public class PieceCheckerTests
         public string TorrentName => "test";
         public bool IsMerkle { get; set; }
         public bool IsV2 { get; set; }
-        public List<byte[]> ExpectedHashes { get; } = new();
-        public List<int> VerifiedPieces { get; } = new();
-        public List<(int PieceIndex, byte[] PieceData)> VerifyPieceCalls { get; } = new();
-        public HashSet<int> MerkleValidPieces { get; } = new();
+        public List<byte[]> ExpectedHashes { get; } = [];
+        public List<int> VerifiedPieces { get; } = [];
+        public List<(int PieceIndex, byte[] PieceData)> VerifyPieceCalls { get; } = [];
+        public HashSet<int> MerkleValidPieces { get; } = [];
+        public Action<byte[]>? BitfieldCallback { get; set; }
 
         public byte[]? GetExpectedHash(int pieceIndex)
         {
             return ExpectedHashes.Count > pieceIndex ? ExpectedHashes[pieceIndex] : null;
         }
 
-        public void UpdatePiecesFromBitfield(byte[] bitfield) { }
+        public void UpdatePiecesFromBitfield(byte[] bitfield) => BitfieldCallback?.Invoke(bitfield);
         public long GetPieceSize(int pieceIndex)
         {
             if (pieceIndex == PieceCount - 1)
@@ -97,6 +113,13 @@ public class PieceCheckerTests
             VerifyPieceCalls.Add((pieceIndex, pieceData.ToArray()));
             return MerkleValidPieces.Contains(pieceIndex);
         }
+    }
+
+    private sealed class SyncProgress<T> : IProgress<T>
+    {
+        private readonly Action<T> _handler;
+        public SyncProgress(Action<T> handler) => _handler = handler;
+        public void Report(T value) => _handler(value);
     }
 
     [Fact(Timeout = 30000)]
@@ -278,6 +301,152 @@ public class PieceCheckerTests
 
         Assert.Equal(1, valid);
         Assert.Equal(new[] { 0 }, ctx.VerifiedPieces);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckAllPiecesAsync_AlreadyRunning_ThrowsInvalidOperationException()
+    {
+        var gate = new SemaphoreSlim(0);
+        var files = new MockFiles { YieldOnRead = true, ReadGate = gate };
+        var ctx = new MockContext { PieceCount = 100, PieceSize = 10, FullSize = 1000 };
+        for (int i = 0; i < ctx.PieceCount; i++)
+        {
+            ctx.ExpectedHashes.Add(SHA1.HashData(new byte[10]));
+        }
+
+        var checker = new PieceChecker(files, ctx);
+
+        var first = checker.CheckAllPiecesAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => checker.CheckAllPiecesAsync());
+        gate.Release(ctx.PieceCount);
+        await first;
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task IsRunning_TrueWhileChecking_FalseAfter()
+    {
+        var files = new MockFiles { YieldOnRead = true };
+        var ctx = new MockContext { PieceCount = 1, PieceSize = 10, FullSize = 10 };
+        ctx.ExpectedHashes.Add(SHA1.HashData(new byte[10]));
+
+        var checker = new PieceChecker(files, ctx);
+
+        Assert.False(checker.IsRunning);
+        var task = checker.CheckAllPiecesAsync();
+        Assert.True(checker.IsRunning);
+        await task;
+        Assert.False(checker.IsRunning);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Cancel_WhileRunning_StopsBeforeAllPieces()
+    {
+        int pieceCount = 200;
+        var files = new MockFiles();
+        var ctx = new MockContext { PieceCount = pieceCount, PieceSize = 10, FullSize = pieceCount * 10 };
+        for (int i = 0; i < pieceCount; i++)
+        {
+            byte[] piece = new byte[10]; piece[0] = (byte)(i % 256);
+            files.Data[i * 10] = piece;
+            ctx.ExpectedHashes.Add(SHA1.HashData(piece));
+        }
+
+        var checker = new PieceChecker(files, ctx);
+        var task = checker.CheckAllPiecesAsync();
+        checker.Cancel();
+        await task;
+
+        // Cancelled early — fewer than all pieces verified.
+        Assert.True(ctx.VerifiedPieces.Count < pieceCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckAllPiecesAsync_WithProgress_ReportsProgressToCallback()
+    {
+        int pieceCount = 3;
+        var files = new MockFiles();
+        var ctx = new MockContext { PieceCount = pieceCount, PieceSize = 10, FullSize = pieceCount * 10 };
+        for (int i = 0; i < pieceCount; i++)
+        {
+            byte[] piece = new byte[10]; piece[0] = (byte)(i + 1);
+            files.Data[i * 10] = piece;
+            ctx.ExpectedHashes.Add(SHA1.HashData(piece));
+        }
+
+        var reports = new List<PieceCheckProgress>();
+        IProgress<PieceCheckProgress> progress = new SyncProgress<PieceCheckProgress>(p => reports.Add(p));
+
+        var checker = new PieceChecker(files, ctx, progress);
+        await checker.CheckAllPiecesAsync();
+
+        // One progress report per piece.
+        Assert.Equal(pieceCount, reports.Count);
+        Assert.Equal(pieceCount, reports[^1].TotalPieces);
+        Assert.Equal(pieceCount, reports[^1].CheckedPieces);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task DisposeAsync_CancelsRunningCheck()
+    {
+        int pieceCount = 500;
+        var files = new MockFiles();
+        var ctx = new MockContext { PieceCount = pieceCount, PieceSize = 10, FullSize = pieceCount * 10 };
+        for (int i = 0; i < pieceCount; i++)
+        {
+            ctx.ExpectedHashes.Add(SHA1.HashData(new byte[10]));
+        }
+
+        var checker = new PieceChecker(files, ctx);
+        var task = checker.CheckAllPiecesAsync();
+        await checker.DisposeAsync();
+        await task;
+
+        Assert.True(ctx.VerifiedPieces.Count < pieceCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckAllPiecesAsync_V2Context_UsesContextVerification()
+    {
+        var files = new MockFiles();
+        var ctx = new MockContext
+        {
+            PieceCount = 2,
+            PieceSize = 10,
+            FullSize = 20,
+            IsV2 = true
+        };
+        ctx.MerkleValidPieces.Add(0);
+        files.Data[0] = new byte[] { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        files.Data[10] = new byte[] { 2, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+        var checker = new PieceChecker(files, ctx);
+        int valid = await checker.CheckAllPiecesAsync();
+
+        Assert.Equal(1, valid);
+        Assert.Equal(2, ctx.VerifyPieceCalls.Count);
+        Assert.Equal(new[] { 0, 1 }, ctx.VerifyPieceCalls.Select(c => c.PieceIndex).ToArray());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckAllPiecesAsync_UpdatesBitfieldOnContext()
+    {
+        var files = new MockFiles();
+        var ctx = new MockContext { PieceCount = 2, PieceSize = 10, FullSize = 20 };
+
+        byte[] piece0 = new byte[10]; piece0[0] = 1;
+        byte[] piece1 = new byte[10]; piece1[0] = 2;
+        files.Data[0] = piece0;
+        files.Data[10] = piece1;
+        ctx.ExpectedHashes.Add(SHA1.HashData(piece0));
+        ctx.ExpectedHashes.Add(SHA1.HashData(piece1));
+
+        byte[]? capturedBitfield = null;
+        ctx.BitfieldCallback = b => capturedBitfield = b;
+
+        var checker = new PieceChecker(files, ctx);
+        await checker.CheckAllPiecesAsync();
+
+        Assert.NotNull(capturedBitfield);
     }
 }
 

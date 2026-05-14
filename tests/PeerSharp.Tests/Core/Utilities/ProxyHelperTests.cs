@@ -1,8 +1,84 @@
 using PeerSharp.Internals.Utilities;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 
 namespace PeerSharp.Tests.Core.Utilities;
+
+/// <summary>
+/// A fake Stream that feeds pre-configured server response chunks to the reader
+/// and captures all bytes written by the client.
+/// </summary>
+internal sealed class FakeStream : Stream
+{
+    private readonly Queue<byte[]> _responseChunks;
+    private byte[]? _currentChunk;
+    private int _currentChunkOffset;
+    private readonly MemoryStream _written = new();
+
+    public FakeStream(params byte[][] responseChunks)
+    {
+        _responseChunks = new Queue<byte[]>(responseChunks);
+    }
+
+    /// <summary>All bytes written by the client, in order.</summary>
+    public byte[] WrittenBytes => _written.ToArray();
+
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => true;
+    public override long Length => throw new NotSupportedException();
+    public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+    public override void Flush() { }
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        // Refill from queue if current chunk is exhausted
+        if (_currentChunk == null || _currentChunkOffset >= _currentChunk.Length)
+        {
+            if (_responseChunks.Count == 0)
+            {
+                return 0; // EOF
+            }
+
+            _currentChunk = _responseChunks.Dequeue();
+            _currentChunkOffset = 0;
+        }
+
+        int available = _currentChunk.Length - _currentChunkOffset;
+        int toCopy = Math.Min(available, count);
+        Array.Copy(_currentChunk, _currentChunkOffset, buffer, offset, toCopy);
+        _currentChunkOffset += toCopy;
+        return toCopy;
+    }
+
+    public override void Write(byte[] buffer, int offset, int count)
+    {
+        _written.Write(buffer, offset, count);
+    }
+
+    public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        byte[] tmp = new byte[buffer.Length];
+        int read = Read(tmp, 0, tmp.Length);
+        tmp.AsMemory(0, read).CopyTo(buffer);
+        return ValueTask.FromResult(read);
+    }
+
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    {
+        Write(buffer, offset, count);
+        return Task.CompletedTask;
+    }
+
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        _written.Write(buffer.Span);
+        return ValueTask.CompletedTask;
+    }
+}
 
 public class ProxyHelperTests
 {
@@ -239,6 +315,387 @@ public class ProxyHelperTests
                 null,
                 CancellationToken.None));
     }
+
+    // -----------------------------------------------------------------------
+    // FakeStream-based unit tests for internal Negotiate* methods
+    // -----------------------------------------------------------------------
+
+    // --- Helpers ---
+
+    private static TcpClient MakeDummyTcpClient() => new TcpClient();
+
+    private static byte[] Socks5NoAuthResponse() => new byte[] { 0x05, 0x00 };
+    private static byte[] Socks5UserPassMethodResponse() => new byte[] { 0x05, 0x02 };
+    private static byte[] Socks5AuthSuccessResponse() => new byte[] { 0x01, 0x00 };
+    private static byte[] Socks5AuthFailureResponse() => new byte[] { 0x01, 0x01 };
+    private static byte[] Socks5ConnectSuccessHeaderIPv4() => new byte[] { 0x05, 0x00, 0x00, 0x01 };
+    private static byte[] Socks5IPv4BoundAddrAndPort() => new byte[] { 127, 0, 0, 1, 0x04, 0x38 }; // 127.0.0.1:1080
+
+    // --- SOCKS5 TCP (NegotiateSocks5Async) ---
+
+    [Fact]
+    public async Task NegotiateSocks5_NoAuth_IPv4_Succeeds()
+    {
+        var stream = new FakeStream(
+            Socks5NoAuthResponse(),
+            Socks5ConnectSuccessHeaderIPv4(),
+            Socks5IPv4BoundAddrAndPort()
+        );
+
+        using var client = MakeDummyTcpClient();
+        var (resultStream, resultClient) = await ProxyHelper.NegotiateSocks5Async(
+            stream, client, "1.2.3.4", 80, null, null, CancellationToken.None);
+
+        Assert.Same(stream, resultStream);
+        Assert.Same(client, resultClient);
+
+        // Greeting: 05 01 00
+        var written = stream.WrittenBytes;
+        Assert.Equal(0x05, written[0]);
+        Assert.Equal(0x01, written[1]); // 1 method
+        Assert.Equal(0x00, written[2]); // NO AUTH
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5_NoAuth_IPv6_Succeeds()
+    {
+        var successHeaderIPv6 = new byte[] { 0x05, 0x00, 0x00, 0x04 }; // ATYP=IPv6
+        var ipv6AddrAndPort = new byte[18]; // 16 addr + 2 port
+        ipv6AddrAndPort[16] = 0x04; ipv6AddrAndPort[17] = 0x38; // port 1080
+
+        var stream = new FakeStream(
+            Socks5NoAuthResponse(),
+            successHeaderIPv6,
+            ipv6AddrAndPort
+        );
+
+        using var client = MakeDummyTcpClient();
+        var (resultStream, _) = await ProxyHelper.NegotiateSocks5Async(
+            stream, client, "::1", 443, null, null, CancellationToken.None);
+
+        Assert.Same(stream, resultStream);
+
+        // Greeting is 3 bytes; CONNECT request starts at offset 3
+        // CONNECT: 05 01 00 04 [16 addr bytes] [2 port bytes] → ATYP at written[6]
+        var written = stream.WrittenBytes;
+        Assert.Equal(0x04, written[6]); // ATYP=IPv6
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5_NoAuth_DomainName_Succeeds()
+    {
+        var stream = new FakeStream(
+            Socks5NoAuthResponse(),
+            Socks5ConnectSuccessHeaderIPv4(),
+            Socks5IPv4BoundAddrAndPort()
+        );
+
+        using var client = MakeDummyTcpClient();
+        var (resultStream, _) = await ProxyHelper.NegotiateSocks5Async(
+            stream, client, "example.com", 80, null, null, CancellationToken.None);
+
+        Assert.Same(stream, resultStream);
+
+        // Greeting=3 bytes; CONNECT: [05][01][00][03][len][domain...][port hi][port lo]
+        var written = stream.WrittenBytes;
+        Assert.Equal(0x03, written[6]); // ATYP=domain
+        int domainLen = written[7];
+        var domain = Encoding.UTF8.GetString(written, 8, domainLen);
+        Assert.Equal("example.com", domain);
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5_UserPassAuth_CorrectCredentials_Succeeds()
+    {
+        var stream = new FakeStream(
+            Socks5UserPassMethodResponse(),
+            Socks5AuthSuccessResponse(),
+            Socks5ConnectSuccessHeaderIPv4(),
+            Socks5IPv4BoundAddrAndPort()
+        );
+
+        using var client = MakeDummyTcpClient();
+        var (resultStream, _) = await ProxyHelper.NegotiateSocks5Async(
+            stream, client, "1.2.3.4", 80, "user", "pass", CancellationToken.None);
+
+        Assert.Same(stream, resultStream);
+
+        // Greeting: 05 02 00 02 (2 methods: NO_AUTH and USER/PASS)
+        var written = stream.WrittenBytes;
+        Assert.Equal(0x05, written[0]);
+        Assert.Equal(0x02, written[1]); // 2 methods
+        Assert.Equal(0x00, written[2]);
+        Assert.Equal(0x02, written[3]);
+
+        // Auth sub-request at byte 4: [01][userLen][user...][passLen][pass...]
+        Assert.Equal(0x01, written[4]); // subneg version
+        int userLen = written[5];
+        var sentUser = Encoding.UTF8.GetString(written, 6, userLen);
+        Assert.Equal("user", sentUser);
+        int passLen = written[6 + userLen];
+        var sentPass = Encoding.UTF8.GetString(written, 7 + userLen, passLen);
+        Assert.Equal("pass", sentPass);
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5_UserPassAuth_ServerRejectsCredentials_ThrowsIOException()
+    {
+        var stream = new FakeStream(
+            Socks5UserPassMethodResponse(),
+            Socks5AuthFailureResponse()
+        );
+
+        using var client = MakeDummyTcpClient();
+        await Assert.ThrowsAsync<IOException>(() =>
+            ProxyHelper.NegotiateSocks5Async(stream, client, "1.2.3.4", 80, "user", "wrongpass", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5_WrongVersion_ThrowsIOException()
+    {
+        var stream = new FakeStream(new byte[] { 0x04, 0x00 }); // version 4 instead of 5
+
+        using var client = MakeDummyTcpClient();
+        await Assert.ThrowsAsync<IOException>(() =>
+            ProxyHelper.NegotiateSocks5Async(stream, client, "1.2.3.4", 80, null, null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5_UnsupportedAuthMethod_ThrowsIOException()
+    {
+        var stream = new FakeStream(new byte[] { 0x05, 0xFF }); // 0xFF = no acceptable methods
+
+        using var client = MakeDummyTcpClient();
+        await Assert.ThrowsAsync<IOException>(() =>
+            ProxyHelper.NegotiateSocks5Async(stream, client, "1.2.3.4", 80, null, null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5_ConnectResponseFailure_ThrowsIOException()
+    {
+        // REP=0x02 (connection not allowed)
+        var connectFailHeader = new byte[] { 0x05, 0x02, 0x00, 0x01 };
+        var stream = new FakeStream(
+            Socks5NoAuthResponse(),
+            connectFailHeader,
+            Socks5IPv4BoundAddrAndPort()
+        );
+
+        using var client = MakeDummyTcpClient();
+        await Assert.ThrowsAsync<IOException>(() =>
+            ProxyHelper.NegotiateSocks5Async(stream, client, "1.2.3.4", 80, null, null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5_ConnectResponse_DomainBoundAddress_ReadsCorrectly()
+    {
+        // Server responds to CONNECT with ATYP=0x03 (domain) in the bound address field
+        var connectSuccessDomain = new byte[] { 0x05, 0x00, 0x00, 0x03 }; // ATYP=domain
+        var domainBytes = Encoding.UTF8.GetBytes("proxy.example.com");
+        var domainResponsePart = new byte[1 + domainBytes.Length + 2];
+        domainResponsePart[0] = (byte)domainBytes.Length;
+        domainBytes.CopyTo(domainResponsePart, 1);
+        domainResponsePart[domainResponsePart.Length - 2] = 0x04;
+        domainResponsePart[domainResponsePart.Length - 1] = 0x38; // port 1080
+
+        var stream = new FakeStream(
+            Socks5NoAuthResponse(),
+            connectSuccessDomain,
+            domainResponsePart
+        );
+
+        using var client = MakeDummyTcpClient();
+        var (resultStream, _) = await ProxyHelper.NegotiateSocks5Async(
+            stream, client, "1.2.3.4", 80, null, null, CancellationToken.None);
+
+        Assert.Same(stream, resultStream);
+    }
+
+    // --- SOCKS5 UDP (NegotiateSocks5UdpAsync) ---
+
+    [Fact]
+    public async Task NegotiateSocks5Udp_NoAuth_IPv4RelayAddress_ReturnsCorrectEndpoint()
+    {
+        var udpAssocHeader = new byte[] { 0x05, 0x00, 0x00, 0x01 }; // ATYP=IPv4
+        var udpAddrAndPort = new byte[] { 10, 0, 0, 1, 0x04, 0xD2 }; // 10.0.0.1:1234
+
+        var stream = new FakeStream(
+            Socks5NoAuthResponse(),
+            udpAssocHeader,
+            udpAddrAndPort
+        );
+
+        using var client = MakeDummyTcpClient();
+        var (udpClient, endPoint, controlClient) = await ProxyHelper.NegotiateSocks5UdpAsync(
+            stream, client, "10.0.0.1", null, null, CancellationToken.None);
+
+        udpClient.Dispose();
+        Assert.Same(client, controlClient);
+        Assert.Equal(IPAddress.Parse("10.0.0.1"), endPoint.Address);
+        Assert.Equal(1234, endPoint.Port);
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5Udp_NoAuth_IPv6RelayAddress_ReturnsCorrectEndpoint()
+    {
+        var udpAssocHeader = new byte[] { 0x05, 0x00, 0x00, 0x04 }; // ATYP=IPv6
+        var addr = IPAddress.Parse("::1").GetAddressBytes();
+        var portBytes = new byte[] { 0x13, 0x88 }; // 5000
+        var addrAndPort = addr.Concat(portBytes).ToArray();
+
+        var stream = new FakeStream(
+            Socks5NoAuthResponse(),
+            udpAssocHeader,
+            addrAndPort
+        );
+
+        using var client = MakeDummyTcpClient();
+        var (udpClient, endPoint, _) = await ProxyHelper.NegotiateSocks5UdpAsync(
+            stream, client, "::1", null, null, CancellationToken.None);
+
+        udpClient.Dispose();
+        Assert.Equal(IPAddress.Parse("::1"), endPoint.Address);
+        Assert.Equal(5000, endPoint.Port);
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5Udp_AuthPath_Succeeds()
+    {
+        var udpAssocHeader = new byte[] { 0x05, 0x00, 0x00, 0x01 };
+        var udpAddrAndPort = new byte[] { 192, 168, 1, 1, 0x1F, 0x90 }; // 192.168.1.1:8080
+
+        var stream = new FakeStream(
+            Socks5UserPassMethodResponse(),
+            Socks5AuthSuccessResponse(),
+            udpAssocHeader,
+            udpAddrAndPort
+        );
+
+        using var client = MakeDummyTcpClient();
+        var (udpClient, endPoint, _) = await ProxyHelper.NegotiateSocks5UdpAsync(
+            stream, client, "192.168.1.1", "user", "pass", CancellationToken.None);
+
+        udpClient.Dispose();
+        Assert.Equal(IPAddress.Parse("192.168.1.1"), endPoint.Address);
+        Assert.Equal(8080, endPoint.Port);
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5Udp_AssociateFailure_ThrowsIOException()
+    {
+        // UDP ASSOCIATE reply code = 0x01 (general failure)
+        var udpAssocFailHeader = new byte[] { 0x05, 0x01, 0x00, 0x01 };
+        var udpAddrAndPort = new byte[] { 10, 0, 0, 1, 0x04, 0xD2 };
+
+        var stream = new FakeStream(
+            Socks5NoAuthResponse(),
+            udpAssocFailHeader,
+            udpAddrAndPort
+        );
+
+        using var client = MakeDummyTcpClient();
+        await Assert.ThrowsAsync<IOException>(() =>
+            ProxyHelper.NegotiateSocks5UdpAsync(stream, client, "10.0.0.1", null, null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task NegotiateSocks5Udp_ProxyReturns0000_FallsBackToProxyHost()
+    {
+        // Relay address = 0.0.0.0 → should fall back to proxyHost
+        var udpAssocHeader = new byte[] { 0x05, 0x00, 0x00, 0x01 };
+        var udpAddrAndPort = new byte[] { 0, 0, 0, 0, 0x04, 0xD2 }; // 0.0.0.0:1234
+
+        var stream = new FakeStream(
+            Socks5NoAuthResponse(),
+            udpAssocHeader,
+            udpAddrAndPort
+        );
+
+        using var client = MakeDummyTcpClient();
+        // Use a valid IP as proxyHost to avoid real DNS resolution
+        var (udpClient, endPoint, _) = await ProxyHelper.NegotiateSocks5UdpAsync(
+            stream, client, "127.0.0.1", null, null, CancellationToken.None);
+
+        udpClient.Dispose();
+        Assert.NotEqual(IPAddress.Any, endPoint.Address);
+        Assert.Equal(1234, endPoint.Port);
+    }
+
+    // --- HTTP CONNECT (NegotiateHttpProxyAsync) ---
+
+    private static byte[] BuildHttpResponse(string statusLine)
+    {
+        var response = statusLine + "\r\n\r\n";
+        return Encoding.UTF8.GetBytes(response);
+    }
+
+    [Fact]
+    public async Task NegotiateHttpProxy_NoAuth_200Ok_Succeeds()
+    {
+        // Feed response one byte at a time to exercise the read loop
+        var responseBytes = BuildHttpResponse("HTTP/1.1 200 Connection established");
+        var chunks = responseBytes.Select(b => new byte[] { b }).ToArray();
+
+        var stream = new FakeStream(chunks);
+
+        using var client = MakeDummyTcpClient();
+        var (resultStream, resultClient) = await ProxyHelper.NegotiateHttpProxyAsync(
+            stream, client, "example.com", 443, null, null, CancellationToken.None);
+
+        Assert.Same(stream, resultStream);
+        Assert.Same(client, resultClient);
+
+        var written = Encoding.UTF8.GetString(stream.WrittenBytes);
+        Assert.Contains("CONNECT example.com:443 HTTP/1.1", written);
+        Assert.DoesNotContain("Proxy-Authorization", written);
+    }
+
+    [Fact]
+    public async Task NegotiateHttpProxy_WithAuth_SendsProxyAuthorizationHeader()
+    {
+        var responseBytes = BuildHttpResponse("HTTP/1.1 200 Connection established");
+        var chunks = responseBytes.Select(b => new byte[] { b }).ToArray();
+
+        var stream = new FakeStream(chunks);
+
+        using var client = MakeDummyTcpClient();
+        await ProxyHelper.NegotiateHttpProxyAsync(
+            stream, client, "example.com", 80, "alice", "s3cr3t", CancellationToken.None);
+
+        var written = Encoding.UTF8.GetString(stream.WrittenBytes);
+        Assert.Contains("Proxy-Authorization: Basic ", written);
+
+        var expectedB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes("alice:s3cr3t"));
+        Assert.Contains(expectedB64, written);
+    }
+
+    [Fact]
+    public async Task NegotiateHttpProxy_Non200Response_ThrowsIOException()
+    {
+        var responseBytes = BuildHttpResponse("HTTP/1.1 407 Proxy Authentication Required");
+        var chunks = responseBytes.Select(b => new byte[] { b }).ToArray();
+
+        var stream = new FakeStream(chunks);
+
+        using var client = MakeDummyTcpClient();
+        await Assert.ThrowsAsync<IOException>(() =>
+            ProxyHelper.NegotiateHttpProxyAsync(stream, client, "example.com", 80, null, null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task NegotiateHttpProxy_ConnectionClosedImmediately_ThrowsIOException()
+    {
+        // FakeStream with no response chunks → Read returns 0 immediately (EOF)
+        var stream = new FakeStream();
+
+        using var client = MakeDummyTcpClient();
+        await Assert.ThrowsAsync<IOException>(() =>
+            ProxyHelper.NegotiateHttpProxyAsync(stream, client, "example.com", 80, null, null, CancellationToken.None));
+    }
+
+    // -----------------------------------------------------------------------
+    // End of FakeStream-based tests
+    // -----------------------------------------------------------------------
 
     private sealed class HttpProxyTestServer : IDisposable
     {

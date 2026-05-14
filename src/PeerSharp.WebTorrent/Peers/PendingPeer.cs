@@ -1,4 +1,3 @@
-using PeerSharp.WebTorrent.Network;
 using PeerSharp.WebTorrent.Trackers;
 using RtcForge;
 
@@ -19,8 +18,8 @@ internal sealed class PendingPeer
     private readonly CancellationTokenSource _lifetimeCts = new();
     private int _attached;
 
-    public List<WebRtcIceCandidateDescription> BufferedLocalCandidates { get; } = new();
-    public List<string> BufferedRemoteCandidates { get; } = new();
+    public List<WebRtcIceCandidateDescription> BufferedLocalCandidates { get; } = [];
+    public List<string> BufferedRemoteCandidates { get; } = [];
     public IWebRtcDataChannel? Channel { get; }
     public IWebRtcConnection Connection { get; }
     public bool Initiator { get; }

@@ -62,7 +62,7 @@ public class PeerManagerConcurrencyTests
 
     private class MockFactory : IPeerCommunicationFactory
     {
-        public ConcurrentBag<MockPeerCommunication> CreatedPeers { get; } = new();
+        public ConcurrentBag<MockPeerCommunication> CreatedPeers { get; } = [];
 
         public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
         {
@@ -147,28 +147,29 @@ public class PeerManagerConcurrencyTests
             var ep = new IPEndPoint(IPAddress.Loopback, 12345);
             var ipStr = ep.Address.ToString();
 
-            var tasks = new List<Task>();
-
-            // Outgoing connection attempt
-            tasks.Add(Task.Run(() => manager.ConnectTo(ipStr, ep.Port)));
-
-            // Incoming connection (simulated handshake completion)
-            tasks.Add(Task.Run(async () =>
+            var tasks = new List<Task>
             {
-                var incomingPeer = new MockPeerCommunication(torrent, manager, TimeProvider.System);
+                // Outgoing connection attempt
+                Task.Run(() => manager.ConnectTo(ipStr, ep.Port)),
 
-                // Use reflection to set private setter of RemoteEndPoint if needed
-                // PeerCommunication.RemoteEndPoint is public get, private set? 
-                // Let's check PeerCommunication definition.
-                // It is "public IPEndPoint RemoteEndPoint { get; }" and set in ctor.
-                // Our mock ctor calls base ctor which sets it to 0.0.0.0:0.
-                // We need to fix the mock ctor or use reflection field set.
+                // Incoming connection (simulated handshake completion)
+                Task.Run(async () =>
+                {
+                    var incomingPeer = new MockPeerCommunication(torrent, manager, TimeProvider.System);
 
-                var epField = typeof(PeerCommunication).GetField("<RemoteEndPoint>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
-                epField?.SetValue(incomingPeer, ep);
+                    // Use reflection to set private setter of RemoteEndPoint if needed
+                    // PeerCommunication.RemoteEndPoint is public get, private set? 
+                    // Let's check PeerCommunication definition.
+                    // It is "public IPEndPoint RemoteEndPoint { get; }" and set in ctor.
+                    // Our mock ctor calls base ctor which sets it to 0.0.0.0:0.
+                    // We need to fix the mock ctor or use reflection field set.
 
-                await manager.HandshakeFinishedAsync(incomingPeer);
-            }));
+                    var epField = typeof(PeerCommunication).GetField("<RemoteEndPoint>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
+                    epField?.SetValue(incomingPeer, ep);
+
+                    await manager.HandshakeFinishedAsync(incomingPeer);
+                })
+            };
 
             Task.WaitAll(tasks.ToArray());
 

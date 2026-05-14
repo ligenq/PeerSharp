@@ -51,6 +51,77 @@ public sealed class NatPmpTests
         Assert.Equal("No gateways discovered", status[0].ErrorMessage);
     }
 
+    [Fact]
+    public async Task MapPortAsync_TcpProtocol_SendsCorrectOpCode()
+    {
+        var received = new List<byte[]>();
+        await using var server = new NatPmpTestServer(success: true, externalPort: 7777, captureRequests: received);
+        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+
+        await mapper.StartAsync(CancellationToken.None);
+        bool result = await mapper.MapPortAsync(9000, "TCP", "test", CancellationToken.None);
+
+        Assert.True(result);
+        Assert.NotEmpty(received);
+        Assert.Equal(2, received[0][1]); // TCP opCode = 2
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task UnmapAllAsync_AfterMapping_SendsUnmapPackets()
+    {
+        var received = new List<byte[]>();
+        await using var server = new NatPmpTestServer(success: true, externalPort: 4444, captureRequests: received);
+        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+
+        await mapper.StartAsync(CancellationToken.None);
+        await mapper.MapPortAsync(1234, "UDP", "test", CancellationToken.None);
+
+        int packetsBefore = received.Count;
+        await mapper.UnmapAllAsync(CancellationToken.None);
+
+        // Wait for the server to receive the unmap packet (fire-and-forget send).
+        await server.WaitForPacketAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(received.Count > packetsBefore);
+        var unmapPacket = received[packetsBefore];
+        // Unmap lifetime bytes 8-11 must all be zero.
+        Assert.Equal(0, unmapPacket[8]);
+        Assert.Equal(0, unmapPacket[9]);
+        Assert.Equal(0, unmapPacket[10]);
+        Assert.Equal(0, unmapPacket[11]);
+    }
+
+    [Fact]
+    public async Task UnmapAllAsync_NoMappings_CompletesWithoutSendingPackets()
+    {
+        await using var server = new NatPmpTestServer(success: true, externalPort: 4444);
+        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+        await mapper.StartAsync(CancellationToken.None);
+
+        // No mappings registered — should complete silently.
+        await mapper.UnmapAllAsync(CancellationToken.None);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task UnmapAllAsync_ClearsInternalMappings_SubsequentCallSendsNothing()
+    {
+        var received = new List<byte[]>();
+        await using var server = new NatPmpTestServer(success: true, externalPort: 5000, captureRequests: received);
+        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+
+        await mapper.StartAsync(CancellationToken.None);
+        await mapper.MapPortAsync(1234, "UDP", "test", CancellationToken.None);
+        await mapper.UnmapAllAsync(CancellationToken.None);
+        await server.WaitForPacketAsync(TimeSpan.FromSeconds(5));
+
+        int countAfterFirst = received.Count;
+        await mapper.UnmapAllAsync(CancellationToken.None);
+
+        // Brief wait to confirm nothing arrived.
+        await Task.Delay(100);
+        Assert.Equal(countAfterFirst, received.Count);
+    }
+
     private sealed class NatPmpTestServer : IAsyncDisposable
     {
         private readonly UdpClient _udp;
@@ -58,17 +129,23 @@ public sealed class NatPmpTests
         private readonly Task _loopTask;
         private readonly bool _success;
         private readonly int? _externalPort;
+        private readonly List<byte[]>? _captureRequests;
+        private readonly SemaphoreSlim _packetSignal = new(0);
 
-        public NatPmpTestServer(bool success, int? externalPort)
+        public NatPmpTestServer(bool success, int? externalPort, List<byte[]>? captureRequests = null)
         {
             _success = success;
             _externalPort = externalPort;
+            _captureRequests = captureRequests;
             _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
             Port = ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
             _loopTask = Task.Run(ReceiveLoopAsync);
         }
 
         public int Port { get; }
+
+        public Task WaitForPacketAsync(TimeSpan timeout) =>
+            _packetSignal.WaitAsync(timeout).ContinueWith(_ => { });
 
         public async ValueTask DisposeAsync()
         {
@@ -83,6 +160,7 @@ public sealed class NatPmpTests
                 // Best-effort shutdown.
             }
             _cts.Dispose();
+            _packetSignal.Dispose();
         }
 
         private async Task ReceiveLoopAsync()
@@ -103,8 +181,21 @@ public sealed class NatPmpTests
                     break;
                 }
 
-                var response = BuildResponse(result.Buffer);
-                await _udp.SendAsync(response, result.RemoteEndPoint).ConfigureAwait(false);
+                lock (_captureRequests ?? new object())
+                {
+                    _captureRequests?.Add(result.Buffer);
+                }
+                _packetSignal.Release();
+
+                // Mapping requests need a response; unmap packets (lifetime=0) don't wait for one.
+                bool isUnmap = result.Buffer.Length >= 12 &&
+                               result.Buffer[8] == 0 && result.Buffer[9] == 0 &&
+                               result.Buffer[10] == 0 && result.Buffer[11] == 0;
+                if (!isUnmap)
+                {
+                    var response = BuildResponse(result.Buffer);
+                    await _udp.SendAsync(response, result.RemoteEndPoint).ConfigureAwait(false);
+                }
             }
         }
 

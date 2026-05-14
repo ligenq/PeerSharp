@@ -143,7 +143,7 @@ internal static class MerkleTree
         int blocksPerPiece = (int)(pieceSize / BlockSize);
         if (blocksPerPiece <= 0 || leaves.Count == 0)
         {
-            return new List<byte[]>();
+            return [];
         }
 
         int actualPieceCount = (leaves.Count + blocksPerPiece - 1) / blocksPerPiece;
@@ -476,7 +476,7 @@ internal static class MerkleTree
         var layers = new List<List<byte[]>>();
         while (layers.Count <= baseDepth)
         {
-            layers.Add(new List<byte[]>());
+            layers.Add([]);
         }
 
         var layer = new List<byte[]>(pieceLayerHashes);

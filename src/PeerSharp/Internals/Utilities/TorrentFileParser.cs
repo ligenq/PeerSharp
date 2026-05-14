@@ -73,7 +73,7 @@ internal static class TorrentFileParser
 
         if (metadata.AnnounceTiers.Count == 0 && !string.IsNullOrWhiteSpace(metadata.Announce))
         {
-            metadata.AnnounceTiers.Add(new List<string> { metadata.Announce });
+            metadata.AnnounceTiers.Add([metadata.Announce]);
         }
 
         // BEP 19: Parse url-list for web seeds

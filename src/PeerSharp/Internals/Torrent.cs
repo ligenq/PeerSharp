@@ -51,7 +51,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private int _timerTickCount;
 
-    private readonly List<IPeerTransport> _peerTransports = new();
+    private readonly List<IPeerTransport> _peerTransports = [];
     private readonly Lock _peerTransportsLock = new();
 
     private Torrent(
@@ -385,7 +385,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         var state = new TorrentStateData
         {
             Pieces = Pieces.ToBitfield(),
-            UnfinishedPieces = FileTransferInternal?.GetUnfinishedPiecesState() ?? new(),
+            UnfinishedPieces = FileTransferInternal?.GetUnfinishedPiecesState() ?? [],
             Downloaded = (ulong)(FileTransferInternal?.Downloader?.Downloaded ?? 0),
             Uploaded = (ulong)(FileTransferInternal?.Uploader?.Uploaded ?? 0),
             SeedTimeSeconds = (long)GetSeedingTime(Services.TimeProvider.GetUtcNow()).TotalSeconds,

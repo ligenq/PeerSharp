@@ -5,7 +5,7 @@ internal class FileSelectionManager : IFileSelectionManager
     private readonly TorrentFileMetadata _metadata;
     private readonly Lock _selectionLock = new();
     private IUnfinishedBytesProvider? _bytesProvider;
-    private List<FileSelection> _fileSelection = new();
+    private List<FileSelection> _fileSelection = [];
     private IReadOnlyList<FileSelection>? _fileSelectionSnapshot;
     private IFileSelectionObserver? _observer;
     private PiecesProgress? _pieces; // Set during Initialize
@@ -272,7 +272,7 @@ internal class FileSelectionManager : IFileSelectionManager
 
     private void InitializeDefaultFileSelection()
     {
-        _fileSelection = new List<FileSelection>();
+        _fileSelection = [];
         for (int i = 0; i < _metadata.Info.Files.Count; i++)
         {
             _fileSelection.Add(GetDefaultSelection(i));

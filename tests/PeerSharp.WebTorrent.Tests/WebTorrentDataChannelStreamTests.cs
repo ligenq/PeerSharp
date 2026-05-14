@@ -101,7 +101,7 @@ public class WebTorrentDataChannelStreamTests
         public bool Disposed { get; private set; }
         public RTCDataChannelState ReadyState => RTCDataChannelState.Open;
         public IAsyncEnumerable<ReadOnlyMemory<byte>> Messages => _messages.Reader.ReadAllAsync();
-        public List<byte[]> SentPayloads { get; } = new();
+        public List<byte[]> SentPayloads { get; } = [];
 
         public Task WaitUntilOpenAsync(CancellationToken cancellationToken = default) =>
             _openTcs.Task.WaitAsync(cancellationToken);

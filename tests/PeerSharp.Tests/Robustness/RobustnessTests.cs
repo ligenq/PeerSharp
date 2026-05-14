@@ -136,7 +136,7 @@ public class RobustnessTests
     private class MockUtpManager : IUtpManager
     {
         public Action<UtpStream>? OnNewConnection { get; set; }
-        public List<UtpStream> ClosedStreams { get; } = new();
+        public List<UtpStream> ClosedStreams { get; } = [];
 
         public UtpStream CreateStream(IPEndPoint remote)
         {

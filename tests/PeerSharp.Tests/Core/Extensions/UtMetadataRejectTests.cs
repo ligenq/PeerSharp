@@ -10,7 +10,7 @@ public class UtMetadataRejectTests
 {
     private class MockPeer : PeerCommunication
     {
-        public List<PeerMessage> Sent { get; } = new();
+        public List<PeerMessage> Sent { get; } = [];
         public MockPeer(Torrent torrent) : base(torrent, new MockListener(), TimeProvider.System) { }
         public override Task SendMessageAsync(PeerMessage msg)
         {

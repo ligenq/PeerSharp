@@ -641,7 +641,10 @@ public class PeerManagerTests
         var nonPortMessages = new List<PeerMessage>();
         while (queue.TryDequeue(out var msg))
         {
-            if (msg!.Id != MessageId.Port) nonPortMessages.Add(msg);
+            if (msg!.Id != MessageId.Port)
+            {
+                nonPortMessages.Add(msg);
+            }
         }
         Assert.Empty(nonPortMessages);
 
@@ -662,7 +665,10 @@ public class PeerManagerTests
 
         var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
         var messages = new List<PeerMessage>();
-        while (queue.TryDequeue(out var msg)) messages.Add(msg!);
+        while (queue.TryDequeue(out var msg))
+        {
+            messages.Add(msg!);
+        }
 
         Assert.Contains(messages, m => m.Id == MessageId.HaveAll);
         Assert.DoesNotContain(messages, m => m.Id == MessageId.Bitfield);
@@ -684,7 +690,10 @@ public class PeerManagerTests
 
         var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
         var messages = new List<PeerMessage>();
-        while (queue.TryDequeue(out var msg)) messages.Add(msg!);
+        while (queue.TryDequeue(out var msg))
+        {
+            messages.Add(msg!);
+        }
 
         Assert.Contains(messages, m => m.Id == MessageId.Bitfield);
         Assert.DoesNotContain(messages, m => m.Id == MessageId.HaveAll);
@@ -720,7 +729,10 @@ public class PeerManagerTests
 
         var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
         var messages = new List<PeerMessage>();
-        while (queue.TryDequeue(out var msg)) messages.Add(msg!);
+        while (queue.TryDequeue(out var msg))
+        {
+            messages.Add(msg!);
+        }
 
         Assert.Contains(messages, m => m.Id == MessageId.Bitfield);
         Assert.DoesNotContain(messages, m => m.Id == MessageId.HaveAll);
@@ -801,13 +813,17 @@ public class PeerManagerTests
 
         await manager.StopAsync();
         await ctx.Torrent.DisposeAsync();
-        try { if (Directory.Exists(ctx.Path)) Directory.Delete(ctx.Path, true); } catch { }
+        try { if (Directory.Exists(ctx.Path)) { Directory.Delete(ctx.Path, true); } } catch { }
     }
 
     private static void SetPrivateProperty(object target, string propertyName, object value)
     {
         var prop = target.GetType().GetProperty(propertyName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
-        if (prop?.SetMethod == null) throw new InvalidOperationException($"Property '{propertyName}' not settable on {target.GetType().Name}");
+        if (prop?.SetMethod == null)
+        {
+            throw new InvalidOperationException($"Property '{propertyName}' not settable on {target.GetType().Name}");
+        }
+
         prop.SetValue(target, value);
     }
 

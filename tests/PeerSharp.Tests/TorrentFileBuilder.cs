@@ -8,7 +8,7 @@ internal class TorrentFileBuilder
 {
     private string _name = "test_torrent";
     private uint _pieceLength = 16384;
-    private readonly List<(string Path, byte[] Data)> _files = new();
+    private readonly List<(string Path, byte[] Data)> _files = [];
 
     public TorrentFileBuilder WithName(string name)
     {

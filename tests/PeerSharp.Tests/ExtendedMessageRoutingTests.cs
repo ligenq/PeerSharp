@@ -26,10 +26,10 @@ public sealed class ExtendedMessageRoutingTests
                 Hash = InfoHash.Empty,
                 FullSize = 0,
                 PieceSize = 0,
-                Files = new List<Internals.TorrentFileEntry>
-                {
+                Files =
+                [
                     new Internals.TorrentFileEntry { Path = "test.dat", Size = 0 }
-                }
+                ]
             }
         };
 

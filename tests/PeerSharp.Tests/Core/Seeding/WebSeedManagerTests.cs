@@ -13,7 +13,7 @@ public class WebSeedManagerTests
         public Func<HttpRequestMessage, HttpResponseMessage>? Handler { get; set; }
         public byte[]? ResponseBytes { get; set; }
         public HttpStatusCode StatusCode { get; set; } = HttpStatusCode.PartialContent;
-        public List<HttpRequestMessage> SentRequests { get; } = new();
+        public List<HttpRequestMessage> SentRequests { get; } = [];
 
         public Task<byte[]> GetByteArrayAsync(string url, CancellationToken cancellationToken)
         {

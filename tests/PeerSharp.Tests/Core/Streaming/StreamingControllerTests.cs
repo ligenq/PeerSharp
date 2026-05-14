@@ -269,7 +269,7 @@ public class StreamingControllerTests
     [Fact]
     public void Dispose_ClearsActiveStream()
     {
-        _controller.PriorityPieces = new List<int> { 1, 2, 3 };
+        _controller.PriorityPieces = [1, 2, 3];
 
         _controller.Dispose();
 
@@ -328,7 +328,7 @@ public class StreamingControllerTests
 
             tasks.Add(Task.Run(() =>
             {
-                _controller.PriorityPieces = new List<int> { 1, 2, 3 };
+                _controller.PriorityPieces = [1, 2, 3];
                 _ = _controller.PriorityPieces;
             }));
         }

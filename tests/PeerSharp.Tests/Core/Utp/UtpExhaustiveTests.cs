@@ -700,7 +700,11 @@ public class UtpExhaustiveTests
         while (total < 4)
         {
             int r = await stream.ReadAsync(buffer.AsMemory(total, 4 - total), cts.Token);
-            if (r == 0) break;
+            if (r == 0)
+            {
+                break;
+            }
+
             total += r;
         }
 

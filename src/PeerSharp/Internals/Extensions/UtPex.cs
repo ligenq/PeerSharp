@@ -10,7 +10,7 @@ internal class UtPex : IUtPex, IDisposable
 
     private readonly IPeerCommunication _peer;
 
-    private readonly HashSet<IPEndPoint> _sentPeers = new();
+    private readonly HashSet<IPEndPoint> _sentPeers = [];
 
     private AtomicDisposal _disposal = new();
 

@@ -68,7 +68,7 @@ public class ProtocolEncryptionTests
 
     private class MockTorrentResolver : ITorrentResolver
     {
-        private readonly List<ITorrent> _torrents = new();
+        private readonly List<ITorrent> _torrents = [];
 
         public void AddTorrent(byte[] infoHash)
         {

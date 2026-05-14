@@ -119,7 +119,7 @@ public class SessionManagerTests
     // Mock for SessionPersistence
     private class MockSessionPersistence : ISessionPersistence
     {
-        public List<SavedTorrentEntry> SavedEntries { get; } = new();
+        public List<SavedTorrentEntry> SavedEntries { get; } = [];
         public bool DeleteCalled { get; private set; }
         public InfoHash? LastDeletedHash { get; private set; }
         public DhtState? SavedDhtState { get; private set; }

@@ -9,7 +9,7 @@ namespace PeerSharp.WebTorrent.Trackers;
 
 internal sealed class WebTorrentTrackerManager : IAsyncDisposable
 {
-    private readonly List<WebTorrentTrackerClient> _clients = new();
+    private readonly List<WebTorrentTrackerClient> _clients = [];
     private readonly ITorrent _torrent;
     private readonly IPeerTransportHost _host;
     private readonly WebTorrentSessionOptions _options;
@@ -185,11 +185,18 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
             client = _clients.FirstOrDefault(c => c.Runtime == runtime);
         }
 
-        if (client == null) return false;
+        if (client == null)
+        {
+            return false;
+        }
 
         lock (runtime.SyncRoot)
         {
-            if (runtime.ReconnectInProgress) return false;
+            if (runtime.ReconnectInProgress)
+            {
+                return false;
+            }
+
             runtime.ReconnectInProgress = true;
         }
 

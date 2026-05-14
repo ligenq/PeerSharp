@@ -2,7 +2,7 @@ namespace PeerSharp.BEncoding;
 
 internal class BDict : IBNode
 {
-    public Dictionary<string, IBNode> Dict { get; } = new();
+    public Dictionary<string, IBNode> Dict { get; } = [];
     public BencodeType Type => BencodeType.Dictionary;
 
     public IBNode? Get(string key)

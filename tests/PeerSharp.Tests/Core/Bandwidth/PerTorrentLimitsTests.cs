@@ -12,7 +12,7 @@ public class PerTorrentLimitsTests
 {
     private sealed class TrackingBandwidthManager : IBandwidthManager
     {
-        private readonly Dictionary<string, BandwidthChannel> _channels = new();
+        private readonly Dictionary<string, BandwidthChannel> _channels = [];
         public int DownloadLimit { get; private set; }
         public int DiskReadLimit { get; private set; }
         public int DiskWriteLimit { get; private set; }
@@ -90,7 +90,7 @@ public class PerTorrentLimitsTests
         public void RegisterAlerts(uint categories) { }
         public List<Alert> PopAlerts()
         {
-            return new();
+            return [];
         }
 
         public async IAsyncEnumerable<Alert> GetAlertsAsync(TimeSpan? timeout = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)

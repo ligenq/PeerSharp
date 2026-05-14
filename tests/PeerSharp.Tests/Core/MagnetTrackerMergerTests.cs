@@ -10,8 +10,8 @@ public class MagnetTrackerMergerTests
         var metadata = new TorrentFileMetadata
         {
             Announce = "udp://metadata/announce",
-            AnnounceList = new List<string> { "udp://metadata/announce" },
-            AnnounceTiers = new List<List<string>> { new() { "udp://metadata/announce" } }
+            AnnounceList = ["udp://metadata/announce"],
+            AnnounceTiers = [new() { "udp://metadata/announce" }]
         };
         var magnet = MagnetLink.Parse("magnet:?xt=urn:btih:0123456789012345678901234567890123456789");
 
@@ -28,7 +28,7 @@ public class MagnetTrackerMergerTests
     {
         var metadata = new TorrentFileMetadata
         {
-            AnnounceList = new List<string> { "udp://tracker-a/announce" }
+            AnnounceList = ["udp://tracker-a/announce"]
         };
         var magnet = MagnetLink.Parse(
             "magnet:?xt=urn:btih:0123456789012345678901234567890123456789" +

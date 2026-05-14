@@ -69,7 +69,7 @@ public class TrackerManagerTests
 
     private class MockTrackerFactory : ITrackerFactory
     {
-        public Dictionary<string, MockTracker> Trackers { get; } = new();
+        public Dictionary<string, MockTracker> Trackers { get; } = [];
 
         public ITracker? CreateTracker(string url, TimeProvider timeProvider)
         {

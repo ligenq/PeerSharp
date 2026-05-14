@@ -13,7 +13,7 @@ internal class IpBlocklist
 {
     private readonly Lock _lock = new();
     private readonly ILogger<IpBlocklist> _logger = TorrentLoggerFactory.CreateLogger<IpBlocklist>();
-    private readonly List<IpRange> _ranges = new();
+    private readonly List<IpRange> _ranges = [];
     private bool _sorted;
 
     /// <summary>

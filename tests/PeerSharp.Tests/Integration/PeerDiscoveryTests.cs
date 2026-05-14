@@ -124,7 +124,7 @@ public class PeerDiscoveryTests : IDisposable
     private sealed class InMemoryUdpNetwork
     {
         private readonly Lock _lock = new();
-        private readonly Dictionary<int, InMemoryUdpListener> _listeners = new();
+        private readonly Dictionary<int, InMemoryUdpListener> _listeners = [];
         private int _nextPort = 10000;
         private int _inFlight;
 
@@ -244,7 +244,7 @@ public class PeerDiscoveryTests : IDisposable
 
     private sealed class RecordingDhtCallback : IDhtCallback
     {
-        private readonly List<(InfoHash Hash, List<IPEndPoint> Peers)> _found = new();
+        private readonly List<(InfoHash Hash, List<IPEndPoint> Peers)> _found = [];
 
         public void OnPeersFound(InfoHash infoHash, List<IPEndPoint> peers)
         {

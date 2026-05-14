@@ -263,7 +263,7 @@ public class LocalSwarmTests : IDisposable
         var sw = Stopwatch.StartNew();
         while (leecherTorrent.Peers.ConnectedCount == 0 && sw.Elapsed < timeout)
         {
-            leecherEngine.OnPeersFound(leecherTorrent.Hash, new List<IPEndPoint> { seedEndpoint });
+            leecherEngine.OnPeersFound(leecherTorrent.Hash, [seedEndpoint]);
             await Task.Delay(200);
         }
 

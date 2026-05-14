@@ -352,7 +352,7 @@ public class SuperSeedManagerTests
             RemoteEndPoint = endpoint;
         }
 
-        public List<PeerMessage> SentMessages { get; } = new();
+        public List<PeerMessage> SentMessages { get; } = [];
         public IPeerListener Listener => null!;
         public byte[] PeerId { get; } = new byte[20];
         public IPEndPoint? RemoteEndPoint { get; }

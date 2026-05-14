@@ -28,7 +28,7 @@ internal class PiecePicker : IDisposable
 
     private readonly Random _random;
     private readonly Lock _selectionLock = new();
-    private List<int> _sortedPieces = new();
+    private List<int> _sortedPieces = [];
     private readonly TimeProvider _timeProvider;
     private AtomicDisposal _disposal = new();
     private IReadOnlyList<FileSelection>? _fileSelectionSnapshot;
@@ -383,7 +383,7 @@ internal class PiecePicker : IDisposable
             int avail = availability[p];
             int bucketIdx = avail >= MaxBuckets ? MaxBuckets - 1 : avail;
 
-            (buckets[bucketIdx] ??= new List<int>()).Add(p);
+            (buckets[bucketIdx] ??= []).Add(p);
         }
 
         list.Clear();

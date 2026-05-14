@@ -5,7 +5,6 @@ using PeerSharp.PieceWriter;
 using Microsoft.Extensions.Time.Testing;
 using System.Net;
 using System.Reflection;
-using System.Threading.Channels;
 using PeerSharp.Messages;
 
 namespace PeerSharp.Tests.Core;
@@ -380,7 +379,9 @@ public class FileTransferTests
             // Wait until the i-th call has been registered (background task threw)
             var deadline = DateTime.UtcNow.AddMilliseconds(2000);
             while (Volatile.Read(ref callCount) < i && DateTime.UtcNow < deadline)
+            {
                 await Task.Delay(1);
+            }
 
             // Give background task time to reach Task.Delay before advancing fake clock
             await Task.Delay(20);
@@ -399,7 +400,10 @@ public class FileTransferTests
         Func<CancellationToken, Task> failOnceThenSucceed = _ =>
         {
             if (Interlocked.Increment(ref callCount) == 1)
+            {
                 throw new InvalidOperationException("transient");
+            }
+
             return Task.CompletedTask;
         };
 
@@ -408,7 +412,9 @@ public class FileTransferTests
         // Wait for 1st failure, then advance time past the 1000ms retry delay
         var deadline = DateTime.UtcNow.AddMilliseconds(2000);
         while (Volatile.Read(ref callCount) < 1 && DateTime.UtcNow < deadline)
+        {
             await Task.Delay(1);
+        }
 
         await Task.Delay(20);
         _timeProvider.Advance(TimeSpan.FromSeconds(2));

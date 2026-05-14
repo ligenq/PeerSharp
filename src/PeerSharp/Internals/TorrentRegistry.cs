@@ -9,7 +9,7 @@ namespace PeerSharp.Internals;
 internal sealed class TorrentRegistry
 {
     private readonly Lock _lock = new();
-    private readonly List<Torrent> _torrents = new();
+    private readonly List<Torrent> _torrents = [];
     private readonly Dictionary<string, Torrent> _torrentsByHash = new(StringComparer.OrdinalIgnoreCase);
 
     public int Count

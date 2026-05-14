@@ -42,7 +42,7 @@ internal sealed class PieceCompletionHandler
         }
 
         // Now remove and cancel
-        List<Task>? cancelTasks = endGameMode ? new List<Task>() : null;
+        List<Task>? cancelTasks = endGameMode ? [] : null;
         foreach (var (peer, key, r) in requestsToRemove)
         {
             if (_requestTracker.TryRemovePeerRequest(peer, key, out _))

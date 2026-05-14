@@ -1,9 +1,6 @@
-using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
-using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
-using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Interfaces;
@@ -34,7 +31,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
     private readonly WebTorrentSessionOptions _options;
     private readonly ILogger<WebTorrentSession> _logger;
     private readonly Lock _backgroundTasksLock = new();
-    private readonly List<Task> _backgroundTasks = new();
+    private readonly List<Task> _backgroundTasks = [];
     private readonly WebTorrentTrackerManager _trackerManager;
     private readonly WebRtcPeerManager _peerManager;
     private int _started;
@@ -102,7 +99,10 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        if (Interlocked.Exchange(ref _started, 1) == 1) return;
+        if (Interlocked.Exchange(ref _started, 1) == 1)
+        {
+            return;
+        }
 
         await _trackerManager.StartAsync(cancellationToken).ConfigureAwait(false);
 
@@ -142,8 +142,8 @@ public sealed class WebTorrentSession : IAsyncDisposable
     {
         return new SessionDiagnostics(
             _trackerManager.GetRuntimes().Count,
-            _trackerManager.GetRuntimes().Count(r => { lock (r.SyncRoot) return r.IsConnected; }),
-            _trackerManager.GetRuntimes().Count(r => { lock (r.SyncRoot) return r.ReconnectInProgress; }),
+            _trackerManager.GetRuntimes().Count(r => { lock (r.SyncRoot) { return r.IsConnected; } }),
+            _trackerManager.GetRuntimes().Count(r => { lock (r.SyncRoot) { return r.ReconnectInProgress; } }),
             _peerManager.PendingConnectionCount,
             _peerManager.EarlyCandidateOfferCount,
             _torrent.Finished);
@@ -178,7 +178,11 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
                     if (!isConnected)
                     {
-                        if (reconnectInProgress || nextReconnectAt == DateTimeOffset.MinValue || _options.TimeProvider.GetUtcNow() < nextReconnectAt) continue;
+                        if (reconnectInProgress || nextReconnectAt == DateTimeOffset.MinValue || _options.TimeProvider.GetUtcNow() < nextReconnectAt)
+                        {
+                            continue;
+                        }
+
                         if (await _trackerManager.TryReconnectAsync(runtime, cancellationToken).ConfigureAwait(false))
                         {
                             await SendOffersAsync(runtime, "started", cancellationToken).ConfigureAwait(false);
@@ -195,7 +199,10 @@ public sealed class WebTorrentSession : IAsyncDisposable
                         try
                         {
                             await _trackerManager.ReannounceAsync(runtime, "completed", null, cancellationToken).ConfigureAwait(false);
-                            lock (runtime.SyncRoot) runtime.CompletedSent = true;
+                            lock (runtime.SyncRoot)
+                            {
+                                runtime.CompletedSent = true;
+                            }
                         }
                         catch (OperationCanceledException)
                         {
@@ -260,11 +267,22 @@ public sealed class WebTorrentSession : IAsyncDisposable
             }
         }
 
-        foreach (var pending in _peerManager.PendingPeers) nextDue = Min(nextDue, pending.ExpiresAt);
+        foreach (var pending in _peerManager.PendingPeers)
+        {
+            nextDue = Min(nextDue, pending.ExpiresAt);
+        }
 
-        if (!nextDue.HasValue) return hasActiveWork ? ActiveLoopMaxDelay : IdleLoopMaxDelay;
+        if (!nextDue.HasValue)
+        {
+            return hasActiveWork ? ActiveLoopMaxDelay : IdleLoopMaxDelay;
+        }
+
         var delay = nextDue.Value - now;
-        if (delay <= TimeSpan.Zero) return TimeSpan.FromMilliseconds(50);
+        if (delay <= TimeSpan.Zero)
+        {
+            return TimeSpan.FromMilliseconds(50);
+        }
+
         var maxDelay = hasActiveWork ? ActiveLoopMaxDelay : IdleLoopMaxDelay;
         return delay < maxDelay ? delay : maxDelay;
     }
@@ -356,7 +374,10 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     private async Task SendCandidateAsync(PendingPeer pending, WebRtcIceCandidateDescription candidate, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(pending.RemotePeerId)) return;
+        if (string.IsNullOrWhiteSpace(pending.RemotePeerId))
+        {
+            return;
+        }
 
         var signalData = new JsonObject
         {
@@ -381,10 +402,18 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     private static string FormatOfferIdForLog(string? offerId)
     {
-        if (string.IsNullOrEmpty(offerId)) return string.Empty;
+        if (string.IsNullOrEmpty(offerId))
+        {
+            return string.Empty;
+        }
+
         var bytes = Encoding.Latin1.GetBytes(offerId);
         var builder = new StringBuilder(bytes.Length * 2);
-        foreach (var b in bytes) builder.Append(b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
+        foreach (var b in bytes)
+        {
+            builder.Append(b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
         return builder.ToString();
     }
 
@@ -395,7 +424,10 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     private async Task AttachChannelInternalAsync(PendingPeer pending, IWebRtcDataChannel channel, CancellationToken cancellationToken)
     {
-        if (!pending.TryMarkAttached()) return;
+        if (!pending.TryMarkAttached())
+        {
+            return;
+        }
 
         var stream = new WebTorrentDataChannelStream(channel);
         stream.Start();
@@ -422,7 +454,10 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (!_cts.IsCancellationRequested) await _cts.CancelAsync().ConfigureAwait(false);
+        if (!_cts.IsCancellationRequested)
+        {
+            await _cts.CancelAsync().ConfigureAwait(false);
+        }
 
         // Send "stopped" announce to all connected trackers
         foreach (var runtime in _trackerManager.GetRuntimes())

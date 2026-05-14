@@ -9,14 +9,14 @@ internal sealed class SessionManager : IAsyncDisposable
 {
     private readonly Lock _lock = new();
     private readonly ILogger<SessionManager> _logger;
-    private readonly Dictionary<InfoHash, string> _magnetLinks = new();
+    private readonly Dictionary<InfoHash, string> _magnetLinks = [];
     private readonly ISessionPersistence _persistence;
     private readonly TorrentRegistry _registry;
     private readonly TimeProvider _timeProvider;
 
     // Store raw .torrent bytes and magnet links for persistence
     // These are needed because the active Torrent object might only have parsed metadata
-    private readonly Dictionary<InfoHash, byte[]> _torrentRawData = new();
+    private readonly Dictionary<InfoHash, byte[]> _torrentRawData = [];
 
     private CancellationTokenSource? _autoSaveCts;
     private Task? _autoSaveTask;

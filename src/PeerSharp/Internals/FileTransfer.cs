@@ -2,7 +2,6 @@ using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Peers;
-using PeerSharp.Internals.Utilities;
 using PeerSharp.PiecePicking;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
@@ -53,7 +52,7 @@ internal sealed class PieceState : IDisposable
 
     public Block?[] BlockData { get; }
     public bool[] Blocks { get; }
-    public HashSet<PeerCommunication> Contributors { get; } = new();
+    public HashSet<PeerCommunication> Contributors { get; } = [];
     public int Index { get; }
 
     public bool IsWriting
@@ -314,7 +313,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     private const int MinSoftTimeoutMs = 3000;
 
     private const int SoftTimeoutRttMultiplier = 6;
-    private static readonly ILogger<FileTransfer> _logger = TorrentLoggerFactory.CreateLogger<FileTransfer>();
+    private static readonly ILogger<FileTransfer> Logger = TorrentLoggerFactory.CreateLogger<FileTransfer>();
 
     // Track background tasks for proper disposal
     private readonly List<Task> _backgroundTasks = new(3);
@@ -389,7 +388,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             SingleReader = true
         });
 
-        _logger.LogDebug("Piece processing queue initialized with capacity {MaxConcurrentPieces} (configurable via MaxConcurrentPieceProcessing)", maxConcurrentPieces);
+        Logger.LogDebug("Piece processing queue initialized with capacity {MaxConcurrentPieces} (configurable via MaxConcurrentPieceProcessing)", maxConcurrentPieces);
 
         var requestSchedulerLogger = TorrentLoggerFactory.CreateLogger<RequestScheduler>();
         _requestScheduler = new RequestScheduler(new RequestSchedulerOptions
@@ -492,7 +491,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         // In this implementation, requests are fulfilled immediately without queuing,
         // so Cancel is mostly informational. A more sophisticated implementation might
         // maintain an upload queue where pending requests could be removed.
-        _logger.LogDebug("Request cancelled by {RemoteEndPoint}: {PieceIndex}:{BlockOffset}", peer.RemoteEndPoint, msg.PieceIndex, msg.BlockOffset);
+        Logger.LogDebug("Request cancelled by {RemoteEndPoint}: {PieceIndex}:{BlockOffset}", peer.RemoteEndPoint, msg.PieceIndex, msg.BlockOffset);
     }
 
     public async Task BlockReceivedAsync(PeerCommunication peer, Block block)
@@ -509,13 +508,13 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         catch (Exception ex)
         {
             block.Dispose();
-            _logger.LogError(ex, "Failed to enqueue block from {RemoteEndPoint}", peer.RemoteEndPoint);
+            Logger.LogError(ex, "Failed to enqueue block from {RemoteEndPoint}", peer.RemoteEndPoint);
         }
     }
 
     public async Task BlockRejectedAsync(PeerCommunication peer, PeerMessage msg)
     {
-        _logger.LogDebug("Request rejected by {RemoteEndPoint}: {PieceIndex}:{BlockOffset}", peer.RemoteEndPoint, msg.PieceIndex, msg.BlockOffset);
+        Logger.LogDebug("Request rejected by {RemoteEndPoint}: {PieceIndex}:{BlockOffset}", peer.RemoteEndPoint, msg.PieceIndex, msg.BlockOffset);
 
         var key = (msg.PieceIndex, msg.BlockOffset);
         if (_requestTracker.TryRemovePeerRequest(peer, key, out var r))
@@ -609,7 +608,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         catch (OperationCanceledException) { /* Normal shutdown */ }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to fulfil request from {RemoteEndPoint}", peer.RemoteEndPoint);
+            Logger.LogError(ex, "Failed to fulfil request from {RemoteEndPoint}", peer.RemoteEndPoint);
             block?.Dispose();
         }
     }
@@ -666,7 +665,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error in immediate peer evaluation for {RemoteEndPoint}", peer.RemoteEndPoint);
+                Logger.LogError(ex, "Error in immediate peer evaluation for {RemoteEndPoint}", peer.RemoteEndPoint);
             }
             return;
         }
@@ -918,14 +917,14 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
             if (isStarved)
             {
-                _logger.LogTrace("REQUEST STARVATION: No pending requests! peers={PeerCount}, unchoked={Unchoked}, activePieces={ActivePieces}, finished={Finished}", peerCount, unchokedPeers, _pieceStateManager.Count, _torrent.Finished);
+                Logger.LogTrace("REQUEST STARVATION: No pending requests! peers={PeerCount}, unchoked={Unchoked}, activePieces={ActivePieces}, finished={Finished}", peerCount, unchokedPeers, _pieceStateManager.Count, _torrent.Finished);
             }
             else if (isStalled)
             {
-                _logger.LogTrace("REQUEST STALL: Oldest request is {Age}ms old! pendingRequests={Pending}, peersWithRequests={PeersWithRequests}", oldestRequestAgeMs, totalPendingRequests, peersWithRequests);
+                Logger.LogTrace("REQUEST STALL: Oldest request is {Age}ms old! pendingRequests={Pending}, peersWithRequests={PeersWithRequests}", oldestRequestAgeMs, totalPendingRequests, peersWithRequests);
             }
 
-            _logger.LogTrace("Transfer status: peers={PeerCount}, unchoked={Unchoked}, peersWithRequests={PeersWithRequests}, pendingRequests={Pending}, activePieces={ActivePieces}/{MaxActive}, blockIndex={BlockIndex}, oldestReq={OldestReq}ms, endGame={EndGame}",
+            Logger.LogTrace("Transfer status: peers={PeerCount}, unchoked={Unchoked}, peersWithRequests={PeersWithRequests}, pendingRequests={Pending}, activePieces={ActivePieces}/{MaxActive}, blockIndex={BlockIndex}, oldestReq={OldestReq}ms, endGame={EndGame}",
                 peerCount, unchokedPeers, peersWithRequests, totalPendingRequests, _pieceStateManager.Count, MaxActivePieces, _requestTracker.BlockRequestIndexCount, oldestRequestAgeMs, EndGameMode);
         }
 
@@ -951,7 +950,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         foreach (var peer in peers)
         {
             try { _ = RequestBlocksAsync(peer); }
-            catch (Exception ex) { _logger.LogError(ex, "RequestBlocks error for {RemoteEndPoint}", peer.RemoteEndPoint); }
+            catch (Exception ex) { Logger.LogError(ex, "RequestBlocks error for {RemoteEndPoint}", peer.RemoteEndPoint); }
         }
 
         if ((now - _lastPrune).TotalSeconds > 10)
@@ -988,7 +987,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Error during FileTransfer.Stop()");
+                Logger.LogWarning(ex, "Error during FileTransfer.Stop()");
             }
 
             try
@@ -1001,13 +1000,13 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                     }
                     catch (TimeoutException ex)
                     {
-                        _logger.LogTrace(ex, "Background tasks did not complete within timeout during disposal");
+                        Logger.LogTrace(ex, "Background tasks did not complete within timeout during disposal");
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogTrace(ex, "Error waiting for background tasks");
+                Logger.LogTrace(ex, "Error waiting for background tasks");
             }
 
             try
@@ -1021,13 +1020,13 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                     }
                     catch (TimeoutException ex)
                     {
-                        _logger.LogTrace(ex, "Overflow tasks did not complete within timeout during disposal");
+                        Logger.LogTrace(ex, "Overflow tasks did not complete within timeout during disposal");
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogTrace(ex, "Error waiting for overflow tasks");
+                Logger.LogTrace(ex, "Error waiting for overflow tasks");
             }
 
             _pieceStateManager.Dispose();
@@ -1125,7 +1124,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error processing block from {RemoteEndPoint}", item.Peer.RemoteEndPoint);
+                    Logger.LogError(ex, "Error processing block from {RemoteEndPoint}", item.Peer.RemoteEndPoint);
                     // Ensure block is disposed even on error
                     item.Block.Dispose();
                 }
@@ -1140,7 +1139,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             return Task.CompletedTask;
         }
 
-        _logger.LogWarning("Piece processing queue full - forcing immediate processing for piece {PieceIndex}. Disk I/O may be bottlenecked", pieceToProcess.Index);
+        Logger.LogWarning("Piece processing queue full - forcing immediate processing for piece {PieceIndex}. Disk I/O may be bottlenecked", pieceToProcess.Index);
         var task = ProcessPieceWithOverflowLimitAsync(pieceToProcess, _cts.Token);
         _overflowTasks.TryAdd(task, 0);
 
@@ -1149,7 +1148,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             _overflowTasks.TryRemove(t, out _);
             if (t.IsFaulted)
             {
-                _logger.LogError(t.Exception, "Overflow piece processing failed");
+                Logger.LogError(t.Exception, "Overflow piece processing failed");
             }
         }, TaskScheduler.Default);
 
@@ -1163,7 +1162,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             return;
         }
 
-        _logger.LogWarning("Piece processing queue full - piece {PieceIndex} waiting for queue space", pieceToProcess.Index);
+        Logger.LogWarning("Piece processing queue full - piece {PieceIndex} waiting for queue space", pieceToProcess.Index);
         await _pieceProcessingQueue.Writer.WriteAsync(pieceToProcess, ct).ConfigureAwait(false);
     }
 
@@ -1192,7 +1191,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         // Wait for a slot (with timeout to prevent indefinite blocking)
         if (!await _overflowProcessingSemaphore.WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false))
         {
-            _logger.LogError("Overflow processing timeout for piece {PieceIndex} - system severely overloaded", pieceToProcess.Index);
+            Logger.LogError("Overflow processing timeout for piece {PieceIndex} - system severely overloaded", pieceToProcess.Index);
             // Reset piece state so it can be re-requested
             pieceToProcess.Reset();
             return;
@@ -1246,19 +1245,19 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                     {
                         // Disk error - reset state so we can retry, but don't penalize peers
                         pieceToProcess.Reset();
-                        _logger.LogWarning("Piece {PieceIndex} write failed, state reset for retry", pieceToProcess.Index);
+                        Logger.LogWarning("Piece {PieceIndex} write failed, state reset for retry", pieceToProcess.Index);
                     }
                     else if (outcome.HashFailed)
                     {
                         pieceToProcess.Reset();
-                        _logger.LogWarning("Piece {PieceIndex} failed hash, will be retried", pieceToProcess.Index);
+                        Logger.LogWarning("Piece {PieceIndex} failed hash, will be retried", pieceToProcess.Index);
 
                         foreach (var p in pieceToProcess.Contributors)
                         {
                             p.Strikes++;
                             if (p.Strikes >= 3)
                             {
-                                _logger.LogWarning("Banning peer {RemoteEndPoint} due to hash failures", p.RemoteEndPoint);
+                                Logger.LogWarning("Banning peer {RemoteEndPoint} due to hash failures", p.RemoteEndPoint);
                                 await p.CloseAsync().ConfigureAwait(false);
                             }
                         }
@@ -1288,7 +1287,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         catch (Exception ex)
         {
             // Log unhandled exceptions in fire-and-forget task to prevent silent failures
-            _logger.LogError(ex, "Error processing piece {PieceIndex}", pieceToProcess.Index);
+            Logger.LogError(ex, "Error processing piece {PieceIndex}", pieceToProcess.Index);
         }
     }
 
@@ -1324,16 +1323,16 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                         if (t.IsFaulted)
                         {
                             _merkleHashRequestCoordinator.CompleteFailedV2Request(selection.RequestKey);
-                            _logger.LogDebug(t.Exception, "BEP 52: Failed to request piece layer for piece {PieceIndex}", pieceIndex);
+                            Logger.LogDebug(t.Exception, "BEP 52: Failed to request piece layer for piece {PieceIndex}", pieceIndex);
                         }
                     }, TaskScheduler.Default);
-                _logger.LogDebug("BEP 52: Requested piece layer for file root {PiecesRoot} from {RemoteEndPoint}", Convert.ToHexString(request.PiecesRoot), selection.Peer.RemoteEndPoint);
+                Logger.LogDebug("BEP 52: Requested piece layer for file root {PiecesRoot} from {RemoteEndPoint}", Convert.ToHexString(request.PiecesRoot), selection.Peer.RemoteEndPoint);
                 return;
             }
 
             if (selection.Status == MerkleHashRequestSelectionStatus.NoPeer)
             {
-                _logger.LogDebug("BEP 52: No peers available to request hashes for piece {PieceIndex}", pieceIndex);
+                Logger.LogDebug("BEP 52: No peers available to request hashes for piece {PieceIndex}", pieceIndex);
             }
 
             return;
@@ -1346,11 +1345,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         if (bep30Selection.Status == MerkleHashRequestSelectionStatus.Selected && bep30Selection.Peer != null)
         {
             bep30Selection.Peer.UtHashPiece!.RequestHashes(pieceIndex);
-            _logger.LogDebug("BEP 30: Requested hashes for piece {PieceIndex} from {RemoteEndPoint}", pieceIndex, bep30Selection.Peer.RemoteEndPoint);
+            Logger.LogDebug("BEP 30: Requested hashes for piece {PieceIndex} from {RemoteEndPoint}", pieceIndex, bep30Selection.Peer.RemoteEndPoint);
             return;
         }
 
-        _logger.LogDebug("BEP 30: No peers available to request hashes for piece {PieceIndex}", pieceIndex);
+        Logger.LogDebug("BEP 30: No peers available to request hashes for piece {PieceIndex}", pieceIndex);
     }
 
     private async Task RunBackgroundTaskAsync(Func<CancellationToken, Task> taskFunc, string taskName)
@@ -1374,14 +1373,14 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 if (restartCount > MaxBackgroundTaskRestarts)
                 {
                     Interlocked.Increment(ref _backgroundTasksFailed);
-                    _logger.LogError(ex, "CRITICAL: Background task '{TaskName}' failed {RestartCount} times, giving up", taskName, restartCount);
+                    Logger.LogError(ex, "CRITICAL: Background task '{TaskName}' failed {RestartCount} times, giving up", taskName, restartCount);
                     // Alert the system about the failure
                     _torrent.FireErrorEvent(new TorrentException($"Background task '{taskName}' failed after {restartCount} attempts.", _torrent.Hash, ex));
                     _torrent.Alerts.TorrentAlert(AlertId.TorrentInterrupted, _torrent);
                     break;
                 }
 
-                _logger.LogWarning(ex, "Background task '{TaskName}' failed (attempt {RestartCount}/{MaxRestarts}), restarting in 1s", taskName, restartCount, MaxBackgroundTaskRestarts);
+                Logger.LogWarning(ex, "Background task '{TaskName}' failed (attempt {RestartCount}/{MaxRestarts}), restarting in 1s", taskName, restartCount, MaxBackgroundTaskRestarts);
 
                 try
                 {

@@ -562,7 +562,10 @@ public class TorrentCreationTests
         }
         finally
         {
-            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, true);
+            }
         }
     }
 

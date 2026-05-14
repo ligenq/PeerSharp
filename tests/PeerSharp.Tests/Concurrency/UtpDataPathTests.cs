@@ -77,69 +77,70 @@ public class UtpDataPathTests
             var ackField = typeof(UtpStream).GetField("_ackNr", BindingFlags.NonPublic | BindingFlags.Instance);
             ackField!.SetValue(stream, (ushort)(startSeq - 1));
 
-            var tasks = new List<Task>();
-
-            // Sender task (simulating application writing to stream)
-            tasks.Add(Task.Run(async () =>
+            var tasks = new List<Task>
             {
-                var buffer = new byte[1000];
-                await stream.WriteAsync(buffer);
-            }));
-
-            // Receiver task (simulating network receiving ACKs)
-            tasks.Add(Task.Run(async () =>
-            {
-                // Simulate ACKs coming back, potentially reordered
-                // We expect packets to be sent by the stream.
-                // We need to poll manager.SentPackets.
-
-                int acked = 0;
-                while (acked < 1000)
+                // Sender task (simulating application writing to stream)
+                Task.Run(async () =>
                 {
-                    if (manager.SentPackets.TryDequeue(out var item))
+                    var buffer = new byte[1000];
+                    await stream.WriteAsync(buffer);
+                }),
+
+                // Receiver task (simulating network receiving ACKs)
+                Task.Run(async () =>
+                {
+                    // Simulate ACKs coming back, potentially reordered
+                    // We expect packets to be sent by the stream.
+                    // We need to poll manager.SentPackets.
+
+                    int acked = 0;
+                    while (acked < 1000)
                     {
-                        // Parse packet to get seqnr, then send ACK
-                        // This is complex because we need to parse the header.
-                        // Ideally we'd use UtpManager.ParseHeader but it's private.
-                        // We'll manually parse what we need.
-
-                        // Header is 20 bytes.
-                        // SeqNr is at offset 16 (ushort big endian)
-                        var data = item.Data;
-                        if (data.Length >= 20)
+                        if (manager.SentPackets.TryDequeue(out var item))
                         {
-                            ushort seq = (ushort)((data[16] << 8) | data[17]);
+                            // Parse packet to get seqnr, then send ACK
+                            // This is complex because we need to parse the header.
+                            // Ideally we'd use UtpManager.ParseHeader but it's private.
+                            // We'll manually parse what we need.
 
-                            // Send ACK back
-                            // We construct a fake ACK packet and inject it into stream
-                            // ProcessPacketWithSack is internal.
-
-                            var header = new MessageHeader
+                            // Header is 20 bytes.
+                            // SeqNr is at offset 16 (ushort big endian)
+                            var data = item.Data;
+                            if (data.Length >= 20)
                             {
-                                TypeVer = (byte)((byte)MessageType.ST_STATE << 4 | 1),
-                                SeqNr = (ushort)(seq + 100), // Random remote seq
-                                AckNr = seq,
-                                WndSize = 100000
-                            };
+                                ushort seq = (ushort)((data[16] << 8) | data[17]);
 
-                            // Inject
-                            stream.ProcessPacketWithSack(header, [], 20, null, null, remote);
+                                // Send ACK back
+                                // We construct a fake ACK packet and inject it into stream
+                                // ProcessPacketWithSack is internal.
 
-                            // We assume roughly 1 byte per packet for this simple test or 
-                            // we just ack until done. 
-                            // Since we sent 1000 bytes, and MSS is likely > 1000, it's probably 1 packet.
-                            // But Coyote might interleave such that WriteAsync splits it?
-                            // WriteAsync uses GetPayloadMss.
+                                var header = new MessageHeader
+                                {
+                                    TypeVer = (byte)((byte)MessageType.ST_STATE << 4 | 1),
+                                    SeqNr = (ushort)(seq + 100), // Random remote seq
+                                    AckNr = seq,
+                                    WndSize = 100000
+                                };
 
-                            acked += data.Length - 20;
+                                // Inject
+                                stream.ProcessPacketWithSack(header, [], 20, null, null, remote);
+
+                                // We assume roughly 1 byte per packet for this simple test or 
+                                // we just ack until done. 
+                                // Since we sent 1000 bytes, and MSS is likely > 1000, it's probably 1 packet.
+                                // But Coyote might interleave such that WriteAsync splits it?
+                                // WriteAsync uses GetPayloadMss.
+
+                                acked += data.Length - 20;
+                            }
+                        }
+                        else
+                        {
+                            await Task.Delay(1);
                         }
                     }
-                    else
-                    {
-                        await Task.Delay(1);
-                    }
-                }
-            }));
+                })
+            };
 
             Task.WaitAll(tasks.ToArray());
 
@@ -168,66 +169,67 @@ public class UtpDataPathTests
             typeof(UtpStream).GetField("_ackNr", BindingFlags.NonPublic | BindingFlags.Instance)!
                 .SetValue(stream, (ushort)(startSeq - 1));
 
-            var tasks = new List<Task>();
-
-            // Sender
-            tasks.Add(Task.Run(async () =>
+            var tasks = new List<Task>
             {
-                var buffer = new byte[100]; // Small packet
-                await stream.WriteAsync(buffer);
-            }));
-
-            // Receiver (Network)
-            tasks.Add(Task.Run(async () =>
-            {
-                bool dropped = false;
-                while (true)
+                // Sender
+                Task.Run(async () =>
                 {
-                    if (manager.SentPackets.TryDequeue(out var item))
+                    var buffer = new byte[100]; // Small packet
+                    await stream.WriteAsync(buffer);
+                }),
+
+                // Receiver (Network)
+                Task.Run(async () =>
+                {
+                    bool dropped = false;
+                    while (true)
                     {
-                        var data = item.Data;
-                        if (data.Length >= 20)
+                        if (manager.SentPackets.TryDequeue(out var item))
                         {
-                            // Drop the first DATA packet
-                            byte typeVer = data[0];
-                            var type = (MessageType)(typeVer >> 4);
-
-                            if (type == MessageType.ST_DATA && !dropped)
+                            var data = item.Data;
+                            if (data.Length >= 20)
                             {
-                                dropped = true;
-                                // Advance time to trigger timeout (Initial timeout is 3s)
-                                timeProvider.Advance(TimeSpan.FromSeconds(4));
-                                // Don't ACK
-                                continue;
-                            }
+                                // Drop the first DATA packet
+                                byte typeVer = data[0];
+                                var type = (MessageType)(typeVer >> 4);
 
-                            // If it's the retransmission (or any subsequent packet), ACK it
-                            if (type == MessageType.ST_DATA && dropped)
-                            {
-                                ushort seq = (ushort)((data[16] << 8) | data[17]);
-                                var header = new MessageHeader
+                                if (type == MessageType.ST_DATA && !dropped)
                                 {
-                                    TypeVer = (byte)((byte)MessageType.ST_STATE << 4 | 1),
-                                    SeqNr = (ushort)(seq + 100),
-                                    AckNr = seq,
-                                    WndSize = 100000
-                                };
-                                stream.ProcessPacketWithSack(header, [], 20, null, null, remote);
-                                break; // Done
+                                    dropped = true;
+                                    // Advance time to trigger timeout (Initial timeout is 3s)
+                                    timeProvider.Advance(TimeSpan.FromSeconds(4));
+                                    // Don't ACK
+                                    continue;
+                                }
+
+                                // If it's the retransmission (or any subsequent packet), ACK it
+                                if (type == MessageType.ST_DATA && dropped)
+                                {
+                                    ushort seq = (ushort)((data[16] << 8) | data[17]);
+                                    var header = new MessageHeader
+                                    {
+                                        TypeVer = (byte)((byte)MessageType.ST_STATE << 4 | 1),
+                                        SeqNr = (ushort)(seq + 100),
+                                        AckNr = seq,
+                                        WndSize = 100000
+                                    };
+                                    stream.ProcessPacketWithSack(header, [], 20, null, null, remote);
+                                    break; // Done
+                                }
+                            }
+                        }
+                        else
+                        {
+                            await Task.Delay(1);
+                            // Ensure we check for timeouts if queue is empty
+                            if (dropped)
+                            {
+                                stream.CheckTimeout();
                             }
                         }
                     }
-                    else
-                    {
-                        await Task.Delay(1);
-                        // Ensure we check for timeouts if queue is empty
-                        if (dropped)
-                        {
-                             stream.CheckTimeout();
-                        }
-                    }
-                }
-            }));
+                })
+            };
 
             Task.WaitAll(tasks.ToArray());
             stream.Dispose();

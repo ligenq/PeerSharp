@@ -1,7 +1,6 @@
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
 using PeerSharp.BEncoding;
-using System.Collections;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -22,7 +21,7 @@ public class MetadataDownloadTests
         public IPeerListener Listener => throw new NotImplementedException();
         public IUtHashPiece? UtHashPiece => throw new NotImplementedException();
         public IUtHolepunch UtHolepunch => throw new NotImplementedException();
-        public List<PeerMessage> SentMessages { get; } = new();
+        public List<PeerMessage> SentMessages { get; } = [];
         public Task SetInterestedAsync(bool interested) => Task.CompletedTask;
         public Task SendMessageAsync(PeerMessage msg)
         {
@@ -35,7 +34,7 @@ public class MetadataDownloadTests
     {
         public int? LocalMessageId { get; private set; }
         public int? RemoteMessageId { get; set; }
-        public List<int> RequestedPieces { get; } = new();
+        public List<int> RequestedPieces { get; } = [];
         public void Init(ExtensionHandshake handshake) { }
         public void SetLocalMessageId(int id) => LocalMessageId = id;
         public void SendRequest(int piece)
@@ -43,8 +42,8 @@ public class MetadataDownloadTests
             RequestedPieces.Add(piece);
         }
 
-        public List<(int Piece, byte[] Data, int TotalSize)> SentDataPieces { get; } = new();
-        public List<int> RejectedPieces { get; } = new();
+        public List<(int Piece, byte[] Data, int TotalSize)> SentDataPieces { get; } = [];
+        public List<int> RejectedPieces { get; } = [];
         public void SendData(int piece, byte[] data, int totalSize) => SentDataPieces.Add((piece, data, totalSize));
         public void SendReject(int piece) => RejectedPieces.Add(piece);
     }
