@@ -303,30 +303,42 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     {
         _disposal.ThrowIfDisposed(this);
 
-        if (Started)
-        {
-            throw new InvalidOperationException("Torrent must be stopped before force recheck");
-        }
-
-        if (!HasMetadata)
-        {
-            throw new InvalidOperationException("Cannot recheck torrent without metadata");
-        }
-
-        FilesInternal.Checking = true;
-        Alerts.TorrentAlert(AlertId.TorrentCheckStarted, this);
-        FireStateChangedEvent(TorrentState.CheckingFiles);
-
+        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await FilesInternal.InitializeAsync(GetFileSelectionSnapshot(), cancellationToken).ConfigureAwait(false);
-            await using var checker = new PieceChecker(FilesInternal, new TorrentPieceCheckerContext(this), progress);
-            return await checker.CheckAllPiecesAsync(cancellationToken).ConfigureAwait(false);
+            _disposal.ThrowIfDisposed(this);
+
+            if (Started)
+            {
+                throw new InvalidOperationException("Torrent must be stopped before force recheck");
+            }
+
+            if (!HasMetadata)
+            {
+                throw new InvalidOperationException("Cannot recheck torrent without metadata");
+            }
+
+            EnsureFilesInitialized();
+
+            FilesInternal.Checking = true;
+            Alerts.TorrentAlert(AlertId.TorrentCheckStarted, this);
+            FireStateChangedEvent(TorrentState.CheckingFiles);
+
+            try
+            {
+                await FilesInternal.InitializeAsync(GetFileSelectionSnapshot(), cancellationToken).ConfigureAwait(false);
+                await using var checker = new PieceChecker(FilesInternal, new TorrentPieceCheckerContext(this), progress);
+                return await checker.CheckAllPiecesAsync(cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                FilesInternal.Checking = false;
+                FireStateChangedEvent(TorrentState.Stopped);
+            }
         }
         finally
         {
-            FilesInternal.Checking = false;
-            FireStateChangedEvent(TorrentState.Stopped);
+            _stateLock.Release();
         }
     }
 
@@ -434,6 +446,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public Task AttachPeerTransportAsync(Stream stream, bool initiator, CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
+        ArgumentNullException.ThrowIfNull(stream);
         cancellationToken.ThrowIfCancellationRequested();
         return PeersInternal.AddConnectedPeerAsync(stream, initiator, remote: null, sourceKind: PeerSourceKind.WebTorrent);
     }
@@ -463,25 +477,35 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     {
         _disposal.ThrowIfDisposed(this);
 
-        if (Started)
+        await _stateLock.WaitAsync().ConfigureAwait(false);
+        try
         {
-            throw new InvalidOperationException("Torrent must be stopped before changing download path");
-        }
+            _disposal.ThrowIfDisposed(this);
 
-        if (string.IsNullOrWhiteSpace(path))
+            if (Started)
+            {
+                throw new InvalidOperationException("Torrent must be stopped before changing download path");
+            }
+
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                throw new ArgumentException("Path cannot be null or empty", nameof(path));
+            }
+
+            LocalState.DownloadPath = path;
+
+            if (FilesInternal != null)
+            {
+                await FilesInternal.DisposeAsync().ConfigureAwait(false);
+            }
+            FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, path);
+
+            _logger.LogInformation("Download path changed to: {Path}", path);
+        }
+        finally
         {
-            throw new ArgumentException("Path cannot be null or empty", nameof(path));
+            _stateLock.Release();
         }
-
-        LocalState.DownloadPath = path;
-
-        if (FilesInternal != null)
-        {
-            await FilesInternal.DisposeAsync().ConfigureAwait(false);
-        }
-        FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, path);
-
-        _logger.LogInformation("Download path changed to: {Path}", path);
     }
 
     public Task SetFilePriorityAsync(int fileIndex, Priority priority, CancellationToken cancellationToken = default)
@@ -517,11 +541,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             {
                 Initialize();
             }
-            else if (FilesInternal.IsDisposed)
-            {
-                string? downloadPath = !string.IsNullOrEmpty(LocalState.DownloadPath) ? LocalState.DownloadPath : null;
-                FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, downloadPath);
-            }
+            EnsureFilesInitialized();
 
             if (FilesInternal == null)
             {
@@ -860,6 +880,15 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         {
             FileTransferInternal = new FileTransfer(this, Services.TimeProvider);
             _fileSelectionManager.SetBytesProvider(FileTransferInternal);
+        }
+    }
+
+    private void EnsureFilesInitialized()
+    {
+        if (FilesInternal == null || FilesInternal.IsDisposed)
+        {
+            string? downloadPath = !string.IsNullOrEmpty(LocalState.DownloadPath) ? LocalState.DownloadPath : null;
+            FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, downloadPath);
         }
     }
 

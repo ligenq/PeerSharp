@@ -164,11 +164,13 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
     public void ClearBlocklist()
     {
+        _disposal.ThrowIfDisposed(this);
         _networkManager?.Blocklist.Clear();
     }
 
     public void ClearGeoIp()
     {
+        _disposal.ThrowIfDisposed(this);
         _geoIp.Clear();
     }
 
@@ -242,11 +244,14 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
     public IReadOnlyList<PortMappingStatus> GetPortMappingStatus()
     {
+        _disposal.ThrowIfDisposed(this);
         return _networkManager?.GetPortMappingStatus() ?? Array.Empty<PortMappingStatus>();
     }
 
     public EngineStats GetStats()
     {
+        _disposal.ThrowIfDisposed(this);
+
         int dlSpeed = 0;
         int ulSpeed = 0;
         long totalDl = 0;
@@ -285,32 +290,38 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
     public ITorrent? GetTorrent(InfoHash hash)
     {
+        _disposal.ThrowIfDisposed(this);
         _registry.TryGet(hash, out var torrent);
         return torrent;
     }
 
     public IReadOnlyList<ITorrent> GetTorrents()
     {
+        _disposal.ThrowIfDisposed(this);
         return _registry.GetAll();
     }
 
     public void LoadBlocklist(Stream stream)
     {
+        _disposal.ThrowIfDisposed(this);
         _networkManager?.Blocklist.LoadFromStream(stream);
     }
 
     public Task LoadBlocklistAsync(Stream stream, CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
         return _networkManager?.Blocklist.LoadFromStreamAsync(stream, cancellationToken) ?? Task.CompletedTask;
     }
 
     public void LoadGeoIp(Stream stream)
     {
+        _disposal.ThrowIfDisposed(this);
         _geoIp.Load(stream);
     }
 
     public Task LoadGeoIpAsync(Stream stream, CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
         return _geoIp.LoadAsync(stream, cancellationToken);
     }
 
@@ -335,6 +346,8 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
     public async Task SaveSessionAsync(CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
+
         if (_sessionManager != null)
         {
             await _sessionManager.SaveAllResumeDataAsync(cancellationToken).ConfigureAwait(false);
@@ -343,6 +356,8 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
     public async Task StopAsync(CancellationToken ct = default)
     {
+        _disposal.ThrowIfDisposed(this);
+
         _logger.LogInformation("Stopping ClientEngine...");
 
         var stopTasks = new List<Task>();
@@ -1033,6 +1048,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         AddTorrentOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(magnetLink);
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -1229,6 +1245,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         AddTorrentOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(torrentFile);
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -1279,6 +1296,8 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
+
         if (Interlocked.Exchange(ref _initialized, 1) == 1)
         {
             throw new InvalidOperationException("Client engine is already initialized.");
@@ -1303,6 +1322,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         RemoveOptions options = RemoveOptions.None,
         CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
         cancellationToken.ThrowIfCancellationRequested();
 
         if (!_registry.TryGet(hash, out var torrent))
@@ -1318,6 +1338,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         RemoveOptions options = RemoveOptions.None,
         CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(torrent);
         cancellationToken.ThrowIfCancellationRequested();
 

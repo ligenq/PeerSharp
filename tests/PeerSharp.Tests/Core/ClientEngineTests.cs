@@ -145,6 +145,46 @@ public class ClientEngineTests
         var stats = engine.GetStats();
         Assert.Equal(2, stats.TorrentCount);
     }
+
+    [Fact(Timeout = 30000)]
+    public async Task PublicMethods_ThrowObjectDisposedException_AfterDispose()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+        var torrentFile = CreateTestTorrentFile();
+        var torrent = await engine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
+
+        await engine.DisposeAsync();
+
+        Assert.Throws<ObjectDisposedException>(() => engine.ClearBlocklist());
+        Assert.Throws<ObjectDisposedException>(() => engine.ClearGeoIp());
+        Assert.Throws<ObjectDisposedException>(() => engine.GetPortMappingStatus());
+        Assert.Throws<ObjectDisposedException>(() => engine.GetStats());
+        Assert.Throws<ObjectDisposedException>(() => engine.GetTorrent(torrent.Hash));
+        Assert.Throws<ObjectDisposedException>(() => engine.GetTorrents());
+        Assert.Throws<ObjectDisposedException>(() => engine.LoadBlocklist(Stream.Null));
+        Assert.Throws<ObjectDisposedException>(() => engine.LoadGeoIp(Stream.Null));
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.LoadBlocklistAsync(Stream.Null));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.LoadGeoIpAsync(Stream.Null));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.SaveSessionAsync());
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.StopAsync());
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.InitializeAsync());
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false }));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.RemoveTorrentAsync(torrent.Hash));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.RemoveTorrentAsync(torrent));
+    }
+
+    private static TorrentFile CreateTestTorrentFile()
+    {
+        var info = new TorrentFileMetadata();
+        info.Info.Hash = InfoHash.CreateRandom();
+        info.Info.Name = "test";
+        info.Info.PieceSize = 16384;
+        info.Info.FullSize = 1000;
+        info.Info.Pieces.Add(new byte[20]);
+        return new TorrentFile(info);
+    }
 }
 
 
