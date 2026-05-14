@@ -631,11 +631,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 p.RemoteSupportsExtensions &&
                 p.RemoteExtensions?.MessageIds.ContainsKey(UtMetadata.Name) == true)
             {
-                    _logger.LogDebug(
-                        "Peer {RemoteEndPoint} supports ut_metadata (id={MessageId}, size={MetadataSize})",
-                        p.RemoteEndPoint,
-                        p.UtMetadata.RemoteMessageId,
-                        p.RemoteExtensions.MetadataSize);
+                _logger.LogDebug(
+                    "Peer {RemoteEndPoint} supports ut_metadata (id={MessageId}, size={MetadataSize})",
+                    p.RemoteEndPoint,
+                    p.UtMetadata.RemoteMessageId,
+                    p.RemoteExtensions.MetadataSize);
                 FireAndForget(p.SetInterestedAsync(true), "SetInterested (Metadata)");
             }
         }

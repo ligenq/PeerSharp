@@ -47,7 +47,7 @@ public class Base32Tests
     public void Decode_LongString_DoesNotOverflow()
     {
         // 20 characters (100 bits -> 12.5 bytes)
-        string input = "ABCDEFGHIJKLMNOPQRST";
+        const string input = "ABCDEFGHIJKLMNOPQRST";
         // Just verify it doesn't throw and returns some data
         var result = Base32.Decode(input);
         Assert.Equal(12, result.Length);

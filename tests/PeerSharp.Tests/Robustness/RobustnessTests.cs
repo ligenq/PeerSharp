@@ -584,7 +584,8 @@ public class RobustnessTests
     {
         var metadata = new TorrentFileMetadata
         {
-            Info = new Internals.TorrentFileInfo {
+            Info = new Internals.TorrentFileInfo
+            {
                 Name = "TestTorrent",
                 PieceSize = 16384,
                 FullSize = 1024 * 1024,
@@ -625,7 +626,8 @@ public class RobustnessTests
     {
         var metadata = new TorrentFileMetadata
         {
-            Info = new Internals.TorrentFileInfo {
+            Info = new Internals.TorrentFileInfo
+            {
                 Name = "TestTorrent",
                 PieceSize = 16384,
                 FullSize = 1024 * 1024,
@@ -654,7 +656,8 @@ public class RobustnessTests
     {
         var metadata = new TorrentFileMetadata
         {
-            Info = new Internals.TorrentFileInfo {
+            Info = new Internals.TorrentFileInfo
+            {
                 Name = "TestTorrent",
                 PieceSize = 16384,
                 FullSize = 1024 * 1024,
@@ -690,7 +693,8 @@ public class RobustnessTests
         {
             var metadata = new TorrentFileMetadata
             {
-                Info = new Internals.TorrentFileInfo {
+                Info = new Internals.TorrentFileInfo
+                {
                     Name = "TestTorrent",
                     PieceSize = 16384,
                     FullSize = 1024 * 1024,

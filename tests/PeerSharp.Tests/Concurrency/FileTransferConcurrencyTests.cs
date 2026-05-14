@@ -72,7 +72,7 @@ public class FileTransferConcurrencyTests
     {
         RunCoyoteTest(() =>
         {
-            int maxConcurrency = 4;
+            const int maxConcurrency = 4;
             var model = new OverflowModel(maxConcurrency);
             var tasks = new List<Task>();
             int maxObservedInFlight = 0;

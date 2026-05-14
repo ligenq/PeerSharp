@@ -94,7 +94,7 @@ public class PeerDiscoveryTests : IDisposable
 
     private static TorrentFile CreateTestTorrent()
     {
-        var fileName = "discovery.bin";
+        const string fileName = "discovery.bin";
         var data = new byte[1024];
         Random.Shared.NextBytes(data);
 

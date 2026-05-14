@@ -158,7 +158,7 @@ public class StorageTests : IAsyncLifetime
     [Fact]
     public async Task InitAsync_Fails_ResetsInitializationState()
     {
-        string invalidRoot = "||invalid_root||";
+        const string invalidRoot = "||invalid_root||";
         using var handleCache = new FileHandleCache();
         var validator = new PathValidator(invalidRoot);
         var storage = new Storage(_metadata, invalidRoot, validator, handleCache, enableSparseFiles: false);

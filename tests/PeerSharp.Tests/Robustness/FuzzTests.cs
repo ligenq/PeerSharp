@@ -17,8 +17,8 @@ public class FuzzTests
     public void BencodeParser_Fuzz_RandomBytes_ShouldNotCrash()
     {
         var random = new Random(12345); // Fixed seed
-        int iterations = 10000;
-        int maxLen = 1024;
+        const int iterations = 10000;
+        const int maxLen = 1024;
         byte[] buffer = new byte[maxLen];
 
         for (int i = 0; i < iterations; i++)
@@ -47,8 +47,8 @@ public class FuzzTests
     public void PeerProtocol_Fuzz_RandomBytes_ShouldNotCrash()
     {
         var random = new Random(67890);
-        int iterations = 10000;
-        int maxLen = PeerProtocol.MaxMessageSize + 100; // Allow slightly larger than max to test boundary
+        const int iterations = 10000;
+        const int maxLen = PeerProtocol.MaxMessageSize + 100; // Allow slightly larger than max to test boundary
         byte[] buffer = new byte[maxLen];
 
         for (int i = 0; i < iterations; i++)
@@ -78,8 +78,8 @@ public class FuzzTests
             }
             catch (Exception ex)
             {
-                 _output.WriteLine($"PeerProtocol crashed on iteration {i}: {ex}");
-                 Assert.Fail($"PeerProtocol crashed with unexpected exception: {ex.GetType().Name}");
+                _output.WriteLine($"PeerProtocol crashed on iteration {i}: {ex}");
+                Assert.Fail($"PeerProtocol crashed with unexpected exception: {ex.GetType().Name}");
             }
         }
     }

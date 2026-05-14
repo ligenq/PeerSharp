@@ -83,7 +83,7 @@ public class StorageConcurrencyTests
     {
         RunCoyoteTest(() =>
         {
-            int fileCount = 5;
+            const int fileCount = 5;
             var model = new StorageLockModel(fileCount);
             var tasks = new List<Task>();
 

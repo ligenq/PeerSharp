@@ -12,7 +12,7 @@ public class NetworkUtilsTests
         var val = NetworkUtils.IpToUInt128(ip);
 
         // (192 << 24) | (168 << 16) | (1 << 8) | 1
-        uint expected = 0xC0A80101;
+        const uint expected = 0xC0A80101;
         Assert.Equal((UInt128)expected, val);
     }
 

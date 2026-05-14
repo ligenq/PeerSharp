@@ -92,7 +92,7 @@ public class TrackerManagerTests
     public void AddTracker_ValidUrl_CreatesAndInitsTracker()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        string url = "http://tracker.com/announce";
+        const string url = "http://tracker.com/announce";
 
         manager.AddTracker(url);
 
@@ -105,7 +105,7 @@ public class TrackerManagerTests
     public async Task RemoveTracker_BeforeStart_DoesNotSendStoppedAnnounce()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        string url = "udp://tracker.example:6969/announce";
+        const string url = "udp://tracker.example:6969/announce";
         manager.AddTracker(url);
         var tracker = _factory.Trackers[url];
 
@@ -121,7 +121,7 @@ public class TrackerManagerTests
     public async Task RemoveTracker_AfterStart_SendsStoppedAnnounce()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        string url = "udp://tracker.example:6969/announce";
+        const string url = "udp://tracker.example:6969/announce";
         manager.AddTracker(url);
         var tracker = _factory.Trackers[url];
 
@@ -159,7 +159,7 @@ public class TrackerManagerTests
     public async Task CircuitBreaker_OpensAfterThreeFailures()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        string url = "http://fail.com/announce";
+        const string url = "http://fail.com/announce";
         manager.AddTracker(url);
         var tracker = _factory.Trackers[url];
 
@@ -180,7 +180,7 @@ public class TrackerManagerTests
     public async Task CircuitBreaker_RetriesAfterBackoff()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        string url = "http://fail.com/announce";
+        const string url = "http://fail.com/announce";
         manager.AddTracker(url);
         await manager.StartAsync();
         var tracker = _factory.Trackers[url];
@@ -208,7 +208,7 @@ public class TrackerManagerTests
     public void Success_ResetsFailuresAndClosesCircuit()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        string url = "http://test.com/announce";
+        const string url = "http://test.com/announce";
         manager.AddTracker(url);
         var tracker = _factory.Trackers[url];
 
@@ -271,7 +271,7 @@ public class TrackerManagerTests
     public void OnMultiScrapeResult_MatchingHash_UpdatesTrackerStats()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        string url = "http://tracker.example/announce";
+        const string url = "http://tracker.example/announce";
         manager.AddTracker(url);
         var tracker = _factory.Trackers[url];
         var response = new MultiScrapeResponse();
@@ -293,7 +293,7 @@ public class TrackerManagerTests
     public void OnMultiScrapeResult_NonMatchingHash_LeavesTrackerStatsUnchanged()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        string url = "http://tracker.example/announce";
+        const string url = "http://tracker.example/announce";
         manager.AddTracker(url);
         var tracker = _factory.Trackers[url];
         var response = new MultiScrapeResponse();

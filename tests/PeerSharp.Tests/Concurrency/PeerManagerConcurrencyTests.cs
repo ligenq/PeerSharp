@@ -73,16 +73,16 @@ public class PeerManagerConcurrencyTests
 
         public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, Stream stream, IPEndPoint? endpoint = null)
         {
-             var p = new MockPeerCommunication(torrent, listener, timeProvider);
-             CreatedPeers.Add(p);
-             return p;
+            var p = new MockPeerCommunication(torrent, listener, timeProvider);
+            CreatedPeers.Add(p);
+            return p;
         }
 
         public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, TcpClient client)
         {
-             var p = new MockPeerCommunication(torrent, listener, timeProvider);
-             CreatedPeers.Add(p);
-             return p;
+            var p = new MockPeerCommunication(torrent, listener, timeProvider);
+            CreatedPeers.Add(p);
+            return p;
         }
     }
 

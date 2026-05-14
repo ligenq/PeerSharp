@@ -232,7 +232,7 @@ public class UtpExhaustiveTests
         var stream = await ConnectStream();
         ushort connId = GetRecvId(stream);
         ushort ackNr = GetLastSentSeq(stream);
-        ushort seq = 1;
+        const ushort seq = 1;
 
         byte[] extBits = new byte[] { 0x01, 0x02, 0x10, 0x20, 0x40, 0x80, 0xAA, 0x55 };
         var packet = CreatePacketWithExtensionBits(2, connId, seq, ackNr, extBits);

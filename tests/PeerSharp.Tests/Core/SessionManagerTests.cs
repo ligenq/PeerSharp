@@ -25,7 +25,7 @@ public class SessionManagerTests
         // Setup
         var torrent = TorrentTestUtility.CreateMinimal();
         _registry.Add(torrent);
-        int intervalSeconds = 10;
+        const int intervalSeconds = 10;
 
         // Act
         await _sessionManager.InitializeAutoSaveAsync(intervalSeconds);

@@ -35,7 +35,7 @@ public class LocalSwarmTests : IDisposable
     [Fact(Timeout = 30000)]
     public async Task DownloadFile_BetweenTwoLocalPeers_Succeeds()
     {
-        var fileName = "dummy.bin";
+        const string fileName = "dummy.bin";
         byte[] dummyData = new byte[64 * 1024];
         Random.Shared.NextBytes(dummyData);
 
@@ -73,7 +73,7 @@ public class LocalSwarmTests : IDisposable
     [Fact(Timeout = 30000)]
     public async Task DownloadFile_FromMagnetMetadataExchange_Succeeds()
     {
-        var fileName = "metadata.bin";
+        const string fileName = "metadata.bin";
         byte[] dummyData = new byte[96 * 1024];
         Random.Shared.NextBytes(dummyData);
 
@@ -160,7 +160,7 @@ public class LocalSwarmTests : IDisposable
     [Fact(Timeout = 30000)]
     public async Task ResumeData_RestoresProgressAndCompletesDownload()
     {
-        var fileName = "resume.bin";
+        const string fileName = "resume.bin";
         byte[] data = new byte[128 * 1024];
         Random.Shared.NextBytes(data);
 

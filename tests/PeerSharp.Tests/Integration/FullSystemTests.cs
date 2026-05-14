@@ -30,7 +30,7 @@ public class FullSystemTests : IDisposable
     [Fact(Timeout = 30000)]
     public async Task Download_OverUtp_Succeeds()
     {
-        var fileName = "utp.bin";
+        const string fileName = "utp.bin";
         byte[] data = new byte[64 * 1024];
         Random.Shared.NextBytes(data);
         await WriteFileAsync(_pathA, fileName, data);
@@ -98,7 +98,7 @@ public class FullSystemTests : IDisposable
 
     {
 
-        var fileName = "encrypted.bin";
+        const string fileName = "encrypted.bin";
 
         byte[] data = new byte[64 * 1024];
 
@@ -178,7 +178,7 @@ public class FullSystemTests : IDisposable
 
 
 
-        var fileName = "ipv6.bin";
+        const string fileName = "ipv6.bin";
 
         byte[] data = new byte[64 * 1024];
 

@@ -176,7 +176,7 @@ internal class HttpTracker : TrackerBase, IDisposable
 
             // Optional min interval (BEP 3/7 variants)
             var minInterval = dict.GetLong("min interval") ?? dict.GetLong("min_interval") ?? dict.GetLong("min_request_interval");
-            if (minInterval.HasValue && minInterval.Value > 0)
+            if (minInterval > 0)
             {
                 resp.MinInterval = (uint)minInterval.Value;
             }

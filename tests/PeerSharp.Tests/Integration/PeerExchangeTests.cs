@@ -137,7 +137,7 @@ public class PeerExchangeTests : IDisposable
 
     private static TorrentFile CreateTestTorrent()
     {
-        var fileName = "pex_test.bin";
+        const string fileName = "pex_test.bin";
         var data = new byte[1024];
         Random.Shared.NextBytes(data);
 
@@ -160,8 +160,8 @@ public class PeerExchangeTests : IDisposable
         }
         catch (OperationCanceledException)
         {
-             // Fall through to assertion failure in caller or throw descriptive
-             throw new Exception($"Timed out waiting for {description}");
+            // Fall through to assertion failure in caller or throw descriptive
+            throw new Exception($"Timed out waiting for {description}");
         }
     }
 

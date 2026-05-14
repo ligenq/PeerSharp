@@ -326,7 +326,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
             }
 
             // Feed blocks to FileTransfer
-            int blockSize = ProtocolConstants.BlockSize;
+            const int blockSize = ProtocolConstants.BlockSize;
             int offset = 0;
 
             while (offset < data.Length)

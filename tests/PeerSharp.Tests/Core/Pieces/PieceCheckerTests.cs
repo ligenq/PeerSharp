@@ -341,7 +341,7 @@ public class PieceCheckerTests
     [Fact(Timeout = 30000)]
     public async Task Cancel_WhileRunning_StopsBeforeAllPieces()
     {
-        int pieceCount = 200;
+        const int pieceCount = 200;
         var files = new MockFiles();
         var ctx = new MockContext { PieceCount = pieceCount, PieceSize = 10, FullSize = pieceCount * 10 };
         for (int i = 0; i < pieceCount; i++)
@@ -363,7 +363,7 @@ public class PieceCheckerTests
     [Fact(Timeout = 30000)]
     public async Task CheckAllPiecesAsync_WithProgress_ReportsProgressToCallback()
     {
-        int pieceCount = 3;
+        const int pieceCount = 3;
         var files = new MockFiles();
         var ctx = new MockContext { PieceCount = pieceCount, PieceSize = 10, FullSize = pieceCount * 10 };
         for (int i = 0; i < pieceCount; i++)
@@ -388,7 +388,7 @@ public class PieceCheckerTests
     [Fact(Timeout = 30000)]
     public async Task DisposeAsync_CancelsRunningCheck()
     {
-        int pieceCount = 500;
+        const int pieceCount = 500;
         var files = new MockFiles();
         var ctx = new MockContext { PieceCount = pieceCount, PieceSize = 10, FullSize = pieceCount * 10 };
         for (int i = 0; i < pieceCount; i++)

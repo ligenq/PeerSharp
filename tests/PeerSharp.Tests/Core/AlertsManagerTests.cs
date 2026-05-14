@@ -16,7 +16,7 @@ public class AlertsManagerTests
     [Fact]
     public void RegisterAlerts_SetsMask()
     {
-        uint mask = (uint)(AlertId.TorrentAdded | AlertId.TorrentRemoved);
+        const uint mask = (uint)(AlertId.TorrentAdded | AlertId.TorrentRemoved);
         _alertsManager.RegisterAlerts(mask);
 
         // No public way to get mask, but we can test side effects

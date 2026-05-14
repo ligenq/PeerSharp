@@ -38,7 +38,7 @@ public class BencodeEdgeTests
     [Fact]
     public void TestStringLengthNegativeOverflow()
     {
-         // length that overflows int to negative
+        // length that overflows int to negative
         var data = Encoding.ASCII.GetBytes("4294967295:a");
         Assert.Throws<FormatException>(() => BencodeParser.Parse(data));
     }

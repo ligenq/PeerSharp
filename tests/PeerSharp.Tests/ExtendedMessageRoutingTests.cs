@@ -22,7 +22,8 @@ public sealed class ExtendedMessageRoutingTests
 
         var metadata = new TorrentFileMetadata
         {
-            Info = new Internals.TorrentFileInfo {
+            Info = new Internals.TorrentFileInfo
+            {
                 Hash = InfoHash.Empty,
                 FullSize = 0,
                 PieceSize = 0,

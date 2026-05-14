@@ -31,9 +31,9 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
 		<PackageReference Include="RtcForge" Version="1.0.0" />
-		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.24.0.138807">
+		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.25.0.139117">
 			<PrivateAssets>all</PrivateAssets>
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>

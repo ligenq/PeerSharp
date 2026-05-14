@@ -272,7 +272,7 @@ public class TorrentFileMetadataTests
         // libtorrent uses min(512, NextPowerOf2(remaining)) so the chunk forms a balanced
         // sub-tree the receiver can verify. For 600 pieces, the second chunk covers indices
         // 512..639 — i.e. 88 real pieces padded out to 128 with merkle pad hashes.
-        int pieceCount = 600;
+        const int pieceCount = 600;
         var info = CreateV2Info(pieceCount * 16_384, new byte[32], pieceCount);
 
         var request = info.GetV2HashRequestForPiece(550);
@@ -289,7 +289,7 @@ public class TorrentFileMetadataTests
         // Multi-chunk file (>512 pieces) where the final chunk uses NextPow2(remaining) padding.
         // pieceSize=16KB makes the math reproducible: pieceCount = blockCount.
         const int pieceCount = 600;
-        long fileSize = pieceCount * 16_384L;
+        const long fileSize = pieceCount * 16_384L;
         byte[] fileData = new byte[fileSize];
         Random.Shared.NextBytes(fileData);
 
@@ -324,7 +324,7 @@ public class TorrentFileMetadataTests
         // 96KB file, 32KB pieces => 3 pieces, blocks_per_piece = 2. This is the exact case
         // where the previous merkle padding bug surfaced: any chunk verification used zero hash
         // instead of merkle_pad(2, 1) = SHA256(zero || zero).
-        long fileSize = 96 * 1024;
+        const long fileSize = 96 * 1024;
         const uint pieceSize = 32 * 1024;
         byte[] fileData = new byte[fileSize];
         Random.Shared.NextBytes(fileData);

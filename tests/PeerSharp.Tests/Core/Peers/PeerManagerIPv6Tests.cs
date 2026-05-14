@@ -76,7 +76,7 @@ public class PeerManagerIPv6Tests
         // IPv6 literal must often be without brackets for IPAddress.Parse, 
         // but PeerManager might strip them or expect them. 
         // Standard URI format uses brackets.
-        string ipv6 = "2001:db8::1";
+        const string ipv6 = "2001:db8::1";
 
         manager.ConnectTo(ipv6, 12345);
 
@@ -114,7 +114,7 @@ public class PeerManagerIPv6Tests
         var manager = new PeerManager(torrent, new MockGeoIp(), factory, timeProvider, new MockGovernor());
         await manager.StartAsync();
 
-        string ipv6 = "[2001:db8::1]";
+        const string ipv6 = "[2001:db8::1]";
 
         manager.ConnectTo(ipv6, 12345);
 
@@ -123,26 +123,26 @@ public class PeerManagerIPv6Tests
 
         if (IPAddress.TryParse(ipv6, out _))
         {
-             // If TryParse supports brackets, it should connect
-             // .NET Core TryParse usually does NOT support brackets.
-             // So we expect this to FAIL (LastCreated == null) unless PeerManager strips brackets.
-             // PeerManager: if (!IPAddress.TryParse(ip, out var ipAddr)) return;
+            // If TryParse supports brackets, it should connect
+            // .NET Core TryParse usually does NOT support brackets.
+            // So we expect this to FAIL (LastCreated == null) unless PeerManager strips brackets.
+            // PeerManager: if (!IPAddress.TryParse(ip, out var ipAddr)) return;
 
-             // If this test fails (LastCreated is null), it confirms PeerManager doesn't handle brackets.
-             // If it passes, it handles them.
-             // The requirement is to TEST it. If it fails, I should fix PeerManager or document it requires raw IP.
-             // Usually URIs have brackets. PEX/Trackers might give raw bytes -> IPAddress.ToString() -> no brackets.
-             // So raw IP is standard.
+            // If this test fails (LastCreated is null), it confirms PeerManager doesn't handle brackets.
+            // If it passes, it handles them.
+            // The requirement is to TEST it. If it fails, I should fix PeerManager or document it requires raw IP.
+            // Usually URIs have brackets. PEX/Trackers might give raw bytes -> IPAddress.ToString() -> no brackets.
+            // So raw IP is standard.
 
-             // But user input (ConnectTo is public?) might have brackets.
-             // I'll assert null if it doesn't support it, or fix it to support it.
-             // Gap says: "connecting to IPv6 literal addresses (e.g., [2001:db8::1])".
-             // This implies expectation of bracket support.
+            // But user input (ConnectTo is public?) might have brackets.
+            // I'll assert null if it doesn't support it, or fix it to support it.
+            // Gap says: "connecting to IPv6 literal addresses (e.g., [2001:db8::1])".
+            // This implies expectation of bracket support.
         }
         else
         {
-             // Verify it didn't crash at least
-             Assert.Null(factory.LastCreated);
+            // Verify it didn't crash at least
+            Assert.Null(factory.LastCreated);
         }
 
         await manager.StopAsync();

@@ -160,68 +160,68 @@ public class UdpTrackerTests
         _torrent = TorrentTestUtility.CreateMinimal();
     }
 
-                [Fact(Timeout = 30000)]
+    [Fact(Timeout = 30000)]
 
-                public async Task AnnounceAsync_FullCycle_Succeeds()
+    public async Task AnnounceAsync_FullCycle_Succeeds()
 
-                {
+    {
 
-                    // Arrange
+        // Arrange
 
-                    var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        var tracker = new UdpTracker(_timeProvider, _socketFactory);
 
-                    tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
-
-
-                    var announceTask = tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
 
 
-                    // 1. Respond to Connect
-
-                    var req1 = await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
-
-                    int transId1 = BinaryPrimitives.ReadInt32BigEndian(req1.AsSpan(12));
+        var announceTask = tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
 
 
-                    byte[] res1 = new byte[16];
+        // 1. Respond to Connect
 
-                    BinaryPrimitives.WriteInt32BigEndian(res1.AsSpan(0), 0);
+        var req1 = await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
 
-                    BinaryPrimitives.WriteInt32BigEndian(res1.AsSpan(4), transId1);
-
-                    BinaryPrimitives.WriteInt64BigEndian(res1.AsSpan(8), 0x12345678);
-
-                    _socketFactory.LastSocket.TriggerResponse(res1);
+        int transId1 = BinaryPrimitives.ReadInt32BigEndian(req1.AsSpan(12));
 
 
-                    // 2. Respond to Announce
+        byte[] res1 = new byte[16];
 
-                    var req2 = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
+        BinaryPrimitives.WriteInt32BigEndian(res1.AsSpan(0), 0);
 
-                    int transId2 = BinaryPrimitives.ReadInt32BigEndian(req2.AsSpan(12));
+        BinaryPrimitives.WriteInt32BigEndian(res1.AsSpan(4), transId1);
 
+        BinaryPrimitives.WriteInt64BigEndian(res1.AsSpan(8), 0x12345678);
 
-                    byte[] res2 = new byte[20 + 6];
-
-                    BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(0), 1);
-
-                    BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(4), transId2);
-
-                    BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(8), 1800);
-
-                    _socketFactory.LastSocket.TriggerResponse(res2);
+        _socketFactory.LastSocket.TriggerResponse(res1);
 
 
-                    await announceTask;
+        // 2. Respond to Announce
+
+        var req2 = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
+
+        int transId2 = BinaryPrimitives.ReadInt32BigEndian(req2.AsSpan(12));
 
 
-                    // Assert
+        byte[] res2 = new byte[20 + 6];
 
-                    Assert.True(_callback.Success);
+        BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(0), 1);
 
-                    Assert.Equal(1800u, _callback.AnnounceResponse?.Interval);
+        BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(4), transId2);
 
-                }
+        BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(8), 1800);
+
+        _socketFactory.LastSocket.TriggerResponse(res2);
+
+
+        await announceTask;
+
+
+        // Assert
+
+        Assert.True(_callback.Success);
+
+        Assert.Equal(1800u, _callback.AnnounceResponse?.Interval);
+
+    }
 
 
     [Fact(Timeout = 30000)]
@@ -267,83 +267,83 @@ public class UdpTrackerTests
     }
 
 
-                [Fact(Timeout = 30000)]
+    [Fact(Timeout = 30000)]
 
     public async Task ScrapeAsync_Succeeds()
 
     {
 
-                    // Arrange
+        // Arrange
 
-                    var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        var tracker = new UdpTracker(_timeProvider, _socketFactory);
 
-                    tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
-
-
-                    var scrapeTask = tracker.ScrapeAsync(CancellationToken.None);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
 
 
-                    // 1. Respond to Connect
-
-                    var req1 = await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
+        var scrapeTask = tracker.ScrapeAsync(CancellationToken.None);
 
 
-                    int transId1 = BinaryPrimitives.ReadInt32BigEndian(req1.AsSpan(12));
+        // 1. Respond to Connect
+
+        var req1 = await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
 
 
-                    byte[] res1 = new byte[16];
+        int transId1 = BinaryPrimitives.ReadInt32BigEndian(req1.AsSpan(12));
 
 
-                    BinaryPrimitives.WriteInt32BigEndian(res1.AsSpan(0), 0);
+        byte[] res1 = new byte[16];
 
 
-                    BinaryPrimitives.WriteInt32BigEndian(res1.AsSpan(4), transId1);
+        BinaryPrimitives.WriteInt32BigEndian(res1.AsSpan(0), 0);
 
 
-                    BinaryPrimitives.WriteInt64BigEndian(res1.AsSpan(8), 0x12345678);
+        BinaryPrimitives.WriteInt32BigEndian(res1.AsSpan(4), transId1);
 
 
-                    _socketFactory.LastSocket.TriggerResponse(res1);
+        BinaryPrimitives.WriteInt64BigEndian(res1.AsSpan(8), 0x12345678);
 
 
-                    // 2. Respond to Scrape
-
-                    var req2 = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
-
-                    int transId2 = BinaryPrimitives.ReadInt32BigEndian(req2.AsSpan(12));
+        _socketFactory.LastSocket.TriggerResponse(res1);
 
 
-                    byte[] res2 = new byte[8 + 12];
+        // 2. Respond to Scrape
 
-                    BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(0), 2); // Action Scrape
+        var req2 = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
 
-                    BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(4), transId2);
-
-                    BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(8), 10); // Seeders
-
-                    BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(12), 50); // Completed
-
-                    BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(16), 2); // Leechers
-
-                    _socketFactory.LastSocket.TriggerResponse(res2);
+        int transId2 = BinaryPrimitives.ReadInt32BigEndian(req2.AsSpan(12));
 
 
-                    await scrapeTask;
+        byte[] res2 = new byte[8 + 12];
+
+        BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(0), 2); // Action Scrape
+
+        BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(4), transId2);
+
+        BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(8), 10); // Seeders
+
+        BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(12), 50); // Completed
+
+        BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(16), 2); // Leechers
+
+        _socketFactory.LastSocket.TriggerResponse(res2);
 
 
-                    // Assert
+        await scrapeTask;
 
-                    Assert.True(_callback.Success);
 
-                    Assert.NotNull(_callback.ScrapeResponse);
+        // Assert
 
-                    Assert.Equal(10u, _callback.ScrapeResponse.SeedCount);
+        Assert.True(_callback.Success);
 
-                    Assert.Equal(50u, _callback.ScrapeResponse.Downloaded);
+        Assert.NotNull(_callback.ScrapeResponse);
 
-                Assert.Equal(2u, _callback.ScrapeResponse.LeechCount);
+        Assert.Equal(10u, _callback.ScrapeResponse.SeedCount);
 
-                }
+        Assert.Equal(50u, _callback.ScrapeResponse.Downloaded);
+
+        Assert.Equal(2u, _callback.ScrapeResponse.LeechCount);
+
+    }
 
     [Fact(Timeout = 30000)]
     public async Task ScrapeMultipleAsync_ReturnsAllResults()
@@ -423,7 +423,7 @@ public class UdpTrackerTests
         var req2 = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
         int transId2 = BinaryPrimitives.ReadInt32BigEndian(req2.AsSpan(12));
 
-        string errorText = "torrent not registered";
+        const string errorText = "torrent not registered";
         byte[] errorBytes = Encoding.ASCII.GetBytes(errorText);
         byte[] res2 = new byte[8 + errorBytes.Length];
         BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(0), 3); // Action Error
@@ -611,7 +611,7 @@ public class UdpTrackerTests
     [Fact]
     public void ParseTrackerErrorMessage_ExtractsAsciiMessage()
     {
-        string errorText = "torrent not registered";
+        const string errorText = "torrent not registered";
         byte[] errorBytes = Encoding.ASCII.GetBytes(errorText);
         byte[] buffer = new byte[8 + errorBytes.Length];
         BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(0), 3);
@@ -1023,7 +1023,7 @@ public class UdpTrackerTests
         var req = await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
         int transId = BinaryPrimitives.ReadInt32BigEndian(req.AsSpan(12));
 
-        string errText = "tracker is down";
+        const string errText = "tracker is down";
         byte[] errBytes = Encoding.ASCII.GetBytes(errText);
         byte[] response = new byte[8 + errBytes.Length];
         BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(0), 3); // action = error

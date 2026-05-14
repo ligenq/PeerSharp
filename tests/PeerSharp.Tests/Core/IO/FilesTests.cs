@@ -131,7 +131,8 @@ public class FilesTests
         metadata.Info.Name = "test";
         metadata.Info.PieceSize = ProtocolConstants.BlockSize;
         metadata.Info.FullSize = size;
-        metadata.Info.Files.Add(new Internals.TorrentFileEntry {
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry
+        {
             Path = "file.bin",
             Size = size,
             Offset = 0

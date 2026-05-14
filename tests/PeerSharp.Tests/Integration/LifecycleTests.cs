@@ -30,7 +30,7 @@ public class LifecycleTests : IDisposable
     [Fact(Timeout = 60000)]
     public async Task StopAndRestart_AllowsCompletion()
     {
-        var fileName = "restart.bin";
+        const string fileName = "restart.bin";
         byte[] data = new byte[2_000_000];
         Random.Shared.NextBytes(data);
         await WriteFileAsync(_pathA, fileName, data);
@@ -75,7 +75,7 @@ public class LifecycleTests : IDisposable
     [Fact(Timeout = 30000)]
     public async Task RemoveTorrent_DeleteFiles_RemovesData()
     {
-        var fileName = "delete.bin";
+        const string fileName = "delete.bin";
         byte[] data = new byte[128 * 1024];
         Random.Shared.NextBytes(data);
 
@@ -110,8 +110,8 @@ public class LifecycleTests : IDisposable
     [Fact(Timeout = 60000)]
     public async Task FileSelection_DownloadsOnlySelectedFiles()
     {
-        var fileNameA = "selected.bin";
-        var fileNameB = "unselected.bin";
+        const string fileNameA = "selected.bin";
+        const string fileNameB = "unselected.bin";
         byte[] dataA = new byte[256 * 1024];
         byte[] dataB = new byte[128 * 1024];
         Random.Shared.NextBytes(dataA);

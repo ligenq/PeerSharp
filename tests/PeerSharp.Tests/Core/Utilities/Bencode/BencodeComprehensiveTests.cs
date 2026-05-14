@@ -674,7 +674,7 @@ public class BencodeComprehensiveTests
     public void RoundTrip_ComplexStructure_PreservesValue()
     {
         // Structure similar to a torrent info dict
-        var bencode = "d4:infod4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee";
+        const string bencode = "d4:infod4:name4:test12:piece lengthi16384e6:pieces20:01234567890123456789ee";
         var data = Encoding.ASCII.GetBytes(bencode);
         var node = BencodeParser.Parse(data);
         var result = BencodeWriter.Write(node!);
@@ -782,7 +782,7 @@ public class BencodeComprehensiveTests
     [Fact]
     public void ParseWithConsumed_ComplexStructure_ReturnsCorrectByteCount()
     {
-        var bencode = "d3:key5:valuee";
+        const string bencode = "d3:key5:valuee";
         var data = Encoding.ASCII.GetBytes(bencode + "trailing");
 
         var (node, consumed) = BencodeParser.ParseWithConsumed(data);
@@ -881,7 +881,7 @@ public class BencodeComprehensiveTests
     public void Parse_TorrentLikeInfoDict_ParsesCorrectly()
     {
         // Simplified torrent info dictionary structure
-        var bencode = "d" +
+        const string bencode = "d" +
             "4:name11:example.txt" +
             "12:piece lengthi16384e" +
             "6:pieces20:01234567890123456789" +
@@ -906,7 +906,7 @@ public class BencodeComprehensiveTests
     {
         // Tiered announce list structure
         // Each URL is 41 characters: http://tracker1.example.com:6969/announce
-        var bencode = "d13:announce-listll41:http://tracker1.example.com:6969/announceel41:http://tracker2.example.com:6969/announceeee";
+        const string bencode = "d13:announce-listll41:http://tracker1.example.com:6969/announceel41:http://tracker2.example.com:6969/announceeee";
 
         var data = Encoding.ASCII.GetBytes(bencode);
         var node = BencodeParser.Parse(data) as BDict;
@@ -921,7 +921,7 @@ public class BencodeComprehensiveTests
     public void Parse_MultiFileInfo_ParsesCorrectly()
     {
         // Multi-file torrent structure
-        var bencode = "d" +
+        const string bencode = "d" +
             "4:name7:myfiles" +
             "5:filesl" +
                 "d6:lengthi1000e4:pathl3:dir8:file.txte" + "e" +

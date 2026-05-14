@@ -124,7 +124,7 @@ internal class EncryptedStream : Stream
             // Optimize: Request bandwidth in larger chunks (256KB) to reduce lock contention in BandwidthManager
             // But don't request absurdly large amounts if we only need a little
             int needed = toRead - _reservedDownloadBandwidth;
-            int batchSize = ProtocolConstants.DownloadBatchSize;
+            const int batchSize = ProtocolConstants.DownloadBatchSize;
             int requestAmount = Math.Max(needed, batchSize);
 
             int granted = await _bandwidthManager.RequestBandwidthAsync(
@@ -211,7 +211,7 @@ internal class EncryptedStream : Stream
                 {
                     // Reserve more, batching small requests
                     int needed = remaining - _reservedUploadBandwidth;
-                    int batchSize = ProtocolConstants.UploadBatchSize;
+                    const int batchSize = ProtocolConstants.UploadBatchSize;
                     int requestAmount = Math.Max(needed, batchSize);
 
                     int granted = await _bandwidthManager.RequestBandwidthAsync(
@@ -624,11 +624,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
             }
 
-                if (!useUtp)
+            if (!useUtp)
+            {
+                var proxy = _torrent.Settings.Proxy;
+                if (proxy.Type != ProxyType.None && proxy.ProxyPeers && !string.IsNullOrEmpty(proxy.Host))
                 {
-                    var proxy = _torrent.Settings.Proxy;
-                    if (proxy.Type != ProxyType.None && proxy.ProxyPeers && !string.IsNullOrEmpty(proxy.Host))
-                    {
                     _logger.LogDebug("Connecting to {Ip}:{Port} via {ProxyType} proxy {ProxyHost}:{ProxyPort}", ip, port, proxy.Type, proxy.Host, proxy.Port);
                     var result = proxy.Type switch
                     {
@@ -637,24 +637,24 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         _ => throw new NotSupportedException($"Proxy type {proxy.Type} not supported")
                     };
 
-                        Stream = result.Stream;
-                        Client = result.Client;
-                        ConfigureTcpClient(Client, _torrent.Settings, _logger);
+                    Stream = result.Stream;
+                    Client = result.Client;
+                    ConfigureTcpClient(Client, _torrent.Settings, _logger);
 
                     // Note: When connecting via proxy, the RemoteEndPoint of the TcpClient
                     // will be the proxy endpoint, not the peer endpoint.
                     // We set it manually here.
                     RemoteEndPoint = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(ip), port);
                 }
-                    else
-                    {
-                        Client = new TcpClient();
-                        ConfigureTcpClient(Client, _torrent.Settings, _logger);
-                        await Client.ConnectAsync(ip, port, linkedCts.Token).ConfigureAwait(false);
-                        Stream = Client.GetStream();
-                        RemoteEndPoint = Client.Client.RemoteEndPoint as System.Net.IPEndPoint;
-                    }
+                else
+                {
+                    Client = new TcpClient();
+                    ConfigureTcpClient(Client, _torrent.Settings, _logger);
+                    await Client.ConnectAsync(ip, port, linkedCts.Token).ConfigureAwait(false);
+                    Stream = Client.GetStream();
+                    RemoteEndPoint = Client.Client.RemoteEndPoint as System.Net.IPEndPoint;
                 }
+            }
 
             _connected = 1;
             _logger.LogDebug("Connected to {Ip}:{Port}", ip, port);
@@ -1389,15 +1389,15 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
         else
         {
-            if (UtMetadata.LocalMessageId.HasValue && UtMetadata.LocalMessageId.Value == id)
+            if (UtMetadata.LocalMessageId == id)
             {
                 try { await Listener.ExtendedMessageReceivedAsync(this, id, payload).ConfigureAwait(false); } catch (Exception ex) { _logger.LogError(ex, "ExtendedMessageReceived callback error"); }
             }
-            else if (UtPex.LocalMessageId.HasValue && UtPex.LocalMessageId.Value == id)
+            else if (UtPex.LocalMessageId == id)
             {
                 await UtPex.HandleMessageAsync(payload).ConfigureAwait(false);
             }
-            else if (UtHolepunch.LocalMessageId.HasValue && UtHolepunch.LocalMessageId.Value == id)
+            else if (UtHolepunch.LocalMessageId == id)
             {
                 await UtHolepunch.HandleMessageAsync(payload).ConfigureAwait(false);
             }
