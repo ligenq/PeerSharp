@@ -13,7 +13,7 @@ internal static class IceCandidateFilter
         {
             string line = rawLine.TrimEnd('\r');
             if (line.StartsWith("a=candidate:", StringComparison.OrdinalIgnoreCase) &&
-                !IsSupportedIceCandidate(line.Substring("a=".Length)))
+                !IsSupportedIceCandidate(line["a=".Length..]))
             {
                 continue;
             }
@@ -28,12 +28,12 @@ internal static class IceCandidateFilter
     {
         if (candidateLine.StartsWith("a=", StringComparison.OrdinalIgnoreCase))
         {
-            candidateLine = candidateLine.Substring("a=".Length);
+            candidateLine = candidateLine["a=".Length..];
         }
 
         if (candidateLine.StartsWith("candidate:", StringComparison.OrdinalIgnoreCase))
         {
-            candidateLine = candidateLine.Substring("candidate:".Length);
+            candidateLine = candidateLine["candidate:".Length..];
         }
 
         var parts = candidateLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);

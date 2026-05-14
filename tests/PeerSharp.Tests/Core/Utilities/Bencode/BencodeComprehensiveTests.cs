@@ -510,7 +510,7 @@ public class BencodeComprehensiveTests
     [Fact]
     public void Write_EmptyString_ProducesCorrectOutput()
     {
-        var node = new BString(Array.Empty<byte>());
+        var node = new BString([]);
 
         var result = BencodeWriter.Write(node);
 

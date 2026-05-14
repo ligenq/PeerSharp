@@ -79,7 +79,7 @@ internal class MerkleTreeSha1
     {
         Span<byte> combined = stackalloc byte[HashSize * 2];
         left.CopyTo(combined);
-        right.CopyTo(combined.Slice(HashSize));
+        right.CopyTo(combined[HashSize..]);
         return SHA1.HashData(combined);
     }
 

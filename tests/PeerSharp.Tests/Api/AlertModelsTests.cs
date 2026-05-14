@@ -1,6 +1,6 @@
 using PeerSharp.Internals;
 
-namespace PeerSharp.Tests;
+namespace PeerSharp.Tests.Api;
 
 public sealed class AlertModelsTests : IAsyncLifetime
 {

@@ -2,7 +2,7 @@ using Microsoft.Extensions.Logging;
 using PeerSharp.PiecePicking;
 using System.Collections.Concurrent;
 
-namespace PeerSharp.Internals;
+namespace PeerSharp.Internals.Transfers;
 
 internal sealed class PieceStateManager : IDisposable
 {

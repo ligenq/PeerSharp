@@ -721,8 +721,8 @@ public class ArchitectureTests
                     {
                         var getter = pi.GetMethod;
                         var setter = pi.SetMethod;
-                        bool getterOverride = getter != null && getter.IsFamily && getter.GetBaseDefinition().DeclaringType != getter.DeclaringType;
-                        bool setterOverride = setter != null && setter.IsFamily && setter.GetBaseDefinition().DeclaringType != setter.DeclaringType;
+                        bool getterOverride = getter?.IsFamily == true && getter.GetBaseDefinition().DeclaringType != getter.DeclaringType;
+                        bool setterOverride = setter?.IsFamily == true && setter.GetBaseDefinition().DeclaringType != setter.DeclaringType;
                         return !getterOverride && !setterOverride;
                     }
 
@@ -1558,7 +1558,7 @@ public class ArchitectureTests
             return null;
         }
 
-        return content.Substring(braceStart, pos - braceStart);
+        return content[braceStart..pos];
     }
 
     /// <summary>
@@ -1568,7 +1568,7 @@ public class ArchitectureTests
     {
         var start = Math.Max(0, position - radius);
         var end = Math.Min(content.Length, position + radius);
-        return content.Substring(start, end - start);
+        return content[start..end];
     }
 
     /// <summary>
@@ -1890,7 +1890,7 @@ public class ArchitectureTests
                     var fullMatch = match.Value;
 
                     // Find line number
-                    var lineNumber = content.Substring(0, match.Index).Count(c => c == '\n') + 1;
+                    var lineNumber = content[..match.Index].Count(c => c == '\n') + 1;
 
                     // Skip if catch body has meaningful handling
                     if (string.IsNullOrWhiteSpace(catchBody))
@@ -2001,11 +2001,11 @@ public class ArchitectureTests
 
                     foreach (System.Text.RegularExpressions.Match match in matches)
                     {
-                        var lineNumber = content.Substring(0, match.Index).Count(c => c == '\n') + 1;
+                        var lineNumber = content[..match.Index].Count(c => c == '\n') + 1;
 
                         // Get surrounding context (next 20 lines or so)
                         var endIndex = Math.Min(content.Length, match.Index + 1000);
-                        var context = content.Substring(match.Index, endIndex - match.Index);
+                        var context = content[match.Index..endIndex];
 
                         // Check if timeout is set in the context
                         var hasTimeout = System.Text.RegularExpressions.Regex.IsMatch(context, timeoutPattern) ||
@@ -2093,7 +2093,7 @@ public class ArchitectureTests
 
                 foreach (System.Text.RegularExpressions.Match match in lockMatches)
                 {
-                    var lineNumber = content.Substring(0, match.Index).Count(c => c == '\n') + 1;
+                    var lineNumber = content[..match.Index].Count(c => c == '\n') + 1;
 
                     // Extract the lock block body
                     var braceStart = match.Index + match.Length - 1;

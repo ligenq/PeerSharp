@@ -133,7 +133,7 @@ public class DhtManagerTests
         var nodes = r.GetBytes("nodes");
         Assert.NotNull(nodes);
         Assert.True(nodes.Value.Length >= 26);
-        Assert.Equal(otherId.ToArray(), nodes.Value.Span.Slice(0, 20).ToArray());
+        Assert.Equal(otherId.ToArray(), nodes.Value.Span[..20].ToArray());
     }
 
     [Fact]
@@ -251,7 +251,7 @@ public class DhtManagerTests
         // Parse peer compact format: 4 bytes IP + 2 bytes port
         var peerData = Assert.IsType<BString>(values.List[0]).Value;
         Assert.Equal(6, peerData.Length);
-        var peerIp = new IPAddress(peerData.Slice(0, 4).Span);
+        var peerIp = new IPAddress(peerData[..4].Span);
         int peerPort = (peerData.Span[4] << 8) | peerData.Span[5];
         Assert.Equal(IPAddress.Loopback, peerIp);
         Assert.Equal(6881, peerPort);

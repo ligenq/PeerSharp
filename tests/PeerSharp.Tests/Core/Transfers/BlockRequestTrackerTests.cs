@@ -3,6 +3,7 @@ using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Extensions;
 using Microsoft.Extensions.Time.Testing;
 using System.Net;
+using PeerSharp.Internals.Transfers;
 
 namespace PeerSharp.Tests.Core.Transfers;
 

@@ -85,7 +85,7 @@ internal static class PeerProtocol
                 var bitfieldPayload = messageBuffer.Slice(1);
                 message.MemoryOwner = MemoryPool<byte>.Shared.Rent((int)bitfieldPayload.Length);
                 bitfieldPayload.CopyTo(message.MemoryOwner.Memory.Span);
-                message.Payload = message.MemoryOwner.Memory.Slice(0, (int)bitfieldPayload.Length);
+                message.Payload = message.MemoryOwner.Memory[..(int)bitfieldPayload.Length];
                 break;
 
             case MessageId.Piece:
@@ -143,7 +143,7 @@ internal static class PeerProtocol
                 var hashesPayload = messageBuffer.Slice(49);
                 message.MemoryOwner = MemoryPool<byte>.Shared.Rent((int)hashesPayload.Length);
                 hashesPayload.CopyTo(message.MemoryOwner.Memory.Span);
-                message.Payload = message.MemoryOwner.Memory.Slice(0, (int)hashesPayload.Length);
+                message.Payload = message.MemoryOwner.Memory[..(int)hashesPayload.Length];
                 break;
 
             case MessageId.Extended:
@@ -151,7 +151,7 @@ internal static class PeerProtocol
                 var extPayload = messageBuffer.Slice(1);
                 message.MemoryOwner = MemoryPool<byte>.Shared.Rent((int)extPayload.Length);
                 extPayload.CopyTo(message.MemoryOwner.Memory.Span);
-                message.Payload = message.MemoryOwner.Memory.Slice(0, (int)extPayload.Length);
+                message.Payload = message.MemoryOwner.Memory[..(int)extPayload.Length];
                 break;
 
             case MessageId.Port:
@@ -190,20 +190,20 @@ internal static class PeerProtocol
         switch (msg.Id)
         {
             case MessageId.Have:
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(5), msg.HavePieceIndex);
+                BinaryPrimitives.WriteInt32BigEndian(destination[5..], msg.HavePieceIndex);
                 break;
 
             case MessageId.Suggest:
             case MessageId.AllowedFast:
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(5), msg.PieceIndex);
+                BinaryPrimitives.WriteInt32BigEndian(destination[5..], msg.PieceIndex);
                 break;
 
             case MessageId.Request:
             case MessageId.Cancel:
             case MessageId.Reject:
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(5), msg.PieceIndex);
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(9), msg.BlockOffset);
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(13), msg.BlockLength);
+                BinaryPrimitives.WriteInt32BigEndian(destination[5..], msg.PieceIndex);
+                BinaryPrimitives.WriteInt32BigEndian(destination[9..], msg.BlockOffset);
+                BinaryPrimitives.WriteInt32BigEndian(destination[13..], msg.BlockLength);
                 break;
 
             case MessageId.HashRequest:
@@ -214,56 +214,56 @@ internal static class PeerProtocol
                     throw new InvalidDataException($"{msg.Id} requires a 32-byte pieces root.");
                 }
                 msg.HashPiecesRoot.CopyTo(destination.Slice(5, 32));
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(37), msg.HashBaseLayer);
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(41), msg.HashIndex);
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(45), msg.HashLength);
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(49), msg.HashProofLayers);
+                BinaryPrimitives.WriteInt32BigEndian(destination[37..], msg.HashBaseLayer);
+                BinaryPrimitives.WriteInt32BigEndian(destination[41..], msg.HashIndex);
+                BinaryPrimitives.WriteInt32BigEndian(destination[45..], msg.HashLength);
+                BinaryPrimitives.WriteInt32BigEndian(destination[49..], msg.HashProofLayers);
                 if (msg.Id == MessageId.Hashes)
                 {
-                    if (msg.Data != null && msg.Data.Length > 0)
+                    if (msg.Data?.Length > 0)
                     {
-                        msg.Data.CopyTo(destination.Slice(53));
+                        msg.Data.CopyTo(destination[53..]);
                     }
                     else
                     {
-                        msg.Payload.Span.CopyTo(destination.Slice(53));
+                        msg.Payload.Span.CopyTo(destination[53..]);
                     }
                 }
                 break;
 
             case MessageId.Piece:
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(5), msg.PieceIndex);
-                BinaryPrimitives.WriteInt32BigEndian(destination.Slice(9), msg.BlockOffset);
+                BinaryPrimitives.WriteInt32BigEndian(destination[5..], msg.PieceIndex);
+                BinaryPrimitives.WriteInt32BigEndian(destination[9..], msg.BlockOffset);
                 if (msg.PooledBlock != null)
                 {
-                    msg.PooledBlock.Data.Span.CopyTo(destination.Slice(13));
+                    msg.PooledBlock.Data.Span.CopyTo(destination[13..]);
                 }
-                else if (msg.Data != null && msg.Data.Length > 0)
+                else if (msg.Data?.Length > 0)
                 {
-                    msg.Data.CopyTo(destination.Slice(13));
+                    msg.Data.CopyTo(destination[13..]);
                 }
                 else
                 {
-                    msg.Payload.Span.CopyTo(destination.Slice(13));
+                    msg.Payload.Span.CopyTo(destination[13..]);
                 }
                 break;
 
             case MessageId.Bitfield:
             case MessageId.Extended:
-                if (msg.Data != null && msg.Data.Length > 0)
+                if (msg.Data?.Length > 0)
                 {
-                    msg.Data.CopyTo(destination.Slice(5));
+                    msg.Data.CopyTo(destination[5..]);
                 }
                 else
                 {
-                    msg.Payload.Span.CopyTo(destination.Slice(5));
+                    msg.Payload.Span.CopyTo(destination[5..]);
                 }
 
                 break;
 
             case MessageId.Port:
                 // BEP 5: Port message contains 2-byte port number for DHT
-                BinaryPrimitives.WriteUInt16BigEndian(destination.Slice(5), msg.Port);
+                BinaryPrimitives.WriteUInt16BigEndian(destination[5..], msg.Port);
                 break;
         }
 

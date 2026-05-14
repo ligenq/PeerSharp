@@ -260,7 +260,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         Span<byte> ipBytes = stackalloc byte[16];
         if (!addr.TryWriteBytes(ipBytes, out int ipLen))
         {
-            return Array.Empty<byte>();
+            return [];
         }
 
         int totalLen = ipLen + secret.Length + infoHash.Length;
@@ -271,7 +271,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
             var work = data[..totalLen].AsSpan();
             addr.TryWriteBytes(work, out _);
             secret.CopyTo(work.Slice(ipLen, secret.Length));
-            infoHash.CopyTo(work.Slice(ipLen + secret.Length));
+            infoHash.CopyTo(work[(ipLen + secret.Length)..]);
 
             Span<byte> hash = stackalloc byte[20];
             SHA1.HashData(work, hash);
@@ -305,7 +305,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
 
         try
         {
-            if (state.NodeId != null && state.NodeId.Length == 20)
+            if (state.NodeId?.Length == 20)
             {
                 NodeId = state.NodeId;
                 _table = new RoutingTable(NodeId.ToArray(), _timeProvider);
@@ -708,7 +708,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     private void RegenerateNodeId(IPAddress externalIp)
     {
         byte[] newId = DhtSecurity.GenerateSecureNodeId(externalIp);
-        _logger.LogInformation("BEP 42: Regenerating node ID for IP {ExternalIP}: {NodeIdPrefix}...", externalIp, Convert.ToHexString(newId).Substring(0, 8));
+        _logger.LogInformation("BEP 42: Regenerating node ID for IP {ExternalIP}: {NodeIdPrefix}...", externalIp, Convert.ToHexString(newId)[..8]);
 
         // Update our ID and create a new routing table
         NodeId = newId;

@@ -6,6 +6,7 @@ using PeerSharp.PiecePicking;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 using PeerSharp.Messages;
+using PeerSharp.Internals.Transfers;
 
 namespace PeerSharp.Internals;
 
@@ -341,6 +342,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     private readonly SemaphoreSlim _writeSemaphore;
     private readonly PieceStateManager _pieceStateManager;
     private readonly PeerEvaluationScheduler _peerEvaluationScheduler;
+    private readonly UploadQueueManager _uploadQueueManager;
 
     // Bounded queue for piece hashing/writing to prevent thread pool starvation
     private readonly Channel<PieceState> _pieceProcessingQueue;
@@ -460,6 +462,9 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
         _cts = new CancellationTokenSource();
 
+        var uploadQueueLogger = TorrentLoggerFactory.CreateLogger<UploadQueueManager>();
+        _uploadQueueManager = new UploadQueueManager(ExecuteUploadItemAsync, uploadQueueLogger, _cts.Token);
+
         // Track background tasks for proper disposal and error handling
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessIncomingBlocksAsync, "ProcessIncomingBlocks"));
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessPeerEvaluationsAsync, "ProcessPeerEvaluations"));
@@ -484,13 +489,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     /// <summary>
     /// BEP-3: Handle Cancel message from peer - they no longer want a previously requested block.
-    /// Since we fulfill requests immediately (no queue), this is primarily for logging.
+    /// Marks the item cancelled in the upload queue so the pump skips or rejects it.
     /// </summary>
-    public static void BlockRequestCancelled(PeerCommunication peer, PeerMessage msg)
+    public void BlockRequestCancelled(PeerCommunication peer, PeerMessage msg)
     {
-        // In this implementation, requests are fulfilled immediately without queuing,
-        // so Cancel is mostly informational. A more sophisticated implementation might
-        // maintain an upload queue where pending requests could be removed.
+        _uploadQueueManager.Cancel(peer, msg.PieceIndex, msg.BlockOffset);
         Logger.LogDebug("Request cancelled by {RemoteEndPoint}: {PieceIndex}:{BlockOffset}", peer.RemoteEndPoint, msg.PieceIndex, msg.BlockOffset);
     }
 
@@ -536,7 +539,6 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     public async Task BlockRequestedAsync(PeerCommunication peer, PeerMessage msg)
     {
-        // Check conditions for rejecting a request
         bool reject = false;
         if (peer.AmChoking && !peer.IsAllowedFast(msg.PieceIndex))
         {
@@ -547,7 +549,6 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         {
             reject = true;
         }
-
         // BEP 16: In superseed mode, only allow requests for assigned pieces
         if (!reject && !_torrent.SuperSeedManager.ShouldAllowRequest(peer, msg.PieceIndex))
         {
@@ -571,41 +572,53 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
         if (reject)
         {
-            if (peer.RemoteSupportsExtensions)
+            await peer.SendRejectAsync(new BlockRequest
             {
-                await peer.SendRejectAsync(new BlockRequest
-                {
-                    PieceIndex = msg.PieceIndex,
-                    Offset = msg.BlockOffset,
-                    Length = msg.BlockLength
-                }).ConfigureAwait(false);
-            }
+                PieceIndex = msg.PieceIndex,
+                Offset = msg.BlockOffset,
+                Length = msg.BlockLength
+            }).ConfigureAwait(false);
             return;
         }
 
+        var item = new UploadQueueItem(msg.PieceIndex, msg.BlockOffset, msg.BlockLength);
+        if (!_uploadQueueManager.TryEnqueue(peer, item))
+        {
+            // Upload queue full — reject so peer can retry
+            await peer.SendRejectAsync(new BlockRequest
+            {
+                PieceIndex = msg.PieceIndex,
+                Offset = msg.BlockOffset,
+                Length = msg.BlockLength
+            }).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ExecuteUploadItemAsync(PeerCommunication peer, UploadQueueItem item, CancellationToken ct)
+    {
         Block? block = null;
         try
         {
-            long pieceOffset = msg.PieceIndex * _torrent.InfoFile.Info.PieceSize;
-            long globalOffset = pieceOffset + msg.BlockOffset;
+            long pieceOffset = item.PieceIndex * _torrent.InfoFile.Info.PieceSize;
+            long globalOffset = pieceOffset + item.Offset;
 
-            block = new Block(msg.PieceIndex, msg.BlockOffset, msg.BlockLength);
-            await _torrent.FilesInternal.ReadAsync(globalOffset, block.Buffer.AsMemory(0, msg.BlockLength), _cts.Token).ConfigureAwait(false);
+            block = new Block(item.PieceIndex, item.Offset, item.Length);
+            await _torrent.FilesInternal.ReadAsync(globalOffset, block.Buffer.AsMemory(0, item.Length), ct).ConfigureAwait(false);
 
             var response = new PeerMessage(MessageId.Piece)
             {
-                PieceIndex = msg.PieceIndex,
-                BlockOffset = msg.BlockOffset,
+                PieceIndex = item.PieceIndex,
+                BlockOffset = item.Offset,
                 PooledBlock = block
             };
 
             await peer.SendMessageAsync(response).ConfigureAwait(false);
             block = null;
 
-            Uploader.AddUploaded(msg.BlockLength);
-            peer.AddUploaded(msg.BlockLength);
+            Uploader.AddUploaded(item.Length);
+            peer.AddUploaded(item.Length);
         }
-        catch (OperationCanceledException) { /* Normal shutdown */ }
+        catch (OperationCanceledException) { block?.Dispose(); }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Failed to fulfil request from {RemoteEndPoint}", peer.RemoteEndPoint);
@@ -865,6 +878,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         _piecePicker.UnregisterPeerAvailability(peer);
         _requestTracker.RemovePeer(peer);
+        _uploadQueueManager.RemovePeer(peer);
     }
 
     public void Update()
@@ -1029,6 +1043,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 Logger.LogTrace(ex, "Error waiting for overflow tasks");
             }
 
+            await _uploadQueueManager.DisposeAsync().ConfigureAwait(false);
             _pieceStateManager.Dispose();
             _cts.Dispose();
             _overflowProcessingSemaphore.Dispose();

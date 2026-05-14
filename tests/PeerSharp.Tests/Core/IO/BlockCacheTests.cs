@@ -32,7 +32,7 @@ public class BlockCacheTests
             if (offset < _data.Length)
             {
                 int len = Math.Min(data.Length, _data.Length - (int)offset);
-                data.Slice(0, len).CopyTo(_data.AsMemory((int)offset, len));
+                data[..len].CopyTo(_data.AsMemory((int)offset, len));
             }
             return ValueTask.CompletedTask;
         }

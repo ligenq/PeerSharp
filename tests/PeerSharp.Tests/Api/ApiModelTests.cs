@@ -1,4 +1,4 @@
-namespace PeerSharp.Tests;
+namespace PeerSharp.Tests.Api;
 
 public sealed class ApiModelTests
 {

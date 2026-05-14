@@ -1,4 +1,3 @@
-using PeerSharp.Core;
 using System.Security.Cryptography;
 using CoreBuilder = PeerSharp.Core.TorrentFileBuilder;
 
@@ -577,7 +576,7 @@ public class TorrentFileBuilderTests
     public void AddFile_ZeroByteFile_BuildsSuccessfully()
     {
         var torrent = new CoreBuilder()
-            .AddFile("empty.bin", Array.Empty<byte>())
+            .AddFile("empty.bin", [])
             .Build();
 
         Assert.Equal(0, torrent.TotalSize);

@@ -43,7 +43,7 @@ internal static class DhtCompactNodeCodec
             }
 
             node.Id.AsSpan(0, NodeIdLength).CopyTo(record);
-            BinaryPrimitives.WriteUInt16BigEndian(record.Slice(NodeIdLength + expectedAddressLength), (ushort)node.EndPoint.Port);
+            BinaryPrimitives.WriteUInt16BigEndian(record[(NodeIdLength + expectedAddressLength)..], (ushort)node.EndPoint.Port);
             ms.Write(record[..recordLength]);
         }
 
@@ -60,7 +60,7 @@ internal static class DhtCompactNodeCodec
         {
             ReadOnlySpan<byte> id = data.Slice(i, NodeIdLength);
             var ip = new IPAddress(data.Slice(i + NodeIdLength, ipSize));
-            int port = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(i + NodeIdLength + ipSize));
+            int port = BinaryPrimitives.ReadUInt16BigEndian(data[(i + NodeIdLength + ipSize)..]);
             list.Add(new NodeInfo(id, new IPEndPoint(ip, port)));
         }
 

@@ -13,7 +13,7 @@ internal class PeerMessage : IDisposable
 
     public int BlockLength { get; set; }
     public int BlockOffset { get; set; }
-    public byte[] Data { get; set; } = Array.Empty<byte>();
+    public byte[] Data { get; set; } = [];
 
     public IMemoryOwner<byte>? MemoryOwner { get; set; }
     public ReadOnlyMemory<byte> Payload { get; set; }

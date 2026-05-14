@@ -139,12 +139,12 @@ internal class UtHolepunch : IUtHolepunch, IDisposable
         span[1] = (byte)id;
         span[2] = (byte)(ipv6 ? 1 : 0);
 
-        addrBytes.CopyTo(span.Slice(3));
-        BinaryPrimitives.WriteUInt16BigEndian(span.Slice(3 + addrBytes.Length), (ushort)endpoint.Port);
+        addrBytes.CopyTo(span[3..]);
+        BinaryPrimitives.WriteUInt16BigEndian(span[(3 + addrBytes.Length)..], (ushort)endpoint.Port);
 
         if (id == MsgId.Error)
         {
-            BinaryPrimitives.WriteInt32BigEndian(span.Slice(3 + addrBytes.Length + 2), (int)error);
+            BinaryPrimitives.WriteInt32BigEndian(span[(3 + addrBytes.Length + 2)..], (int)error);
         }
 
         _ = _peer.SendMessageAsync(msg);

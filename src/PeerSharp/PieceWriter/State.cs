@@ -17,7 +17,7 @@ internal class TorrentStateData
     public long LastStateTime { get; set; }
 
     // Bitfield of finished pieces
-    public byte[] Pieces { get; set; } = Array.Empty<byte>();
+    public byte[] Pieces { get; set; } = [];
 
     public long SeedTimeSeconds { get; set; }
 
@@ -41,8 +41,8 @@ internal class TorrentStateData
 
     internal class UnfinishedPieceData
     {
-        public bool[] Blocks { get; set; } = Array.Empty<bool>();
-        public byte[] Data { get; set; } = Array.Empty<byte>();
+        public bool[] Blocks { get; set; } = [];
+        public byte[] Data { get; set; } = [];
         public int Index { get; set; }
     }
 }

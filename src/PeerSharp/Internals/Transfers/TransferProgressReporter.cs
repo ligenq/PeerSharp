@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Logging;
 
-namespace PeerSharp.Internals;
+namespace PeerSharp.Internals.Transfers;
 
 internal sealed class TransferProgressReporter
 {

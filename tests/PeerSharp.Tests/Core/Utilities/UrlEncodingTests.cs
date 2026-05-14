@@ -8,7 +8,7 @@ public class UrlEncodingTests
     [Fact]
     public void Encode_EmptySpan_ReturnsEmptyString()
     {
-        Assert.Equal(string.Empty, UrlEncoding.Encode(ReadOnlySpan<byte>.Empty));
+        Assert.Equal(string.Empty, UrlEncoding.Encode([]));
     }
 
     [Fact]

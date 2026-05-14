@@ -231,7 +231,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
             }
 
             // Skip if piece is already being downloaded by peers
-            if (fileTransfer != null && fileTransfer.IsPieceActive(i))
+            if (fileTransfer?.IsPieceActive(i) == true)
             {
                 continue;
             }

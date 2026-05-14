@@ -1,4 +1,4 @@
-namespace PeerSharp.Tests;
+namespace PeerSharp.Tests.Api;
 
 public class TorrentFileTests
 {
@@ -17,7 +17,7 @@ public class TorrentFileTests
     [Fact]
     public void Parse_EmptySpan_Throws()
     {
-        Assert.Throws<FormatException>(() => TorrentFile.Parse(ReadOnlySpan<byte>.Empty));
+        Assert.Throws<FormatException>(() => TorrentFile.Parse([]));
     }
 
     [Fact]

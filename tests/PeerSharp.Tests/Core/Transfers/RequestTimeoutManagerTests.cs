@@ -4,6 +4,7 @@ using PeerSharp.Internals.Peers;
 using PeerSharp.Messages;
 using PeerSharp.Internals.Extensions;
 using System.Net;
+using PeerSharp.Internals.Transfers;
 
 namespace PeerSharp.Tests.Core.Transfers;
 

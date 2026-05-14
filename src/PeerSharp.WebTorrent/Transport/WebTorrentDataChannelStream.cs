@@ -91,7 +91,7 @@ internal sealed class WebTorrentDataChannelStream : Stream
             _length = length;
         }
 
-        public Memory<byte> Memory => _inner.Memory.Slice(0, _length);
+        public Memory<byte> Memory => _inner.Memory[.._length];
 
         public void Dispose() => _inner.Dispose();
     }

@@ -14,7 +14,7 @@ internal static class ArchitectureHelper
 
     public static string[] SourceFiles { get; } = Directory.Exists(SourceDirectory)
         ? Directory.GetFiles(SourceDirectory, "*.cs", SearchOption.AllDirectories)
-        : Array.Empty<string>();
+        : [];
 
     private static string GetSourceDirectory()
     {

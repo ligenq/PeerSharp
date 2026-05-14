@@ -330,7 +330,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         int index = baseUrl.LastIndexOf('/');
         if (index >= 0)
         {
-            string lastPart = baseUrl.Substring(index + 1);
+            string lastPart = baseUrl[(index + 1)..];
             if (lastPart.StartsWith("announce"))
             {
                 string scrapeBase = string.Concat(baseUrl.AsSpan(0, index + 1), "scrape", lastPart.AsSpan(8));

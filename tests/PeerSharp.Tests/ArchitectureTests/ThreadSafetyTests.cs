@@ -40,7 +40,7 @@ public class ThreadSafetyTests
             {
                 // Simple filter to ignore comments (lines starting with //)
                 // This is not a full C# parser but handles single-line comments.
-                int lineIndex = content.Substring(0, match.Index).Count(c => c == '\n');
+                int lineIndex = content[..match.Index].Count(c => c == '\n');
                 var line = content.Split('\n')[lineIndex];
                 if (line.TrimStart().StartsWith("//"))
                 {
