@@ -13,6 +13,7 @@ public class PiecePickerTests
         public List<FileSelection>? Selection { get; set; }
         public DownloadStrategy DownloadStrategy { get; set; } = DownloadStrategy.RarestFirst;
         public List<int>? PriorityPieces { get; set; }
+        public Dictionary<int, Priority> PiecePriorities { get; } = [];
         public HashSet<int> ActivePieces { get; } = [];
 
         public bool HasPiece(int pieceIndex)
@@ -32,7 +33,7 @@ public class PiecePickerTests
 
         public Priority GetPiecePriority(int pieceIndex, IReadOnlyList<FileSelection>? selection)
         {
-            return Priority.Normal;
+            return PiecePriorities.GetValueOrDefault(pieceIndex, Priority.Normal);
         }
 
         public bool IsPieceActive(int pieceIndex)
@@ -446,6 +447,74 @@ public class PiecePickerTests
 
         // Assert
         Assert.True(pickedHighestAvailability, "Should randomly pick even the most common piece during startup");
+    }
+
+    [Fact]
+    public void PickNextPiece_StartupMode_PrefersSuggestedPieces()
+    {
+        var ctx = new MockContext { PieceCount = 10, CompletedPieceCount = 0 };
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+        var peer = new MockPeer();
+        for (int i = 0; i < 10; i++)
+        {
+            peer.Pieces.Add(i);
+        }
+        peer.SuggestedPieces.Add(7);
+
+        bool success = picker.PickNextPiece(peer, out int picked);
+
+        Assert.True(success);
+        Assert.Equal(7, picked);
+    }
+
+    [Fact]
+    public void PickNextPiece_StartupMode_RandomizesWithinHighestAvailablePriority()
+    {
+        var ctx = new MockContext { PieceCount = 5, CompletedPieceCount = 0 };
+        ctx.PiecePriorities[0] = Priority.Low;
+        ctx.PiecePriorities[1] = Priority.Normal;
+        ctx.PiecePriorities[2] = Priority.High;
+        ctx.PiecePriorities[3] = Priority.High;
+        ctx.PiecePriorities[4] = Priority.Low;
+
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+        var peer = new MockPeer();
+        for (int i = 0; i < 5; i++)
+        {
+            peer.Pieces.Add(i);
+        }
+
+        var pickedPieces = new HashSet<int>();
+        for (int attempt = 0; attempt < 50; attempt++)
+        {
+            bool success = picker.PickNextPiece(peer, out int picked);
+            Assert.True(success);
+            Assert.Contains(picked, new[] { 2, 3 });
+            pickedPieces.Add(picked);
+        }
+
+        Assert.Equal([2, 3], pickedPieces.OrderBy(i => i).ToArray());
+    }
+
+    [Fact]
+    public void PickNextPiece_StartupMode_FallsBackToLowerPriorityWhenOnlyLowerPriorityAvailable()
+    {
+        var ctx = new MockContext { PieceCount = 5, CompletedPieceCount = 0 };
+        ctx.PiecePriorities[0] = Priority.High;
+        ctx.PiecePriorities[1] = Priority.High;
+        ctx.PiecePriorities[2] = Priority.Normal;
+        ctx.PiecePriorities[3] = Priority.Low;
+        ctx.PiecePriorities[4] = Priority.Low;
+
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+        var peer = new MockPeer();
+        peer.Pieces.Add(3);
+        peer.Pieces.Add(4);
+
+        bool success = picker.PickNextPiece(peer, out int picked);
+
+        Assert.True(success);
+        Assert.Contains(picked, new[] { 3, 4 });
     }
 }
 

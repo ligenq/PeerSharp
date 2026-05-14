@@ -21,6 +21,7 @@ namespace PeerSharp.PiecePicking;
 /// </summary>
 internal class PiecePicker : IDisposable
 {
+    private const int InitialRandomPieceThreshold = 4;
     private static readonly ILogger<PiecePicker> _logger = TorrentLoggerFactory.CreateLogger<PiecePicker>();
 
     private readonly IPiecePickerContext _context;
@@ -196,17 +197,43 @@ internal class PiecePicker : IDisposable
             return false;
         }
 
+        // Fast path: Peer has suggested pieces?
+        if (!peer.IsChoking)
+        {
+            foreach (int i in peer.GetSuggestedPieces())
+            {
+                if (CanPick(i, peer, selection))
+                {
+                    pieceIndex = i;
+                    return true;
+                }
+            }
+        }
+
         // RANDOM FIRST PIECES MODE (Startup Optimization)
-        // To quickly participate in Tit-for-Tat and unchoke others, we download the first few pieces randomly
-        // instead of picking the rarest piece, which is usually held by slow peers.
-        if (_context.DownloadStrategy == DownloadStrategy.RarestFirst && _context.CompletedPieceCount < 4)
+        // Complete a few random pieces quickly so the client can participate in Tit-for-Tat.
+        if (_context.DownloadStrategy == DownloadStrategy.RarestFirst && _context.CompletedPieceCount < InitialRandomPieceThreshold)
         {
             int selectedIndex = -1;
+            Priority selectedPriority = Priority.DoNotDownload;
             int count = 0;
             for (int i = 0; i < _context.PieceCount; i++)
             {
                 if (CanPick(i, peer, selection))
                 {
+                    var priority = _context.GetPiecePriority(i, selection);
+                    if (priority < selectedPriority)
+                    {
+                        continue;
+                    }
+
+                    if (priority > selectedPriority)
+                    {
+                        selectedPriority = priority;
+                        selectedIndex = -1;
+                        count = 0;
+                    }
+
                     count++;
                     if (_random.Next(count) == 0)
                     {
@@ -225,19 +252,6 @@ internal class PiecePicker : IDisposable
         }
 
         // RAREST FIRST MODE (default)
-        // Fast path: Peer has suggested pieces?
-        if (!peer.IsChoking)
-        {
-            foreach (int i in peer.GetSuggestedPieces())
-            {
-                if (CanPick(i, peer, selection))
-                {
-                    pieceIndex = i;
-                    return true;
-                }
-            }
-        }
-
         List<int> currentPieces;
         lock (_selectionLock)
         {
