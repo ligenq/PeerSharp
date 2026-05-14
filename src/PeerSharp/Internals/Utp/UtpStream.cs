@@ -590,7 +590,6 @@ internal class UtpStream : Stream
 
                 case MessageType.ST_RESET:
                     _logger.LogDebug("Reset from {Remote}", RemoteEndPoint);
-                    // CRITICAL FIX: Fail pending connection with exception instead of cancellation
                     var ex = new IOException("Connection reset by remote peer");
                     _connectTcs?.TrySetException(ex);
                     CloseInternal(false, ex);

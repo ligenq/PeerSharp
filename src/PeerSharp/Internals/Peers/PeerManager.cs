@@ -38,7 +38,6 @@ namespace PeerSharp.Internals.Peers;
 
 internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 {
-    // SPEED STABILITY FIX: Gradual unchoking - peers performing above this threshold
     // relative to the top candidate are kept unchoked to maintain stability
     private const double GradualUnchokeThreshold = 0.7;
 
@@ -855,7 +854,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             }
             // else: Have no pieces - no need to send anything (HaveNone is optional and implicit)
 
-            // SPEED STABILITY FIX: Use immediate evaluation after handshake
             // to start downloading as quickly as possible
             await _torrent.FileTransferInternal.RequestBlocksAsync(p, immediate: true).ConfigureAwait(false);
         }
@@ -885,7 +883,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         switch (msg.Id)
         {
             case MessageId.Unchoke:
-                // SPEED STABILITY FIX: Use immediate evaluation when unchoked
                 // to minimize delay between unchoke and first request
                 FireAndForget(_torrent.FileTransferInternal.RequestBlocksAsync(p, immediate: true), "RequestBlocks (Unchoke)");
                 break;
@@ -1583,7 +1580,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 return;
             }
 
-            // CRITICAL FIX: Add to connected endpoints with atomic check-and-add pattern
             // This minimizes the race window with ConnectionClosed by checking peer existence BEFORE adding endpoint
             if (peer.RemoteEndPoint != null && _connectedPeers.ContainsKey(peer))
             {
@@ -1988,7 +1984,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         else
         {
             // Leeching: Tit-for-tat (reciprocity) -> Prioritize peers sending data fastest
-            // SPEED STABILITY FIX: Use SmoothedDownloadSpeed to avoid feedback loops
             // where a peer appears slow just because they finished their requests
             candidates.Sort((a, b) => b.SmoothedDownloadSpeed.CompareTo(a.SmoothedDownloadSpeed));
         }
@@ -1998,7 +1993,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // Reserve one slot for optimistic unchoke if we have overflow
         int regularSlots = (candidates.Count > slots) ? slots - 1 : slots;
 
-        // SPEED STABILITY FIX: Gradual unchoking algorithm
         // Instead of just taking top N candidates, we:
         // 1. Always include top candidates (up to regularSlots)
         // 2. Keep currently unchoked peers if they're performing at 50%+ of the best
@@ -2018,7 +2012,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             toUnchokeSet.Add(candidates[i]);
         }
 
-        // SPEED STABILITY FIX: Keep currently unchoked peers that are performing well
         // This prevents sudden disconnection of productive peers
         int keptFromPrevious = 0;
         foreach (var p in peers)

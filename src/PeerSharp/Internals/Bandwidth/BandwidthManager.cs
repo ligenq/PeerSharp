@@ -252,7 +252,6 @@ internal class BandwidthManager : IBandwidthManager
 
     /// <summary>
     /// Returns unused bandwidth back to the specified channels.
-    /// CRITICAL FIX: Prevents bandwidth leaks when operations are cancelled or fail.
     /// </summary>
     public void ReturnBandwidth(int amount, string[] channelNames)
     {

@@ -55,7 +55,6 @@ internal class EncryptedStream : Stream
     private readonly IBandwidthUser _user;
     private AtomicDisposal _disposal = new();
 
-    // CRITICAL FIX: Track reserved bandwidth for proper cleanup
     // These are returned to the BandwidthManager on disposal to prevent bandwidth leaks
     private int _reservedDownloadBandwidth;
 
@@ -79,7 +78,6 @@ internal class EncryptedStream : Stream
         _leaveInnerOpen = leaveInnerOpen;
     }
 
-    // CRITICAL FIX: Finalizer ensures bandwidth is returned even if Dispose is not called
     // This prevents permanent bandwidth leaks when exceptions cause objects to be GC'd
     [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
     ~EncryptedStream()
@@ -261,7 +259,6 @@ internal class EncryptedStream : Stream
     {
         if (_disposal.MarkDisposed())
         {
-            // CRITICAL FIX: Return any unused reserved bandwidth to prevent leaks
             // This runs both for explicit Dispose() and finalizer to ensure cleanup
             if (_reservedDownloadBandwidth > 0)
             {
@@ -345,7 +342,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private byte[] _preReadHandshake = [];
     private int _receiveLoopState = 0;
 
-    // CRITICAL FIX: Track background tasks to eliminate fire-and-forget patterns
     // These tasks are awaited during Close() to ensure proper cleanup
     private Task? _receiveLoopTask;
 
@@ -707,7 +703,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             // If peer closed the connection, we need a fresh connection for plaintext
             if (needsReconnect)
             {
-                // CRITICAL FIX: Dispose old connection resources to prevent leaks
                 // TcpClient.Close() is not sufficient - must call Dispose() to release all resources
                 try { Client?.Dispose(); } catch { /* Ignore disposal errors during reconnect */ }
                 try { UtpStream?.Close(); } catch { /* Ignore disposal errors during reconnect */ }
@@ -899,13 +894,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// THROUGHPUT OPTIMIZATION: Calculate optimal request pipeline depth based on bandwidth-delay product.
     /// Pipeline = (Speed * RTT) / BlockSize, with min/max bounds.
     /// At startup, uses configured estimates to avoid slow ramp-up.
-    /// </para>
-    /// <para>
-    /// SPEED STABILITY FIX: MaxPipeline reduced from 2000 to 250 to prevent:
-    /// - Massive request backlogs that cause stalls when peers choke
-    /// - Long recovery times after peer state changes
-    /// - Memory pressure from thousands of pending requests
-    /// 250 blocks = 4MB in-flight, sufficient for 1 Gbps with 30ms RTT
     /// </para>
     /// </summary>
     public int GetOptimalPipelineDepth()
@@ -1254,7 +1242,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _lastDownloaded = totalDown;
         _lastUploaded = totalUp;
 
-        // SPEED STABILITY FIX: Use a more sophisticated smoothing algorithm inspired by libtransmission.
         // Instead of a simple 0.5/0.875 EMA, use a strategy that:
         // 1. Adopts higher speeds quickly (to find peaks)
         // 2. Adopts lower speeds SLOWLY (to ignore momentary stalls/jitter)
@@ -1627,7 +1614,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return EncryptionHandshakeResult.Failed;
             }
 
-            // CRITICAL FIX: Handle trailing data (e.g. BT Handshake) sent in the same packet as Pe4
             // Decrypt it and store in _plaintextBuffer so ReadHandshakeAsync can pick it up
             var trailing = pe.TrailingData;
             if (trailing.Length > 0 && pe.Encryption != null)
@@ -2109,7 +2095,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     }
 
     /// <summary>
-    /// CRITICAL FIX: Runs a background task with proper error handling and logging.
     /// This eliminates fire-and-forget patterns that silently swallow exceptions.
     /// </summary>
     private Task RunBackgroundTaskAsync(

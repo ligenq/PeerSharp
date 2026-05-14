@@ -9,7 +9,6 @@ internal interface IBandwidthUser
 
 internal class BandwidthChannel
 {
-    // CRITICAL FIX: All fields must be accessed with Interlocked operations for thread safety
     // Multiple threads can call UpdateQuota, UseQuota, ReturnQuota simultaneously
     private int _limit;
 
@@ -32,7 +31,6 @@ internal class BandwidthChannel
                 return int.MaxValue;
             }
 
-            // CRITICAL FIX: Thread-safe read
             return Interlocked.CompareExchange(ref _quota, 0, 0);
         }
     }
@@ -45,7 +43,6 @@ internal class BandwidthChannel
             return true;
         }
 
-        // CRITICAL FIX: Thread-safe read
         int quota = Interlocked.CompareExchange(ref _quota, 0, 0);
         return quota >= amount;
     }
@@ -57,7 +54,6 @@ internal class BandwidthChannel
 
     /// <summary>
     /// Returns unused bandwidth quota back to the channel.
-    /// CRITICAL FIX: Called when reserved bandwidth is not used (cancellation, timeout, error).
     /// Thread-safe using Interlocked operations.
     /// </summary>
     public void ReturnQuota(int amount)
@@ -68,7 +64,6 @@ internal class BandwidthChannel
             return;
         }
 
-        // CRITICAL FIX: Thread-safe increment
         int newQuota = Interlocked.Add(ref _quota, amount);
 
         // Cap to prevent quota from growing unboundedly
@@ -109,7 +104,6 @@ internal class BandwidthChannel
         int quotaDelta = (int)(newQuota / 1000);
         int subQuotaDelta = (int)(newQuota % 1000);
 
-        // CRITICAL FIX: Use Interlocked for thread-safe accumulation
         int newSubQuota = Interlocked.Add(ref _subQuota, subQuotaDelta);
 
         // Handle overflow from subQuota to quota
@@ -157,7 +151,6 @@ internal class BandwidthChannel
             return;
         }
 
-        // CRITICAL FIX: Thread-safe decrement with bounds checking
         // Note: Quota can go negative if multiple threads check-then-use simultaneously
         // This is acceptable - it represents temporary over-allocation that will be
         // corrected on the next UpdateQuota cycle. We only prevent extreme negative values.
