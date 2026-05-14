@@ -9,7 +9,6 @@ internal class ProtocolEncryption
 {
     private readonly Lock _decryptLock = new();
 
-    // CRITICAL FIX: Add synchronization to prevent race conditions
     // RC4 is stateful and not thread-safe - concurrent encrypt/decrypt calls corrupt state
     private readonly Lock _encryptLock = new();
 
@@ -165,7 +164,6 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
 
                 var pe3Msg = CreatePe3Message();
 
-                // CRITICAL FIX: Try to process Pe4 immediately from remaining buffer
                 // We might have received Pe2 + Pe4 in the same packet/read.
                 // If we don't process it now, we'll return to ReadAsync and deadlock
                 // because the data is already in _buffer.

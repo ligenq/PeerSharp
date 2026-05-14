@@ -33,7 +33,6 @@ internal class AlertsManager : IAlertsManager
 {
     private const int MaxAlertQueueSize = 10000;
 
-    // MEMORY FIX: Track queue size to prevent unbounded growth
     private readonly ConcurrentQueue<Alert> _alerts = new();
 
     private readonly Lock _lock = new();

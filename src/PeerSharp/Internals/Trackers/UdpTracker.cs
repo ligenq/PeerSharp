@@ -43,7 +43,6 @@ internal class UdpTracker : TrackerBase, IDisposable
     private readonly Random _random = new Random();
     private readonly IUdpSocketFactory _socketFactory;
 
-    // CRITICAL FIX: Synchronization for shared state (_client, _connectionId, _connectionIdTimestamp)
     private readonly SemaphoreSlim _syncLock = new SemaphoreSlim(1, 1);
 
     private readonly TimeProvider _timeProvider;

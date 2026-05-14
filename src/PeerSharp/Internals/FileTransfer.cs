@@ -662,11 +662,6 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         await EvaluateNextRequestsAsync(peer, immediate: false).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// SPEED STABILITY FIX: Support immediate evaluation for freshly unchoked peers.
-    /// When a peer unchokes us, we should send requests immediately rather than
-    /// waiting for the async queue, which can cause delays of several seconds.
-    /// </summary>
     public async Task EvaluateNextRequestsAsync(PeerCommunication peer, bool immediate)
     {
         if (immediate)
@@ -865,10 +860,6 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         await EvaluateNextRequestsAsync(peer, immediate: false).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// SPEED STABILITY FIX: Request blocks with optional immediate evaluation.
-    /// Use immediate=true for time-critical events like Unchoke to avoid queue delays.
-    /// </summary>
     public async Task RequestBlocksAsync(PeerCommunication peer, bool immediate)
     {
         await EvaluateNextRequestsAsync(peer, immediate).ConfigureAwait(false);
