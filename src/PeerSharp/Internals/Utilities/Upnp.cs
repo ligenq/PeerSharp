@@ -20,6 +20,7 @@ internal static class UpnpDiscovery
         "MX: 3\r\n\r\n";
 
     private const int SsdpPort = 1900;
+    private static readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(2) };
     private static readonly ILogger _logger = TorrentLoggerFactory.CreateLogger(nameof(UpnpDiscovery));
 
     public static Task<List<UpnpGateway>> DiscoverAsync(CancellationToken ct = default)
@@ -85,9 +86,7 @@ internal static class UpnpDiscovery
     {
         try
         {
-            using var http = new HttpClient();
-            http.Timeout = TimeSpan.FromSeconds(2);
-            var xml = await http.GetStringAsync(location, ct).ConfigureAwait(false);
+            var xml = await _httpClient.GetStringAsync(location, ct).ConfigureAwait(false);
             var doc = XDocument.Parse(xml);
             var ns = doc.Root?.GetDefaultNamespace() ?? XNamespace.None;
 
@@ -246,6 +245,7 @@ internal class UpnpGateway
 
 internal class UpnpPortMapping : IPortMapper
 {
+    private static readonly HttpClient _soapClient = new() { Timeout = TimeSpan.FromSeconds(10) };
     private readonly Func<CancellationToken, Task<List<UpnpGateway>>> _discoverGatewaysAsync;
     private readonly ILogger<UpnpPortMapping> _logger = TorrentLoggerFactory.CreateLogger<UpnpPortMapping>();
     private readonly List<(int Port, string Protocol, string Description)> _mappings = [];
@@ -408,14 +408,10 @@ internal class UpnpPortMapping : IPortMapper
     {
         try
         {
-            using var client = new HttpClient
-            {
-                Timeout = TimeSpan.FromSeconds(10) // UPnP requests should complete quickly
-            };
             var content = new StringContent(body, Encoding.UTF8, "text/xml");
             content.Headers.Add("SOAPACTION", $"\"{gateway.ServiceType}#{action}\"");
 
-            var response = await client.PostAsync(gateway.ControlUrl, content, ct).ConfigureAwait(false);
+            var response = await _soapClient.PostAsync(gateway.ControlUrl, content, ct).ConfigureAwait(false);
             return response.IsSuccessStatusCode;
         }
         catch (Exception ex)
