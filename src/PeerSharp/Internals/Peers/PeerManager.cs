@@ -5,6 +5,7 @@ using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
 using System.Collections.Concurrent;
 using System.Net;
+using System.Security.Cryptography;
 using System.Threading.Channels;
 using PeerSharp.Messages;
 
@@ -39,6 +40,7 @@ namespace PeerSharp.Internals.Peers;
 internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 {
     // relative to the top candidate are kept unchoked to maintain stability
+    private const int AllowedFastSetSize = 10;
     private const double GradualUnchokeThreshold = 0.7;
 
     // Periodic task intervals
@@ -894,6 +896,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 {
                     TryImmediateUnchoke(p);
                 }
+                if (p.RemoteSupportsFastExtension)
+                {
+                    FireAndForget(SendAllowedFastSetAsync(p), "SendAllowedFastSet");
+                }
                 break;
 
             case MessageId.NotInterested:
@@ -1658,6 +1664,56 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 // Cleanup will be handled by the connection failure path
             }
         }, TaskScheduler.Default);
+    }
+
+    private async Task SendAllowedFastSetAsync(PeerCommunication peer)
+    {
+        var remoteEndPoint = peer.RemoteEndPoint;
+        if (remoteEndPoint == null) return;
+
+        int numPieces = _torrent.Pieces.Count;
+        if (numPieces == 0) return;
+
+        // BEP-6: SHA1(IP_bytes + info_hash) generates deterministic piece indices for the allowed-fast set.
+        var ip = remoteEndPoint.Address;
+        if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+        byte[] ipBytes = ip.GetAddressBytes();
+
+        byte[] input = new byte[ipBytes.Length + InfoHash.V1Length];
+        ipBytes.CopyTo(input, 0);
+        _torrent.Hash.Span.CopyTo(input.AsSpan(ipBytes.Length));
+
+        byte[] hash = SHA1.HashData(input);
+        var sent = new HashSet<int>();
+        int attempts = 0;
+        int loops = 0;
+
+        while (true)
+        {
+            for (int i = 0; i < hash.Length / 4; i++)
+            {
+                loops++;
+                uint raw = (uint)hash[i * 4] << 24 | (uint)hash[(i * 4) + 1] << 16
+                         | (uint)hash[(i * 4) + 2] << 8 | hash[(i * 4) + 3];
+                int pieceIndex = (int)(raw % (uint)numPieces);
+
+                if (sent.Contains(pieceIndex))
+                {
+                    if (++loops > 500) return;
+                    continue;
+                }
+
+                if (_torrent.Pieces.HasPiece(pieceIndex))
+                {
+                    await peer.SendAllowedFastAsync(pieceIndex).ConfigureAwait(false);
+                    sent.Add(pieceIndex);
+                }
+
+                if (++attempts >= AllowedFastSetSize) return;
+            }
+
+            hash = SHA1.HashData(hash);
+        }
     }
 
     private void FireAndForget(Task task, string context)

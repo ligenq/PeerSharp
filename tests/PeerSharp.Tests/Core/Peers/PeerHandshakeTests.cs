@@ -48,6 +48,14 @@ public class PeerHandshakeTests
     }
 
     [Fact]
+    public void Create_SetsDhtBit_InReservedByte7()
+    {
+        var info = CreateInfo(TorrentVersion.V1);
+        byte[] handshake = PeerHandshake.Create(info, new byte[20]);
+        Assert.True((handshake[27] & 0x01) != 0);
+    }
+
+    [Fact]
     public void TryParse_ValidHandshake_ReturnsCapabilitiesAndPeerId()
     {
         var info = CreateInfo(TorrentVersion.Hybrid);

@@ -394,7 +394,7 @@ public class RobustnessTests
                 {
                     for (int i = 0; i < 20; i++)
                     {
-                        int peerId = cycleId * 1000 + i;
+                        int peerId = (cycleId * 1000) + i;
                         var endpoint = new IPEndPoint(IPAddress.Parse($"192.168.{cycleId}.{i}"), 6881);
 
                         if (model.TryConnect(peerId, endpoint, new object()))

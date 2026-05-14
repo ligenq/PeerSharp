@@ -707,9 +707,9 @@ public class ArchitectureTests
 
             var protectedMembers = type
                 .GetMembers(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
-                .Where(m => m is MethodInfo mi && mi.IsFamily || // protected method
-                           m is FieldInfo fi && fi.IsFamily ||   // protected field
-                           m is PropertyInfo pi && (pi.GetMethod?.IsFamily == true || pi.SetMethod?.IsFamily == true))
+                .Where(m => (m is MethodInfo mi && mi.IsFamily) || // protected method
+                           (m is FieldInfo fi && fi.IsFamily) ||   // protected field
+                           (m is PropertyInfo pi && (pi.GetMethod?.IsFamily == true || pi.SetMethod?.IsFamily == true)))
                 .Where(m =>
                 {
                     if (m is MethodInfo mi)
@@ -1823,7 +1823,7 @@ public class ArchitectureTests
 
                             // Skip specific acceptable patterns
                             if (line.Contains("_processingTask.Wait(TimeSpan") || // Shutdown with timeout
-                                line.Contains("GetAwaiter().GetResult()") && line.Contains("static")) // Static initializers
+                                (line.Contains("GetAwaiter().GetResult()") && line.Contains("static"))) // Static initializers
                             {
                                 continue;
                             }

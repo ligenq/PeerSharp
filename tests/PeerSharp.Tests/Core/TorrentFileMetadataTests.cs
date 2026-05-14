@@ -115,7 +115,7 @@ public class TorrentFileMetadataTests
     {
         var info = new Internals.TorrentFileInfo();
         info.PieceSize = 16384;
-        info.FullSize = 16384 * 10 + 1; // 11 pieces
+        info.FullSize = (16384 * 10) + 1; // 11 pieces
 
         Assert.Equal(11, info.MerklePieceCount);
     }

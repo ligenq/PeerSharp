@@ -761,7 +761,7 @@ public class CoyoteTests
                 {
                     for (int i = 0; i < 20; i++)
                     {
-                        int id = threadId * 100 + i;
+                        int id = (threadId * 100) + i;
                         model.TryAdd(id, id + 10000, $"value_{id}");
                     }
                 }));
@@ -805,7 +805,7 @@ public class CoyoteTests
                 {
                     for (int i = 0; i < 20; i++)
                     {
-                        int id = 1000 + threadId * 100 + i;
+                        int id = 1000 + (threadId * 100) + i;
                         model.TryAdd(id, id + 10000, $"value_{id}");
                     }
                 }));
@@ -819,7 +819,7 @@ public class CoyoteTests
                 {
                     for (int i = 0; i < 25; i++)
                     {
-                        int id = threadId * 25 + i;
+                        int id = (threadId * 25) + i;
                         model.TryRemove(id, id + 10000);
                     }
                 }));
@@ -1122,7 +1122,7 @@ public class CoyoteTests
                 {
                     for (int i = 0; i < 50; i++)
                     {
-                        await channel.Writer.WriteAsync(threadId * 1000 + i);
+                        await channel.Writer.WriteAsync((threadId * 1000) + i);
                         lock (writeLock)
                         {
                             totalWritten++;
@@ -1184,7 +1184,7 @@ public class CoyoteTests
                     for (int i = 0; i < 100; i++)
                     {
                         // TryWrite should never block or throw
-                        channel.Writer.TryWrite(threadId * 1000 + i);
+                        channel.Writer.TryWrite((threadId * 1000) + i);
                     }
                 }));
             }

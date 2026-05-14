@@ -370,7 +370,7 @@ public class UdpTrackerTests
         var req2 = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
         int transId2 = BinaryPrimitives.ReadInt32BigEndian(req2.AsSpan(12));
 
-        byte[] res2 = new byte[8 + 12 * 2];
+        byte[] res2 = new byte[8 + (12 * 2)];
         BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(0), 2); // Action Scrape
         BinaryPrimitives.WriteInt32BigEndian(res2.AsSpan(4), transId2);
 
@@ -1244,7 +1244,7 @@ public class UdpTrackerTests
 
         var req = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
         int transId = BinaryPrimitives.ReadInt32BigEndian(req.AsSpan(12));
-        byte[] response = new byte[8 + 12 * 2];
+        byte[] response = new byte[8 + (12 * 2)];
         BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(0), 2);
         BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(4), transId);
         BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(8), 4);

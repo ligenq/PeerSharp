@@ -292,7 +292,7 @@ public class MerkleTreeAdditionalTests
         for (int i = 0; i < proofCount; i++)
         {
             var h = new byte[MerkleTree.HashSize];
-            Buffer.BlockCopy(proofData, pieceHashBytes + i * MerkleTree.HashSize, h, 0, MerkleTree.HashSize);
+            Buffer.BlockCopy(proofData, pieceHashBytes + (i * MerkleTree.HashSize), h, 0, MerkleTree.HashSize);
             proofHashes.Add(h);
         }
 
@@ -323,7 +323,7 @@ public class MerkleTreeAdditionalTests
         for (int i = 0; i < proofCount; i++)
         {
             var h = new byte[MerkleTree.HashSize];
-            Buffer.BlockCopy(proofData, pieceHashBytes + i * MerkleTree.HashSize, h, 0, MerkleTree.HashSize);
+            Buffer.BlockCopy(proofData, pieceHashBytes + (i * MerkleTree.HashSize), h, 0, MerkleTree.HashSize);
             proofHashes.Add(h);
         }
 

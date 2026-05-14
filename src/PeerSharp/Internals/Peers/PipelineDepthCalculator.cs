@@ -55,7 +55,7 @@ internal static class PipelineDepthCalculator
         int depth = optimalDepth;
         if (strikes > 0)
         {
-            depth = Math.Max(minPipelineDepth, depth - strikes * 10);
+            depth = Math.Max(minPipelineDepth, depth - (strikes * 10));
         }
 
         if (rttMs >= 800)

@@ -816,6 +816,30 @@ public class PeerManagerTests
         try { if (Directory.Exists(ctx.Path)) { Directory.Delete(ctx.Path, true); } } catch { }
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task MessageReceivedAsync_Interested_FastExtensionPeer_SendsAllowedFast()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Pieces.AddPiece(0);
+
+        var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System);
+        SetPrivateField(peer, "_connected", 1);
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
+        SetPrivateField(peer, "_peerInterested", 1);
+        peer.RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 6881);
+
+        await ctx.Manager.MessageReceivedAsync(peer, new PeerMessage(MessageId.Interested));
+        await Task.Delay(200);
+
+        var queue = GetPrivateField<MessageQueue>(peer, "_sendQueue");
+        var messages = new List<PeerMessage>();
+        while (queue.TryDequeue(out var msg)) messages.Add(msg!);
+
+        Assert.Contains(messages, m => m.Id == MessageId.AllowedFast);
+
+        await CleanupAsync(ctx);
+    }
+
     private static void SetPrivateProperty(object target, string propertyName, object value)
     {
         var prop = target.GetType().GetProperty(propertyName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
