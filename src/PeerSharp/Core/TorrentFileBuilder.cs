@@ -11,9 +11,9 @@ namespace PeerSharp.Core;
 public sealed class TorrentFileBuilder
 {
     private const uint DefaultPieceLength = 256 * 1024;
-    private readonly List<List<string>> _announceTiers = new();
-    private readonly List<FileSource> _files = new();
-    private readonly List<string> _webSeeds = new();
+    private readonly List<List<string>> _announceTiers = [];
+    private readonly List<FileSource> _files = [];
+    private readonly List<string> _webSeeds = [];
     private string? _announce;
     private bool _isPrivate;
     private string? _name;
@@ -73,7 +73,7 @@ public sealed class TorrentFileBuilder
 
         if (_announceTiers.Count == 0)
         {
-            _announceTiers.Add(new List<string>());
+            _announceTiers.Add([]);
         }
 
         _announceTiers[0].Add(trackerUrl);
@@ -580,7 +580,7 @@ public sealed class TorrentFileBuilder
         {
             if (announceTiers.Count == 0)
             {
-                announceTiers.Add(new List<string> { announce });
+                announceTiers.Add([announce]);
             }
             else if (!announceTiers[0].Any(url => string.Equals(url, announce, StringComparison.Ordinal)))
             {

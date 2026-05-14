@@ -248,9 +248,9 @@ internal class UpnpPortMapping : IPortMapper
 {
     private readonly Func<CancellationToken, Task<List<UpnpGateway>>> _discoverGatewaysAsync;
     private readonly ILogger<UpnpPortMapping> _logger = TorrentLoggerFactory.CreateLogger<UpnpPortMapping>();
-    private readonly List<(int Port, string Protocol, string Description)> _mappings = new();
-    private readonly Dictionary<UpnpGateway, (PortMappingResult MappingResult, string? Error)> _status = new();
-    private List<UpnpGateway> _gateways = new();
+    private readonly List<(int Port, string Protocol, string Description)> _mappings = [];
+    private readonly Dictionary<UpnpGateway, (PortMappingResult MappingResult, string? Error)> _status = [];
+    private List<UpnpGateway> _gateways = [];
 
     public UpnpPortMapping()
         : this(UpnpDiscovery.DiscoverAsync)

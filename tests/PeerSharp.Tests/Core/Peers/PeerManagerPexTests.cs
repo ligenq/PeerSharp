@@ -13,7 +13,7 @@ public class PeerManagerPexTests
     {
         public int? LocalMessageId { get; set; }
         public int? RemoteMessageId { get; set; }
-        public List<List<(IPEndPoint, byte)>> Updates { get; } = new();
+        public List<List<(IPEndPoint, byte)>> Updates { get; } = [];
 
         public void Init(ExtensionHandshake handshake) { }
         public void SetLocalMessageId(int id) => LocalMessageId = id;

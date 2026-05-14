@@ -170,7 +170,7 @@ internal sealed class TorrentQueueManager
 
     internal sealed class QueuePlan
     {
-        public List<InfoHash> Start { get; } = new();
-        public List<InfoHash> Stop { get; } = new();
+        public List<InfoHash> Start { get; } = [];
+        public List<InfoHash> Stop { get; } = [];
     }
 }

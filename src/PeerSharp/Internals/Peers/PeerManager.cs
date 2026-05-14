@@ -79,12 +79,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private readonly DateTimeOffset _startTime;
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
-    private readonly List<PeerCommunication> _unchokeCandidates = new();
+    private readonly List<PeerCommunication> _unchokeCandidates = [];
 
     // Reusable collections for UnchokePeers to avoid allocations every 10 seconds
-    private readonly List<PeerCommunication> _unchokePeersList = new();
+    private readonly List<PeerCommunication> _unchokePeersList = [];
 
-    private readonly HashSet<PeerCommunication> _unchokeSet = new();
+    private readonly HashSet<PeerCommunication> _unchokeSet = [];
 
     // Track pending connections separately
     // O(1) lookup for connected endpoints

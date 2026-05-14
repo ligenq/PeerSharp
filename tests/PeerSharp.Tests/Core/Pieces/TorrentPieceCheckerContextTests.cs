@@ -111,7 +111,7 @@ public class TorrentPieceCheckerContextTests
             PieceCount = 2,
             PiecesRoot = piecesRoot
         };
-        entry.PieceLayers = new List<byte[]> { leaf0, leaf1 };
+        entry.PieceLayers = [leaf0, leaf1];
 
         var metadata = BuildV2Metadata(entry);
         metadata.Info.FullSize = 32768;
@@ -141,7 +141,7 @@ public class TorrentPieceCheckerContextTests
             PieceCount = 2,
             PiecesRoot = MerkleTree.HashPair(leaf0, leaf1)
         };
-        entry.PieceLayers = new List<byte[]> { leaf0, leaf1 };
+        entry.PieceLayers = [leaf0, leaf1];
 
         var metadata = BuildV2Metadata(entry);
         metadata.Info.FullSize = 32768;

@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.Internals;
 
@@ -59,7 +58,7 @@ internal class TorrentFileEntry
 
 internal class TorrentFileInfo
 {
-    public List<TorrentFileEntry> Files { get; set; } = new();
+    public List<TorrentFileEntry> Files { get; set; } = [];
 
     public long FullSize { get; set; }
 
@@ -103,12 +102,12 @@ internal class TorrentFileInfo
     /// BEP 30: Cached Merkle tree hashes. Populated as hashes are received from peers.
     /// Index 0 = root, then level by level down to piece hashes.
     /// </summary>
-    public List<byte[]?> MerkleTree { get; set; } = new();
+    public List<byte[]?> MerkleTree { get; set; } = [];
 
     public string Name { get; set; } = string.Empty;
 
     /// <summary>V1: SHA-1 piece hashes (20 bytes each)</summary>
-    public List<byte[]> Pieces { get; set; } = new();
+    public List<byte[]> Pieces { get; set; } = [];
 
     public uint PieceSize { get; set; }
 
@@ -286,7 +285,7 @@ internal class TorrentFileInfo
             List<byte[]> layer;
             if (file.PieceCount == 1)
             {
-                layer = new List<byte[]> { file.PiecesRoot };
+                layer = [file.PiecesRoot];
             }
             else if (file.PieceLayers != null)
             {
@@ -344,7 +343,7 @@ internal class TorrentFileInfo
 
             var received = Utilities.MerkleTree.ParsePieceLayer(hashes.Slice(0, length * Utilities.MerkleTree.HashSize).ToArray());
             var proof = proofHashCount == 0
-                ? new List<byte[]>()
+                ? []
                 : Utilities.MerkleTree.ParsePieceLayer(hashes.Slice(length * Utilities.MerkleTree.HashSize).ToArray());
 
             if (!Utilities.MerkleTree.VerifyPieceLayerSubsetAgainstRoot(
@@ -613,11 +612,11 @@ internal class TorrentFileInfo
 internal class TorrentFileMetadata
 {
     public string Announce { get; set; } = string.Empty;
-    public List<string> AnnounceList { get; set; } = new();
+    public List<string> AnnounceList { get; set; } = [];
     /// <summary>
     /// BEP 12: Tracker tiers (announce-list). Each inner list is a tier.
     /// </summary>
-    public List<List<string>> AnnounceTiers { get; set; } = new();
+    public List<List<string>> AnnounceTiers { get; set; } = [];
     public TorrentFileInfo Info { get; set; } = new();
     public byte[]? InfoBytes { get; set; }
 
@@ -630,7 +629,7 @@ internal class TorrentFileMetadata
     /// <summary>
     /// BEP 19: List of HTTP/FTP web seed URLs for downloading torrent content.
     /// </summary>
-    public List<string> WebSeedUrls { get; set; } = new();
+    public List<string> WebSeedUrls { get; set; } = [];
 
     /// <summary>
     /// Byte array comparer for dictionary keys.

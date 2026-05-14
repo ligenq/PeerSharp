@@ -23,7 +23,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     private readonly IHttpClientFactory _httpClientFactory = new HttpClientFactory();
     private readonly Lock _lock = new();
     private readonly ILogger<WebSeedManager> _logger = TorrentLoggerFactory.CreateLogger<WebSeedManager>();
-    private readonly List<WebSeedSource> _sources = new();
+    private readonly List<WebSeedSource> _sources = [];
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
     private CancellationTokenSource _cts = new();

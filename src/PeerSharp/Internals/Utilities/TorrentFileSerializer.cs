@@ -45,7 +45,7 @@ internal static class TorrentFileSerializer
         }
         else if (tiers.Count == 0)
         {
-            tiers.Add(new List<string> { announce });
+            tiers.Add([announce]);
         }
 
         if (!string.IsNullOrWhiteSpace(announce))

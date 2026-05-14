@@ -11,7 +11,7 @@ public class DhtManagerTests
     private class MockUdpListener : IUdpListener
     {
         public int Port => 0;
-        public List<(byte[] Data, IPEndPoint EndPoint)> SentPackets { get; } = new();
+        public List<(byte[] Data, IPEndPoint EndPoint)> SentPackets { get; } = [];
         public IUdpReceiver? Receiver { get; private set; }
 
         public void RegisterReceiver(IUdpReceiver receiver)
@@ -37,7 +37,7 @@ public class DhtManagerTests
 
     private class MockDhtCallback : IDhtCallback
     {
-        public List<(InfoHash Hash, List<IPEndPoint> Peers)> FoundPeers { get; } = new();
+        public List<(InfoHash Hash, List<IPEndPoint> Peers)> FoundPeers { get; } = [];
         public void OnPeersFound(InfoHash infoHash, List<IPEndPoint> peers)
         {
             FoundPeers.Add((infoHash, peers));

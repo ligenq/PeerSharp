@@ -19,7 +19,7 @@ public class UtPexTests
         public IPeerListener Listener { get; set; } = null!;
         public IUtHashPiece? UtHashPiece => throw new NotImplementedException();
         public IUtHolepunch UtHolepunch => throw new NotImplementedException();
-        public List<PeerMessage> SentMessages { get; } = new();
+        public List<PeerMessage> SentMessages { get; } = [];
         public Task SetInterestedAsync(bool interested) => Task.CompletedTask;
         public Task SendMessageAsync(PeerMessage msg)
         {
@@ -30,9 +30,9 @@ public class UtPexTests
 
     private class MockPeerListener : IPeerListener
     {
-        public List<IPEndPoint> Added { get; } = new();
-        public List<byte> AddedFlags { get; } = new();
-        public List<IPEndPoint> Dropped { get; } = new();
+        public List<IPEndPoint> Added { get; } = [];
+        public List<byte> AddedFlags { get; } = [];
+        public List<IPEndPoint> Dropped { get; } = [];
 
         public Task HandshakeFinishedAsync(IPeerCommunication peer) => Task.CompletedTask;
         public Task ConnectionClosedAsync(IPeerCommunication peer, int code) => Task.CompletedTask;

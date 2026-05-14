@@ -15,7 +15,7 @@ internal static class TorrentTestUtility
 {
     internal class MockBandwidthManager : IBandwidthManager
     {
-        private readonly Dictionary<string, BandwidthChannel> _channels = new();
+        private readonly Dictionary<string, BandwidthChannel> _channels = [];
 
         public void SetGlobalLimits(int downloadLimit, int uploadLimit) { }
         public void SetGlobalDiskLimits(int readLimit, int writeLimit) { }
@@ -73,7 +73,7 @@ internal static class TorrentTestUtility
         public void RegisterAlerts(uint categories) { }
         public List<Alert> PopAlerts()
         {
-            return new();
+            return [];
         }
 
         public async IAsyncEnumerable<Alert> GetAlertsAsync(TimeSpan? timeout = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)

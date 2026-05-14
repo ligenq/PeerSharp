@@ -43,9 +43,9 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
     private readonly ITrackerFactory _trackerFactory;
-    private readonly Dictionary<ITracker, TrackerInfo> _trackerLookup = new();
-    private readonly List<TrackerInfo> _trackers = new();
-    private readonly List<TrackerTier> _tiers = new();
+    private readonly Dictionary<ITracker, TrackerInfo> _trackerLookup = [];
+    private readonly List<TrackerInfo> _trackers = [];
+    private readonly List<TrackerTier> _tiers = [];
     private readonly HashSet<string> _trackerUrls = new(StringComparer.OrdinalIgnoreCase); // O(1) URL dedup
     private AtomicDisposal _disposal = new();
 
@@ -110,7 +110,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
     public async Task AnnounceAsync(string? url = null, CancellationToken cancellationToken = default)
     {
-        List<TrackerInfo> toAnnounce = new();
+        List<TrackerInfo> toAnnounce = [];
         lock (_lock)
         {
             if (url != null)
@@ -396,7 +396,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     public async Task StopAsync()
     {
         List<TrackerInfo> toStop;
-        List<CancellationTokenSource> ctsToCancel = new();
+        List<CancellationTokenSource> ctsToCancel = [];
 
         lock (_lock)
         {
@@ -672,7 +672,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     private sealed class TrackerTier
     {
         public int Index { get; init; }
-        public List<TrackerInfo> Trackers { get; } = new();
+        public List<TrackerInfo> Trackers { get; } = [];
         public int ConsecutiveFailures { get; set; }
         public DateTimeOffset LastSuccess { get; set; } = DateTimeOffset.MinValue;
     }

@@ -20,7 +20,7 @@ public class UtHashPieceTests
         public IPeerListener Listener { get; set; } = null!;
         public IUtHashPiece? UtHashPiece => throw new NotImplementedException();
         public IUtHolepunch UtHolepunch => throw new NotImplementedException();
-        public List<PeerMessage> SentMessages { get; } = new();
+        public List<PeerMessage> SentMessages { get; } = [];
         public Task SetInterestedAsync(bool interested) => Task.CompletedTask;
         public Task SendMessageAsync(PeerMessage msg)
         {

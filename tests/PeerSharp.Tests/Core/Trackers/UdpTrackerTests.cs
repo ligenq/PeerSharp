@@ -13,11 +13,11 @@ public class UdpTrackerTests
 {
     private class MockUdpSocket : IUdpSocket
     {
-        public List<byte[]> SentPackets { get; } = new();
+        public List<byte[]> SentPackets { get; } = [];
         public bool Closed { get; private set; }
         private TaskCompletionSource<UdpReceiveResult>? _receiveTcs;
         private readonly Queue<UdpReceiveResult> _queuedResponses = new();
-        private readonly List<TaskCompletionSource<byte[]>> _sentPacketWaiters = new();
+        private readonly List<TaskCompletionSource<byte[]>> _sentPacketWaiters = [];
 
         public Socket Client => throw new NotImplementedException();
 
@@ -354,7 +354,7 @@ public class UdpTrackerTests
         byte[] hash1 = InfoHash.CreateRandom().ToArray();
         byte[] hash2 = InfoHash.CreateRandom().ToArray();
 
-        var scrapeTask = tracker.ScrapeMultipleAsync(new List<byte[]> { hash1, hash2 }, CancellationToken.None);
+        var scrapeTask = tracker.ScrapeMultipleAsync([hash1, hash2], CancellationToken.None);
 
         // Connect response
         var req1 = await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
@@ -590,7 +590,7 @@ public class UdpTrackerTests
         var tracker = new UdpTracker(_timeProvider, _socketFactory);
         tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
 
-        var response = await tracker.ScrapeMultipleAsync(new List<byte[]>(), CancellationToken.None);
+        var response = await tracker.ScrapeMultipleAsync([], CancellationToken.None);
 
         Assert.Empty(response.Results);
         Assert.Empty(_socketFactory.LastSocket.SentPackets);
@@ -815,7 +815,11 @@ public class UdpTrackerTests
     {
         // Configure non-default values so the assertions actually exercise the encoder.
         var peerId = new byte[20];
-        for (int i = 0; i < peerId.Length; i++) peerId[i] = (byte)(0x40 + i);
+        for (int i = 0; i < peerId.Length; i++)
+        {
+            peerId[i] = (byte)(0x40 + i);
+        }
+
         _torrent.Settings.PeerId = peerId;
         _torrent.Settings.Connection.TcpPort = 12345;
 
@@ -1166,7 +1170,7 @@ public class UdpTrackerTests
         tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
 
         byte[] hash = InfoHash.CreateRandom().ToArray();
-        var scrapeTask = tracker.ScrapeMultipleAsync(new List<byte[]> { hash }, CancellationToken.None);
+        var scrapeTask = tracker.ScrapeMultipleAsync([hash], CancellationToken.None);
 
         // attempt 0: timeout on connect
         await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
@@ -1201,7 +1205,7 @@ public class UdpTrackerTests
         tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
 
         byte[] hash = InfoHash.CreateRandom().ToArray();
-        var scrapeTask = tracker.ScrapeMultipleAsync(new List<byte[]> { hash }, CancellationToken.None);
+        var scrapeTask = tracker.ScrapeMultipleAsync([hash], CancellationToken.None);
 
         int[] retryDelaysMs = { 1000, 2000, 4000 };
         for (int attempt = 0; attempt < 4; attempt++)

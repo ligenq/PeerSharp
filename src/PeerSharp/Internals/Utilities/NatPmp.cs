@@ -15,10 +15,10 @@ internal class NatPmpPortMapping : IPortMapper
     private const int NatPmpPort = 5351;
     private static readonly ILogger _logger = TorrentLoggerFactory.CreateLogger<NatPmpPortMapping>();
     private readonly Func<IEnumerable<IPAddress>> _gatewayProvider;
-    private readonly List<IPAddress> _gateways = new();
-    private readonly List<(int Port, string Protocol)> _mappings = new();
+    private readonly List<IPAddress> _gateways = [];
+    private readonly List<(int Port, string Protocol)> _mappings = [];
     private readonly int _natPmpPort;
-    private readonly Dictionary<IPAddress, (PortMappingResult MappingResult, string? Error, int? ExternalPort)> _status = new();
+    private readonly Dictionary<IPAddress, (PortMappingResult MappingResult, string? Error, int? ExternalPort)> _status = [];
     private readonly TimeProvider _timeProvider;
 
     public NatPmpPortMapping()

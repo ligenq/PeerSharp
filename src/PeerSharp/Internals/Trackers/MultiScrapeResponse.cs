@@ -6,5 +6,5 @@ namespace PeerSharp.Internals.Trackers;
 /// </summary>
 internal class MultiScrapeResponse
 {
-    public Dictionary<string, ScrapeResponse> Results { get; set; } = new();
+    public Dictionary<string, ScrapeResponse> Results { get; set; } = [];
 }

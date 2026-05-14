@@ -1120,7 +1120,7 @@ public class WebTorrentSessionTests
             Trackers = new FakeTrackers(trackers.Length == 0 ? ["wss://tracker.example"] : trackers);
         }
 
-        public List<(Stream Stream, bool Initiator)> AttachedStreams { get; } = new();
+        public List<(Stream Stream, bool Initiator)> AttachedStreams { get; } = [];
         public long DataDownloaded { get; set; }
         public long DataLeft { get; set; } = 1024;
         public long DataUploaded { get; set; }
@@ -1203,7 +1203,7 @@ public class WebTorrentSessionTests
 
     private sealed class FakeWebRtcConnectionFactory : IWebRtcConnectionFactory
     {
-        public List<FakeWebRtcConnection> Created { get; } = new();
+        public List<FakeWebRtcConnection> Created { get; } = [];
         public bool ConnectResult { get; set; } = true;
         public string OfferSdp { get; set; } = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fake\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n";
         public string AnswerSdp { get; set; } = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fake\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n";
@@ -1252,8 +1252,8 @@ public class WebTorrentSessionTests
         public int ConnectCalls { get; private set; }
         public bool Disposed { get; private set; }
         public IWebRtcDataChannel? LastCreatedChannel { get; private set; }
-        public List<string> AnswerIceCandidates { get; } = new();
-        public List<string> RemoteCandidates { get; } = new();
+        public List<string> AnswerIceCandidates { get; } = [];
+        public List<string> RemoteCandidates { get; } = [];
         public WebRtcSessionDescription? RemoteDescription { get; private set; }
         public bool ThrowOnSetRemoteDescription { get; set; }
 
@@ -1353,7 +1353,7 @@ public class WebTorrentSessionTests
         public string Label { get; }
         public RTCDataChannelState ReadyState => RTCDataChannelState.Open;
         public IAsyncEnumerable<ReadOnlyMemory<byte>> Messages => _messages.Reader.ReadAllAsync();
-        public List<byte[]> SentPayloads { get; } = new();
+        public List<byte[]> SentPayloads { get; } = [];
 
         public Task WaitUntilOpenAsync(CancellationToken cancellationToken = default)
             => _openTcs.Task.WaitAsync(cancellationToken);
@@ -1411,7 +1411,7 @@ public class WebTorrentSessionTests
         public Func<CancellationToken, Task>? ConnectStep { get; set; }
         public int ThrowOnSendCallNumber { get; set; }
 
-        public List<string> SentMessages { get; } = new();
+        public List<string> SentMessages { get; } = [];
 
         public Task ConnectAsync(Uri uri, CancellationToken cancellationToken)
         {

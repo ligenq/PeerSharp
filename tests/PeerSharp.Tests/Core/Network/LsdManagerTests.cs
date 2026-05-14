@@ -12,7 +12,7 @@ public class LsdManagerTests
 {
     private class MockUdpSocket : IUdpSocket
     {
-        public List<byte[]> SentPackets { get; } = new();
+        public List<byte[]> SentPackets { get; } = [];
         public bool JoinedMulticast { get; private set; }
         private readonly TaskCompletionSource<UdpReceiveResult> _receiveTcs = new();
 
@@ -64,7 +64,7 @@ public class LsdManagerTests
 
     private class MockResolver : ITorrentResolver
     {
-        public Dictionary<InfoHash, Torrent> Torrents { get; } = new();
+        public Dictionary<InfoHash, Torrent> Torrents { get; } = [];
         public ITorrent? GetTorrent(InfoHash hash)
         {
             return Torrents.TryGetValue(hash, out var t) ? t : null;

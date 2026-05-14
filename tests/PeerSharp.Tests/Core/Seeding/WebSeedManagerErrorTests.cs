@@ -11,7 +11,7 @@ public class WebSeedManagerErrorTests
     private class MockHttpClient : IHttpClient
     {
         public Queue<HttpResponseMessage> Responses { get; } = new();
-        public List<string> RequestedUrls { get; } = new();
+        public List<string> RequestedUrls { get; } = [];
 
         public Task<byte[]> GetByteArrayAsync(string requestUri, CancellationToken cancellationToken)
         {

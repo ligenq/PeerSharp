@@ -299,7 +299,10 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
 
     private void HandleLocalIceCandidate(PendingPeer pending, WebRtcIceCandidateDescription candidate)
     {
-        if (!IceCandidateFilter.IsSupportedIceCandidate(candidate.Candidate)) return;
+        if (!IceCandidateFilter.IsSupportedIceCandidate(candidate.Candidate))
+        {
+            return;
+        }
 
         lock (pending.SyncRoot)
         {
@@ -337,7 +340,10 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
 
     private void BufferEarlyRemoteCandidate(string offerId, string candidate)
     {
-        if (!_earlyRemoteCandidates.ContainsKey(offerId) && _earlyRemoteCandidates.Count >= MaxPendingConnections) return;
+        if (!_earlyRemoteCandidates.ContainsKey(offerId) && _earlyRemoteCandidates.Count >= MaxPendingConnections)
+        {
+            return;
+        }
 
         var candidates = _earlyRemoteCandidates.GetOrAdd(offerId, static _ => new ConcurrentQueue<string>());
         candidates.Enqueue(candidate);
@@ -352,7 +358,10 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
         var candidates = new List<string>();
         if (_earlyRemoteCandidates.TryRemove(pending.OfferId, out var earlyCandidates))
         {
-            while (earlyCandidates.TryDequeue(out var candidate)) candidates.Add(candidate);
+            while (earlyCandidates.TryDequeue(out var candidate))
+            {
+                candidates.Add(candidate);
+            }
         }
 
         lock (pending.SyncRoot)
@@ -420,10 +429,18 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
 
     private static string FormatOfferIdForLog(string? offerId)
     {
-        if (string.IsNullOrEmpty(offerId)) return string.Empty;
+        if (string.IsNullOrEmpty(offerId))
+        {
+            return string.Empty;
+        }
+
         var bytes = Encoding.Latin1.GetBytes(offerId);
         var builder = new StringBuilder(bytes.Length * 2);
-        foreach (var b in bytes) builder.Append(b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
+        foreach (var b in bytes)
+        {
+            builder.Append(b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
         return builder.ToString();
     }
 

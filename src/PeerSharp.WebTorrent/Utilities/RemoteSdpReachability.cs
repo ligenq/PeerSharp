@@ -148,7 +148,10 @@ internal static class RemoteSdpReachability
     private static bool IsPrivateIPv4(IPAddress address)
     {
         var bytes = address.GetAddressBytes();
-        if (bytes.Length != 4) return false;
+        if (bytes.Length != 4)
+        {
+            return false;
+        }
 
         return bytes[0] switch
         {

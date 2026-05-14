@@ -302,12 +302,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private const int SendQueueCapacityMax = 1000;
     private const int SendQueueCapacityMin = 200;
     private const int SendQueueTimeoutMs = ProtocolConstants.SendQueueTimeoutMs;
-    private readonly HashSet<int> _allowedFastPieces = new();
+    private readonly HashSet<int> _allowedFastPieces = [];
     private readonly Lock _fastPiecesLock = new();
     private readonly int _lastLoggedPipelineDepth = 0;
     private readonly ILogger<PeerCommunication> _logger = TorrentLoggerFactory.CreateLogger<PeerCommunication>();
     private readonly MessageQueue _sendQueue;
-    private readonly List<int> _suggestedPieces = new();
+    private readonly List<int> _suggestedPieces = [];
     private readonly Torrent _torrent;
     private readonly TimeProvider _timeProvider;
 
@@ -817,6 +817,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
     }
 
+    [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
     public async ValueTask DisposeAsync()
     {
         if (_disposal.MarkDisposed())

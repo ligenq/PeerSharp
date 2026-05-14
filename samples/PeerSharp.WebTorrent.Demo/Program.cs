@@ -80,11 +80,11 @@ internal class Program
 
         var iceServers = options.IceServers.Count > 0
             ? options.IceServers
-            : new List<WebTorrentIceServer>
-            {
+            :
+            [
                 new() { Urls = { "stun:stun.l.google.com:19302" } },
                 new() { Urls = { "stun:stun1.l.google.com:19302" } }
-            };
+            ];
 
         var webTorrentOptions = new WebTorrentSessionOptions
         {

@@ -225,7 +225,7 @@ public class LifecycleTests : IDisposable
 
         while (leecherTorrent.Peers.ConnectedCount == 0 && !cts.IsCancellationRequested)
         {
-            leecherEngine.OnPeersFound(leecherTorrent.Hash, new List<IPEndPoint> { seedEndpoint });
+            leecherEngine.OnPeersFound(leecherTorrent.Hash, [seedEndpoint]);
             try { await Task.Delay(200, cts.Token); } catch { break; }
         }
 

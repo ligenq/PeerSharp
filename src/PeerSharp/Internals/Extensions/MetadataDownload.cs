@@ -6,10 +6,10 @@ namespace PeerSharp.Internals.Extensions;
 
 internal class MetadataDownload : IMetadataDownload, IDisposable
 {
-    private readonly List<IPeerCommunication> _activePeers = new();
+    private readonly List<IPeerCommunication> _activePeers = [];
     private readonly Lock _lock = new();
     private readonly ILogger<MetadataDownload> _logger = TorrentLoggerFactory.CreateLogger<MetadataDownload>();
-    private readonly Dictionary<int, PendingMetadataRequest> _pendingRequests = new();
+    private readonly Dictionary<int, PendingMetadataRequest> _pendingRequests = [];
     private readonly Torrent _torrent;
     private AtomicDisposal _disposal = new();
 

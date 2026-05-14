@@ -11,13 +11,13 @@ namespace PeerSharp.Internals.Utilities;
 internal class FastIpToCountry
 {
     private readonly List<(uint StartIp, ushort CountryIdx)>[] _buckets = new List<(uint StartIp, ushort CountryIdx)>[256];
-    private readonly List<string> _countries = new();
+    private readonly List<string> _countries = [];
 
     public FastIpToCountry()
     {
         for (int i = 0; i < 256; i++)
         {
-            _buckets[i] = new List<(uint StartIp, ushort CountryIdx)>();
+            _buckets[i] = [];
         }
     }
 

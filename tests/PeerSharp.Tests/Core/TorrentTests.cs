@@ -340,7 +340,7 @@ public class TorrentTests
 
     private sealed class RecordingFileHandleCache : IFileHandleCache
     {
-        public List<string> ClosedRoots { get; } = new();
+        public List<string> ClosedRoots { get; } = [];
 
         public void CloseTorrentHandles(string rootPath)
         {

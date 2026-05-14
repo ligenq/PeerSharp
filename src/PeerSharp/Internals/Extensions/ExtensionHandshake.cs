@@ -5,7 +5,7 @@ namespace PeerSharp.Internals.Extensions;
 internal class ExtensionHandshake
 {
     public string Client { get; set; } = string.Empty;
-    public Dictionary<string, int> MessageIds { get; set; } = new();
+    public Dictionary<string, int> MessageIds { get; set; } = [];
     public int? MetadataSize { get; set; }
     public byte[]? YourIp { get; set; }
 

@@ -18,54 +18,62 @@ internal static class ProxyHelper
         {
             await tcpClient.ConnectAsync(proxyHost, proxyPort, cancellationToken).ConfigureAwait(false);
             var stream = tcpClient.GetStream();
-
-            var connectRequest = $"CONNECT {targetHost}:{targetPort} HTTP/1.1\r\n" +
-                                 $"Host: {targetHost}:{targetPort}\r\n";
-
-            if (!string.IsNullOrEmpty(username))
-            {
-                var auth = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
-                connectRequest += $"Proxy-Authorization: Basic {auth}\r\n";
-            }
-
-            connectRequest += "\r\n";
-
-            await stream.WriteAsync(Encoding.UTF8.GetBytes(connectRequest), cancellationToken).ConfigureAwait(false);
-
-            byte[] buffer = new byte[4096];
-            int totalRead = 0;
-            do
-            {
-                int read = await stream.ReadAsync(buffer.AsMemory(totalRead, 1), cancellationToken).ConfigureAwait(false);
-                if (read == 0)
-                {
-                    throw new IOException("Unexpected end of stream");
-                }
-
-                totalRead += read;
-            }
-            while (totalRead < 4 ||
-                    buffer[totalRead - 4] != '\r' || buffer[totalRead - 3] != '\n' ||
-                    buffer[totalRead - 2] != '\r' || buffer[totalRead - 1] != '\n');
-
-            var response = Encoding.UTF8.GetString(buffer, 0, totalRead);
-            var statusLine = response.Split("\r\n")[0];
-
-            // Validate HTTP status line format: "HTTP/x.x 200 ..."
-            if (!statusLine.StartsWith("HTTP/", StringComparison.OrdinalIgnoreCase) ||
-                !statusLine.Contains(" 200 "))
-            {
-                throw new IOException($"HTTP Proxy connection failed: {statusLine}");
-            }
-
-            _logger.LogDebug("HTTP Proxy: Connection established to {TargetHost}:{TargetPort}", targetHost, targetPort);
-            return (stream, tcpClient);
+            return await NegotiateHttpProxyAsync(stream, tcpClient, targetHost, targetPort, username, password, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
             tcpClient.Dispose();
             throw;
         }
+    }
+
+    internal static async Task<(Stream Stream, TcpClient Client)> NegotiateHttpProxyAsync(
+        Stream stream, TcpClient client,
+        string targetHost, int targetPort,
+        string? username, string? password,
+        CancellationToken cancellationToken)
+    {
+        var connectRequest = $"CONNECT {targetHost}:{targetPort} HTTP/1.1\r\n" +
+                             $"Host: {targetHost}:{targetPort}\r\n";
+
+        if (!string.IsNullOrEmpty(username))
+        {
+            var auth = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
+            connectRequest += $"Proxy-Authorization: Basic {auth}\r\n";
+        }
+
+        connectRequest += "\r\n";
+
+        await stream.WriteAsync(Encoding.UTF8.GetBytes(connectRequest), cancellationToken).ConfigureAwait(false);
+
+        byte[] buffer = new byte[4096];
+        int totalRead = 0;
+        do
+        {
+            int read = await stream.ReadAsync(buffer.AsMemory(totalRead, 1), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                throw new IOException("Unexpected end of stream");
+            }
+
+            totalRead += read;
+        }
+        while (totalRead < 4 ||
+                buffer[totalRead - 4] != '\r' || buffer[totalRead - 3] != '\n' ||
+                buffer[totalRead - 2] != '\r' || buffer[totalRead - 1] != '\n');
+
+        var response = Encoding.UTF8.GetString(buffer, 0, totalRead);
+        var statusLine = response.Split("\r\n")[0];
+
+        // Validate HTTP status line format: "HTTP/x.x 200 ..."
+        if (!statusLine.StartsWith("HTTP/", StringComparison.OrdinalIgnoreCase) ||
+            !statusLine.Contains(" 200 "))
+        {
+            throw new IOException($"HTTP Proxy connection failed: {statusLine}");
+        }
+
+        _logger.LogDebug("HTTP Proxy: Connection established to {TargetHost}:{TargetPort}", targetHost, targetPort);
+        return (stream, client);
     }
 
     public static async Task<(Stream Stream, TcpClient Client)> ConnectSocks5Async(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
@@ -77,126 +85,134 @@ internal static class ProxyHelper
         {
             await tcpClient.ConnectAsync(proxyHost, proxyPort, cancellationToken).ConfigureAwait(false);
             var stream = tcpClient.GetStream();
-
-            // 1. Version identifier/method selection message
-            byte[] authMethods = string.IsNullOrEmpty(username)
-                ? new byte[] { 0x05, 0x01, 0x00 }
-                : new byte[] { 0x05, 0x02, 0x00, 0x02 };
-
-            await stream.WriteAsync(authMethods, cancellationToken).ConfigureAwait(false);
-
-            // 2. Method selection response
-            byte[] methodResponse = new byte[2];
-            await ReadExactAsync(stream, methodResponse, cancellationToken).ConfigureAwait(false);
-
-            if (methodResponse[0] != 0x05)
-            {
-                throw new IOException("Invalid SOCKS5 version");
-            }
-
-            if (methodResponse[1] == 0x02) // Username/Password Authentication
-            {
-                if (string.IsNullOrEmpty(username))
-                {
-                    throw new IOException("Proxy requires authentication but none provided");
-                }
-
-                var userBytes = Encoding.UTF8.GetBytes(username);
-                var passBytes = Encoding.UTF8.GetBytes(password ?? "");
-                byte[] authRequest = new byte[3 + userBytes.Length + passBytes.Length];
-                authRequest[0] = 0x01; // Subnegotiation version
-                authRequest[1] = (byte)userBytes.Length;
-                userBytes.CopyTo(authRequest, 2);
-                authRequest[2 + userBytes.Length] = (byte)passBytes.Length;
-                passBytes.CopyTo(authRequest, 3 + userBytes.Length);
-
-                await stream.WriteAsync(authRequest, cancellationToken).ConfigureAwait(false);
-
-                byte[] authResponse = new byte[2];
-                await ReadExactAsync(stream, authResponse, cancellationToken).ConfigureAwait(false);
-                if (authResponse[1] != 0x00)
-                {
-                    throw new IOException("SOCKS5 authentication failed");
-                }
-            }
-            else if (methodResponse[1] != 0x00)
-            {
-                throw new IOException($"SOCKS5 proxy requires unsupported authentication method: {methodResponse[1]}");
-            }
-
-            // 3. Connection request
-            byte[] request = new byte[1024];
-            request[0] = 0x05;
-            request[1] = 0x01; // CONNECT
-            request[2] = 0x00; // Reserved
-
-            int offset = 4;
-            if (IPAddress.TryParse(targetHost, out var ip))
-            {
-                if (ip.AddressFamily == AddressFamily.InterNetwork)
-                {
-                    request[3] = 0x01; // IPv4
-                    ip.GetAddressBytes().CopyTo(request, offset);
-                    offset += 4;
-                }
-                else
-                {
-                    request[3] = 0x04; // IPv6
-                    ip.GetAddressBytes().CopyTo(request, offset);
-                    offset += 16;
-                }
-            }
-            else
-            {
-                request[3] = 0x03; // Domain name
-                var hostBytes = Encoding.UTF8.GetBytes(targetHost);
-                request[offset++] = (byte)hostBytes.Length;
-                hostBytes.CopyTo(request, offset);
-                offset += hostBytes.Length;
-            }
-
-            request[offset++] = (byte)(targetPort >> 8);
-            request[offset++] = (byte)(targetPort & 0xFF);
-
-            await stream.WriteAsync(request.AsMemory(0, offset), cancellationToken).ConfigureAwait(false);
-
-            // 4. Connection response
-            byte[] response = new byte[4];
-            await ReadExactAsync(stream, response, cancellationToken).ConfigureAwait(false);
-
-            if (response[1] != 0x00)
-            {
-                throw new IOException($"SOCKS5 connection failed with error: {response[1]}");
-            }
-
-            // Skip address and port in response (read asynchronously)
-            int skipBytes = response[3] switch
-            {
-                0x01 => 4 + 2, // IPv4 (4 address + 2 port)
-                0x04 => 16 + 2, // IPv6 (16 address + 2 port)
-                0x03 => -1, // Domain - needs special handling
-                _ => throw new IOException("Invalid SOCKS5 address type in response")
-            };
-
-            if (skipBytes == -1)
-            {
-                // Domain: read length byte, then skip (length + 2) bytes
-                byte[] lenBuf = new byte[1];
-                await ReadExactAsync(stream, lenBuf, cancellationToken).ConfigureAwait(false);
-                skipBytes = lenBuf[0] + 2; // domain length + 2 port bytes
-            }
-
-            byte[] skipBuf = new byte[skipBytes];
-            await ReadExactAsync(stream, skipBuf, cancellationToken).ConfigureAwait(false);
-
-            _logger.LogDebug("SOCKS5 TCP: Connection established to {TargetHost}:{TargetPort}", targetHost, targetPort);
-            return (stream, tcpClient);
+            return await NegotiateSocks5Async(stream, tcpClient, targetHost, targetPort, username, password, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
             tcpClient.Dispose();
             throw;
         }
+    }
+
+    internal static async Task<(Stream Stream, TcpClient Client)> NegotiateSocks5Async(
+        Stream stream, TcpClient client,
+        string targetHost, int targetPort,
+        string? username, string? password,
+        CancellationToken cancellationToken)
+    {
+        // 1. Version identifier/method selection message
+        byte[] authMethods = string.IsNullOrEmpty(username)
+            ? new byte[] { 0x05, 0x01, 0x00 }
+            : new byte[] { 0x05, 0x02, 0x00, 0x02 };
+
+        await stream.WriteAsync(authMethods, cancellationToken).ConfigureAwait(false);
+
+        // 2. Method selection response
+        byte[] methodResponse = new byte[2];
+        await ReadExactAsync(stream, methodResponse, cancellationToken).ConfigureAwait(false);
+
+        if (methodResponse[0] != 0x05)
+        {
+            throw new IOException("Invalid SOCKS5 version");
+        }
+
+        if (methodResponse[1] == 0x02) // Username/Password Authentication
+        {
+            if (string.IsNullOrEmpty(username))
+            {
+                throw new IOException("Proxy requires authentication but none provided");
+            }
+
+            var userBytes = Encoding.UTF8.GetBytes(username);
+            var passBytes = Encoding.UTF8.GetBytes(password ?? "");
+            byte[] authRequest = new byte[3 + userBytes.Length + passBytes.Length];
+            authRequest[0] = 0x01; // Subnegotiation version
+            authRequest[1] = (byte)userBytes.Length;
+            userBytes.CopyTo(authRequest, 2);
+            authRequest[2 + userBytes.Length] = (byte)passBytes.Length;
+            passBytes.CopyTo(authRequest, 3 + userBytes.Length);
+
+            await stream.WriteAsync(authRequest, cancellationToken).ConfigureAwait(false);
+
+            byte[] authResponse = new byte[2];
+            await ReadExactAsync(stream, authResponse, cancellationToken).ConfigureAwait(false);
+            if (authResponse[1] != 0x00)
+            {
+                throw new IOException("SOCKS5 authentication failed");
+            }
+        }
+        else if (methodResponse[1] != 0x00)
+        {
+            throw new IOException($"SOCKS5 proxy requires unsupported authentication method: {methodResponse[1]}");
+        }
+
+        // 3. Connection request
+        byte[] request = new byte[1024];
+        request[0] = 0x05;
+        request[1] = 0x01; // CONNECT
+        request[2] = 0x00; // Reserved
+
+        int offset = 4;
+        if (IPAddress.TryParse(targetHost, out var ip))
+        {
+            if (ip.AddressFamily == AddressFamily.InterNetwork)
+            {
+                request[3] = 0x01; // IPv4
+                ip.GetAddressBytes().CopyTo(request, offset);
+                offset += 4;
+            }
+            else
+            {
+                request[3] = 0x04; // IPv6
+                ip.GetAddressBytes().CopyTo(request, offset);
+                offset += 16;
+            }
+        }
+        else
+        {
+            request[3] = 0x03; // Domain name
+            var hostBytes = Encoding.UTF8.GetBytes(targetHost);
+            request[offset++] = (byte)hostBytes.Length;
+            hostBytes.CopyTo(request, offset);
+            offset += hostBytes.Length;
+        }
+
+        request[offset++] = (byte)(targetPort >> 8);
+        request[offset++] = (byte)(targetPort & 0xFF);
+
+        await stream.WriteAsync(request.AsMemory(0, offset), cancellationToken).ConfigureAwait(false);
+
+        // 4. Connection response
+        byte[] response = new byte[4];
+        await ReadExactAsync(stream, response, cancellationToken).ConfigureAwait(false);
+
+        if (response[1] != 0x00)
+        {
+            throw new IOException($"SOCKS5 connection failed with error: {response[1]}");
+        }
+
+        // Skip address and port in response (read asynchronously)
+        int skipBytes = response[3] switch
+        {
+            0x01 => 4 + 2, // IPv4 (4 address + 2 port)
+            0x04 => 16 + 2, // IPv6 (16 address + 2 port)
+            0x03 => -1, // Domain - needs special handling
+            _ => throw new IOException("Invalid SOCKS5 address type in response")
+        };
+
+        if (skipBytes == -1)
+        {
+            // Domain: read length byte, then skip (length + 2) bytes
+            byte[] lenBuf = new byte[1];
+            await ReadExactAsync(stream, lenBuf, cancellationToken).ConfigureAwait(false);
+            skipBytes = lenBuf[0] + 2; // domain length + 2 port bytes
+        }
+
+        byte[] skipBuf = new byte[skipBytes];
+        await ReadExactAsync(stream, skipBuf, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogDebug("SOCKS5 TCP: Connection established to {TargetHost}:{TargetPort}", targetHost, targetPort);
+        return (stream, client);
     }
 
     public static async Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> ConnectSocks5UdpAsync(string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
@@ -208,106 +224,114 @@ internal static class ProxyHelper
         {
             await tcpClient.ConnectAsync(proxyHost, proxyPort, cancellationToken).ConfigureAwait(false);
             var stream = tcpClient.GetStream();
-
-            // 1. Handshake (Method Selection)
-            byte[] authMethods = string.IsNullOrEmpty(username)
-                ? new byte[] { 0x05, 0x01, 0x00 }
-                : new byte[] { 0x05, 0x02, 0x00, 0x02 };
-            await stream.WriteAsync(authMethods, cancellationToken).ConfigureAwait(false);
-
-            byte[] methodResponse = new byte[2];
-            await ReadExactAsync(stream, methodResponse, cancellationToken).ConfigureAwait(false);
-            if (methodResponse[0] != 0x05)
-            {
-                throw new IOException("Invalid SOCKS5 version");
-            }
-
-            if (methodResponse[1] == 0x02) // Auth
-            {
-                var userBytes = Encoding.UTF8.GetBytes(username!);
-                var passBytes = Encoding.UTF8.GetBytes(password ?? "");
-                byte[] authRequest = new byte[3 + userBytes.Length + passBytes.Length];
-                authRequest[0] = 0x01;
-                authRequest[1] = (byte)userBytes.Length;
-                userBytes.CopyTo(authRequest, 2);
-                authRequest[2 + userBytes.Length] = (byte)passBytes.Length;
-                passBytes.CopyTo(authRequest, 3 + userBytes.Length);
-                await stream.WriteAsync(authRequest, cancellationToken).ConfigureAwait(false);
-
-                byte[] authResponse = new byte[2];
-                await ReadExactAsync(stream, authResponse, cancellationToken).ConfigureAwait(false);
-                if (authResponse[1] != 0x00)
-                {
-                    throw new IOException("SOCKS5 authentication failed");
-                }
-            }
-            else if (methodResponse[1] != 0x00)
-            {
-                throw new IOException($"SOCKS5 proxy requires unsupported authentication method: {methodResponse[1]}");
-            }
-
-            // 2. UDP ASSOCIATE Request
-            byte[] request = new byte[] { 0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
-            await stream.WriteAsync(request, cancellationToken).ConfigureAwait(false);
-
-            // 3. UDP ASSOCIATE Response
-            byte[] response = new byte[4];
-            await ReadExactAsync(stream, response, cancellationToken).ConfigureAwait(false);
-            if (response[1] != 0x00)
-            {
-                throw new IOException($"SOCKS5 UDP ASSOCIATE failed with error: {response[1]}");
-            }
-
-            IPAddress proxyUdpAddress;
-            if (response[3] == 0x01) // IPv4
-            {
-                byte[] addr = new byte[4];
-                await ReadExactAsync(stream, addr, cancellationToken).ConfigureAwait(false);
-                proxyUdpAddress = new IPAddress(addr);
-            }
-            else if (response[3] == 0x04) // IPv6
-            {
-                byte[] addr = new byte[16];
-                await ReadExactAsync(stream, addr, cancellationToken).ConfigureAwait(false);
-                proxyUdpAddress = new IPAddress(addr);
-            }
-            else if (response[3] == 0x03) // Domain
-            {
-                byte[] lenBuf = new byte[1];
-                await ReadExactAsync(stream, lenBuf, cancellationToken).ConfigureAwait(false);
-                byte[] host = new byte[lenBuf[0]];
-                await ReadExactAsync(stream, host, cancellationToken).ConfigureAwait(false);
-                var hostStr = Encoding.UTF8.GetString(host);
-                var ips = await Dns.GetHostAddressesAsync(hostStr, cancellationToken).ConfigureAwait(false);
-                proxyUdpAddress = ips[0];
-            }
-            else
-            {
-                throw new IOException("Invalid address type in SOCKS5 response");
-            }
-
-            byte[] portBytes = new byte[2];
-            await ReadExactAsync(stream, portBytes, cancellationToken).ConfigureAwait(false);
-            int proxyUdpPort = (portBytes[0] << 8) | portBytes[1];
-
-            // If the proxy returns 0.0.0.0, it means use the proxy host we connected to
-            if (proxyUdpAddress.Equals(IPAddress.Any) || proxyUdpAddress.Equals(IPAddress.IPv6Any))
-            {
-                var proxyIps = await Dns.GetHostAddressesAsync(proxyHost, cancellationToken).ConfigureAwait(false);
-                proxyUdpAddress = proxyIps[0];
-            }
-
-            var proxyUdpEndPoint = new IPEndPoint(proxyUdpAddress, proxyUdpPort);
-            var udpClient = new UdpClient(proxyUdpAddress.AddressFamily);
-
-            _logger.LogDebug("SOCKS5 UDP: Association established, relay endpoint {ProxyUdpEndPoint}", proxyUdpEndPoint);
-            return (udpClient, proxyUdpEndPoint, tcpClient);
+            return await NegotiateSocks5UdpAsync(stream, tcpClient, proxyHost, username, password, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
             tcpClient.Dispose();
             throw;
         }
+    }
+
+    internal static async Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> NegotiateSocks5UdpAsync(
+        Stream stream, TcpClient client,
+        string proxyHost,
+        string? username, string? password,
+        CancellationToken cancellationToken)
+    {
+        // 1. Handshake (Method Selection)
+        byte[] authMethods = string.IsNullOrEmpty(username)
+            ? new byte[] { 0x05, 0x01, 0x00 }
+            : new byte[] { 0x05, 0x02, 0x00, 0x02 };
+        await stream.WriteAsync(authMethods, cancellationToken).ConfigureAwait(false);
+
+        byte[] methodResponse = new byte[2];
+        await ReadExactAsync(stream, methodResponse, cancellationToken).ConfigureAwait(false);
+        if (methodResponse[0] != 0x05)
+        {
+            throw new IOException("Invalid SOCKS5 version");
+        }
+
+        if (methodResponse[1] == 0x02) // Auth
+        {
+            var userBytes = Encoding.UTF8.GetBytes(username!);
+            var passBytes = Encoding.UTF8.GetBytes(password ?? "");
+            byte[] authRequest = new byte[3 + userBytes.Length + passBytes.Length];
+            authRequest[0] = 0x01;
+            authRequest[1] = (byte)userBytes.Length;
+            userBytes.CopyTo(authRequest, 2);
+            authRequest[2 + userBytes.Length] = (byte)passBytes.Length;
+            passBytes.CopyTo(authRequest, 3 + userBytes.Length);
+            await stream.WriteAsync(authRequest, cancellationToken).ConfigureAwait(false);
+
+            byte[] authResponse = new byte[2];
+            await ReadExactAsync(stream, authResponse, cancellationToken).ConfigureAwait(false);
+            if (authResponse[1] != 0x00)
+            {
+                throw new IOException("SOCKS5 authentication failed");
+            }
+        }
+        else if (methodResponse[1] != 0x00)
+        {
+            throw new IOException($"SOCKS5 proxy requires unsupported authentication method: {methodResponse[1]}");
+        }
+
+        // 2. UDP ASSOCIATE Request
+        byte[] request = new byte[] { 0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+        await stream.WriteAsync(request, cancellationToken).ConfigureAwait(false);
+
+        // 3. UDP ASSOCIATE Response
+        byte[] response = new byte[4];
+        await ReadExactAsync(stream, response, cancellationToken).ConfigureAwait(false);
+        if (response[1] != 0x00)
+        {
+            throw new IOException($"SOCKS5 UDP ASSOCIATE failed with error: {response[1]}");
+        }
+
+        IPAddress proxyUdpAddress;
+        if (response[3] == 0x01) // IPv4
+        {
+            byte[] addr = new byte[4];
+            await ReadExactAsync(stream, addr, cancellationToken).ConfigureAwait(false);
+            proxyUdpAddress = new IPAddress(addr);
+        }
+        else if (response[3] == 0x04) // IPv6
+        {
+            byte[] addr = new byte[16];
+            await ReadExactAsync(stream, addr, cancellationToken).ConfigureAwait(false);
+            proxyUdpAddress = new IPAddress(addr);
+        }
+        else if (response[3] == 0x03) // Domain
+        {
+            byte[] lenBuf = new byte[1];
+            await ReadExactAsync(stream, lenBuf, cancellationToken).ConfigureAwait(false);
+            byte[] host = new byte[lenBuf[0]];
+            await ReadExactAsync(stream, host, cancellationToken).ConfigureAwait(false);
+            var hostStr = Encoding.UTF8.GetString(host);
+            var ips = await Dns.GetHostAddressesAsync(hostStr, cancellationToken).ConfigureAwait(false);
+            proxyUdpAddress = ips[0];
+        }
+        else
+        {
+            throw new IOException("Invalid address type in SOCKS5 response");
+        }
+
+        byte[] portBytes = new byte[2];
+        await ReadExactAsync(stream, portBytes, cancellationToken).ConfigureAwait(false);
+        int proxyUdpPort = (portBytes[0] << 8) | portBytes[1];
+
+        // If the proxy returns 0.0.0.0, it means use the proxy host we connected to
+        if (proxyUdpAddress.Equals(IPAddress.Any) || proxyUdpAddress.Equals(IPAddress.IPv6Any))
+        {
+            var proxyIps = await Dns.GetHostAddressesAsync(proxyHost, cancellationToken).ConfigureAwait(false);
+            proxyUdpAddress = proxyIps[0];
+        }
+
+        var proxyUdpEndPoint = new IPEndPoint(proxyUdpAddress, proxyUdpPort);
+        var udpClient = new UdpClient(proxyUdpAddress.AddressFamily);
+
+        _logger.LogDebug("SOCKS5 UDP: Association established, relay endpoint {ProxyUdpEndPoint}", proxyUdpEndPoint);
+        return (udpClient, proxyUdpEndPoint, client);
     }
 
     public static byte[] GetSocks5UdpPacket(byte[] payload, IPEndPoint target)

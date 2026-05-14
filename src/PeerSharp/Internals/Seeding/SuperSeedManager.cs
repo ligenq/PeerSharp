@@ -25,7 +25,7 @@ internal class SuperSeedManager
     private readonly ConcurrentDictionary<IPeerCommunication, int> _assignedPieces = new();
 
     // Pieces that have been "distributed" (seen from at least one other peer)
-    private readonly HashSet<int> _distributedPieces = new();
+    private readonly HashSet<int> _distributedPieces = [];
 
     private readonly Lock _lock = new();
     private readonly ILogger<SuperSeedManager> _logger = TorrentLoggerFactory.CreateLogger<SuperSeedManager>();
@@ -106,7 +106,7 @@ internal class SuperSeedManager
 
         if (!_peerPieces.TryGetValue(peer, out var peerHas))
         {
-            peerHas = new HashSet<int>();
+            peerHas = [];
             _peerPieces[peer] = peerHas;
         }
 
@@ -142,7 +142,7 @@ internal class SuperSeedManager
         }
 
         // Track this peer
-        _peerPieces.TryAdd(peer, new HashSet<int>());
+        _peerPieces.TryAdd(peer, []);
         _assignedPieces.TryAdd(peer, -1);
 
         // After handshake, give them their first piece
@@ -246,7 +246,7 @@ internal class SuperSeedManager
             // Get pieces this peer already has
             if (!_peerPieces.TryGetValue(peer, out var peerHas))
             {
-                peerHas = new HashSet<int>();
+                peerHas = [];
             }
 
             for (int i = 0; i < _torrent.Pieces.Count; i++)

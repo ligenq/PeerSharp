@@ -34,7 +34,7 @@ internal class BandwidthManager : IBandwidthManager
     public const string GlobalUpload = "GlobalUpload";
     public const string GlobalDiskRead = "GlobalDiskRead";
     public const string GlobalDiskWrite = "GlobalDiskWrite";
-    private readonly HashSet<IBandwidthUser> _activeUsers = new();
+    private readonly HashSet<IBandwidthUser> _activeUsers = [];
     private readonly ConcurrentDictionary<string, BandwidthChannel> _channels = new();
 
     // To prevent duplicates in RR queue
@@ -43,7 +43,7 @@ internal class BandwidthManager : IBandwidthManager
     private readonly ILogger<BandwidthManager> _logger = TorrentLoggerFactory.CreateLogger<BandwidthManager>();
 
     // Fairness structures
-    private readonly Dictionary<IBandwidthUser, Queue<BandwidthRequest>> _pendingRequests = new();
+    private readonly Dictionary<IBandwidthUser, Queue<BandwidthRequest>> _pendingRequests = [];
 
     private readonly Queue<IBandwidthUser> _roundRobinQueue = new();
     private readonly TimeProvider _timeProvider;

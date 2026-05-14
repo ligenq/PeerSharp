@@ -19,7 +19,7 @@ internal class NetworkManager : INetworkManager
 {
     private readonly ILogger<NetworkManager> _logger = TorrentLoggerFactory.CreateLogger<NetworkManager>();
     private readonly Action<UtpStream> _onUtpConnection;
-    private readonly List<IPortMapper> _portMappers = new();
+    private readonly List<IPortMapper> _portMappers = [];
     private readonly NetworkServices _services;
     private readonly Settings _settings;
     private AtomicDisposal _disposal = new();

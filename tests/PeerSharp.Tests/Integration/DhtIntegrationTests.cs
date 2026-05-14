@@ -43,7 +43,7 @@ public class DhtIntegrationTests
     private class MockUdpListener : IUdpListener
     {
         private readonly MockDhtNetwork _network;
-        private readonly List<IUdpReceiver> _receivers = new();
+        private readonly List<IUdpReceiver> _receivers = [];
 
         public MockUdpListener(MockDhtNetwork network, IPEndPoint endpoint)
         {
@@ -80,7 +80,7 @@ public class DhtIntegrationTests
 
     private class MockDnsResolver : IDnsResolver
     {
-        private readonly Dictionary<string, IPAddress[]> _entries = new();
+        private readonly Dictionary<string, IPAddress[]> _entries = [];
 
         public void Add(string host, IPAddress ip)
         {
