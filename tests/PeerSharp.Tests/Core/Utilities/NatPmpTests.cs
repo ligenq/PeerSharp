@@ -111,15 +111,16 @@ public sealed class NatPmpTests
 
         await mapper.StartAsync(CancellationToken.None);
         await mapper.MapPortAsync(1234, "UDP", "test", CancellationToken.None);
+        int packetsBeforeUnmap = server.CapturedCount;
         await mapper.UnmapAllAsync(CancellationToken.None);
-        await server.WaitForPacketAsync(TimeSpan.FromSeconds(5));
+        await server.WaitForPacketCountAsync(packetsBeforeUnmap + 1, TimeSpan.FromSeconds(5));
 
-        int countAfterFirst = received.Count;
+        int countAfterFirst = server.CapturedCount;
         await mapper.UnmapAllAsync(CancellationToken.None);
 
         // Brief wait to confirm nothing arrived.
         await Task.Delay(100);
-        Assert.Equal(countAfterFirst, received.Count);
+        Assert.Equal(countAfterFirst, server.CapturedCount);
     }
 
     private sealed class NatPmpTestServer : IAsyncDisposable
@@ -130,6 +131,7 @@ public sealed class NatPmpTests
         private readonly bool _success;
         private readonly int? _externalPort;
         private readonly List<byte[]>? _captureRequests;
+        private readonly Lock _captureLock = new();
         private readonly SemaphoreSlim _packetSignal = new(0);
 
         public NatPmpTestServer(bool success, int? externalPort, List<byte[]>? captureRequests = null)
@@ -144,8 +146,28 @@ public sealed class NatPmpTests
 
         public int Port { get; }
 
+        public int CapturedCount
+        {
+            get
+            {
+                lock (_captureLock)
+                {
+                    return _captureRequests?.Count ?? 0;
+                }
+            }
+        }
+
         public Task WaitForPacketAsync(TimeSpan timeout) =>
             _packetSignal.WaitAsync(timeout).ContinueWith(_ => { });
+
+        public async Task WaitForPacketCountAsync(int count, TimeSpan timeout)
+        {
+            using var cts = new CancellationTokenSource(timeout);
+            while (CapturedCount < count)
+            {
+                await _packetSignal.WaitAsync(cts.Token).ConfigureAwait(false);
+            }
+        }
 
         public async ValueTask DisposeAsync()
         {
@@ -181,7 +203,7 @@ public sealed class NatPmpTests
                     break;
                 }
 
-                lock (_captureRequests ?? new object())
+                lock (_captureLock)
                 {
                     _captureRequests?.Add(result.Buffer);
                 }

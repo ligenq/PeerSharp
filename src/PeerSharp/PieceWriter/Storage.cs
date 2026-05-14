@@ -477,7 +477,11 @@ internal sealed class Storage : IStorage
             if (!info.Exists || info.Length < size)
             {
                 using var fs = new FileStream(fullPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite);
-                DiskAllocation.Allocate(fs, size, TryEnableSparse);
+                TryEnableSparse(fs);
+                if (fs.Length < size)
+                {
+                    fs.SetLength(size);
+                }
             }
         }, ct);
     }
