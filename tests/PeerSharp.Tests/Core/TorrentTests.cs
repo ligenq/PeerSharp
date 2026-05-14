@@ -1,6 +1,7 @@
 using PeerSharp.Internals;
 using PeerSharp.PieceWriter;
 using Microsoft.Extensions.Time.Testing;
+using System.Security.Cryptography;
 
 namespace PeerSharp.Tests.Core;
 
@@ -140,6 +141,171 @@ public class TorrentTests
 
         Assert.False(torrent.Started);
         Assert.Equal(TorrentState.Stopped, torrent.State);
+    }
+
+    [Fact]
+    public async Task StoppedTorrent_PublicSnapshotApis_DoNotThrowAfterInternalsAreStopped()
+    {
+        string downloadPath = Path.Combine(Path.GetTempPath(), "PeerSharpTests_StoppedApis", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(downloadPath);
+
+        var info = new TorrentFileMetadata();
+        info.Info.Name = "test";
+        info.Info.Hash = InfoHash.CreateRandom();
+        info.Info.PieceSize = 16384;
+        info.Info.FullSize = 1000;
+        info.Info.Pieces.Add(new byte[20]);
+        info.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = 1000, Offset = 0 });
+
+        var settings = new Settings();
+        settings.Files.DefaultDownloadPath = downloadPath;
+        var torrent = Torrent.Create(
+            info,
+            settings,
+            new TorrentTestUtility.MockBandwidthManager(),
+            new TorrentTestUtility.MockAlertsManager(),
+            new CustomMockSelectionManager(),
+            new TorrentTestUtility.MockPeerCommunicationFactory(),
+            new TorrentTestUtility.MockTrackerFactory(),
+            new TorrentTestUtility.MockGeoIpService(),
+            new TorrentTestUtility.MockFileHandleCache(),
+            new TorrentTestUtility.MockConnectionGovernor(),
+            _timeProvider);
+
+        try
+        {
+            await torrent.StartAsync(TestContext.Current.CancellationToken);
+            await torrent.StopAsync(TestContext.Current.CancellationToken);
+
+            Assert.Equal(TorrentState.Stopped, torrent.State);
+            Assert.False(torrent.Started);
+            Assert.Equal(1, torrent.FileCount);
+            Assert.Equal(1, torrent.GetAllFileInfo().Count);
+            Assert.Equal("file.bin", torrent.GetFileInfo(0).Path);
+            Assert.Equal(1, torrent.GetAllFileSelections().Count);
+            Assert.NotNull(torrent.GetFileSelection(0));
+            Assert.NotEmpty(torrent.GetPieceBitfield());
+            Assert.Equal(torrent.Hash, torrent.GetResumeData().Hash);
+            Assert.Equal(0, torrent.FileTransfer.Downloaded);
+            Assert.Equal(0, torrent.FileTransfer.Uploaded);
+            Assert.Equal(0, torrent.Peers.ConnectedCount);
+            Assert.NotNull(torrent.Trackers.GetTrackers());
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+            try { Directory.Delete(downloadPath, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task SetDownloadPathAsync_WorksAfterStop_ReplacingDisposedFiles()
+    {
+        string originalPath = Path.Combine(Path.GetTempPath(), "PeerSharpTests_PathOriginal", Guid.NewGuid().ToString("N"));
+        string newPath = Path.Combine(Path.GetTempPath(), "PeerSharpTests_PathNew", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(originalPath);
+
+        var info = new TorrentFileMetadata();
+        info.Info.Name = "test";
+        info.Info.Hash = InfoHash.CreateRandom();
+        info.Info.PieceSize = 16384;
+        info.Info.FullSize = 1000;
+        info.Info.Pieces.Add(new byte[20]);
+        info.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = 1000, Offset = 0 });
+
+        var torrent = TorrentTestUtility.CreateMinimal(info, originalPath);
+
+        try
+        {
+            await torrent.StartAsync(TestContext.Current.CancellationToken);
+            await torrent.StopAsync(TestContext.Current.CancellationToken);
+
+            await torrent.SetDownloadPathAsync(newPath);
+
+            Assert.Equal(newPath, torrent.LocalState.DownloadPath);
+            Assert.Equal(newPath, torrent.Files.DownloadPath);
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+            try { Directory.Delete(originalPath, true); } catch { }
+            try { Directory.Delete(newPath, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task OpenStreamAsync_StoppedTorrent_ThrowsInvalidOperationException()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => torrent.OpenStreamAsync(0));
+    }
+
+    [Fact]
+    public async Task ForceRecheckAsync_WorksAfterStop_ReinitializingFiles()
+    {
+        string downloadPath = Path.Combine(Path.GetTempPath(), "PeerSharpTests_Recheck", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(downloadPath);
+
+        byte[] content = "verified content"u8.ToArray();
+        await File.WriteAllBytesAsync(Path.Combine(downloadPath, "file.bin"), content, TestContext.Current.CancellationToken);
+
+        var info = new TorrentFileMetadata();
+        info.Info.Name = "test";
+        info.Info.Hash = InfoHash.CreateRandom();
+        info.Info.PieceSize = 16384;
+        info.Info.FullSize = content.Length;
+        info.Info.Pieces.Add(SHA1.HashData(content));
+        info.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = content.Length, Offset = 0 });
+
+        var torrent = TorrentTestUtility.CreateMinimal(info, downloadPath);
+
+        try
+        {
+            await torrent.StartAsync(TestContext.Current.CancellationToken);
+            await torrent.StopAsync(TestContext.Current.CancellationToken);
+
+            int validPieces = await torrent.ForceRecheckAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(1, validPieces);
+            Assert.False(torrent.Started);
+            Assert.Equal(TorrentState.Stopped, torrent.State);
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+            try { Directory.Delete(downloadPath, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task ForceRecheckAsync_ThrowsObjectDisposedException_AfterDispose()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+
+        await torrent.DisposeAsync();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => torrent.ForceRecheckAsync());
+    }
+
+    [Fact]
+    public async Task AttachPeerTransportAsync_ThrowsObjectDisposedException_AfterDispose()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+
+        await torrent.DisposeAsync();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+            ((IPeerTransportHost)torrent).AttachPeerTransportAsync(Stream.Null, initiator: true));
+    }
+
+    [Fact]
+    public async Task AttachPeerTransportAsync_ThrowsArgumentNullException_ForNullStream()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() =>
+            ((IPeerTransportHost)torrent).AttachPeerTransportAsync(null!, initiator: true));
     }
 
     [Fact(Timeout = 30000)]
