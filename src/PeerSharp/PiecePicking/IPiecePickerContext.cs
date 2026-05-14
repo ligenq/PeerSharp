@@ -76,6 +76,11 @@ internal interface IPiecePickerContext
     int PieceCount { get; }
 
     /// <summary>
+    /// Gets the number of completed pieces.
+    /// </summary>
+    int CompletedPieceCount { get; }
+
+    /// <summary>
     /// Gets priority pieces for streaming mode.
     /// </summary>
     IReadOnlyList<int>? StreamingPriorityPieces { get; }
@@ -181,6 +186,7 @@ internal class TorrentPiecePickerContext : IPiecePickerContext
 
     public DownloadStrategy DownloadStrategy => _torrent.DownloadStrategy;
     public int PieceCount => _torrent.Pieces.Count;
+    public int CompletedPieceCount => _torrent.Pieces.ReceivedCount;
 
     public IReadOnlyList<int>? StreamingPriorityPieces => _torrent.StreamingPriorityPieces;
 

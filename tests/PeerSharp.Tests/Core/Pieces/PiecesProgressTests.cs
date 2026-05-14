@@ -124,7 +124,7 @@ public class PiecesProgressTests
     [Fact]
     public void AddPiece_ThreadSafety()
     {
-        int count = 1000;
+        const int count = 1000;
         var progress = new PiecesProgress(count);
         Parallel.For(0, count, progress.AddPiece);
         Assert.True(progress.IsFull);

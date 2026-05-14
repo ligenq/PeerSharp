@@ -309,7 +309,8 @@ public class SuperSeedManagerTests
         var metadata = new TorrentFileMetadata();
         metadata.Info.PieceSize = ProtocolConstants.BlockSize;
         metadata.Info.FullSize = ProtocolConstants.BlockSize * pieceCount;
-        metadata.Info.Files.Add(new Internals.TorrentFileEntry {
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry
+        {
             Path = "file.bin",
             Size = metadata.Info.FullSize,
             Offset = 0

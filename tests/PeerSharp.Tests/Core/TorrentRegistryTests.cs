@@ -71,8 +71,8 @@ public class TorrentRegistryTests
     public void Concurrent_AddAndRemove_MaintainsConsistency()
     {
         // This test attempts to find race conditions by hammering the registry
-        int threadCount = 10;
-        int operationsPerThread = 1000;
+        const int threadCount = 10;
+        const int operationsPerThread = 1000;
 
         // We will add and remove torrents with random hashes concurrently
         Parallel.For(0, threadCount, t =>

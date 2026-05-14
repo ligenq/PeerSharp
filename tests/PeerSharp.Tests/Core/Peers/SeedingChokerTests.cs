@@ -15,9 +15,6 @@ public class SeedingChokerTests
     private static SeedingRankEntry Active(int uploadSpeed, long uploadedSinceUnchoked, DateTimeOffset lastUnchokedAt)
         => new() { UploadSpeed = uploadSpeed, IsChoked = false, UploadedSinceUnchoked = uploadedSinceUnchoked, LastUnchokedAt = lastUnchokedAt };
 
-    private static SeedingRankEntry Choked(DateTimeOffset lastUnchokedAt = default)
-        => new() { UploadSpeed = 0, IsChoked = true, UploadedSinceUnchoked = 0, LastUnchokedAt = lastUnchokedAt };
-
     // ── Quota de-prioritization ─────────────────────────────────────────────
 
     [Fact]
@@ -48,7 +45,7 @@ public class SeedingChokerTests
     [Fact]
     public void Compare_BothPastQuota_FasterUploadWins()
     {
-        long bigUpload = (PieceLength * Quota) + 1;
+        const long bigUpload = (PieceLength * Quota) + 1;
         DateTimeOffset longAgo = Epoch.AddHours(-2); // unchoked >60s ago
 
         var fast = Active(uploadSpeed: 1000, uploadedSinceUnchoked: bigUpload, lastUnchokedAt: longAgo);
@@ -157,7 +154,7 @@ public class SeedingChokerTests
     [Fact]
     public void Compare_QuotaComplete_LongestWaitingRotatesInFirst()
     {
-        long bigUpload = (PieceLength * Quota) + 1;
+        const long bigUpload = (PieceLength * Quota) + 1;
 
         // Both quota-complete; the one that's been waiting longer for their NEXT slot wins
         var waitedLonger = Active(
@@ -180,7 +177,7 @@ public class SeedingChokerTests
     [Fact]
     public void Compare_Transitivity_HoldsAcrossThreePeers()
     {
-        long bigUpload = (PieceLength * Quota) + 1;
+        const long bigUpload = (PieceLength * Quota) + 1;
 
         var A = Active(uploadSpeed: 1000, uploadedSinceUnchoked: 0, lastUnchokedAt: Epoch); // within quota, fast
         var B = Active(uploadSpeed: 500, uploadedSinceUnchoked: 0, lastUnchokedAt: Epoch);  // within quota, slower

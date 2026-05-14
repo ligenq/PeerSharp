@@ -28,7 +28,7 @@ public class WebSeedManagerErrorTests
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }
 
-        public void Dispose() {}
+        public void Dispose() { }
     }
 
     /// <summary>

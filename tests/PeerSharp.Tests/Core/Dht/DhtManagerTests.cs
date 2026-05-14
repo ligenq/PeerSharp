@@ -378,7 +378,7 @@ public class DhtManagerTests
         await dht.StartAsync();
 
         var senderId = InfoHash.CreateRandom();
-        var senderPort = 12345;
+        const int senderPort = 12345;
         var senderEp = new IPEndPoint(IPAddress.Loopback, senderPort);
         var infoHash = InfoHash.CreateRandom();
 

@@ -83,7 +83,7 @@ public class RoutingTableTests
 
         for (int i = 0; i < 8; i++)
         {
-            var ip = IPAddress.Parse($"8.8.8.{i+1}");
+            var ip = IPAddress.Parse($"8.8.8.{i + 1}");
             byte[] insecureId = new byte[20]; insecureId[0] = 0xFF; insecureId[19] = (byte)i;
             table.NodeResponded(new NodeInfo(insecureId, new IPEndPoint(ip, 6881)), isSecure: false);
         }

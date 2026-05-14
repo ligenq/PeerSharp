@@ -69,7 +69,7 @@ public sealed class UtpIntegrationTests
             }
         };
 
-        ushort connId = 4242;
+        const ushort connId = 4242;
         byte[] synPacket = CreatePacket(MessageType.ST_SYN, connId, seq: 1, ack: 0);
 
         using var clientA = new UdpClient(0);

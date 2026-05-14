@@ -103,8 +103,8 @@ public class MerkleTreeAdditionalTests
     public void ValidateLayerRequest_Valid_ReturnsTrue()
     {
         // 1MB file, 16KB pieces → 64 blocks, 64 pieces, piece depth = 0
-        long fileSize = 1024 * 1024;
-        uint pieceSize = 16384;
+        const long fileSize = 1024 * 1024;
+        const uint pieceSize = 16384;
         bool valid = MerkleTree.ValidateLayerRequest(pieceSize, fileSize, 0, 0, 1, 5);
         Assert.True(valid);
     }
@@ -271,7 +271,7 @@ public class MerkleTreeAdditionalTests
         // baseTreeLayers(0) + proofHashes(2) = 2 ✓)
         byte[] fileData = new byte[4 * 16384];
         Random.Shared.NextBytes(fileData);
-        uint pieceSize = 16384;
+        const uint pieceSize = 16384;
         long fileSize = fileData.Length;
 
         var leaves = MerkleTree.ComputeLeaves(fileData);
@@ -284,7 +284,7 @@ public class MerkleTreeAdditionalTests
         Assert.NotNull(proofData);
 
         // Split into piece hashes and proof hashes
-        int pieceHashBytes = 1 * MerkleTree.HashSize;
+        const int pieceHashBytes = 1 * MerkleTree.HashSize;
         int proofHashBytes = proofData!.Length - pieceHashBytes;
         int proofCount = proofHashBytes / MerkleTree.HashSize;
         var piecesSubset = new List<byte[]> { proofData[..MerkleTree.HashSize] };
@@ -307,7 +307,7 @@ public class MerkleTreeAdditionalTests
     {
         byte[] fileData = new byte[4 * 16384];
         Random.Shared.NextBytes(fileData);
-        uint pieceSize = 16384;
+        const uint pieceSize = 16384;
         long fileSize = fileData.Length;
 
         var leaves = MerkleTree.ComputeLeaves(fileData);
@@ -316,7 +316,7 @@ public class MerkleTreeAdditionalTests
         var proofData = MerkleTree.GetPieceLayerHashesWithProof(pieceLayer, pieceSize, fileSize, 0, 1, proofLayers);
         Assert.NotNull(proofData);
 
-        int pieceHashBytes = 1 * MerkleTree.HashSize;
+        const int pieceHashBytes = 1 * MerkleTree.HashSize;
         int proofCount = (proofData!.Length - pieceHashBytes) / MerkleTree.HashSize;
         var piecesSubset = new List<byte[]> { proofData[..MerkleTree.HashSize] };
         var proofHashes = new List<byte[]>();
@@ -341,7 +341,7 @@ public class MerkleTreeAdditionalTests
     {
         byte[] fileData = new byte[4 * 16384];
         Random.Shared.NextBytes(fileData);
-        uint pieceSize = 16384;
+        const uint pieceSize = 16384;
         long fileSize = fileData.Length;
 
         var leaves = MerkleTree.ComputeLeaves(fileData);

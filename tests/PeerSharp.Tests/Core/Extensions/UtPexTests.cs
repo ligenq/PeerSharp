@@ -384,7 +384,7 @@ public class UtPexTests
         utPex.Init(handshake);
 
         // Test all flag combinations
-        byte allFlags = 0x01 | 0x02 | 0x04 | 0x08; // Encryption | Seed | Utp | Holepunch
+        const byte allFlags = 0x01 | 0x02 | 0x04 | 0x08; // Encryption | Seed | Utp | Holepunch
         var peers = new List<(IPEndPoint Ep, byte Flags)>
         {
             (new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1111), allFlags)

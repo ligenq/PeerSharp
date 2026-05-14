@@ -49,7 +49,7 @@ public class DhtBloomFilterTests
     public void EstimateCount_ReturnsApproximateValue()
     {
         var filter = new DhtBloomFilter();
-        int count = 100;
+        const int count = 100;
         for (int i = 0; i < count; i++)
         {
             filter.AddBytes(BitConverter.GetBytes(i));

@@ -83,7 +83,7 @@ public class PeerProtocolTests
     public void TryDecodeMessage_PieceMessage_DecodesCorrectly()
     {
         // Arrange
-        int payloadLen = 9 + 10; // 9 bytes header + 10 bytes data
+        const int payloadLen = 9 + 10; // 9 bytes header + 10 bytes data
         byte[] data = new byte[4 + payloadLen];
         BinaryPrimitives.WriteInt32BigEndian(data, payloadLen);
         data[4] = (byte)MessageId.Piece;
@@ -114,7 +114,7 @@ public class PeerProtocolTests
     public void TryDecodeMessage_PieceMessageTooLarge_ThrowsInvalidDataException()
     {
         // Arrange
-        int payloadLen = 9 + ProtocolConstants.BlockSize + 1; // Oversized block
+        const int payloadLen = 9 + ProtocolConstants.BlockSize + 1; // Oversized block
         byte[] data = new byte[4 + payloadLen];
         BinaryPrimitives.WriteInt32BigEndian(data, payloadLen);
         data[4] = (byte)MessageId.Piece;

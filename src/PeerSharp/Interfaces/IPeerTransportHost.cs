@@ -30,8 +30,8 @@ public interface IPeerTransportHost
     long DataUploaded { get; }
 
     /// <summary>
-     /// Gets the local peer ID advertised to trackers and peers.
-     /// </summary>
+    /// Gets the local peer ID advertised to trackers and peers.
+    /// </summary>
     ReadOnlyMemory<byte> PeerId { get; }
 
     /// <summary>

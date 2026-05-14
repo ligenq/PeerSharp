@@ -59,15 +59,15 @@ public class CoyoteTests
         {
             var timeProvider = new FakeTimeProvider();
             var channel = new BandwidthChannel(timeProvider);
-            int limit = 1000;
+            const int limit = 1000;
             channel.SetLimit(limit);
 
             // Give initial quota
             channel.UpdateQuota(1000);
 
-            int taskCount = 5;
-            int usesPerTask = 100;
-            int amountPerUse = 50;
+            const int taskCount = 5;
+            const int usesPerTask = 100;
+            const int amountPerUse = 50;
 
             var tasks = new List<Task>();
             for (int t = 0; t < taskCount; t++)
@@ -103,12 +103,12 @@ public class CoyoteTests
         {
             var timeProvider = new FakeTimeProvider();
             var channel = new BandwidthChannel(timeProvider);
-            int limit = 1000;
+            const int limit = 1000;
             channel.SetLimit(limit);
 
-            int taskCount = 5;
-            int updatesPerTask = 100;
-            int dtPerUpdate = 100; // 100ms
+            const int taskCount = 5;
+            const int updatesPerTask = 100;
+            const int dtPerUpdate = 100; // 100ms
 
             var tasks = new List<Task>();
             for (int t = 0; t < taskCount; t++)
@@ -145,7 +145,7 @@ public class CoyoteTests
         {
             var timeProvider = new FakeTimeProvider();
             var channel = new BandwidthChannel(timeProvider);
-            int limit = 1000;
+            const int limit = 1000;
             channel.SetLimit(limit);
             channel.UpdateQuota(2000); // Start with 2000
 
@@ -254,7 +254,7 @@ public class CoyoteTests
         RunCoyoteTest(() =>
         {
             var piece = new PieceState(0, 10);
-            int blockIndex = 5;
+            const int blockIndex = 5;
             int successCount = 0;
             object countLock = new();
 
@@ -305,7 +305,7 @@ public class CoyoteTests
     {
         RunCoyoteTest(() =>
         {
-            int blocksCount = 4;
+            const int blocksCount = 4;
             var piece = new PieceState(0, blocksCount);
             int writeClaimCount = 0;
             object countLock = new();
@@ -354,7 +354,7 @@ public class CoyoteTests
     {
         RunCoyoteTest(() =>
         {
-            int blocksCount = 4;
+            const int blocksCount = 4;
             var piece = new PieceState(0, blocksCount);
 
             // Add all blocks first
@@ -413,7 +413,7 @@ public class CoyoteTests
     {
         RunCoyoteTest(() =>
         {
-            int blocksCount = 4;
+            const int blocksCount = 4;
             var piece = new PieceState(0, blocksCount);
 
             // Add some blocks
@@ -476,7 +476,7 @@ public class CoyoteTests
             var manager = new AlertsManager(timeProvider);
             manager.RegisterAlerts((uint)AlertId.TorrentAdded);
 
-            int postCount = 200;
+            const int postCount = 200;
             var tasks = new List<Task>();
 
             for (int t = 0; t < 5; t++)
@@ -644,9 +644,9 @@ public class CoyoteTests
         RunCoyoteTest(() =>
         {
             var stats = new CoreTransferStats();
-            int threads = 5;
-            int addsPerThread = 100;
-            long bytesPerAdd = 1000;
+            const int threads = 5;
+            const int addsPerThread = 100;
+            const long bytesPerAdd = 1000;
 
             var tasks = new List<Task>();
 
@@ -937,11 +937,11 @@ public class CoyoteTests
     {
         RunCoyoteTest(() =>
         {
-            int pieceCount = 100;
+            const int pieceCount = 100;
             var model = new PieceAvailabilityModel(pieceCount);
 
-            int peersPerThread = 10;
-            int threadCount = 5;
+            const int peersPerThread = 10;
+            const int threadCount = 5;
 
             var tasks = new List<Task>();
 
@@ -983,7 +983,7 @@ public class CoyoteTests
     {
         RunCoyoteTest(() =>
         {
-            int pieceCount = 50;
+            const int pieceCount = 50;
             var model = new PieceAvailabilityModel(pieceCount);
 
             // Pre-populate with some availability
@@ -1050,7 +1050,7 @@ public class CoyoteTests
     {
         RunCoyoteTest(() =>
         {
-            int pieceCount = 20;
+            const int pieceCount = 20;
             var model = new PieceAvailabilityModel(pieceCount);
 
             // Start with small availability

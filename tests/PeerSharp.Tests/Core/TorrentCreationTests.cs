@@ -10,7 +10,7 @@ public class TorrentCreationTests
     [Fact]
     public async Task BuildAsync_V2_CreatesValidV2Torrent()
     {
-        var fileName = "v2_async.bin";
+        const string fileName = "v2_async.bin";
         byte[] data = new byte[32 * 1024];
         Random.Shared.NextBytes(data);
 
@@ -56,7 +56,7 @@ public class TorrentCreationTests
     [Fact]
     public void BuildSingleFile_CreatesValidTorrent()
     {
-        var fileName = "single.bin";
+        const string fileName = "single.bin";
         byte[] data = new byte[48 * 1024];
         Random.Shared.NextBytes(data);
 
@@ -171,7 +171,7 @@ public class TorrentCreationTests
     [Fact]
     public void BuildV2SingleFile_EmitsV2Metadata()
     {
-        var fileName = "v2.bin";
+        const string fileName = "v2.bin";
         byte[] data = new byte[24 * 1024];
         Random.Shared.NextBytes(data);
 
@@ -254,7 +254,7 @@ public class TorrentCreationTests
     [Fact]
     public void BuildHybridSingleFile_EmitsBothHashes()
     {
-        var fileName = "hybrid.bin";
+        const string fileName = "hybrid.bin";
         byte[] data = new byte[32 * 1024];
         Random.Shared.NextBytes(data);
 

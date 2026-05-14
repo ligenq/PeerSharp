@@ -196,6 +196,34 @@ internal class PiecePicker : IDisposable
             return false;
         }
 
+        // RANDOM FIRST PIECES MODE (Startup Optimization)
+        // To quickly participate in Tit-for-Tat and unchoke others, we download the first few pieces randomly
+        // instead of picking the rarest piece, which is usually held by slow peers.
+        if (_context.DownloadStrategy == DownloadStrategy.RarestFirst && _context.CompletedPieceCount < 4)
+        {
+            int selectedIndex = -1;
+            int count = 0;
+            for (int i = 0; i < _context.PieceCount; i++)
+            {
+                if (CanPick(i, peer, selection))
+                {
+                    count++;
+                    if (_random.Next(count) == 0)
+                    {
+                        selectedIndex = i;
+                    }
+                }
+            }
+
+            if (selectedIndex != -1)
+            {
+                pieceIndex = selectedIndex;
+                return true;
+            }
+
+            return false;
+        }
+
         // RAREST FIRST MODE (default)
         // Fast path: Peer has suggested pieces?
         if (!peer.IsChoking)

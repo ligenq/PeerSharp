@@ -8,6 +8,7 @@ public class PiecePickerTests
     private class MockContext : IPiecePickerContext
     {
         public int PieceCount { get; set; }
+        public int CompletedPieceCount { get; set; } = 4; // Default to 4 to bypass random first piece mode in tests
         public HashSet<int> CompletedPieces { get; } = [];
         public List<FileSelection>? Selection { get; set; }
         public DownloadStrategy DownloadStrategy { get; set; } = DownloadStrategy.RarestFirst;
@@ -404,6 +405,47 @@ public class PiecePickerTests
         // Piece 2 (avail=0) → piece 1 (avail=1) → piece 0 (avail=200)
         Assert.True(candidates.IndexOf(2) < candidates.IndexOf(1));
         Assert.True(candidates.IndexOf(1) < candidates.IndexOf(0));
+    }
+
+    [Fact]
+    public void PickNextPiece_StartupMode_PicksRandomFirstPieces()
+    {
+        // Arrange
+        // CompletedPieceCount = 0 triggers the Random First Pieces mode
+        var ctx = new MockContext { PieceCount = 5, CompletedPieceCount = 0 };
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+
+        // Piece 0: avail 1, Piece 1: avail 1, Piece 2: avail 10
+        picker.IncrementAvailability(0);
+        picker.IncrementAvailability(1);
+        for (int i = 0; i < 10; i++)
+        {
+            picker.IncrementAvailability(2);
+        }
+
+        var peer = new MockPeer();
+        for (int i = 0; i < 5; i++)
+        {
+            peer.Pieces.Add(i);
+        }
+
+        // Act
+        // Run it enough times to demonstrate it picks piece 2 (highest availability)
+        // which RarestFirst would never do initially.
+        bool pickedHighestAvailability = false;
+        for (int attempt = 0; attempt < 50; attempt++)
+        {
+            bool success = picker.PickNextPiece(peer, out int picked);
+            Assert.True(success);
+            if (picked == 2)
+            {
+                pickedHighestAvailability = true;
+                break;
+            }
+        }
+
+        // Assert
+        Assert.True(pickedHighestAvailability, "Should randomly pick even the most common piece during startup");
     }
 }
 

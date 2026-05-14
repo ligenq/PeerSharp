@@ -93,7 +93,7 @@ public class MerkleTreeTests
     [Fact]
     public void VerifyPiece_FinalPartialPiece_PadsToPieceBoundary()
     {
-        uint pieceSize = 64 * 1024;
+        const uint pieceSize = 64 * 1024;
         byte[] fileData = new byte[80 * 1024]; // 64KB piece + 16KB final piece
         Random.Shared.NextBytes(fileData);
 
@@ -109,7 +109,7 @@ public class MerkleTreeTests
     [Fact]
     public void VerifyPiece_SinglePieceSmallFile_DoesNotPadToPieceBoundary()
     {
-        uint pieceSize = 64 * 1024;
+        const uint pieceSize = 64 * 1024;
         byte[] fileData = new byte[24 * 1024];
         Random.Shared.NextBytes(fileData);
 
@@ -124,8 +124,8 @@ public class MerkleTreeTests
     public void VerifyPieceLayerAgainstRoot_Valid_ReturnsTrue()
     {
         // 1MB file, 32KB pieces
-        long fileSize = 1024 * 1024;
-        uint pieceSize = 32768;
+        const long fileSize = 1024 * 1024;
+        const uint pieceSize = 32768;
         byte[] fileData = new byte[fileSize];
         Random.Shared.NextBytes(fileData);
 
@@ -168,8 +168,8 @@ public class MerkleTreeTests
     {
         // 80KB file, 32KB pieces => 5 blocks, 3 real pieces. Without the trim, GetPieceLayer
         // historically returned 4 entries (last one was hash(zero, zero) padding).
-        long fileSize = 80 * 1024;
-        uint pieceSize = 32 * 1024;
+        const long fileSize = 80 * 1024;
+        const uint pieceSize = 32 * 1024;
         byte[] fileData = new byte[fileSize];
         Random.Shared.NextBytes(fileData);
 
@@ -184,8 +184,8 @@ public class MerkleTreeTests
     {
         // The original bug: VerifyPieceLayerAgainstRoot padded with zero hash at the piece
         // layer instead of merkle_pad(blocks_per_piece, 1). Pre-fix this returned false.
-        long fileSize = 80 * 1024;       // 5 blocks → 3 pieces (last partial)
-        uint pieceSize = 32 * 1024;      // 2 blocks per piece
+        const long fileSize = 80 * 1024;       // 5 blocks → 3 pieces (last partial)
+        const uint pieceSize = 32 * 1024;      // 2 blocks per piece
         byte[] fileData = new byte[fileSize];
         Random.Shared.NextBytes(fileData);
 
@@ -202,8 +202,8 @@ public class MerkleTreeTests
         // Reproduce the exact tree libtorrent computes (`merkle_pad(blocks_per_piece, 1)`)
         // and check our code agrees layer for layer.
         // 96KB file with 32KB pieces => 6 blocks → 3 pieces.
-        long fileSize = 96 * 1024;
-        uint pieceSize = 32 * 1024;
+        const long fileSize = 96 * 1024;
+        const uint pieceSize = 32 * 1024;
         byte[] fileData = new byte[fileSize];
         Random.Shared.NextBytes(fileData);
 
@@ -237,8 +237,8 @@ public class MerkleTreeTests
         // libtorrent requests the final chunk with count = NextPow2(remaining); the server
         // must virtually fill entries past file_num_pieces with the layer pad. Pre-fix,
         // GetV2Hashes returned null when index+length exceeded layer.Count.
-        long fileSize = 4 * 16_384L;     // 4 blocks → 4 pieces with pieceSize=16KB
-        uint pieceSize = 16_384;
+        const long fileSize = 4 * 16_384L;     // 4 blocks → 4 pieces with pieceSize=16KB
+        const uint pieceSize = 16_384;
         byte[] fileData = new byte[fileSize];
         Random.Shared.NextBytes(fileData);
         var leaves = MerkleTree.ComputeLeaves(fileData);

@@ -73,7 +73,7 @@ public class BlockCacheTests
         cache.Initialize(storage);
 
         var buffer = new byte[16 * 1024]; // 16KB block
-        long offset = 0;
+        const long offset = 0;
 
         // First read: miss
         await cache.ReadAsync(offset, buffer);
@@ -92,7 +92,7 @@ public class BlockCacheTests
         cache.Initialize(storage);
 
         var buffer = new byte[100]; // Small read
-        long offset = 0;
+        const long offset = 0;
 
         await cache.ReadAsync(offset, buffer);
         Assert.Equal(1, storage.ReadCount);
@@ -110,7 +110,7 @@ public class BlockCacheTests
 
         var data = new byte[16 * 1024]; // 16KB
         Array.Fill(data, (byte)0xFF);
-        long offset = 0;
+        const long offset = 0;
 
         // Write through
         await cache.WriteAsync(offset, data);

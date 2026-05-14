@@ -37,7 +37,7 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
         var hash = new InfoHash(Enumerable.Range(0, 20).Select(i => (byte)i).ToArray());
 
         var torrentBytes = Encoding.ASCII.GetBytes("torrent-bytes");
-        var magnet = "magnet:?xt=urn:btih:TEST";
+        const string magnet = "magnet:?xt=urn:btih:TEST";
         var resume = new TorrentResumeData
         {
             Hash = hash,

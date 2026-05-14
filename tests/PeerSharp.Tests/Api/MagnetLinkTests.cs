@@ -127,7 +127,7 @@ public class MagnetLinkTests
     [Fact]
     public void Parse_MissingInfoHash_Fails()
     {
-        string magnet = "magnet:?dn=NoHash&tr=udp://tracker";
+        const string magnet = "magnet:?dn=NoHash&tr=udp://tracker";
 
         Assert.False(MagnetLink.TryParse(magnet, out _, out var error));
         Assert.NotNull(error);

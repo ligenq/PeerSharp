@@ -60,14 +60,6 @@ public readonly struct InfoHash : IEquatable<InfoHash>
     }
 
     /// <summary>
-    /// Private constructor for internal use (does not copy).
-    /// </summary>
-    private InfoHash(byte[] bytes, bool noCopy)
-    {
-        _bytes = bytes;
-    }
-
-    /// <summary>
     /// Gets an empty info hash (all zeros, V1 length).
     /// </summary>
     public static InfoHash Empty { get; } = new(new byte[V1Length]);
@@ -114,7 +106,7 @@ public readonly struct InfoHash : IEquatable<InfoHash>
     {
         var bytes = new byte[V1Length];
         Random.Shared.NextBytes(bytes);
-        return new InfoHash(bytes, noCopy: true);
+        return new InfoHash(bytes);
     }
 
     /// <summary>
@@ -124,7 +116,7 @@ public readonly struct InfoHash : IEquatable<InfoHash>
     {
         var bytes = new byte[V2Length];
         Random.Shared.NextBytes(bytes);
-        return new InfoHash(bytes, noCopy: true);
+        return new InfoHash(bytes);
     }
 
     /// <summary>
@@ -147,7 +139,7 @@ public readonly struct InfoHash : IEquatable<InfoHash>
     {
         ArgumentNullException.ThrowIfNull(hex);
         var bytes = Convert.FromHexString(hex);
-        return new InfoHash(bytes, noCopy: true);
+        return new InfoHash(bytes);
     }
 
     /// <summary>
@@ -197,7 +189,7 @@ public readonly struct InfoHash : IEquatable<InfoHash>
                 return false;
             }
 
-            result = new InfoHash(bytes, noCopy: true);
+            result = new InfoHash(bytes);
             return true;
         }
         catch

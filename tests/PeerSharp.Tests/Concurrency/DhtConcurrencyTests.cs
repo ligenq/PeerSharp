@@ -75,7 +75,7 @@ public class DhtConcurrencyTests
             _ = dht.StartAsync();
 
             var tasks = new List<Task>();
-            int nodeCount = 20;
+            const int nodeCount = 20;
 
             // Concurrent add nodes (via ping response simulation)
             for (int i = 0; i < nodeCount; i++)

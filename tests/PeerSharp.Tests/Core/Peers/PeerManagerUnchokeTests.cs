@@ -47,7 +47,7 @@ public class PeerManagerUnchokeTests
         // Setup peers: 2 interested (candidates), 1 not interested (filler)
         var p1 = new MockPeer(torrent); p1.SetSpeed(100); p1.SetInterested(true); p1.Choke();
         var p2 = new MockPeer(torrent); p2.SetSpeed(200); p2.SetInterested(true); p2.Choke();
-        var p3 = new MockPeer(torrent); p3.SetSpeed(50);  p3.SetInterested(false); p3.Choke(); // Not interested
+        var p3 = new MockPeer(torrent); p3.SetSpeed(50); p3.SetInterested(false); p3.Choke(); // Not interested
 
         // Add to connected peers via reflection
         var dict = typeof(PeerManager).GetField("_connectedPeers", BindingFlags.Instance | BindingFlags.NonPublic)!

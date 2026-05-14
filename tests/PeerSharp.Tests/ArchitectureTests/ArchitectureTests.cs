@@ -1881,7 +1881,7 @@ public class ArchitectureTests
                 }
 
                 // Find all catch blocks
-                var catchPattern = @"catch\s*\([^)]*\)\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}";
+                const string catchPattern = @"catch\s*\([^)]*\)\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}";
                 var matches = System.Text.RegularExpressions.Regex.Matches(content, catchPattern);
 
                 foreach (System.Text.RegularExpressions.Match match in matches)
@@ -2088,7 +2088,7 @@ public class ArchitectureTests
 
                 // Find lock blocks and check for await inside
                 // Pattern: lock (...) { ... await ... }
-                var lockPattern = @"lock\s*\([^)]+\)\s*\{";
+                const string lockPattern = @"lock\s*\([^)]+\)\s*\{";
                 var lockMatches = System.Text.RegularExpressions.Regex.Matches(content, lockPattern);
 
                 foreach (System.Text.RegularExpressions.Match match in lockMatches)

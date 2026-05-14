@@ -84,8 +84,8 @@ internal class DhtBloomFilter
         }
 
         // BEP 33 formula
-        double m = FilterSizeBits;
-        double k = 2; // Number of hash functions
+        const double m = FilterSizeBits;
+        const double k = 2; // Number of hash functions
         double x = bitsSet;
 
         // n ≈ -m/k * ln(1 - x/m)

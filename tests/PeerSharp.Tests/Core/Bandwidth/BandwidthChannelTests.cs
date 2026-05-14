@@ -122,9 +122,9 @@ public class BandwidthChannelTests
         channel.SetLimit(1000000); // High limit
         channel.UpdateQuota(1000); // 1MB quota
 
-        int threads = 10;
-        int usesPerThread = 1000;
-        int amountPerUse = 10;
+        const int threads = 10;
+        const int usesPerThread = 1000;
+        const int amountPerUse = 10;
 
         Parallel.For(0, threads, _ =>
         {
