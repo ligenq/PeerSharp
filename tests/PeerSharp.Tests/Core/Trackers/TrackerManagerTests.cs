@@ -139,6 +139,25 @@ public class TrackerManagerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task Announce_HugeInterval_IsClampedAndDoesNotThrow()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://tracker.com/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        // A malformed tracker sends an interval that overflows int when cast: this used to
+        // schedule a negative timer delay and throw inside the announce-result handler.
+        tracker.TriggerResult(true, new AnnounceResponse { Interval = uint.MaxValue });
+
+        var status = manager.GetTrackers().First();
+        Assert.True(status.Interval > 0);
+        Assert.True(status.Interval <= 24 * 60 * 60);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task Start_AnnouncesToAllTrackers()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);

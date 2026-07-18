@@ -16,7 +16,9 @@ internal static class RandomUtils
 
     public static uint Number()
     {
-        return (uint)Random.Shared.NextInt64(0, uint.MaxValue);
+        Span<byte> buf = stackalloc byte[4];
+        RandomNumberGenerator.Fill(buf);
+        return BitConverter.ToUInt32(buf);
     }
 
     public static ulong Number64()

@@ -140,6 +140,49 @@ public class IpBlocklistTests
     }
 
     [Fact]
+    public void IsBlocked_NestedRanges_MatchesContainingRange()
+    {
+        // A wide range whose Start precedes several narrow ranges. Binary search over
+        // ranges sorted by Start must not skip the containing range when a mid probe
+        // lands on a later, narrower range whose End is below the queried IP.
+        var blocklist = new IpBlocklist { Enabled = true };
+        blocklist.AddRange(IPAddress.Parse("10.0.0.0"), IPAddress.Parse("10.0.255.255"));
+        blocklist.AddRange(IPAddress.Parse("10.0.0.5"), IPAddress.Parse("10.0.0.6"));
+        blocklist.AddRange(IPAddress.Parse("10.0.0.7"), IPAddress.Parse("10.0.0.8"));
+
+        // 10.0.128.0 is only inside the wide first range
+        Assert.True(blocklist.IsBlocked(IPAddress.Parse("10.0.128.0")));
+        Assert.True(blocklist.IsBlocked(IPAddress.Parse("10.0.255.255")));
+        Assert.False(blocklist.IsBlocked(IPAddress.Parse("10.1.0.0")));
+    }
+
+    [Fact]
+    public void IsBlocked_OverlappingRanges_MatchesAcrossSeam()
+    {
+        var blocklist = new IpBlocklist { Enabled = true };
+        blocklist.AddRange(IPAddress.Parse("1.0.0.0"), IPAddress.Parse("1.0.0.100"));
+        blocklist.AddRange(IPAddress.Parse("1.0.0.50"), IPAddress.Parse("1.0.0.200"));
+
+        Assert.True(blocklist.IsBlocked(IPAddress.Parse("1.0.0.0")));
+        Assert.True(blocklist.IsBlocked(IPAddress.Parse("1.0.0.150")));
+        Assert.True(blocklist.IsBlocked(IPAddress.Parse("1.0.0.200")));
+        Assert.False(blocklist.IsBlocked(IPAddress.Parse("1.0.0.201")));
+    }
+
+    [Fact]
+    public void IsBlocked_AdjacentRanges_AreCoalesced()
+    {
+        var blocklist = new IpBlocklist { Enabled = true };
+        blocklist.AddRange(IPAddress.Parse("2.0.0.0"), IPAddress.Parse("2.0.0.10"));
+        blocklist.AddRange(IPAddress.Parse("2.0.0.11"), IPAddress.Parse("2.0.0.20"));
+
+        Assert.True(blocklist.IsBlocked(IPAddress.Parse("2.0.0.10")));
+        Assert.True(blocklist.IsBlocked(IPAddress.Parse("2.0.0.11")));
+        Assert.True(blocklist.IsBlocked(IPAddress.Parse("2.0.0.20")));
+        Assert.False(blocklist.IsBlocked(IPAddress.Parse("2.0.0.21")));
+    }
+
+    [Fact]
     public void Clear_RemovesAllRangesAndDisables()
     {
         var blocklist = new IpBlocklist();

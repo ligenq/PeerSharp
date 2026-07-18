@@ -139,8 +139,12 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 // Reconstruct TorrentFileMetadata from raw info dictionary bytes
                 var newMetadata = TorrentFileParser.ParseInfoBytes(_metadataBuffer);
 
-                // SECURITY: Verify the downloaded metadata hash matches the requested hash
-                bool hashMatches = true;
+                // SECURITY: Verify the downloaded metadata hash matches the requested hash.
+                // Require at least one expected hash to be present: with no known hash we
+                // cannot authenticate attacker-supplied metadata, so it must be rejected
+                // rather than accepted unverified.
+                bool haveExpectedHash = !_torrent.InfoFile.Info.Hash.IsEmpty || !_torrent.InfoFile.Info.HashV2.IsEmpty;
+                bool hashMatches = haveExpectedHash;
                 if (!_torrent.InfoFile.Info.Hash.IsEmpty && !newMetadata.Info.Hash.Equals(_torrent.InfoFile.Info.Hash))
                 {
                     hashMatches = false;

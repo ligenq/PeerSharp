@@ -223,15 +223,23 @@ internal static class DhtSecurity
             maskLen = 8;
         }
 
-        // Create data: masked IP bytes + r
-        Span<byte> data = stackalloc byte[9]; // max maskLen + 1
-        for (int i = 0; i < maskLen && i < ipWritten; i++)
+        // BEP 42: mask the first maskLen octets of the IP, fold the low 3 bits of r
+        // into the top of the first masked octet, then CRC32-C exactly those octets:
+        //   for i in 0..num: ip[i] &= mask[i]
+        //   ip[0] |= (r & 0x7) << 5
+        //   crc32c(ip[0..num])
+        // The previous implementation appended r as a trailing byte and hashed one
+        // extra octet, which was self-consistent but non-conformant: our secure node
+        // IDs read as insecure to other clients and vice-versa.
+        Span<byte> data = stackalloc byte[8];
+        for (int i = 0; i < maskLen; i++)
         {
-            data[i] = (byte)(ipBytes[i] & mask[i]);
+            byte ipByte = i < ipWritten ? ipBytes[i] : (byte)0;
+            data[i] = (byte)(ipByte & mask[i]);
         }
-        data[maskLen] = r;
+        data[0] |= (byte)((r & 0x7) << 5);
 
-        return ComputeCrc32C(data[..(maskLen + 1)]);
+        return ComputeCrc32C(data[..maskLen]);
     }
 
     /// <summary>

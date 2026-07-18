@@ -1559,6 +1559,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             {
                 Interlocked.Decrement(ref _connectedPeersCount);
                 UnregisterConnectedEndpoint(peer);
+                // The peer is only ever added to _connectedPeers after the governor
+                // connection slot is acquired, so removing it here means the slot would
+                // otherwise leak (ConnectionClosedAsync won't run for a peer we just removed).
+                if (useGovernor)
+                {
+                    _governor.ReleaseConnectionSlot();
+                }
             }
         }
         finally

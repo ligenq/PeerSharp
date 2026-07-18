@@ -221,7 +221,10 @@ internal class BlockCache : IBlockCache
         {
             if (_blocks.TryGetValue(offset, out var existing))
             {
-                // Already in cache, maybe update MRU?
+                // Refresh the cached contents: the same offset can be written again with
+                // different data (e.g. a piece that failed verification and was re-downloaded).
+                // Keeping the old block here would serve stale/corrupt data on later reads.
+                data.CopyTo(existing.Data);
                 _lruList.Remove(existing.Node);
                 _lruList.AddLast(existing.Node);
                 CachePool.Return(buffer);
