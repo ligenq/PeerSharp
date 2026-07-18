@@ -12,7 +12,9 @@ internal class BDict : IBNode
 
     public ReadOnlyMemory<byte>? GetBytes(string key)
     {
-        return Get(key) is BString s ? s.Value : null;
+        // The explicit nullable cast matters: a bare `null` here would convert via
+        // byte[] -> ReadOnlyMemory<byte> into an empty (non-null) value instead.
+        return Get(key) is BString s ? s.Value : (ReadOnlyMemory<byte>?)null;
     }
 
     public long? GetLong(string key)

@@ -195,11 +195,33 @@ internal static class TorrentFileParser
     }
 
     /// <summary>
-    /// BEP 47: "attr" is a string of flag characters; 'p' marks a padding file.
+    /// BEP 47: Applies the "attr" flag characters ('p' padding, 'x' executable,
+    /// 'h' hidden, 'l' symlink) and the "symlink path" and "sha1" keys of a file
+    /// entry. Unknown flag characters are ignored, per the BEP.
     /// </summary>
-    private static bool HasPaddingAttribute(BDict fileDict)
+    private static void ApplyBep47Attributes(BDict fileDict, TorrentFileEntry entry)
     {
-        return fileDict.GetString("attr")?.Contains('p') == true;
+        string? attr = fileDict.GetString("attr");
+        if (attr != null)
+        {
+            entry.IsPadding |= attr.Contains('p');
+            entry.IsExecutable = attr.Contains('x');
+            entry.IsHidden = attr.Contains('h');
+            entry.IsSymlink = attr.Contains('l');
+        }
+
+        if (fileDict.Get("symlink path") is BList symlinkPath && symlinkPath.List.Count > 0)
+        {
+            entry.SymlinkTarget = string.Join(
+                Path.DirectorySeparatorChar,
+                symlinkPath.List.OfType<BString>().Select(s => s.Text));
+        }
+
+        var sha1 = fileDict.GetBytes("sha1");
+        if (sha1?.Length == 20)
+        {
+            entry.Sha1 = sha1.Value.ToArray();
+        }
     }
 
     /// <summary>
@@ -229,8 +251,9 @@ internal static class TorrentFileParser
                         Size = length,
                         Offset = currentOffset,
                         PiecesRoot = piecesRootBytes?.ToArray(),
-                        IsPadding = HasPaddingAttribute(fileInfo) || PaddingFileHelper.IsPaddingPath(path)
+                        IsPadding = PaddingFileHelper.IsPaddingPath(path)
                     };
+                    ApplyBep47Attributes(fileInfo, file);
 
                     // BEP 52: Calculate first piece index (files are piece-aligned)
                     if (metadata.Info.PieceSize > 0)
@@ -374,13 +397,15 @@ internal static class TorrentFileParser
                             ? string.Join(Path.DirectorySeparatorChar, pathList.List.Select(n => n.ToString()))
                             : "Unknown";
 
-                        metadata.Info.Files.Add(new TorrentFileEntry
+                        var entry = new TorrentFileEntry
                         {
                             Path = path,
                             Size = len,
                             Offset = offset,
-                            IsPadding = HasPaddingAttribute(fDict) || PaddingFileHelper.IsPaddingPath(path)
-                        });
+                            IsPadding = PaddingFileHelper.IsPaddingPath(path)
+                        };
+                        ApplyBep47Attributes(fDict, entry);
+                        metadata.Info.Files.Add(entry);
                         offset += len;
                     }
                 }
@@ -388,15 +413,17 @@ internal static class TorrentFileParser
             }
             else if (metadata.Info.Files.Count == 0)
             {
-                // Single file
+                // Single file. BEP 47 keys live directly in the info dictionary here.
                 long len = info.GetLong("length") ?? 0;
-                metadata.Info.Files.Add(new TorrentFileEntry
+                var entry = new TorrentFileEntry
                 {
                     Path = metadata.Info.Name,
                     Size = len,
                     Offset = 0,
-                    IsPadding = HasPaddingAttribute(info) || PaddingFileHelper.IsPaddingPath(metadata.Info.Name)
-                });
+                    IsPadding = PaddingFileHelper.IsPaddingPath(metadata.Info.Name)
+                };
+                ApplyBep47Attributes(info, entry);
+                metadata.Info.Files.Add(entry);
                 metadata.Info.FullSize = len;
             }
         }

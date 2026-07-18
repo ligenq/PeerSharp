@@ -67,6 +67,9 @@ var created = await new TorrentFileBuilder()
     .WithPieceLength(256 * 1024)
     .AddTracker("https://tracker.example/announce")
     .AddFileFromPath("release.iso")
+    .AddFileFromPath("install.sh", "install.sh", TorrentFileAttributes.Executable) // BEP 47 attributes
+    .AddSymlink("latest.iso", "release.iso") // BEP 47 symlink entry
+    .WithPerFileSha1() // BEP 47 per-file sha1 digests
     .BuildAsync();
 ```
 
@@ -171,7 +174,7 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 33  | DHT Scrape | Supported |
 | 40  | Canonical Peer Priority | Supported |
 | 42  | DHT Security Extension | Supported |
-| 47  | Padding Files and Extended File Attributes | Partial (padding files with attr flag) |
+| 47  | Padding Files and Extended File Attributes | Supported (metadata; attributes are not applied to downloaded files) |
 | 48  | Tracker Protocol Extension: Scrape | Supported |
 | 52  | The BitTorrent Protocol Specification v2 | Supported |
 | 53  | Magnet URI Extension - Select Specific File Indices for Download | Supported |

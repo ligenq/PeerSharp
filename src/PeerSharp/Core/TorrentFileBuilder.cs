@@ -21,18 +21,28 @@ public sealed class TorrentFileBuilder
     private bool _usePadding;
     private TorrentFileVersion _version = TorrentFileVersion.V1;
     private bool _useAsyncFileIO = true;
+    private bool _emitPerFileSha1;
 
     /// <summary>
     /// Adds an in-memory file to the torrent.
     /// </summary>
     public TorrentFileBuilder AddFile(string torrentPath, byte[] data)
     {
+        return AddFile(torrentPath, data, TorrentFileAttributes.None);
+    }
+
+    /// <summary>
+    /// Adds an in-memory file to the torrent with BEP 47 attributes.
+    /// </summary>
+    public TorrentFileBuilder AddFile(string torrentPath, byte[] data, TorrentFileAttributes attributes)
+    {
         ArgumentNullException.ThrowIfNull(data);
         AddFileInternal(
             torrentPath,
             data.LongLength,
             () => new MemoryStream(data, writable: false),
-            () => new MemoryStream(data, writable: false));
+            () => new MemoryStream(data, writable: false),
+            attributes);
         return this;
     }
 
@@ -40,6 +50,14 @@ public sealed class TorrentFileBuilder
     /// Adds a file from disk to the torrent.
     /// </summary>
     public TorrentFileBuilder AddFileFromPath(string filePath, string? torrentPath = null)
+    {
+        return AddFileFromPath(filePath, torrentPath, TorrentFileAttributes.None);
+    }
+
+    /// <summary>
+    /// Adds a file from disk to the torrent with BEP 47 attributes.
+    /// </summary>
+    public TorrentFileBuilder AddFileFromPath(string filePath, string? torrentPath, TorrentFileAttributes attributes)
     {
         if (string.IsNullOrWhiteSpace(filePath))
         {
@@ -57,7 +75,27 @@ public sealed class TorrentFileBuilder
             relativePath,
             fileInfo.Length,
             () => OpenFileRead(fileInfo.FullName),
-            () => OpenFileReadWithAsyncIO(fileInfo.FullName));
+            () => OpenFileReadWithAsyncIO(fileInfo.FullName),
+            attributes);
+        return this;
+    }
+
+    /// <summary>
+    /// Adds a BEP 47 symbolic link entry. The link itself carries no data;
+    /// <paramref name="targetPath"/> is the link target relative to the torrent root.
+    /// </summary>
+    public TorrentFileBuilder AddSymlink(string torrentPath, string targetPath)
+    {
+        ValidateTorrentPath(torrentPath, nameof(torrentPath));
+        ValidateTorrentPath(targetPath, nameof(targetPath));
+
+        _files.Add(new FileSource(
+            torrentPath,
+            Length: 0,
+            () => new ZeroStream(0),
+            () => new ZeroStream(0),
+            TorrentFileAttributes.Symlink,
+            targetPath));
         return this;
     }
 
@@ -199,6 +237,16 @@ public sealed class TorrentFileBuilder
     }
 
     /// <summary>
+    /// Emits a BEP 47 "sha1" key (SHA-1 of the file contents) for each regular file.
+    /// Padding files and symlinks are skipped.
+    /// </summary>
+    public TorrentFileBuilder WithPerFileSha1(bool enabled = true)
+    {
+        _emitPerFileSha1 = enabled;
+        return this;
+    }
+
+    /// <summary>
     /// Controls whether async build operations open files with async I/O.
     /// Defaults to true.
     /// </summary>
@@ -236,7 +284,12 @@ public sealed class TorrentFileBuilder
             var fileNode = new BDict();
             var fileInfo = new BDict();
             fileInfo.Dict["length"] = new BNumber(file.Length);
-            fileInfo.Dict["pieces root"] = new BString(file.PiecesRoot);
+            if (file.Length > 0)
+            {
+                // BEP 52: zero-length files (and BEP 47 symlinks) have no pieces root
+                fileInfo.Dict["pieces root"] = new BString(file.PiecesRoot);
+            }
+            ApplyBep47Keys(fileInfo, file.Source);
             fileNode.Dict[string.Empty] = fileInfo;
             current.Dict[fileName] = fileNode;
         }
@@ -288,43 +341,107 @@ public sealed class TorrentFileBuilder
         return path.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
     }
 
-    private static void ValidateTorrentPath(string torrentPath)
+    private static BList BuildPathList(string path)
+    {
+        var pathList = new BList();
+        foreach (var part in SplitPath(path))
+        {
+            pathList.List.Add(new BString(Encoding.UTF8.GetBytes(part)));
+        }
+        return pathList;
+    }
+
+    private static string BuildAttrString(TorrentFileAttributes attributes)
+    {
+        var attr = new StringBuilder(4);
+        if ((attributes & TorrentFileAttributes.Padding) != 0)
+        {
+            attr.Append('p');
+        }
+        if ((attributes & TorrentFileAttributes.Symlink) != 0)
+        {
+            attr.Append('l');
+        }
+        if ((attributes & TorrentFileAttributes.Executable) != 0)
+        {
+            attr.Append('x');
+        }
+        if ((attributes & TorrentFileAttributes.Hidden) != 0)
+        {
+            attr.Append('h');
+        }
+        return attr.ToString();
+    }
+
+    /// <summary>
+    /// BEP 47: Emits the "attr", "symlink path" and "sha1" keys of a file entry.
+    /// </summary>
+    private static void ApplyBep47Keys(BDict fileDict, FileSource file)
+    {
+        string attr = BuildAttrString(file.Attributes);
+        if (attr.Length > 0)
+        {
+            fileDict.Dict["attr"] = new BString(Encoding.UTF8.GetBytes(attr));
+        }
+
+        if (file.SymlinkTarget != null)
+        {
+            fileDict.Dict["symlink path"] = BuildPathList(file.SymlinkTarget);
+        }
+
+        if (file.Sha1 != null)
+        {
+            fileDict.Dict["sha1"] = new BString(file.Sha1);
+        }
+    }
+
+    private static void ValidateTorrentPath(string torrentPath, string paramName)
     {
         if (string.IsNullOrWhiteSpace(torrentPath))
         {
-            throw new ArgumentException("Torrent path cannot be null or whitespace.", nameof(torrentPath));
+            throw new ArgumentException("Torrent path cannot be null or whitespace.", paramName);
         }
 
         if (Path.IsPathRooted(torrentPath))
         {
-            throw new ArgumentException("Torrent paths must be relative.", nameof(torrentPath));
+            throw new ArgumentException("Torrent paths must be relative.", paramName);
         }
 
         var parts = SplitPath(torrentPath);
         if (parts.Length == 0)
         {
-            throw new ArgumentException("Torrent path must contain at least one file name.", nameof(torrentPath));
+            throw new ArgumentException("Torrent path must contain at least one file name.", paramName);
         }
 
         foreach (string part in parts)
         {
             if (part == "." || part == "..")
             {
-                throw new ArgumentException("Torrent paths must not contain current or parent directory segments.", nameof(torrentPath));
+                throw new ArgumentException("Torrent paths must not contain current or parent directory segments.", paramName);
             }
         }
     }
 
-    private void AddFileInternal(string torrentPath, long length, Func<Stream> openRead, Func<Stream> openReadAsync)
+    private void AddFileInternal(string torrentPath, long length, Func<Stream> openRead, Func<Stream> openReadAsync, TorrentFileAttributes attributes)
     {
-        ValidateTorrentPath(torrentPath);
+        ValidateTorrentPath(torrentPath, nameof(torrentPath));
 
         if (length < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(length), "File length cannot be negative.");
         }
 
-        _files.Add(new FileSource(torrentPath, length, openRead, openReadAsync));
+        if ((attributes & TorrentFileAttributes.Padding) != 0)
+        {
+            throw new ArgumentException("Padding entries are generated automatically; the Padding attribute cannot be set explicitly.", nameof(attributes));
+        }
+
+        if ((attributes & TorrentFileAttributes.Symlink) != 0)
+        {
+            throw new ArgumentException("Use AddSymlink to add symbolic link entries.", nameof(attributes));
+        }
+
+        _files.Add(new FileSource(torrentPath, length, openRead, openReadAsync, attributes));
     }
 
     private List<FileSource> GetV1FilesWithPadding()
@@ -368,7 +485,7 @@ public sealed class TorrentFileBuilder
                 padLength,
                 () => new ZeroStream(padLength),
                 () => new ZeroStream(padLength),
-                IsPadding: true));
+                TorrentFileAttributes.Padding));
             offset += padLength;
         }
 
@@ -381,6 +498,7 @@ public sealed class TorrentFileBuilder
         {
             var file = _files[0];
             info.Dict["length"] = new BNumber(file.Length);
+            ApplyBep47Keys(info, file);
         }
         else
         {
@@ -449,7 +567,7 @@ public sealed class TorrentFileBuilder
 
         var piecesRoot = MerkleTree.ComputeRoot(leaves);
         var pieceLayer = MerkleTree.GetPieceLayer(leaves, _pieceLength);
-        return new FileMerkleInfo(file.Path, file.Length, piecesRoot, pieceLayer);
+        return new FileMerkleInfo(file, piecesRoot, pieceLayer);
     }
 
     private async Task<FileMerkleInfo> BuildMerkleInfoAsync(FileSource file, Stream stream, CancellationToken cancellationToken)
@@ -475,7 +593,7 @@ public sealed class TorrentFileBuilder
 
         var piecesRoot = MerkleTree.ComputeRoot(leaves);
         var pieceLayer = MerkleTree.GetPieceLayer(leaves, _pieceLength);
-        return new FileMerkleInfo(file.Path, file.Length, piecesRoot, pieceLayer);
+        return new FileMerkleInfo(file, piecesRoot, pieceLayer);
     }
 
     private byte[] BuildPieceHashes()
@@ -542,9 +660,41 @@ public sealed class TorrentFileBuilder
         return piecesStream.ToArray();
     }
 
+    private void PrepareFileSha1Digests()
+    {
+        foreach (var file in _files)
+        {
+            if (file.IsSymlink || file.Sha1 != null)
+            {
+                continue;
+            }
+
+            using var stream = file.OpenRead();
+            file.Sha1 = SHA1.HashData(stream);
+        }
+    }
+
+    private async Task PrepareFileSha1DigestsAsync(CancellationToken cancellationToken)
+    {
+        foreach (var file in _files)
+        {
+            if (file.IsSymlink || file.Sha1 != null)
+            {
+                continue;
+            }
+
+            await using var stream = file.OpenReadWithAsyncIO();
+            file.Sha1 = await SHA1.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private byte[] BuildRawTorrentBytes()
     {
         ValidateInputs();
+        if (_emitPerFileSha1)
+        {
+            PrepareFileSha1Digests();
+        }
         return _version switch
         {
             TorrentFileVersion.V1 => BuildV1TorrentBytes(),
@@ -557,6 +707,10 @@ public sealed class TorrentFileBuilder
     private async Task<byte[]> BuildRawTorrentBytesAsync(CancellationToken cancellationToken)
     {
         ValidateInputs();
+        if (_emitPerFileSha1)
+        {
+            await PrepareFileSha1DigestsAsync(cancellationToken).ConfigureAwait(false);
+        }
         return _version switch
         {
             TorrentFileVersion.V1 => await BuildV1TorrentBytesAsync(cancellationToken).ConfigureAwait(false),
@@ -639,18 +793,9 @@ public sealed class TorrentFileBuilder
         foreach (var file in GetV1FilesWithPadding())
         {
             var fDict = new BDict();
-            if (file.IsPadding)
-            {
-                // BEP 47: padding files carry the "attr" key containing "p"
-                fDict.Dict["attr"] = new BString(Encoding.UTF8.GetBytes("p"));
-            }
             fDict.Dict["length"] = new BNumber(file.Length);
-            var pathList = new BList();
-            foreach (var part in SplitPath(file.Path))
-            {
-                pathList.List.Add(new BString(Encoding.UTF8.GetBytes(part)));
-            }
-            fDict.Dict["path"] = pathList;
+            fDict.Dict["path"] = BuildPathList(file.Path);
+            ApplyBep47Keys(fDict, file);
             bFiles.List.Add(fDict);
         }
         return bFiles;
@@ -673,6 +818,7 @@ public sealed class TorrentFileBuilder
         {
             var file = _files[0];
             info.Dict["length"] = new BNumber(file.Length);
+            ApplyBep47Keys(info, file);
         }
         else
         {
@@ -921,11 +1067,26 @@ public sealed class TorrentFileBuilder
         }
     }
 
-    private sealed record FileSource(string Path, long Length, Func<Stream> OpenReadFactory, Func<Stream> OpenReadWithAsyncIOFactory, bool IsPadding = false)
+    private sealed record FileSource(
+        string Path,
+        long Length,
+        Func<Stream> OpenReadFactory,
+        Func<Stream> OpenReadWithAsyncIOFactory,
+        TorrentFileAttributes Attributes = TorrentFileAttributes.None,
+        string? SymlinkTarget = null)
     {
+        /// <summary>BEP 47 "sha1" digest, computed on demand when enabled.</summary>
+        public byte[]? Sha1 { get; set; }
+
+        public bool IsPadding => (Attributes & TorrentFileAttributes.Padding) != 0;
+        public bool IsSymlink => (Attributes & TorrentFileAttributes.Symlink) != 0;
         public Stream OpenRead() => OpenReadFactory();
         public Stream OpenReadWithAsyncIO() => OpenReadWithAsyncIOFactory();
     }
-    private sealed record FileMerkleInfo(string Path, long Length, byte[] PiecesRoot, List<byte[]> PieceLayer);
+    private sealed record FileMerkleInfo(FileSource Source, byte[] PiecesRoot, List<byte[]> PieceLayer)
+    {
+        public string Path => Source.Path;
+        public long Length => Source.Length;
+    }
     private sealed record V2Metadata(BDict Info, BDict? PieceLayers);
 }
