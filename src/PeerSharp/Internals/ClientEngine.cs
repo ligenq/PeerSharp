@@ -1104,6 +1104,15 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             torrent.QueueAutoStart = options.StartImmediately;
         }
 
+        // BEP 53: Remember the magnet's select-only file indices. If metadata is already
+        // available (fetched via xs=), the selection applies immediately; otherwise it is
+        // applied when the metadata download completes.
+        if (magnetLink.SelectOnlyFileIndices.Count > 0)
+        {
+            torrent.PendingSelectOnlyFileIndices = magnetLink.SelectOnlyFileIndices;
+            await torrent.ApplyPendingSelectOnlyFileIndicesAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         // Start if requested
         if (options?.StartImmediately ?? true)
         {

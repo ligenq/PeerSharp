@@ -452,11 +452,18 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return PeersInternal.AddConnectedPeerAsync(stream, initiator, remote: null, sourceKind: PeerSourceKind.WebTorrent);
     }
 
+    /// <summary>
+    /// BEP 53: File indices from a magnet link's "so=" parameter, waiting for metadata to
+    /// arrive so they can be applied to the file selection. Null when no restriction is pending.
+    /// </summary>
+    internal IReadOnlyList<int>? PendingSelectOnlyFileIndices { get; set; }
+
     public async Task ReinitializeAfterMetadataAsync(CancellationToken ct = default)
     {
         bool wasStarted = Started;
         await StopAsync(ct).ConfigureAwait(false);
         Initialize();
+        await ApplyPendingSelectOnlyFileIndicesAsync(ct).ConfigureAwait(false);
         if (wasStarted)
         {
             await StartAsync(ct).ConfigureAwait(false);
@@ -465,6 +472,48 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         {
             FireAndForgetLsdAnnounce();
         }
+    }
+
+    /// <summary>
+    /// BEP 53: Applies a pending magnet "so=" restriction by deselecting every file whose
+    /// index is not in the requested set. No-ops until metadata is available. A file
+    /// selection restored from resume data reflects an explicit user choice and wins over
+    /// the magnet link's restriction.
+    /// </summary>
+    internal async Task ApplyPendingSelectOnlyFileIndicesAsync(CancellationToken ct = default)
+    {
+        var indices = PendingSelectOnlyFileIndices;
+        if (indices == null || !HasMetadata)
+        {
+            return;
+        }
+
+        PendingSelectOnlyFileIndices = null;
+
+        if (indices.Count == 0)
+        {
+            return;
+        }
+
+        if (LocalState.Selection is { Count: > 0 })
+        {
+            _logger.LogDebug("BEP 53: Ignoring magnet 'so=' selection - resume data already defines a file selection");
+            return;
+        }
+
+        int fileCount = InfoFile.Info.GetVisibleFileCount();
+        var selected = new HashSet<int>(indices);
+        int deselected = 0;
+        for (int i = 0; i < fileCount; i++)
+        {
+            if (!selected.Contains(i))
+            {
+                await SetFilePriorityAsync(i, Priority.DoNotDownload, ct).ConfigureAwait(false);
+                deselected++;
+            }
+        }
+
+        _logger.LogInformation("BEP 53: Magnet 'so=' selection applied - downloading {Selected} of {Total} files", fileCount - deselected, fileCount);
     }
 
     public Task SetAllFilesPriorityAsync(Priority priority, CancellationToken cancellationToken = default)

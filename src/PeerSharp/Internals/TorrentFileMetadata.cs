@@ -74,7 +74,7 @@ internal class TorrentFileInfo
     public bool IsMerkle => MerkleRootHash?.Length == 20;
 
     /// <summary>
-    /// BEP 17: Private torrent flag. When true, DHT and PEX must not be used.
+    /// BEP 27: Private torrent flag. When true, DHT and PEX must not be used.
     /// </summary>
     public bool IsPrivate { get; set; }
 
