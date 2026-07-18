@@ -293,7 +293,7 @@ internal static class TorrentFileParser
         metadata.Info.Name = info.GetString("name") ?? "Unknown";
         metadata.Info.PieceSize = (uint)(info.GetLong("piece length") ?? 0);
 
-        // BEP 17: Parse the "private" flag from info dictionary
+        // BEP 27: Parse the "private" flag from info dictionary
         long? privateFlag = info.GetLong("private");
         metadata.Info.IsPrivate = privateFlag == 1;
 

@@ -90,6 +90,62 @@ public class MagnetLinkTests
     }
 
     [Fact]
+    public void Parse_SelectOnly_SingleIndicesAndRanges()
+    {
+        string hashHex = new string('a', 40);
+        string magnet = $"magnet:?xt=urn:btih:{hashHex}&so=0,2,4-6";
+
+        var link = MagnetLink.Parse(magnet);
+
+        Assert.Equal(new[] { 0, 2, 4, 5, 6 }, link.SelectOnlyFileIndices);
+    }
+
+    [Fact]
+    public void Parse_SelectOnly_MultipleParams_AreMergedSortedAndDeduplicated()
+    {
+        string hashHex = new string('a', 40);
+        string magnet = $"magnet:?xt=urn:btih:{hashHex}&so=3,1,3&so=2,1-2";
+
+        var link = MagnetLink.Parse(magnet);
+
+        Assert.Equal(new[] { 1, 2, 3 }, link.SelectOnlyFileIndices);
+    }
+
+    [Fact]
+    public void Parse_SelectOnly_InvalidTokens_AreIgnored()
+    {
+        string hashHex = new string('a', 40);
+        // Invalid: non-numeric, negative, reversed range, empty tokens
+        string magnet = $"magnet:?xt=urn:btih:{hashHex}&so=1,abc,-5,7-3,,2";
+
+        var link = MagnetLink.Parse(magnet);
+
+        Assert.Equal(new[] { 1, 2 }, link.SelectOnlyFileIndices);
+    }
+
+    [Fact]
+    public void Parse_WithoutSelectOnly_IsEmpty()
+    {
+        string hashHex = new string('a', 40);
+        var link = MagnetLink.Parse($"magnet:?xt=urn:btih:{hashHex}");
+
+        Assert.Empty(link.SelectOnlyFileIndices);
+    }
+
+    [Fact]
+    public void Parse_SelectOnly_HugeRange_IsCapped()
+    {
+        string hashHex = new string('a', 40);
+        string magnet = $"magnet:?xt=urn:btih:{hashHex}&so=0-2000000000";
+
+        var link = MagnetLink.Parse(magnet);
+
+        // Guard against maliciously large ranges: parsing must terminate and stay bounded
+        Assert.True(link.SelectOnlyFileIndices.Count <= 10_000);
+        Assert.Equal(0, link.SelectOnlyFileIndices[0]);
+    }
+
+    [Fact]
     public void Parse_InvalidPeerEntries_AreIgnored()
     {
         string hashHex = new string('a', 40);

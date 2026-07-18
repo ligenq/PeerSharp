@@ -956,7 +956,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     public Task PexReceivedAsync(IPeerCommunication peer, List<IPEndPoint> added, List<byte> addedFlags, List<IPEndPoint> dropped)
     {
         var p = (PeerCommunication)peer;
-        // BEP 17: Don't accept peers from PEX for private torrents
+        // BEP 27: Don't accept peers from PEX for private torrents
         if (_torrent.InfoFile.Info.IsPrivate)
         {
             return Task.CompletedTask;
@@ -1171,7 +1171,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private void BroadcastPex()
     {
-        // BEP 17: Don't broadcast PEX for private torrents
+        // BEP 27: Don't broadcast PEX for private torrents
         if (_torrent.InfoFile.Info.IsPrivate)
         {
             return;

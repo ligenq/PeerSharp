@@ -172,7 +172,7 @@ public sealed class TorrentFileBuilder
     }
 
     /// <summary>
-    /// Marks the torrent as private (BEP 17).
+    /// Marks the torrent as private (BEP 27).
     /// </summary>
     public TorrentFileBuilder WithPrivate(bool isPrivate = true)
     {

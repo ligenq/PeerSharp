@@ -13,7 +13,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 
 ## Key Features
 
-- **Full BEP Support:** Implements 20+ BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
+- **Full BEP Support:** Implements 25+ BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
 - **Hybrid Networking:** Native support for both TCP and uTP (BEP 29) with automatic congestion control.
 - **DHT & Peer Discovery:** Full Mainline DHT (BEP 5), Local Service Discovery (BEP 14), Peer Exchange (PEX), and UDP/HTTP Tracker support.
 - **Magnet Links:** Fast metadata exchange (BEP 9) allowing torrent starts from magnet links alone.
@@ -150,28 +150,31 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 
 | BEP | Title | Status |
 |-----|-------|--------|
-| 3   | The BitTorrent Protocol Specification (TCP) | Supported |
+| 3   | The BitTorrent Protocol Specification | Supported |
 | 5   | DHT Protocol | Supported |
 | 6   | Fast Extension | Supported |
-| 9   | Extension for Handling Metadata Files | Supported |
+| 7   | IPv6 Tracker Extension | Supported |
+| 9   | Extension for Peers to Send Metadata Files | Supported |
 | 10  | Extension Protocol | Supported |
+| 11  | Peer Exchange (PEX) | Supported |
 | 12  | Multitracker Metadata Extension | Supported |
 | 14  | Local Service Discovery | Supported |
 | 15  | UDP Tracker Protocol | Supported |
-| 16  | Super-seeding | Supported |
-| 19  | Web Seed Protocol | Supported |
+| 16  | Superseeding | Supported |
+| 19  | WebSeed - HTTP/FTP Seeding (GetRight style) | Supported |
 | 20  | Peer ID Conventions | Supported |
-| 23  | Compact Peer Lists | Supported |
+| 23  | Tracker Returns Compact Peer Lists | Supported |
 | 27  | Private Torrents | Supported |
-| 29  | uTP - Micro Transport Protocol | Supported |
-| 30  | Merkle Hash Torrent | Supported |
-| 32  | Merkle Tree (revised) | Supported |
+| 29  | uTorrent Transport Protocol (uTP) | Supported |
+| 30  | Merkle Hash Torrent Extension | Supported |
+| 32  | IPv6 Extension for DHT | Supported |
 | 33  | DHT Scrape | Supported |
 | 40  | Canonical Peer Priority | Supported |
 | 42  | DHT Security Extension | Supported |
-| 47  | Padding Files | Supported |
-| 48  | Tracker Returns Compact Peer Lists | Supported |
-| 52  | BitTorrent Protocol v2 | Supported |
+| 47  | Padding Files and Extended File Attributes | Partial (padding files) |
+| 48  | Tracker Protocol Extension: Scrape | Supported |
+| 52  | The BitTorrent Protocol Specification v2 | Supported |
+| 53  | Magnet URI Extension - Select Specific File Indices for Download | Supported |
 | 55  | Holepunch Extension | Supported |
 
 ## Architecture

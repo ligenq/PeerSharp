@@ -16,6 +16,7 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
             IReadOnlyList<string> trackers,
             IReadOnlyList<string> exactSources,
             IReadOnlyList<System.Net.IPEndPoint> peers,
+            IReadOnlyList<int> selectOnlyFileIndices,
             string originalString)
     {
         InfoHash = infoHash;
@@ -24,6 +25,7 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
         Trackers = trackers;
         ExactSources = exactSources;
         Peers = peers;
+        SelectOnlyFileIndices = selectOnlyFileIndices;
         OriginalString = originalString;
     }
 
@@ -76,6 +78,13 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
     /// Gets the list of initial peers (x.pe) from the magnet link.
     /// </summary>
     public IReadOnlyList<System.Net.IPEndPoint> Peers { get; }
+
+    /// <summary>
+    /// BEP 53: Gets the file indices selected for download (so=), sorted ascending.
+    /// Empty when the magnet link does not restrict the file selection.
+    /// Indices refer to the torrent's user-visible file list once metadata is available.
+    /// </summary>
+    public IReadOnlyList<int> SelectOnlyFileIndices { get; }
 
     /// <summary>
     /// Implicitly converts a string to a MagnetLink by parsing it.
@@ -244,12 +253,15 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
                 }
             }
 
+            // Parse select-only file indices (BEP 53: so=0,2,4-7)
+            var selectOnly = ParseSelectOnlyIndices(query.GetValues("so"));
+
             // Deduplicate trackers and peers
             var distinctTrackers = trackers.Distinct(StringComparer.OrdinalIgnoreCase).ToList().AsReadOnly();
             var distinctSources = exactSources.Distinct(StringComparer.OrdinalIgnoreCase).ToList().AsReadOnly();
             var distinctPeers = peers.Distinct().ToList().AsReadOnly();
 
-            result = new MagnetLink(infoHash, infoHashV2, displayName, distinctTrackers, distinctSources, distinctPeers, magnetUri);
+            result = new MagnetLink(infoHash, infoHashV2, displayName, distinctTrackers, distinctSources, distinctPeers, selectOnly, magnetUri);
             return true;
         }
         catch (UriFormatException)
@@ -257,6 +269,68 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
             error = "Invalid magnet link URI format.";
             return false;
         }
+    }
+
+    /// <summary>
+    /// BEP 53: Parses "so=" values of the form "0,2,4-7" into a sorted, deduplicated index list.
+    /// Invalid tokens are ignored; the total number of indices is capped to guard against
+    /// maliciously large ranges in untrusted magnet links.
+    /// </summary>
+    private static IReadOnlyList<int> ParseSelectOnlyIndices(string?[]? values)
+    {
+        const int MaxIndices = 10_000;
+
+        if (values == null || values.Length == 0)
+        {
+            return Array.Empty<int>();
+        }
+
+        var indices = new SortedSet<int>();
+        foreach (var value in values)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
+
+            foreach (var token in value.Split(','))
+            {
+                var span = token.AsSpan().Trim();
+                if (span.IsEmpty)
+                {
+                    continue;
+                }
+
+                int dash = span.IndexOf('-');
+                if (dash < 0)
+                {
+                    if (int.TryParse(span, out int index) && index >= 0)
+                    {
+                        indices.Add(index);
+                    }
+                }
+                else if (int.TryParse(span[..dash], out int start) &&
+                         int.TryParse(span[(dash + 1)..], out int end) &&
+                         start >= 0 && end >= start)
+                {
+                    for (int i = start; i <= end; i++)
+                    {
+                        indices.Add(i);
+                        if (indices.Count >= MaxIndices)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                if (indices.Count >= MaxIndices)
+                {
+                    return indices.ToList().AsReadOnly();
+                }
+            }
+        }
+
+        return indices.Count == 0 ? Array.Empty<int>() : indices.ToList().AsReadOnly();
     }
 
     private static bool TryParseEndpoint(string? value, out System.Net.IPEndPoint endpoint)

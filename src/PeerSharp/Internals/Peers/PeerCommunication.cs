@@ -2212,7 +2212,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             handshake.MessageIds[UtMetadata.Name] = 1;
             UtMetadata.SetLocalMessageId(1);
 
-            // BEP 17: Don't advertise PEX support for private torrents
+            // BEP 27: Don't advertise PEX support for private torrents
             if (!_torrent.InfoFile.Info.IsPrivate)
             {
                 handshake.MessageIds[Extensions.UtPex.Name] = 2;

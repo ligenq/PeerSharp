@@ -52,7 +52,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     public bool IsMerkle => Metadata.Info.IsMerkle;
 
     /// <summary>
-    /// Gets whether this is a private torrent (BEP 17).
+    /// Gets whether this is a private torrent (BEP 27).
     /// </summary>
     public bool IsPrivate => Metadata.Info.IsPrivate;
 
