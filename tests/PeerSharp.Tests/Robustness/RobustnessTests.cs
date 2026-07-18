@@ -613,9 +613,7 @@ public class RobustnessTests
         Assert.False(torrent.Started);
         Assert.Equal(TorrentState.Stopped, torrent.State);
 
-        // Note: Don't call Dispose() here - it will throw because
-        // Dispose() calls Stop() which checks disposed flag.
-        // This is a known issue in the disposal pattern.
+        await torrent.DisposeAsync();
     }
 
     /// <summary>
@@ -643,13 +641,11 @@ public class RobustnessTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => torrent.StartAsync());
 
         await torrent.StopAsync();
-        // Note: Don't call Dispose() - see Torrent_StartStopCycles_StateConsistent
+        await torrent.DisposeAsync();
     }
 
     /// <summary>
     /// Tests that Start after dispose throws ObjectDisposedException.
-    /// Note: Dispose() itself has an issue where it calls Stop() which throws.
-    /// This test documents the expected behavior for Start().
     /// </summary>
     [Fact]
     public async Task Torrent_StartAfterDispose_Throws()
@@ -667,17 +663,7 @@ public class RobustnessTests
 
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
-        // BUG FOUND: Dispose() throws ObjectDisposedException because it calls Stop()
-        // which checks disposed flag. This is a disposal pattern issue.
-        // For now, we catch and ignore this expected exception.
-        try
-        {
-            await torrent.DisposeAsync();
-        }
-        catch (ObjectDisposedException)
-        {
-            // Expected due to bug in disposal pattern
-        }
+        await torrent.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => torrent.StartAsync());
     }
@@ -743,11 +729,11 @@ public class RobustnessTests
                 state == TorrentState.Active || state == TorrentState.Stopped,
                 $"Invalid final state: {state}");
 
-            // No unexpected exceptions (ObjectDisposedException is known issue)
+            // No unexpected exceptions
             Specification.Assert(exceptions.IsEmpty,
                 $"Unexpected exceptions: {string.Join(", ", exceptions.Select(e => e.Message))}");
 
-            // Don't call Dispose() due to known disposal pattern issue
+            torrent.DisposeAsync().AsTask().GetAwaiter().GetResult();
         });
     }
 

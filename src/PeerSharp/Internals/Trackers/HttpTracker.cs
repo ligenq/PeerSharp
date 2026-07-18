@@ -213,7 +213,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         throw new InvalidDataException("Invalid response");
     }
 
-    private static ScrapeResponse ParseScrapeResponse(byte[] data)
+    private ScrapeResponse ParseScrapeResponse(byte[] data)
     {
         // Response: d5:filesd20:...d8:completei5e...eee
         var node = BencodeParser.Parse(data);
@@ -227,22 +227,21 @@ internal class HttpTracker : TrackerBase, IDisposable
         }
         if (node is BDict dict2 && dict2.Get("files") is BDict files)
         {
-            // We only care about our infohash
-            foreach (var key in files.Dict.Keys)
+            // The files dict is keyed by the binary info hash. Like libtorrent, only
+            // accept the entry for the hash we actually scraped - a response about a
+            // different torrent must not be mistaken for ours.
+            string expectedKey = System.Text.Encoding.Latin1.GetString(Torrent.InfoFile.Info.GetTrackerInfoHash().Span);
+            if (files.Get(expectedKey) is BDict info)
             {
-                // Check if key corresponds to our hash?
-                // For now, if we requested one hash, we take the first result.
-                if (files.Get(key) is BDict info)
+                return new ScrapeResponse
                 {
-                    var resp = new ScrapeResponse
-                    {
-                        SeedCount = (uint)(info.GetLong("complete") ?? 0),
-                        LeechCount = (uint)(info.GetLong("incomplete") ?? 0),
-                        Downloaded = (uint)(info.GetLong("downloaded") ?? 0)
-                    };
-                    return resp;
-                }
+                    SeedCount = (uint)(info.GetLong("complete") ?? 0),
+                    LeechCount = (uint)(info.GetLong("incomplete") ?? 0),
+                    Downloaded = (uint)(info.GetLong("downloaded") ?? 0)
+                };
             }
+
+            throw new InvalidDataException("Scrape response does not contain stats for the requested info hash");
         }
         throw new InvalidDataException("Invalid scrape response");
     }

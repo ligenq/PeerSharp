@@ -140,9 +140,56 @@ public class LsdManagerTests
         var sender = new IPEndPoint(IPAddress.Parse("1.2.3.4"), 12345);
         lsd.ProcessMessage(message, sender);
 
-        // We can't easily check added peers directly because PeerManager is internal and complex.
-        // But we can check if it tries to add them if we had a mock PeerManager.
-        // For now, let's just ensure it doesn't throw.
+        // The announced peer (sender address + advertised port) must land in the
+        // torrent's known-peers cache
+        Assert.True(KnownPeersContain(torrent, new IPEndPoint(IPAddress.Parse("1.2.3.4"), 6000)));
+    }
+
+    [Fact]
+    public void ProcessMessage_UnknownInfoHash_AddsNoPeers()
+    {
+        var lsd = new LsdManager(_settings, _resolver, _timeProvider, _socketFactory);
+        var hash = InfoHash.CreateRandom();
+        var torrent = TorrentTestUtility.CreateMinimal(new TorrentFileMetadata { Info = { Hash = hash } });
+        _resolver.Torrents[hash] = torrent;
+
+        string message =
+            "BT-SEARCH * HTTP/1.1\r\n" +
+            "Port: 6000\r\n" +
+            $"Infohash: {InfoHash.CreateRandom().ToHexString()}\r\n" +
+            "cookie: other\r\n\r\n";
+
+        lsd.ProcessMessage(message, new IPEndPoint(IPAddress.Parse("1.2.3.4"), 12345));
+
+        Assert.False(KnownPeersContain(torrent, new IPEndPoint(IPAddress.Parse("1.2.3.4"), 6000)));
+    }
+
+    [Fact]
+    public void ProcessMessage_InvalidPort_AddsNoPeers()
+    {
+        var lsd = new LsdManager(_settings, _resolver, _timeProvider, _socketFactory);
+        var hash = InfoHash.CreateRandom();
+        var torrent = TorrentTestUtility.CreateMinimal(new TorrentFileMetadata { Info = { Hash = hash } });
+        _resolver.Torrents[hash] = torrent;
+
+        string message =
+            "BT-SEARCH * HTTP/1.1\r\n" +
+            "Port: 0\r\n" +
+            $"Infohash: {hash.ToHexString()}\r\n" +
+            "cookie: other\r\n\r\n";
+
+        lsd.ProcessMessage(message, new IPEndPoint(IPAddress.Parse("1.2.3.4"), 12345));
+
+        Assert.False(KnownPeersContain(torrent, new IPEndPoint(IPAddress.Parse("1.2.3.4"), 0)));
+    }
+
+    private static bool KnownPeersContain(Torrent torrent, IPEndPoint endpoint)
+    {
+        var field = typeof(PeerSharp.Internals.Peers.PeerManager).GetField(
+            "_knownPeersCache",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var cache = (System.Collections.IDictionary)field.GetValue(torrent.PeersInternal)!;
+        return cache.Contains(endpoint);
     }
 }
 

@@ -37,7 +37,7 @@ internal static class BencodeParser
         return Encoding.Latin1.GetString(span);
     }
 
-    public static IBNode? Parse(byte[] data)
+    public static IBNode Parse(byte[] data)
     {
         int pos = 0;
         int elementCount = 0;
@@ -45,7 +45,7 @@ internal static class BencodeParser
     }
 
     // Parse and return consumed byte count
-    public static (IBNode? Node, int Consumed) ParseWithConsumed(byte[] data)
+    public static (IBNode Node, int Consumed) ParseWithConsumed(byte[] data)
     {
         int pos = 0;
         int elementCount = 0;
@@ -53,7 +53,7 @@ internal static class BencodeParser
         return (node, pos);
     }
 
-    private static IBNode? Parse(byte[] data, ref int pos, int depth, ref int elementCount)
+    private static IBNode Parse(byte[] data, ref int pos, int depth, ref int elementCount)
     {
         // SECURITY: Prevent stack overflow from deeply nested structures
         if (depth > MaxRecursionDepth)
@@ -92,7 +92,7 @@ internal static class BencodeParser
             return ParseString(data, ref pos);
         }
 
-        return null;
+        throw new FormatException($"Invalid bencode data (unexpected byte 0x{c:X2})");
     }
 
     private static BDict ParseDictionary(byte[] data, ref int pos, int depth, ref int elementCount)
@@ -111,16 +111,14 @@ internal static class BencodeParser
             // Use Latin1 encoding for dictionary keys because bencode keys are arbitrary
             // byte strings (not UTF8). Latin1 preserves all byte values 0-255.
             var key = GetDictionaryKey(keyNode.Value.Span);
-            var val = Parse(data, ref pos, depth + 1, ref elementCount);
-            if (val != null)
-            {
-                dict.Dict[key] = val;
-            }
-            else
-            {
-                break;
-            }
+            dict.Dict[key] = Parse(data, ref pos, depth + 1, ref elementCount);
         }
+
+        if (pos >= data.Length)
+        {
+            throw new FormatException("Unterminated dictionary");
+        }
+
         pos++; // 'e'
         return dict;
     }
@@ -224,16 +222,14 @@ internal static class BencodeParser
                 throw new FormatException($"SECURITY: Bencode list exceeds maximum items ({MaxCollectionItems}). Possible attack.");
             }
 
-            var item = Parse(data, ref pos, depth + 1, ref elementCount);
-            if (item != null)
-            {
-                list.List.Add(item);
-            }
-            else
-            {
-                break;
-            }
+            list.List.Add(Parse(data, ref pos, depth + 1, ref elementCount));
         }
+
+        if (pos >= data.Length)
+        {
+            throw new FormatException("Unterminated list");
+        }
+
         pos++; // 'e'
         return list;
     }

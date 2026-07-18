@@ -195,10 +195,10 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
         else if (response.StatusCode == HttpStatusCode.OK)
         {
-            // Server doesn't support range requests - this is problematic for large files
-            // We'd need to download the whole file and extract the piece
-            _logger.LogWarning("Web seed {Url} doesn't support range requests", source.Url);
-            return null!;
+            // Server ignored the Range header and sent the whole file
+            _logger.LogDebug("Web seed {Url} doesn't support range requests; slicing full response", source.Url);
+            var content = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            return SliceFullContentResponse(content, offset, length)!;
         }
         else if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
@@ -267,17 +267,29 @@ internal sealed class WebSeedManager : IAsyncDisposable
         {
             return await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
         }
-        else if (response.StatusCode == HttpStatusCode.OK && offset == 0)
+        else if (response.StatusCode == HttpStatusCode.OK)
         {
-            // For small files, server might return full content
-            var content = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-            if (content.Length >= length)
-            {
-                return content.AsSpan(0, length).ToArray();
-            }
+            return SliceFullContentResponse(
+                await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false),
+                offset,
+                length);
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// A server that ignores the Range header replies 200 with the whole file.
+    /// Like libtorrent, accept that and slice the requested range out of the body.
+    /// </summary>
+    private static byte[]? SliceFullContentResponse(byte[] content, long offset, int length)
+    {
+        if (offset < 0 || offset > content.LongLength - length)
+        {
+            return null;
+        }
+
+        return content.AsSpan((int)offset, length).ToArray();
     }
 
     private static string BuildFileUrl(string baseUrl, params string[] paths)

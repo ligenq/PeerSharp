@@ -90,12 +90,31 @@ public class WebSeedManagerTests
     }
 
     [Fact]
-    public async Task DownloadSingleFilePieceAsync_OkResponse_ReturnsNull()
+    public async Task DownloadSingleFilePieceAsync_OkResponse_SlicesRequestedRangeFromFullContent()
+    {
+        // A server that ignores the Range header replies 200 with the whole file;
+        // like libtorrent, the requested range is sliced out of the full body.
+        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        manager.SetTestClient(_mockHttp);
+        _mockHttp.StatusCode = HttpStatusCode.OK;
+        var fullContent = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+        _mockHttp.ResponseBytes = fullContent;
+
+        var source = new WebSeedManager.WebSeedSource("http://seed.com", false);
+
+        var data = await manager.DownloadSingleFilePieceAsync(source, 8, 16, CancellationToken.None);
+
+        Assert.NotNull(data);
+        Assert.Equal(fullContent.AsSpan(8, 16).ToArray(), data);
+    }
+
+    [Fact]
+    public async Task DownloadSingleFilePieceAsync_OkResponseTooShort_ReturnsNull()
     {
         var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
         manager.SetTestClient(_mockHttp);
         _mockHttp.StatusCode = HttpStatusCode.OK;
-        _mockHttp.ResponseBytes = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+        _mockHttp.ResponseBytes = new byte[8]; // shorter than the requested range
 
         var source = new WebSeedManager.WebSeedSource("http://seed.com", false);
 

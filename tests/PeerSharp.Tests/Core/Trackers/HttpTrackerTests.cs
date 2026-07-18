@@ -129,6 +129,7 @@ public class HttpTrackerTests
     public async Task ScrapeAsync_ValidResponse_ParsesStats()
     {
         // Arrange
+        _torrent.InfoFile.Info.Hash = InfoHash.CreateRandom();
         var tracker = new HttpTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
@@ -140,7 +141,7 @@ public class HttpTrackerTests
         infoDict.Dict["downloaded"] = new BNumber(50);
 
         var filesDict = new BDict();
-        filesDict.Dict["somehash"] = infoDict;
+        filesDict.Dict[Encoding.Latin1.GetString(_torrent.InfoFile.Info.GetTrackerInfoHash().Span)] = infoDict;
 
         var root = new BDict();
         root.Dict["files"] = filesDict;
@@ -155,6 +156,32 @@ public class HttpTrackerTests
         Assert.Equal(10u, _callback.ScrapeResponse.SeedCount);
         Assert.Equal(2u, _callback.ScrapeResponse.LeechCount);
         Assert.Equal(50u, _callback.ScrapeResponse.Downloaded);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ScrapeAsync_StatsKeyedByDifferentHash_RaisesFailure()
+    {
+        // A response about some other torrent must not be mistaken for ours
+        _torrent.InfoFile.Info.Hash = InfoHash.CreateRandom();
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var infoDict = new BDict();
+        infoDict.Dict["complete"] = new BNumber(10);
+        infoDict.Dict["incomplete"] = new BNumber(2);
+        infoDict.Dict["downloaded"] = new BNumber(50);
+
+        var filesDict = new BDict();
+        filesDict.Dict[Encoding.Latin1.GetString(InfoHash.CreateRandom().Span)] = infoDict;
+
+        var root = new BDict();
+        root.Dict["files"] = filesDict;
+        _mockHttp.ResponseBytes = BencodeWriter.Write(root);
+
+        await tracker.ScrapeAsync(CancellationToken.None);
+
+        Assert.False(_callback.Success);
     }
 
     [Fact(Timeout = 30000)]
