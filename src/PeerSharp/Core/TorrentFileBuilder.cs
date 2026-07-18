@@ -367,7 +367,8 @@ public sealed class TorrentFileBuilder
                 padPath,
                 padLength,
                 () => new ZeroStream(padLength),
-                () => new ZeroStream(padLength)));
+                () => new ZeroStream(padLength),
+                IsPadding: true));
             offset += padLength;
         }
 
@@ -638,6 +639,11 @@ public sealed class TorrentFileBuilder
         foreach (var file in GetV1FilesWithPadding())
         {
             var fDict = new BDict();
+            if (file.IsPadding)
+            {
+                // BEP 47: padding files carry the "attr" key containing "p"
+                fDict.Dict["attr"] = new BString(Encoding.UTF8.GetBytes("p"));
+            }
             fDict.Dict["length"] = new BNumber(file.Length);
             var pathList = new BList();
             foreach (var part in SplitPath(file.Path))
@@ -915,7 +921,7 @@ public sealed class TorrentFileBuilder
         }
     }
 
-    private sealed record FileSource(string Path, long Length, Func<Stream> OpenReadFactory, Func<Stream> OpenReadWithAsyncIOFactory)
+    private sealed record FileSource(string Path, long Length, Func<Stream> OpenReadFactory, Func<Stream> OpenReadWithAsyncIOFactory, bool IsPadding = false)
     {
         public Stream OpenRead() => OpenReadFactory();
         public Stream OpenReadWithAsyncIO() => OpenReadWithAsyncIOFactory();
