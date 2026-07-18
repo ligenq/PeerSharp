@@ -28,8 +28,11 @@ namespace PeerSharp.Internals.Peers;
  *    - Single reader pattern for ProcessConnectionQueueAsync
  *
  * KEY INVARIANTS:
- * - _connectedPeers and _connectedEndpoints must stay in sync
- *   (add to both on connect, remove from both on disconnect)
+ * - _connectedEndpoints is the authoritative duplicate-connection gate: a connection may only
+ *   be registered in _connectedPeers if its endpoint was successfully added to _connectedEndpoints
+ *   first (TryAdd), and only the owning PeerCommunication may remove its entry on disconnect.
+ * - All endpoint keys are normalized (IPv4-mapped IPv6 -> plain IPv4); PeerCommunication.RemoteEndPoint
+ *   normalizes on assignment.
  * - _connectedPeersCount reflects _connectedPeers.Count
  * - Connection queue enforces rate limiting (5 connections/second)
  *
@@ -58,7 +61,15 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     // Track active connection attempts for clean shutdown
     private readonly ConcurrentDictionary<Task, byte> _activeConnectionTasks = new();
 
-    private readonly ConcurrentDictionary<IPEndPoint, byte> _connectedEndpoints = new();
+    // Maps each connected remote endpoint to the PeerCommunication that owns it.
+    // Authoritative duplicate gate - see thread-safety notes at the top of this file.
+    private readonly ConcurrentDictionary<IPEndPoint, PeerCommunication> _connectedEndpoints = new();
+
+    // Maps each connected remote peer id (hex) to the PeerCommunication that owns it.
+    // Endpoints alone cannot correlate an incoming connection (peer's ephemeral source port)
+    // with an outgoing one (peer's listen port), so this second gate dedups by identity once
+    // the handshake reveals the remote peer id.
+    private readonly ConcurrentDictionary<string, PeerCommunication> _connectedPeerIds = new();
     private readonly ConcurrentDictionary<PeerCommunication, byte> _connectedPeers = new();
     private readonly ConcurrentDictionary<PeerCommunication, byte> _connectingPeers = new();
 
@@ -154,202 +165,20 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private readonly record struct ConnectionRequest(string Ip, int Port, bool ForceUtp);
     public int ConnectedCount => _connectedPeersCount;
 
-    public async Task AddIncomingPeerAsync(System.Net.Sockets.TcpClient client, byte[] handshake)
+    public Task AddIncomingPeerAsync(System.Net.Sockets.TcpClient client, byte[] handshake)
     {
-        // Reject if force proxy is enabled (incoming connections are not proxied)
-        if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
-        {
-            _logger.LogDebug("Rejecting incoming TCP connection - ForceProxy is enabled");
-            client.Close();
-            return;
-        }
-
-        // Calculate priority early for BEP 40 decisions
-        var remoteEp = client.Client.RemoteEndPoint as IPEndPoint;
-
-        // Check blocklist first
-        if (_torrent.Blocklist?.IsBlocked(remoteEp) == true)
-        {
-            _logger.LogDebug("Blocked incoming connection from {RemoteEp} (blocklist)", remoteEp);
-            client.Close();
-            return;
-        }
-        uint incomingPriority = remoteEp != null
-            ? PeerPriority.Calculate(remoteEp.Address, _torrent.Hash.ToArray())
-            : 0;
-
-        // Check connection limits for incoming connections
-        int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
-        {
-            // BEP 40: Try to replace lowest priority peer if incoming has higher priority
-            var lowestPriorityPeer = TryGetLowestPriorityPeer();
-            if (lowestPriorityPeer != null && incomingPriority > lowestPriorityPeer.Priority)
-            {
-                _logger.LogDebug("BEP 40: Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
-                await lowestPriorityPeer.CloseAsync().ConfigureAwait(false);
-            }
-            else
-            {
-                _logger.LogDebug("Rejecting incoming connection - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
-                client.Close();
-                return;
-            }
-        }
-
-        // Check global governor limits
-        if (!_governor.TryAcquireConnectionSlot())
-        {
-            _logger.LogDebug("Rejecting incoming connection - global limit reached ({MaxConnections})", _settings.Connection.MaxConnections);
-            client.Close();
-            return;
-        }
-
-        var peer = _peerFactory.Create(_torrent, this, _timeProvider, client);
-        if (peer.RemoteEndPoint != null)
-        {
-            peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-            // BEP 40: Calculate canonical peer priority
-            peer.Priority = incomingPriority;
-            _connectedEndpoints.TryAdd(peer.RemoteEndPoint, 0);
-
-            // Mark as connectable in history
-            var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
-            history.IsConnectable = true;
-        }
-
-        if (!await peer.SetHandshakeReceivedAsync(handshake).ConfigureAwait(false))
-        {
-            _logger.LogDebug("Rejecting peer {RemoteEndPoint} - invalid handshake", peer.RemoteEndPoint);
-            if (peer.RemoteEndPoint != null)
-            {
-                _connectedEndpoints.TryRemove(peer.RemoteEndPoint, out _);
-            }
-
-            _governor.ReleaseConnectionSlot();
-            client.Close();
-            return;
-        }
-
-        if (_connectedPeers.TryAdd(peer, 0))
-        {
-            Interlocked.Increment(ref _connectedPeersCount);
-        }
-        else
-        {
-            // Duplicate connection
-            if (peer.RemoteEndPoint != null)
-            {
-                _connectedEndpoints.TryRemove(peer.RemoteEndPoint, out _);
-            }
-            _governor.ReleaseConnectionSlot();
-            _logger.LogDebug("Rejecting duplicate incoming connection from {RemoteEndPoint}", peer.RemoteEndPoint);
-            client.Close();
-            return;
-        }
-
-        peer.Start(client.GetStream());
+        return AddIncomingTcpPeerCoreAsync(client, handshake, encryption: null);
     }
 
-    public async Task AddIncomingPeerAsync(System.Net.Sockets.TcpClient client, byte[] handshake, ProtocolEncryption encryption)
+    public Task AddIncomingPeerAsync(System.Net.Sockets.TcpClient client, byte[] handshake, ProtocolEncryption encryption)
     {
-        // Reject if force proxy is enabled (incoming connections are not proxied)
-        if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
-        {
-            _logger.LogDebug("Rejecting incoming TCP connection - ForceProxy is enabled");
-            client.Close();
-            return;
-        }
-
-        // Calculate priority early for BEP 40 decisions
-        var remoteEp = client.Client.RemoteEndPoint as IPEndPoint;
-
-        // Check blocklist first
-        if (_torrent.Blocklist?.IsBlocked(remoteEp) == true)
-        {
-            _logger.LogDebug("Blocked incoming connection from {RemoteEp} (blocklist)", remoteEp);
-            client.Close();
-            return;
-        }
-        uint incomingPriority = remoteEp != null
-            ? PeerPriority.Calculate(remoteEp.Address, _torrent.Hash.ToArray())
-            : 0;
-
-        // Check connection limits for incoming connections
-        int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
-        {
-            // BEP 40: Try to replace lowest priority peer if incoming has higher priority
-            var lowestPriorityPeer = TryGetLowestPriorityPeer();
-            if (lowestPriorityPeer != null && incomingPriority > lowestPriorityPeer.Priority)
-            {
-                _logger.LogDebug("BEP 40: Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
-                await lowestPriorityPeer.CloseAsync().ConfigureAwait(false);
-            }
-            else
-            {
-                _logger.LogDebug("Rejecting incoming connection - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
-                client.Close();
-                return;
-            }
-        }
-
-        // Check global governor limits
-        if (!_governor.TryAcquireConnectionSlot())
-        {
-            _logger.LogDebug("Rejecting incoming connection - global limit reached ({MaxConnections})", _settings.Connection.MaxConnections);
-            client.Close();
-            return;
-        }
-
-        var peer = _peerFactory.Create(_torrent, this, _timeProvider, client);
-        if (peer.RemoteEndPoint != null)
-        {
-            peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-            // BEP 40: Calculate canonical peer priority
-            peer.Priority = incomingPriority;
-            _connectedEndpoints.TryAdd(peer.RemoteEndPoint, 0);
-
-            // Mark as connectable in history
-            var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
-            history.IsConnectable = true;
-        }
-
-        if (!await peer.SetHandshakeReceivedAsync(handshake).ConfigureAwait(false))
-        {
-            _logger.LogDebug("Rejecting peer {RemoteEndPoint} - invalid handshake", peer.RemoteEndPoint);
-            if (peer.RemoteEndPoint != null)
-            {
-                _connectedEndpoints.TryRemove(peer.RemoteEndPoint, out _);
-            }
-
-            _governor.ReleaseConnectionSlot();
-            client.Close();
-            return;
-        }
-
-        if (_connectedPeers.TryAdd(peer, 0))
-        {
-            Interlocked.Increment(ref _connectedPeersCount);
-        }
-        else
-        {
-            // Duplicate connection
-            if (peer.RemoteEndPoint != null)
-            {
-                _connectedEndpoints.TryRemove(peer.RemoteEndPoint, out _);
-            }
-            _governor.ReleaseConnectionSlot();
-            _logger.LogDebug("Rejecting duplicate incoming connection from {RemoteEndPoint}", peer.RemoteEndPoint);
-            client.Close();
-            return;
-        }
-
-        peer.Start(client.GetStream(), encryption);
+        return AddIncomingTcpPeerCoreAsync(client, handshake, encryption);
     }
 
     public async Task AddIncomingPeerAsync(Stream stream, byte[] handshake, IPEndPoint? remote = null)
     {
+        remote = NetworkUtils.NormalizeEndPoint(remote);
+
         // Reject if force proxy is enabled (incoming connections are not proxied)
         if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
         {
@@ -408,12 +237,21 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             peer = _peerFactory.Create(_torrent, this, _timeProvider, stream); // Will have Unknown endpoint
         }
 
+        // Authoritative duplicate gate: claim the endpoint before registering anything else.
+        // If another live connection already owns this endpoint, keep it and drop the new one.
+        if (!TryRegisterConnectedEndpoint(peer))
+        {
+            _governor.ReleaseConnectionSlot();
+            _logger.LogDebug("Rejecting duplicate incoming connection from {RemoteEndPoint}", peer.RemoteEndPoint);
+            stream.Close();
+            return;
+        }
+
         if (peer.RemoteEndPoint != null)
         {
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
             // BEP 40: Use already calculated priority
             peer.Priority = incomingPriority;
-            _connectedEndpoints.TryAdd(peer.RemoteEndPoint, 0);
 
             // Mark as connectable in history
             var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
@@ -427,34 +265,109 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (!await peer.SetHandshakeReceivedAsync(handshake).ConfigureAwait(false))
         {
             _logger.LogDebug("Rejecting peer {RemoteEndPoint} - invalid handshake", peer.RemoteEndPoint);
-            if (peer.RemoteEndPoint != null)
-            {
-                _connectedEndpoints.TryRemove(peer.RemoteEndPoint, out _);
-            }
-
+            UnregisterConnectedEndpoint(peer);
             _governor.ReleaseConnectionSlot();
             stream.Close();
             return;
         }
 
-        if (_connectedPeers.TryAdd(peer, 0))
-        {
-            Interlocked.Increment(ref _connectedPeersCount);
-        }
-        else
-        {
-            // Duplicate connection
-            if (peer.RemoteEndPoint != null)
-            {
-                _connectedEndpoints.TryRemove(peer.RemoteEndPoint, out _);
-            }
-            _governor.ReleaseConnectionSlot();
-            _logger.LogDebug("Rejecting duplicate incoming connection from {RemoteEndPoint}", peer.RemoteEndPoint);
-            stream.Close();
-            return;
-        }
+        // The add always succeeds because peer is a freshly created instance (reference equality).
+        // Duplicate endpoints were already rejected by the endpoint gate above.
+        _connectedPeers.TryAdd(peer, 0);
+        Interlocked.Increment(ref _connectedPeersCount);
 
         peer.Start(stream);
+    }
+
+    private async Task AddIncomingTcpPeerCoreAsync(System.Net.Sockets.TcpClient client, byte[] handshake, ProtocolEncryption? encryption)
+    {
+        // Reject if force proxy is enabled (incoming connections are not proxied)
+        if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
+        {
+            _logger.LogDebug("Rejecting incoming TCP connection - ForceProxy is enabled");
+            client.Close();
+            return;
+        }
+
+        // Calculate priority early for BEP 40 decisions
+        var remoteEp = NetworkUtils.NormalizeEndPoint(client.Client.RemoteEndPoint as IPEndPoint);
+
+        // Check blocklist first
+        if (_torrent.Blocklist?.IsBlocked(remoteEp) == true)
+        {
+            _logger.LogDebug("Blocked incoming connection from {RemoteEp} (blocklist)", remoteEp);
+            client.Close();
+            return;
+        }
+        uint incomingPriority = remoteEp != null
+            ? PeerPriority.Calculate(remoteEp.Address, _torrent.Hash.ToArray())
+            : 0;
+
+        // Check connection limits for incoming connections
+        int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
+        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        {
+            // BEP 40: Try to replace lowest priority peer if incoming has higher priority
+            var lowestPriorityPeer = TryGetLowestPriorityPeer();
+            if (lowestPriorityPeer != null && incomingPriority > lowestPriorityPeer.Priority)
+            {
+                _logger.LogDebug("BEP 40: Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
+                await lowestPriorityPeer.CloseAsync().ConfigureAwait(false);
+            }
+            else
+            {
+                _logger.LogDebug("Rejecting incoming connection - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
+                client.Close();
+                return;
+            }
+        }
+
+        // Check global governor limits
+        if (!_governor.TryAcquireConnectionSlot())
+        {
+            _logger.LogDebug("Rejecting incoming connection - global limit reached ({MaxConnections})", _settings.Connection.MaxConnections);
+            client.Close();
+            return;
+        }
+
+        var peer = _peerFactory.Create(_torrent, this, _timeProvider, client);
+
+        // Authoritative duplicate gate: claim the endpoint before registering anything else.
+        // If another live connection already owns this endpoint, keep it and drop the new one.
+        if (!TryRegisterConnectedEndpoint(peer))
+        {
+            _governor.ReleaseConnectionSlot();
+            _logger.LogDebug("Rejecting duplicate incoming connection from {RemoteEndPoint}", peer.RemoteEndPoint);
+            client.Close();
+            return;
+        }
+
+        if (peer.RemoteEndPoint != null)
+        {
+            peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
+            // BEP 40: Calculate canonical peer priority
+            peer.Priority = incomingPriority;
+
+            // Mark as connectable in history
+            var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
+            history.IsConnectable = true;
+        }
+
+        if (!await peer.SetHandshakeReceivedAsync(handshake).ConfigureAwait(false))
+        {
+            _logger.LogDebug("Rejecting peer {RemoteEndPoint} - invalid handshake", peer.RemoteEndPoint);
+            UnregisterConnectedEndpoint(peer);
+            _governor.ReleaseConnectionSlot();
+            client.Close();
+            return;
+        }
+
+        // The add always succeeds because peer is a freshly created instance (reference equality).
+        // Duplicate endpoints were already rejected by the endpoint gate above.
+        _connectedPeers.TryAdd(peer, 0);
+        Interlocked.Increment(ref _connectedPeersCount);
+
+        peer.Start(client.GetStream(), encryption);
     }
 
     public void AddPeers(IEnumerable<IPEndPoint> peers, PeerSourceKind sourceKind = PeerSourceKind.Unknown, PeerCommunication? source = null)
@@ -500,10 +413,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _governor.ReleaseConnectionSlot();
         }
         _slowPeers.TryRemove(p, out _);
-        if (p.RemoteEndPoint != null)
-        {
-            _connectedEndpoints.TryRemove(p.RemoteEndPoint, out _);
-        }
+
+        // Only remove the endpoint/id entries if this peer owns them. A rejected duplicate
+        // closing must not evict the surviving connection's entries, or the dedup gates would
+        // let a new connection through while the survivor is still alive.
+        UnregisterConnectedEndpoint(p);
+        UnregisterConnectedPeerId(p);
 
         _logger.LogDebug("Connection closed to {RemoteEndPoint} (code={Code}), downloaded={Downloaded}B, uploaded={Uploaded}B, strikes={Strikes}, remaining peers={RemainingPeers}",
             p.RemoteEndPoint, code, p.Downloaded, p.Uploaded, p.Strikes, _connectedPeersCount);
@@ -575,6 +490,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (!IPAddress.TryParse(ip, out var ipAddr))
         {
             return;
+        }
+
+        // Normalize IPv4-mapped IPv6 so dedup keys match what connections store
+        if (ipAddr.IsIPv4MappedToIPv6)
+        {
+            ipAddr = ipAddr.MapToIPv4();
+            ip = ipAddr.ToString();
         }
         var endpoint = new IPEndPoint(ipAddr, port);
 
@@ -801,6 +723,15 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     public async Task HandshakeFinishedAsync(IPeerCommunication peer)
     {
         var p = (PeerCommunication)peer;
+
+        // Now that the handshake revealed the remote peer id, drop self-connections and
+        // resolve duplicate connections to the same peer (e.g. crossed simultaneous opens
+        // that endpoint-based dedup cannot correlate).
+        if (!await TryResolvePeerIdentityAsync(p).ConfigureAwait(false))
+        {
+            return;
+        }
+
         try
         {
             // BEP 5: Send Port message to advertise our DHT UDP port if DHT is enabled
@@ -1130,6 +1061,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         Interlocked.Exchange(ref _connectingPeersCount, 0);
 
         _connectedEndpoints.Clear();
+        _connectedPeerIds.Clear();
 
         if (toClose.Count > 0)
         {
@@ -1183,8 +1115,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         var candidates = new List<(PeerHistory History, long Score)>();
         int index = 0;
 
-        foreach (var ep in peers)
+        foreach (var rawEp in peers)
         {
+            // Normalize IPv4-mapped IPv6 so cache and dedup keys match what connections store
+            var ep = NetworkUtils.NormalizeEndPoint(rawEp);
             if (blocklist?.IsBlocked(ep) == true)
             {
                 index++;
@@ -1439,7 +1373,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         IPEndPoint? endpoint = null;
         try
         {
-            endpoint = new IPEndPoint(IPAddress.Parse(ip), port);
+            endpoint = NetworkUtils.NormalizeEndPoint(new IPEndPoint(IPAddress.Parse(ip), port));
         }
         catch { /* Invalid IP - will use null endpoint */ }
 
@@ -1570,35 +1504,44 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 return;
             }
 
-            // Connection successful - move to connected list
-            if (_connectedPeers.TryAdd(peer, 0))
+            // Authoritative duplicate gate: claim the endpoint before registering the peer.
+            // The check in ConnectTo ran at queue time; another connection to the same endpoint
+            // (e.g. an incoming one) may have been established while we were dialing.
+            // If so, keep the existing connection and drop the new one.
+            if (!TryRegisterConnectedEndpoint(peer))
             {
-                Interlocked.Increment(ref _connectedPeersCount);
-            }
-            else
-            {
-                // Duplicate connection
+                _logger.LogDebug("Rejecting duplicate outgoing connection to {RemoteEndPoint}", peer.RemoteEndPoint);
                 if (useGovernor)
                 {
                     _governor.ReleaseConnectionSlot();
                 }
 
+                await peer.CloseAsync().ConfigureAwait(false);
                 return;
             }
 
-            // This minimizes the race window with ConnectionClosed by checking peer existence BEFORE adding endpoint
-            if (peer.RemoteEndPoint != null && _connectedPeers.ContainsKey(peer))
+            // Connection successful - move to connected list.
+            // peer is a freshly created instance (reference equality), so this always succeeds.
+            _connectedPeers.TryAdd(peer, 0);
+            Interlocked.Increment(ref _connectedPeersCount);
+
+            if (peer.RemoteEndPoint != null)
             {
-                _connectedEndpoints.TryAdd(peer.RemoteEndPoint, 0);
                 peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
                 // BEP 40: Calculate canonical peer priority
                 peer.Priority = PeerPriority.Calculate(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
+            }
 
-                // Double-check: if peer was removed between check and add, clean up stale endpoint
-                // This handles the race where ConnectionClosed runs between our ContainsKey and TryAdd
-                if (!_connectedPeers.ContainsKey(peer))
+            // The connection may have died between ConnectAsync succeeding and the registration
+            // above (its receive loops are already running). In that case ConnectionClosedAsync
+            // already ran and found nothing to remove, so undo the registration here.
+            if (peer.Connected == 0 && _connectedPeers.TryRemove(peer, out _))
+            {
+                Interlocked.Decrement(ref _connectedPeersCount);
+                UnregisterConnectedEndpoint(peer);
+                if (useGovernor)
                 {
-                    _connectedEndpoints.TryRemove(peer.RemoteEndPoint, out _);
+                    _governor.ReleaseConnectionSlot();
                 }
             }
         }
@@ -1615,6 +1558,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (_connectedPeers.TryRemove(peer, out _))
             {
                 Interlocked.Decrement(ref _connectedPeersCount);
+                UnregisterConnectedEndpoint(peer);
+            }
+        }
+        finally
+        {
+            // The pending entry blocked new dials to this endpoint while we were connecting.
+            // On success the endpoint is registered in _connectedEndpoints before we get here,
+            // on failure the per-peer backoff (NextConnectAttempt) throttles retries.
+            if (endpoint != null)
+            {
+                _pendingConnections.TryRemove(endpoint, out _);
             }
         }
     }
@@ -1901,6 +1855,146 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             _logger.LogError(ex, "Connection queue processor error");
             _torrent.FireErrorEvent(new TorrentException("Connection queue processor error.", _torrent.Hash, ex));
+        }
+    }
+
+    /// <summary>
+    /// Claims the peer's endpoint in _connectedEndpoints. Returns false if another live
+    /// connection already owns that endpoint (i.e. this peer is a duplicate and must be
+    /// dropped). Peers without a known endpoint cannot be deduplicated and always pass.
+    /// </summary>
+    private bool TryRegisterConnectedEndpoint(PeerCommunication peer)
+    {
+        return peer.RemoteEndPoint == null || _connectedEndpoints.TryAdd(peer.RemoteEndPoint, peer);
+    }
+
+    /// <summary>
+    /// Removes the peer's endpoint from _connectedEndpoints, but only if this peer owns the
+    /// entry. A duplicate connection closing must not evict the surviving connection's entry.
+    /// </summary>
+    private void UnregisterConnectedEndpoint(PeerCommunication peer)
+    {
+        if (peer.RemoteEndPoint != null)
+        {
+            _connectedEndpoints.TryRemove(KeyValuePair.Create(peer.RemoteEndPoint, peer));
+        }
+    }
+
+    private static bool IsPeerIdSet(byte[]? peerId)
+    {
+        if (peerId is not { Length: 20 })
+        {
+            return false;
+        }
+
+        foreach (byte b in peerId)
+        {
+            if (b != 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Called once the handshake has revealed the remote peer id. Enforces at most one live
+    /// connection per peer id and drops connections to ourselves. Returns false if
+    /// <paramref name="p"/> must not be kept - in that case it has already been closed.
+    /// </summary>
+    private async Task<bool> TryResolvePeerIdentityAsync(PeerCommunication p)
+    {
+        var remoteId = p.PeerId;
+        if (!IsPeerIdSet(remoteId))
+        {
+            // No usable id (e.g. handshake not fully parsed) - nothing to dedup on
+            return true;
+        }
+
+        // Self-connection: we dialed our own external address (e.g. a tracker announced our own
+        // IP back to us). Back off the endpoint so we don't keep redialing ourselves.
+        if (IsPeerIdSet(_settings.PeerId) && remoteId.AsSpan().SequenceEqual(_settings.PeerId))
+        {
+            _logger.LogDebug("Detected connection to ourselves at {RemoteEndPoint}, closing", p.RemoteEndPoint);
+            if (p.RemoteEndPoint != null)
+            {
+                var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint);
+                history.FruitlessConnectionCount++;
+                ApplyConnectionBackoff(history);
+            }
+
+            await p.CloseAsync().ConfigureAwait(false);
+            return false;
+        }
+
+        string key = Convert.ToHexString(remoteId);
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            if (_connectedPeerIds.TryAdd(key, p))
+            {
+                return true;
+            }
+
+            if (!_connectedPeerIds.TryGetValue(key, out var existing))
+            {
+                // Owner released the id between TryAdd and TryGetValue - retry the claim
+                continue;
+            }
+
+            if (ReferenceEquals(existing, p))
+            {
+                return true;
+            }
+
+            if (!ShouldReplaceExistingConnection(existing, p))
+            {
+                _logger.LogDebug("Closing duplicate connection to peer {PeerId} at {RemoteEndPoint} (keeping existing connection at {ExistingEndPoint})",
+                    key, p.RemoteEndPoint, existing.RemoteEndPoint);
+                await p.CloseAsync().ConfigureAwait(false);
+                return false;
+            }
+
+            _logger.LogDebug("Replacing connection to peer {PeerId} at {ExistingEndPoint} with new connection at {RemoteEndPoint}",
+                key, existing.RemoteEndPoint, p.RemoteEndPoint);
+            await existing.CloseAsync().ConfigureAwait(false);
+
+            // ConnectionClosedAsync normally releases the id, but make sure the slot is free
+            // even if the close raced with another shutdown path, then retry the claim.
+            _connectedPeerIds.TryRemove(KeyValuePair.Create(key, existing));
+        }
+
+        // Could not claim the id - treat the new connection as the duplicate and drop it
+        await p.CloseAsync().ConfigureAwait(false);
+        return false;
+    }
+
+    /// <summary>
+    /// Tie-break between two live connections that turned out to belong to the same peer id.
+    /// Same-direction duplicates keep the existing connection (this also prevents a peer that
+    /// spoofs another's id from evicting an established connection). Crossed connections
+    /// (simultaneous open) deterministically keep the one initiated by the side with the
+    /// lexicographically smaller peer id, so both ends converge on the same connection.
+    /// </summary>
+    private bool ShouldReplaceExistingConnection(PeerCommunication existing, PeerCommunication candidate)
+    {
+        if (existing.IsOutgoing == candidate.IsOutgoing)
+        {
+            return false;
+        }
+
+        bool keepOutgoing = _settings.PeerId.AsSpan().SequenceCompareTo(candidate.PeerId) < 0;
+        return keepOutgoing == candidate.IsOutgoing;
+    }
+
+    /// <summary>
+    /// Removes the peer's id from _connectedPeerIds, but only if this peer owns the entry.
+    /// </summary>
+    private void UnregisterConnectedPeerId(PeerCommunication peer)
+    {
+        if (IsPeerIdSet(peer.PeerId))
+        {
+            _connectedPeerIds.TryRemove(KeyValuePair.Create(Convert.ToHexString(peer.PeerId), peer));
         }
     }
 
@@ -2325,6 +2419,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private async Task AddConnectedPeerCoreAsync(Stream stream, bool initiator, IPEndPoint? remote, PeerSourceKind sourceKind)
     {
+        remote = NetworkUtils.NormalizeEndPoint(remote);
+
         if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
         {
             _logger.LogDebug("Rejecting connected stream peer - ForceProxy is enabled");
@@ -2357,32 +2453,30 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         var peer = remote != null
             ? _peerFactory.Create(_torrent, this, _timeProvider, stream, remote)
             : _peerFactory.Create(_torrent, this, _timeProvider, stream);
+        peer.IsOutgoing = initiator;
+
+        // Authoritative duplicate gate: claim the endpoint before registering anything else.
+        if (!TryRegisterConnectedEndpoint(peer))
+        {
+            _governor.ReleaseConnectionSlot();
+            _logger.LogDebug("Rejecting duplicate connected stream peer from {RemoteEndPoint}", peer.RemoteEndPoint);
+            stream.Close();
+            return;
+        }
 
         if (peer.RemoteEndPoint != null)
         {
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
             peer.Priority = PeerPriority.Calculate(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
-            _connectedEndpoints.TryAdd(peer.RemoteEndPoint, 0);
 
             var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
             history.UpdateSource(sourceKind);
         }
 
-        if (_connectedPeers.TryAdd(peer, 0))
-        {
-            Interlocked.Increment(ref _connectedPeersCount);
-        }
-        else
-        {
-            if (peer.RemoteEndPoint != null)
-            {
-                _connectedEndpoints.TryRemove(peer.RemoteEndPoint, out _);
-            }
-
-            _governor.ReleaseConnectionSlot();
-            stream.Close();
-            return;
-        }
+        // The add always succeeds because peer is a freshly created instance (reference equality).
+        // Duplicate endpoints were already rejected by the endpoint gate above.
+        _connectedPeers.TryAdd(peer, 0);
+        Interlocked.Increment(ref _connectedPeersCount);
 
         if (initiator)
         {

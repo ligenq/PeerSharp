@@ -429,7 +429,18 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     public uint Priority { get; set; }
 
-    public System.Net.IPEndPoint? RemoteEndPoint { get; internal set; }
+    private System.Net.IPEndPoint? _remoteEndPoint;
+
+    /// <summary>
+    /// The remote peer's endpoint. Always stored in normalized form (IPv4-mapped IPv6
+    /// addresses are converted to plain IPv4) so it can be used as a dictionary key
+    /// regardless of whether the connection came from a dual-stack socket or a tracker/PEX address.
+    /// </summary>
+    public System.Net.IPEndPoint? RemoteEndPoint
+    {
+        get => _remoteEndPoint;
+        internal set => _remoteEndPoint = NetworkUtils.NormalizeEndPoint(value);
+    }
 
     public ExtensionHandshake? RemoteExtensions { get; private set; }
 
@@ -482,6 +493,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S2292:Trivial properties should be auto-implemented", Justification = "Backing field used with Interlocked")]
     internal int Connected { get => _connected; set => _connected = value; }
+
+    /// <summary>
+    /// True if the local side initiated this connection (outgoing dial). Used by PeerManager
+    /// for the duplicate-peer-id tie-break on crossed (simultaneous-open) connections.
+    /// </summary>
+    internal bool IsOutgoing { get; set; }
 
     internal Stream? Stream { get; set; }
 
@@ -588,6 +605,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public async virtual Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, CancellationToken ct = default)
     {
         _logger.LogDebug("Connecting to {Ip}:{Port} (uTP: {UseUtp}, timeout: {Timeout}ms)", ip, port, useUtp, timeoutMs);
+        IsOutgoing = true;
 
         // Record start time for adaptive timeout tracking
         _connectionStartTicks = Stopwatch.GetTimestamp();
