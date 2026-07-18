@@ -253,6 +253,36 @@ internal class IpBlocklist
         }
 
         _ranges.Sort((a, b) => a.Start.CompareTo(b.Start));
+
+        // Coalesce overlapping and adjacent ranges. Binary search over ranges sorted
+        // by Start only returns correct results when the ranges are disjoint: with
+        // overlapping/nested ranges (common in real P2P blocklists) a containing range
+        // with an earlier Start could be skipped, producing false negatives.
+        int write = 0;
+        for (int read = 1; read < _ranges.Count; read++)
+        {
+            var current = _ranges[write];
+            var next = _ranges[read];
+
+            // Merge if next starts within, or immediately after, the current range.
+            // The `End + 1` adjacency check is guarded against UInt128 overflow.
+            bool adjacent = current.End != UInt128.MaxValue && next.Start <= current.End + 1;
+            if (next.Start <= current.End || adjacent)
+            {
+                var mergedEnd = next.End > current.End ? next.End : current.End;
+                _ranges[write] = current with { End = mergedEnd };
+            }
+            else
+            {
+                _ranges[++write] = next;
+            }
+        }
+
+        if (_ranges.Count > 0)
+        {
+            _ranges.RemoveRange(write + 1, _ranges.Count - write - 1);
+        }
+
         _sorted = true;
     }
 

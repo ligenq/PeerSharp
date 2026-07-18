@@ -21,9 +21,17 @@ internal sealed class FileHandleCache : IFileHandleCache
 
     public void CloseTorrentHandles(string rootPath)
     {
+        // Cache keys are full file paths under the torrent root. Match on a directory
+        // boundary so that stopping a torrent rooted at "/d/foo" does not also close
+        // handles belonging to a sibling torrent at "/d/foobar".
+        string normalizedRoot = Path.GetFullPath(rootPath);
+        string prefix = normalizedRoot.EndsWith(Path.DirectorySeparatorChar) || normalizedRoot.EndsWith(Path.AltDirectorySeparatorChar)
+            ? normalizedRoot
+            : normalizedRoot + Path.DirectorySeparatorChar;
+
         lock (_lock)
         {
-            var toRemove = _cache.Keys.Where(path => path.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase)).ToList();
+            var toRemove = _cache.Keys.Where(path => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList();
             foreach (var path in toRemove)
             {
                 if (_cache.Remove(path, out var entry))

@@ -124,6 +124,31 @@ public class FileHandleCacheTests : IDisposable
         Assert.True(lease2.Handle.IsClosed);
         Assert.False(leaseOther.Handle.IsClosed);
     }
+
+    [Fact(Timeout = 30000)]
+    public async Task CloseTorrentHandles_DoesNotCloseSiblingWithSharedPrefix()
+    {
+        string torrentDir = Path.Combine(_tempDir, "torrent1");
+        string siblingDir = Path.Combine(_tempDir, "torrent11"); // shares "torrent1" string prefix
+        Directory.CreateDirectory(torrentDir);
+        Directory.CreateDirectory(siblingDir);
+        string file = Path.Combine(torrentDir, "file.txt");
+        string siblingFile = Path.Combine(siblingDir, "file.txt");
+
+        File.WriteAllText(file, "data");
+        File.WriteAllText(siblingFile, "data");
+
+        var lease = await _cache.GetHandleAsync(file, false);
+        var siblingLease = await _cache.GetHandleAsync(siblingFile, false);
+        lease.Dispose();
+        siblingLease.Dispose();
+
+        _cache.CloseTorrentHandles(torrentDir);
+
+        Assert.True(lease.Handle.IsClosed);
+        // The sibling torrent's handle must survive despite the shared string prefix
+        Assert.False(siblingLease.Handle.IsClosed);
+    }
 }
 
 

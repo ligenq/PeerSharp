@@ -34,7 +34,19 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     private const int MaxBackoffSeconds = 3600;
 
     private const int SuccessThresholdForReset = 5;
+
+    // Bounds for a tracker-supplied announce interval. Clamping guards against a malformed
+    // or hostile tracker sending a value that overflows int when cast (scheduling a negative
+    // timer delay), hammers us with a near-zero interval, or effectively disables announces.
+    private const int MinAnnounceIntervalSeconds = 30;
+    private const int MaxAnnounceIntervalSeconds = 24 * 60 * 60;
+
     private readonly Lock _lock = new();
+
+    private static int ClampAnnounceInterval(uint seconds)
+    {
+        return (int)Math.Clamp(seconds, (uint)MinAnnounceIntervalSeconds, (uint)MaxAnnounceIntervalSeconds);
+    }
     private readonly ILogger<TrackerManager> _logger = TorrentLoggerFactory.CreateLogger<TrackerManager>();
 
     // Track tasks for removed trackers (cleanup)
@@ -219,11 +231,11 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             {
                 info.IsWorking = true;
                 info.LastAnnounce = _timeProvider.GetUtcNow();
-                info.MinInterval = response.MinInterval.HasValue ? (int)response.MinInterval.Value : null;
-                int effectiveInterval = (int)response.Interval;
-                if (response.MinInterval.HasValue)
+                info.MinInterval = response.MinInterval.HasValue ? ClampAnnounceInterval(response.MinInterval.Value) : null;
+                int effectiveInterval = ClampAnnounceInterval(response.Interval);
+                if (info.MinInterval.HasValue)
                 {
-                    effectiveInterval = Math.Max(effectiveInterval, (int)response.MinInterval.Value);
+                    effectiveInterval = Math.Max(effectiveInterval, info.MinInterval.Value);
                 }
                 info.Interval = effectiveInterval;
                 info.SeedCount = response.SeedCount;
