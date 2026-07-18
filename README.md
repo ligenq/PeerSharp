@@ -171,7 +171,7 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 33  | DHT Scrape | Supported |
 | 40  | Canonical Peer Priority | Supported |
 | 42  | DHT Security Extension | Supported |
-| 47  | Padding Files and Extended File Attributes | Partial (padding files) |
+| 47  | Padding Files and Extended File Attributes | Partial (padding files with attr flag) |
 | 48  | Tracker Protocol Extension: Scrape | Supported |
 | 52  | The BitTorrent Protocol Specification v2 | Supported |
 | 53  | Magnet URI Extension - Select Specific File Indices for Download | Supported |

@@ -195,6 +195,14 @@ internal static class TorrentFileParser
     }
 
     /// <summary>
+    /// BEP 47: "attr" is a string of flag characters; 'p' marks a padding file.
+    /// </summary>
+    private static bool HasPaddingAttribute(BDict fileDict)
+    {
+        return fileDict.GetString("attr")?.Contains('p') == true;
+    }
+
+    /// <summary>
     /// BEP 52: Parse the file tree structure recursively.
     /// File tree is a nested dictionary where keys are path components.
     /// </summary>
@@ -221,7 +229,7 @@ internal static class TorrentFileParser
                         Size = length,
                         Offset = currentOffset,
                         PiecesRoot = piecesRootBytes?.ToArray(),
-                        IsPadding = PaddingFileHelper.IsPaddingPath(path)
+                        IsPadding = HasPaddingAttribute(fileInfo) || PaddingFileHelper.IsPaddingPath(path)
                     };
 
                     // BEP 52: Calculate first piece index (files are piece-aligned)
@@ -371,7 +379,7 @@ internal static class TorrentFileParser
                             Path = path,
                             Size = len,
                             Offset = offset,
-                            IsPadding = PaddingFileHelper.IsPaddingPath(path)
+                            IsPadding = HasPaddingAttribute(fDict) || PaddingFileHelper.IsPaddingPath(path)
                         });
                         offset += len;
                     }
@@ -387,7 +395,7 @@ internal static class TorrentFileParser
                     Path = metadata.Info.Name,
                     Size = len,
                     Offset = 0,
-                    IsPadding = PaddingFileHelper.IsPaddingPath(metadata.Info.Name)
+                    IsPadding = HasPaddingAttribute(info) || PaddingFileHelper.IsPaddingPath(metadata.Info.Name)
                 });
                 metadata.Info.FullSize = len;
             }

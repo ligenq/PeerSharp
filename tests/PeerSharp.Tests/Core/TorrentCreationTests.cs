@@ -614,6 +614,159 @@ public class TorrentCreationTests
         Assert.Equal(3, v1Files.List.Count); // a.bin + .pad/8192 + b.bin
     }
 
+    // ── BEP 47 attr ──────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Build_PaddingEnabled_PaddingEntriesCarryBep47Attr()
+    {
+        var fileA = new byte[8_192];
+        var fileB = new byte[4_096];
+
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("attr-pad")
+            .WithPieceLength(16_384)
+            .WithPaddingFiles()
+            .AddFile("a.bin", fileA)
+            .AddFile("b.bin", fileB)
+            .Build();
+
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        var info = Assert.IsType<BDict>(root.Get("info"));
+        var v1Files = Assert.IsType<BList>(info.Get("files"));
+        Assert.Equal(3, v1Files.List.Count); // a.bin + .pad/8192 + b.bin
+
+        foreach (var node in v1Files.List)
+        {
+            var fDict = Assert.IsType<BDict>(node);
+            var pathList = Assert.IsType<BList>(fDict.Get("path"));
+            bool isPadPath = pathList.List[0].ToString() == ".pad";
+            if (isPadPath)
+            {
+                Assert.Equal("p", fDict.GetString("attr"));
+            }
+            else
+            {
+                Assert.Null(fDict.Get("attr"));
+            }
+        }
+    }
+
+    [Fact]
+    public void Build_Hybrid_PaddingEntriesCarryBep47Attr()
+    {
+        var fileA = new byte[8_192];
+        var fileB = new byte[4_096];
+
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("hybrid-attr-pad")
+            .WithPieceLength(16_384)
+            .WithVersion(TorrentFileVersion.Hybrid)
+            .AddFile("a.bin", fileA)
+            .AddFile("b.bin", fileB)
+            .Build();
+
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        var info = Assert.IsType<BDict>(root.Get("info"));
+        var v1Files = Assert.IsType<BList>(info.Get("files"));
+
+        var padEntries = v1Files.List
+            .OfType<BDict>()
+            .Where(f => f.Get("path") is BList p && p.List[0].ToString() == ".pad")
+            .ToList();
+        Assert.Single(padEntries);
+        Assert.Equal("p", padEntries[0].GetString("attr"));
+    }
+
+    [Fact]
+    public void Parse_V1AttrPadding_WithoutPadPath_DetectedAsPadding()
+    {
+        // A padding entry marked only by BEP 47 "attr":"p", not by the .pad/ path convention
+        var metadata = TorrentFileParser.Parse(BuildV1TorrentBytes(padAttr: "p", padPath: new[] { "filler.bin" }));
+
+        Assert.Equal(3, metadata.Info.Files.Count);
+        Assert.False(metadata.Info.Files[0].IsPadding);
+        Assert.True(metadata.Info.Files[1].IsPadding);
+        Assert.False(metadata.Info.Files[2].IsPadding);
+    }
+
+    [Fact]
+    public void Parse_V1AttrWithoutPaddingFlag_NotDetectedAsPadding()
+    {
+        // BEP 47 attr "x" (executable) must not mark the file as padding
+        var metadata = TorrentFileParser.Parse(BuildV1TorrentBytes(padAttr: "x", padPath: new[] { "filler.bin" }));
+
+        Assert.All(metadata.Info.Files, f => Assert.False(f.IsPadding));
+    }
+
+    [Fact]
+    public void Parse_V2FileTreeAttrPadding_DetectedAsPadding()
+    {
+        var fileTree = new BDict();
+        fileTree.Dict["data.bin"] = MakeV2FileNode(100, attr: null);
+        fileTree.Dict["filler.bin"] = MakeV2FileNode(100, attr: "p");
+
+        var info = new BDict();
+        info.Dict["name"] = new BString("v2-attr"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(16_384);
+        info.Dict["meta version"] = new BNumber(2);
+        info.Dict["file tree"] = fileTree;
+
+        var metadata = TorrentFileParser.ParseInfoBytes(BencodeWriter.Write(info));
+
+        Assert.Equal(2, metadata.Info.Files.Count);
+        Assert.False(metadata.Info.Files.First(f => f.Path == "data.bin").IsPadding);
+        Assert.True(metadata.Info.Files.First(f => f.Path == "filler.bin").IsPadding);
+    }
+
+    private static byte[] BuildV1TorrentBytes(string padAttr, string[] padPath)
+    {
+        static BDict MakeFileEntry(long length, string[] pathParts, string? attr)
+        {
+            var entry = new BDict();
+            entry.Dict["length"] = new BNumber(length);
+            var pathList = new BList();
+            foreach (var part in pathParts)
+            {
+                pathList.List.Add(new BString(System.Text.Encoding.UTF8.GetBytes(part)));
+            }
+            entry.Dict["path"] = pathList;
+            if (attr != null)
+            {
+                entry.Dict["attr"] = new BString(System.Text.Encoding.UTF8.GetBytes(attr));
+            }
+            return entry;
+        }
+
+        var files = new BList();
+        files.List.Add(MakeFileEntry(100, new[] { "a.bin" }, attr: null));
+        files.List.Add(MakeFileEntry(156, padPath, padAttr));
+        files.List.Add(MakeFileEntry(100, new[] { "b.bin" }, attr: null));
+
+        var info = new BDict();
+        info.Dict["name"] = new BString("attr-parse"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(256);
+        info.Dict["pieces"] = new BString(new byte[40]); // 2 pieces of 20-byte SHA-1
+        info.Dict["files"] = files;
+
+        var root = new BDict();
+        root.Dict["info"] = info;
+        return BencodeWriter.Write(root);
+    }
+
+    private static BDict MakeV2FileNode(long length, string? attr)
+    {
+        var fileInfo = new BDict();
+        fileInfo.Dict["length"] = new BNumber(length);
+        fileInfo.Dict["pieces root"] = new BString(new byte[32]);
+        if (attr != null)
+        {
+            fileInfo.Dict["attr"] = new BString(System.Text.Encoding.UTF8.GetBytes(attr));
+        }
+        var node = new BDict();
+        node.Dict[string.Empty] = fileInfo;
+        return node;
+    }
+
     [Theory]
     [InlineData("../escape.bin")]
     [InlineData("folder/../../escape.bin")]
