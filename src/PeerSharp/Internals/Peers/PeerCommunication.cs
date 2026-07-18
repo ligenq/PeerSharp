@@ -1387,7 +1387,18 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
         if (id == 0) // Handshake
         {
-            if (BencodeParser.Parse(payload) is BDict dict)
+            BDict? dict;
+            try
+            {
+                dict = BencodeParser.Parse(payload) as BDict;
+            }
+            catch (FormatException ex)
+            {
+                _logger.LogDebug(ex, "Malformed extended handshake from {PeerName}", Name);
+                dict = null;
+            }
+
+            if (dict is not null)
             {
                 RemoteExtensions = ExtensionHandshake.Parse(dict);
                 UtMetadata.Init(RemoteExtensions);

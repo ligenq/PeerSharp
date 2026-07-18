@@ -437,7 +437,7 @@ public class DhtManagerTests
     }
 
     [Fact]
-    public async Task Receive_AnnouncePeer_WithInvalidToken_NoResponse()
+    public async Task Receive_AnnouncePeer_WithInvalidToken_SendsProtocolError()
     {
         var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback);
         await dht.StartAsync();
@@ -460,8 +460,29 @@ public class DhtManagerTests
 
         dht.Receive(BencodeWriter.Write(announce), senderEp);
 
-        // Should not send any response for invalid token
-        Assert.Empty(_listener.SentPackets);
+        // BEP 5: a bad token gets an error reply: {"y": "e", "e": [203, message]}
+        var packet = Assert.Single(_listener.SentPackets);
+        var response = Assert.IsType<BDict>(BencodeParser.Parse(packet.Data));
+        Assert.Equal("e", response.GetString("y"));
+        Assert.Equal("ap", response.GetString("t"));
+        var error = Assert.IsType<BList>(response.Get("e"));
+        Assert.Equal(203, Assert.IsType<BNumber>(error.List[0]).Value);
+
+        // The peer must NOT have been stored: get_peers must not return it
+        _listener.SentPackets.Clear();
+        var getPeers = new BDict();
+        getPeers.Dict["t"] = new BString("gp"u8.ToArray());
+        getPeers.Dict["y"] = new BString("q"u8.ToArray());
+        getPeers.Dict["q"] = new BString("get_peers"u8.ToArray());
+        var gpa = new BDict();
+        gpa.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        gpa.Dict["info_hash"] = new BString(infoHash.ToArray());
+        getPeers.Dict["a"] = gpa;
+        dht.Receive(BencodeWriter.Write(getPeers), new IPEndPoint(IPAddress.Loopback, 9999));
+
+        var gpResponse = Assert.IsType<BDict>(BencodeParser.Parse(_listener.SentPackets[0].Data));
+        var r = Assert.IsType<BDict>(gpResponse.Get("r"));
+        Assert.False(r.Dict.ContainsKey("values"));
     }
 
     [Fact(Timeout = 10000)]

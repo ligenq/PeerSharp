@@ -40,7 +40,18 @@ internal class UtPex : IUtPex, IDisposable
     public async Task HandleMessageAsync(byte[] data)
     {
         // Data starts after ExtId
-        if (BencodeParser.Parse(data) is not BDict dict)
+        BDict? dict;
+        try
+        {
+            dict = BencodeParser.Parse(data) as BDict;
+        }
+        catch (FormatException)
+        {
+            // Malformed PEX payload from a remote peer - ignore
+            return;
+        }
+
+        if (dict is null)
         {
             return;
         }

@@ -803,21 +803,31 @@ public class BencodeComprehensiveTests
     }
 
     [Fact]
-    public void Parse_UnknownType_ReturnsNull()
+    public void Parse_UnknownType_ThrowsFormatException()
     {
         var data = Encoding.ASCII.GetBytes("x123");
-        var node = BencodeParser.Parse(data);
 
-        Assert.Null(node);
+        Assert.Throws<FormatException>(() => BencodeParser.Parse(data));
     }
 
     [Fact]
-    public void Parse_JustTerminator_ReturnsNull()
+    public void Parse_JustTerminator_ThrowsFormatException()
     {
         var data = Encoding.ASCII.GetBytes("e");
-        var node = BencodeParser.Parse(data);
 
-        Assert.Null(node);
+        Assert.Throws<FormatException>(() => BencodeParser.Parse(data));
+    }
+
+    [Theory]
+    [InlineData("l4:test")] // list without terminator
+    [InlineData("d3:keyi42e")] // dict without terminator
+    [InlineData("l4:testx")] // invalid item mid-list
+    [InlineData("d3:keyx")] // invalid value mid-dict
+    public void Parse_MalformedCollection_ThrowsFormatException(string bencode)
+    {
+        var data = Encoding.ASCII.GetBytes(bencode);
+
+        Assert.Throws<FormatException>(() => BencodeParser.Parse(data));
     }
 
     [Fact]

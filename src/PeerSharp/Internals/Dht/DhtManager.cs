@@ -16,6 +16,9 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     private const int MaxTransactions = 5000;
     private const int MaxPeersPerInfoHash = 200;
     private const int MaxRecentQueries = 10000;
+
+    /// <summary>BEP 5: "203 Protocol Error, such as a malformed packet, invalid arguments, or bad token".</summary>
+    private const int DhtErrorProtocol = 203;
     private readonly IUdpListener _listener;
     private readonly ILogger<DhtManager> _logger = TorrentLoggerFactory.CreateLogger<DhtManager>();
     private readonly ConcurrentDictionary<string, List<DhtPeer>> _peers = new();
@@ -509,7 +512,16 @@ internal class DhtManager : IUdpReceiver, IDhtManager
             var infoHash = a.GetBytes("info_hash");
             var token = a.GetBytes("token");
 
-            if (infoHash != null && token != null && ValidateToken(token.Value.Span, remote, infoHash.Value.Span))
+            if (infoHash == null || token == null)
+            {
+                SendError(t, DhtErrorProtocol, "Missing arguments", remote);
+            }
+            else if (!ValidateToken(token.Value.Span, remote, infoHash.Value.Span))
+            {
+                // BEP 5: a bad token gets a 203 Protocol Error reply
+                SendError(t, DhtErrorProtocol, "Invalid token", remote);
+            }
+            else
             {
                 int p = a.Get("port") is BNumber port ? (int)port.Value : remote.Port;
                 if (a.Get("implied_port") is BNumber impliedPort && impliedPort.Value != 0)
@@ -925,6 +937,22 @@ internal class DhtManager : IUdpReceiver, IDhtManager
                 _logger.LogTrace(ex, "DHT send error to {EndPoint}", ep);
             }
         }
+    }
+
+    /// <summary>
+    /// BEP 5: Sends an error reply: {"t": tid, "y": "e", "e": [code, message]}.
+    /// </summary>
+    private void SendError(BString t, int code, string message, IPEndPoint ep)
+    {
+        var e = new BList();
+        e.List.Add(new BNumber(code));
+        e.List.Add(new BString(System.Text.Encoding.UTF8.GetBytes(message)));
+
+        var dict = new BDict();
+        dict.Dict["t"] = t;
+        dict.Dict["y"] = new BString("e"u8.ToArray());
+        dict.Dict["e"] = e;
+        SendPacket(dict, ep, DhtToken);
     }
 
     private void SendResponse(BString t, BDict r, IPEndPoint ep)
