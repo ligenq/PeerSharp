@@ -9,6 +9,24 @@ namespace PeerSharp.Internals.Utilities;
 internal static class NetworkUtils
 {
     /// <summary>
+    /// Normalizes an IPv4-mapped IPv6 endpoint (e.g. [::ffff:1.2.3.4]:6881) to its plain IPv4 form.
+    /// Dual-stack sockets report IPv4 peers in the mapped form while trackers and PEX hand out
+    /// plain IPv4 addresses; without normalization the two forms compare as different endpoints.
+    /// </summary>
+    [return: System.Diagnostics.CodeAnalysis.NotNullIfNotNull(nameof(endPoint))]
+    public static IPEndPoint? NormalizeEndPoint(IPEndPoint? endPoint)
+    {
+        if (endPoint == null)
+        {
+            return null;
+        }
+
+        return endPoint.Address.IsIPv4MappedToIPv6
+            ? new IPEndPoint(endPoint.Address.MapToIPv4(), endPoint.Port)
+            : endPoint;
+    }
+
+    /// <summary>
     /// Converts an IPAddress to a UInt128 for unified comparison.
     /// Handles both IPv4 and IPv6.
     /// </summary>
