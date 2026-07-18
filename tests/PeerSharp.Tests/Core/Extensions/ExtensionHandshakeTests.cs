@@ -85,7 +85,7 @@ public class ExtensionHandshakeTests
         Assert.Empty(handshake.MessageIds);
         Assert.Equal(string.Empty, handshake.Client);
         Assert.Null(handshake.MetadataSize);
-        Assert.Empty(handshake.YourIp!);
+        Assert.Null(handshake.YourIp);
     }
 }
 

@@ -54,6 +54,32 @@ internal class TorrentFileEntry
     /// BEP 47: True if this entry is a padding file.
     /// </summary>
     public bool IsPadding { get; set; }
+
+    /// <summary>
+    /// BEP 47: True if the file carries the executable ('x') attribute.
+    /// </summary>
+    public bool IsExecutable { get; set; }
+
+    /// <summary>
+    /// BEP 47: True if the file carries the hidden ('h') attribute.
+    /// </summary>
+    public bool IsHidden { get; set; }
+
+    /// <summary>
+    /// BEP 47: True if the entry is a symbolic link ('l').
+    /// </summary>
+    public bool IsSymlink { get; set; }
+
+    /// <summary>
+    /// BEP 47: Target of the symbolic link, relative to the torrent root.
+    /// </summary>
+    public string? SymlinkTarget { get; set; }
+
+    /// <summary>
+    /// BEP 47: Optional SHA-1 digest of the file contents (20 bytes). A hint for
+    /// deduplication; not authoritative for verification.
+    /// </summary>
+    public byte[]? Sha1 { get; set; }
 }
 
 internal class TorrentFileInfo

@@ -258,7 +258,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     {
         int internalIndex = Metadata.Info.MapVisibleIndexToInternal(fileIndex);
         var file = Metadata.Info.Files[internalIndex];
-        return new TorrentFileEntry(file.Path, file.Size, fileIndex);
+        return CreateFileEntry(file, fileIndex);
     }
 
     /// <summary>
@@ -271,10 +271,34 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
         foreach (var internalIndex in Metadata.Info.GetVisibleFileIndices())
         {
             var file = Metadata.Info.Files[internalIndex];
-            results.Add(new TorrentFileEntry(file.Path, file.Size, visibleIndex));
+            results.Add(CreateFileEntry(file, visibleIndex));
             visibleIndex++;
         }
         return results;
+    }
+
+    private static TorrentFileEntry CreateFileEntry(Internals.TorrentFileEntry file, int visibleIndex)
+    {
+        var attributes = TorrentFileAttributes.None;
+        if (file.IsExecutable)
+        {
+            attributes |= TorrentFileAttributes.Executable;
+        }
+        if (file.IsHidden)
+        {
+            attributes |= TorrentFileAttributes.Hidden;
+        }
+        if (file.IsSymlink)
+        {
+            attributes |= TorrentFileAttributes.Symlink;
+        }
+        if (file.IsPadding)
+        {
+            attributes |= TorrentFileAttributes.Padding;
+        }
+
+        ReadOnlyMemory<byte>? sha1 = file.Sha1 is null ? null : new ReadOnlyMemory<byte>(file.Sha1);
+        return new TorrentFileEntry(file.Path, file.Size, visibleIndex, attributes, file.SymlinkTarget, sha1);
     }
 
     /// <inheritdoc />
@@ -295,11 +319,14 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
 /// </summary>
 public readonly struct TorrentFileEntry
 {
-    internal TorrentFileEntry(string path, long size, int index)
+    internal TorrentFileEntry(string path, long size, int index, TorrentFileAttributes attributes = TorrentFileAttributes.None, string? symlinkTarget = null, ReadOnlyMemory<byte>? sha1 = null)
     {
         Path = path;
         Size = size;
         Index = index;
+        Attributes = attributes;
+        SymlinkTarget = symlinkTarget;
+        Sha1 = sha1;
     }
 
     /// <summary>
@@ -316,6 +343,37 @@ public readonly struct TorrentFileEntry
     /// Gets the file size in bytes.
     /// </summary>
     public long Size { get; }
+
+    /// <summary>
+    /// Gets the BEP 47 attribute flags of this file.
+    /// </summary>
+    public TorrentFileAttributes Attributes { get; }
+
+    /// <summary>
+    /// Gets whether the file carries the BEP 47 executable attribute.
+    /// </summary>
+    public bool IsExecutable => (Attributes & TorrentFileAttributes.Executable) != 0;
+
+    /// <summary>
+    /// Gets whether the file carries the BEP 47 hidden attribute.
+    /// </summary>
+    public bool IsHidden => (Attributes & TorrentFileAttributes.Hidden) != 0;
+
+    /// <summary>
+    /// Gets whether the entry is a BEP 47 symbolic link.
+    /// </summary>
+    public bool IsSymlink => (Attributes & TorrentFileAttributes.Symlink) != 0;
+
+    /// <summary>
+    /// Gets the symlink target path (relative to the torrent root), if the entry is a symlink.
+    /// </summary>
+    public string? SymlinkTarget { get; }
+
+    /// <summary>
+    /// Gets the BEP 47 per-file SHA-1 digest (20 bytes), if present. This is a
+    /// deduplication hint, not an integrity guarantee.
+    /// </summary>
+    public ReadOnlyMemory<byte>? Sha1 { get; }
 
     /// <inheritdoc />
     public override string ToString()

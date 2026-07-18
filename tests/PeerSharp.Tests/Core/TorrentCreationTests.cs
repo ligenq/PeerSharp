@@ -718,9 +718,240 @@ public class TorrentCreationTests
         Assert.True(metadata.Info.Files.First(f => f.Path == "filler.bin").IsPadding);
     }
 
-    private static byte[] BuildV1TorrentBytes(string padAttr, string[] padPath)
+    [Fact]
+    public void Build_V1_ExecutableAndHiddenAttributes_EmittedAndRoundTrip()
     {
-        static BDict MakeFileEntry(long length, string[] pathParts, string? attr)
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("attrs")
+            .WithPieceLength(16_384)
+            .AddFile("run.sh", new byte[100], TorrentFileAttributes.Executable)
+            .AddFile("secret.bin", new byte[100], TorrentFileAttributes.Executable | TorrentFileAttributes.Hidden)
+            .AddFile("plain.bin", new byte[100])
+            .Build();
+
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        var info = Assert.IsType<BDict>(root.Get("info"));
+        var v1Files = Assert.IsType<BList>(info.Get("files"));
+        Assert.Equal("x", Assert.IsType<BDict>(v1Files.List[0]).GetString("attr"));
+        Assert.Equal("xh", Assert.IsType<BDict>(v1Files.List[1]).GetString("attr"));
+        Assert.Null(Assert.IsType<BDict>(v1Files.List[2]).Get("attr"));
+
+        var files = torrent.GetFiles();
+        Assert.True(files[0].IsExecutable);
+        Assert.False(files[0].IsHidden);
+        Assert.True(files[1].IsExecutable);
+        Assert.True(files[1].IsHidden);
+        Assert.Equal(TorrentFileAttributes.None, files[2].Attributes);
+    }
+
+    [Fact]
+    public void Build_V1SingleFile_AttributesEmittedInInfoDictionary()
+    {
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("single")
+            .WithPieceLength(16_384)
+            .AddFile("run.sh", new byte[100], TorrentFileAttributes.Executable)
+            .Build();
+
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        var info = Assert.IsType<BDict>(root.Get("info"));
+        Assert.Equal("x", info.GetString("attr"));
+
+        Assert.True(torrent.GetFile(0).IsExecutable);
+    }
+
+    [Fact]
+    public void Build_V1Symlink_EmittedAndRoundTrip()
+    {
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("links")
+            .WithPieceLength(16_384)
+            .AddFile("data/target.bin", new byte[100])
+            .AddSymlink("links/alias.bin", "data/target.bin")
+            .Build();
+
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        var info = Assert.IsType<BDict>(root.Get("info"));
+        var v1Files = Assert.IsType<BList>(info.Get("files"));
+        var linkDict = v1Files.List.OfType<BDict>().Single(f => f.GetString("attr") == "l");
+        Assert.Equal(0, linkDict.GetLong("length"));
+        var symlinkPath = Assert.IsType<BList>(linkDict.Get("symlink path"));
+        Assert.Equal(new[] { "data", "target.bin" }, symlinkPath.List.Select(n => n.ToString()).ToArray());
+
+        var link = torrent.GetFiles().Single(f => f.IsSymlink);
+        Assert.Equal(0, link.Size);
+        Assert.Equal(string.Join(Path.DirectorySeparatorChar, "data", "target.bin"), link.SymlinkTarget);
+    }
+
+    [Fact]
+    public void Build_V2Symlink_NoPiecesRoot_AndRoundTrip()
+    {
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("v2-links")
+            .WithPieceLength(16_384)
+            .WithVersion(TorrentFileVersion.V2)
+            .AddFile("data/target.bin", new byte[100])
+            .AddSymlink("alias.bin", "data/target.bin")
+            .Build();
+
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        var info = Assert.IsType<BDict>(root.Get("info"));
+        var fileTree = Assert.IsType<BDict>(info.Get("file tree"));
+        var linkInfo = Assert.IsType<BDict>(Assert.IsType<BDict>(fileTree.Get("alias.bin")).Get(""));
+        Assert.Equal("l", linkInfo.GetString("attr"));
+        Assert.Equal(0, linkInfo.GetLong("length"));
+        Assert.Null(linkInfo.Get("pieces root"));
+        Assert.NotNull(linkInfo.Get("symlink path"));
+
+        var link = torrent.GetFiles().Single(f => f.IsSymlink);
+        Assert.Equal(string.Join(Path.DirectorySeparatorChar, "data", "target.bin"), link.SymlinkTarget);
+    }
+
+    [Fact]
+    public void Build_WithPerFileSha1_EmitsDigests_SkipsPaddingAndSymlinks()
+    {
+        var dataA = new byte[8_192];
+        var dataB = new byte[4_096];
+        Random.Shared.NextBytes(dataA);
+        Random.Shared.NextBytes(dataB);
+
+        var torrent = new ApiTorrentFileBuilder()
+            .WithName("sha1")
+            .WithPieceLength(16_384)
+            .WithPaddingFiles()
+            .WithPerFileSha1()
+            .AddFile("a.bin", dataA)
+            .AddFile("b.bin", dataB)
+            .AddSymlink("alias.bin", "a.bin")
+            .Build();
+
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        var info = Assert.IsType<BDict>(root.Get("info"));
+        var v1Files = Assert.IsType<BList>(info.Get("files"));
+
+        foreach (var fDict in v1Files.List.OfType<BDict>())
+        {
+            var pathList = Assert.IsType<BList>(fDict.Get("path"));
+            string name = pathList.List[^1].ToString()!;
+            var sha1 = fDict.GetBytes("sha1");
+            switch (name)
+            {
+                case "a.bin":
+                    Assert.Equal(System.Security.Cryptography.SHA1.HashData(dataA), sha1!.Value.ToArray());
+                    break;
+                case "b.bin":
+                    Assert.Equal(System.Security.Cryptography.SHA1.HashData(dataB), sha1!.Value.ToArray());
+                    break;
+                default:
+                    Assert.Null(sha1); // padding and symlink entries carry no sha1
+                    break;
+            }
+        }
+
+        var parsedA = torrent.GetFiles().Single(f => f.Path == "a.bin");
+        Assert.NotNull(parsedA.Sha1);
+        Assert.Equal(System.Security.Cryptography.SHA1.HashData(dataA), parsedA.Sha1!.Value.ToArray());
+    }
+
+    [Fact]
+    public async Task BuildAsync_WithPerFileSha1_MatchesSyncBuild()
+    {
+        var data = new byte[10_000];
+        Random.Shared.NextBytes(data);
+
+        var builder = new ApiTorrentFileBuilder()
+            .WithName("sha1-async")
+            .WithPieceLength(16_384)
+            .WithPerFileSha1()
+            .AddFile("a.bin", data);
+
+        var sync = builder.Build();
+        var async = await builder.BuildAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(sync.InfoHash, async.InfoHash);
+    }
+
+    [Fact]
+    public void AddFile_PaddingOrSymlinkAttribute_Throws()
+    {
+        var builder = new ApiTorrentFileBuilder();
+
+        Assert.Throws<ArgumentException>(() => builder.AddFile("a.bin", new byte[16], TorrentFileAttributes.Padding));
+        Assert.Throws<ArgumentException>(() => builder.AddFile("a.bin", new byte[16], TorrentFileAttributes.Symlink));
+    }
+
+    [Fact]
+    public void AddSymlink_InvalidTargetPath_Throws()
+    {
+        var builder = new ApiTorrentFileBuilder();
+
+        var ex = Assert.Throws<ArgumentException>(() => builder.AddSymlink("alias.bin", "../escape.bin"));
+        Assert.Equal("targetPath", ex.ParamName);
+    }
+
+    [Fact]
+    public void Parse_V1AttrFlags_SymlinkPathAndSha1_Parsed()
+    {
+        byte[] sha1 = new byte[20];
+        Random.Shared.NextBytes(sha1);
+
+        var entry = new BDict();
+        entry.Dict["length"] = new BNumber(0);
+        entry.Dict["attr"] = new BString("lxh"u8.ToArray());
+        var target = new BList();
+        target.List.Add(new BString("dir"u8.ToArray()));
+        target.List.Add(new BString("real.bin"u8.ToArray()));
+        entry.Dict["symlink path"] = target;
+        entry.Dict["sha1"] = new BString(sha1);
+        var pathList = new BList();
+        pathList.List.Add(new BString("alias.bin"u8.ToArray()));
+        entry.Dict["path"] = pathList;
+
+        var other = new BDict();
+        other.Dict["length"] = new BNumber(100);
+        var otherPath = new BList();
+        otherPath.List.Add(new BString("real.bin"u8.ToArray()));
+        other.Dict["path"] = otherPath;
+
+        var files = new BList();
+        files.List.Add(other);
+        files.List.Add(entry);
+
+        var info = new BDict();
+        info.Dict["name"] = new BString("attr-full"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(256);
+        info.Dict["pieces"] = new BString(new byte[20]);
+        info.Dict["files"] = files;
+
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        var metadata = TorrentFileParser.Parse(BencodeWriter.Write(root));
+
+        var link = metadata.Info.Files[1];
+        Assert.True(link.IsSymlink);
+        Assert.True(link.IsExecutable);
+        Assert.True(link.IsHidden);
+        Assert.False(link.IsPadding);
+        Assert.Equal(string.Join(Path.DirectorySeparatorChar, "dir", "real.bin"), link.SymlinkTarget);
+        Assert.Equal(sha1, link.Sha1);
+
+        var plain = metadata.Info.Files[0];
+        Assert.False(plain.IsSymlink);
+        Assert.Null(plain.Sha1);
+    }
+
+    [Fact]
+    public void Parse_InvalidSha1Length_Ignored()
+    {
+        var metadata = TorrentFileParser.Parse(BuildV1TorrentBytes(padAttr: "p", padPath: new[] { "filler.bin" }, padSha1: new byte[7]));
+
+        Assert.All(metadata.Info.Files, f => Assert.Null(f.Sha1));
+    }
+
+    private static byte[] BuildV1TorrentBytes(string padAttr, string[] padPath, byte[]? padSha1 = null)
+    {
+        static BDict MakeFileEntry(long length, string[] pathParts, string? attr, byte[]? sha1 = null)
         {
             var entry = new BDict();
             entry.Dict["length"] = new BNumber(length);
@@ -734,12 +965,16 @@ public class TorrentCreationTests
             {
                 entry.Dict["attr"] = new BString(System.Text.Encoding.UTF8.GetBytes(attr));
             }
+            if (sha1 != null)
+            {
+                entry.Dict["sha1"] = new BString(sha1);
+            }
             return entry;
         }
 
         var files = new BList();
         files.List.Add(MakeFileEntry(100, new[] { "a.bin" }, attr: null));
-        files.List.Add(MakeFileEntry(156, padPath, padAttr));
+        files.List.Add(MakeFileEntry(156, padPath, padAttr, padSha1));
         files.List.Add(MakeFileEntry(100, new[] { "b.bin" }, attr: null));
 
         var info = new BDict();
