@@ -17,7 +17,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 - **Full BEP Support:** Implements 25+ BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
 - **Hybrid Networking:** Native support for both TCP and uTP (BEP 29) with automatic congestion control.
 - **DHT & Peer Discovery:** Full Mainline DHT (BEP 5), Local Service Discovery (BEP 14), Peer Exchange (PEX), and UDP/HTTP Tracker support.
-- **Magnet Links:** Fast metadata exchange (BEP 9) allowing torrent starts from magnet links alone.
+- **Magnet Links:** Fast metadata exchange (BEP 9) allowing torrent starts from magnet links alone, with metadata-only fetch for previewing the file list before downloading, and metadata export for caching.
 - **BitTorrent v2 & Hybrid Torrents:** Parse, create, announce, and verify v2/hybrid torrents with BEP 52 file trees, piece layers, and Merkle proofs.
 - **Streaming Engine:** Integrated HTTP streaming server for real-time media playback while downloading.
 - **Protocol Encryption:** MSE (Message Stream Encryption) with configurable enforcement modes.
@@ -95,6 +95,41 @@ var events = new TorrentEventsBuilder()
 
 var options = new AddTorrentOptions("./downloads") { Events = events };
 ```
+
+### Previewing Magnet Links Before Downloading
+
+For .torrent files the file list is available up front, so users can deselect files before
+the download starts. Magnet links need their metadata fetched from the swarm first — two
+APIs support that without downloading any file data:
+
+```csharp
+// Option 1: Fetch only the metadata and get a TorrentFile back.
+// A transient torrent fetches the metadata and is removed again automatically.
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+var torrentFile = await engine.GetMagnetMetadataAsync(magnet, cts.Token);
+
+for (int i = 0; i < torrentFile.FileCount; i++)
+{
+    Console.WriteLine($"{torrentFile.GetFile(i).Path} ({torrentFile.GetFile(i).Size} bytes)");
+}
+
+// Show your selection UI, then add it like a regular .torrent
+var torrent = await engine.AddTorrentAsync(torrentFile, new AddTorrentOptions("./downloads"));
+
+// Option 2: Add the magnet in preview mode - the torrent fetches its metadata and is
+// then left stopped, giving a race-free window to adjust selections before starting.
+var preview = await engine.AddMagnetAsync(magnet, new AddTorrentOptions("./downloads")
+{
+    StopAfterMetadata = true
+});
+await preview.WaitForMetadataAsync(cts.Token);   // stopped here, nothing downloaded yet
+await preview.SetFilePriorityAsync(1, Priority.DoNotDownload);
+await preview.StartAsync();
+```
+
+Fetched metadata can also be cached so the same magnet never needs a second metadata
+download: persist `torrent.ExportTorrentFile().RawData` (or `torrentFile.RawData` from
+option 1) and later re-add it via `TorrentFile.Parse(bytes)`.
 
 ### Streaming
 

@@ -108,6 +108,142 @@ public class LocalSwarmTests : IDisposable
     }
 
     [Fact(Timeout = 30000)]
+    public async Task PreviewMagnet_StopAfterMetadata_AllowsDeselectionBeforeDownload()
+    {
+        var fileA = (Path: "keep.bin", Data: new byte[16_384]);
+        var fileB = (Path: "skip.bin", Data: new byte[16_384]);
+        Random.Shared.NextBytes(fileA.Data);
+        Random.Shared.NextBytes(fileB.Data);
+
+        await WriteFilesAsync(_pathA, fileA, fileB);
+
+        var torrentFile = new ApiTorrentFileBuilder()
+            .WithName("PreviewTest")
+            .WithPieceLength(16_384)
+            .AddFile(fileA.Path, fileA.Data)
+            .AddFile(fileB.Path, fileB.Data)
+            .Build();
+
+        await using var seedEngine = await CreateEngineAsync(_pathA);
+        var seedTorrent = await seedEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
+        await seedTorrent.ForceRecheckAsync();
+        await seedTorrent.StartAsync();
+
+        string magnet = $"magnet:?xt=urn:btih:{torrentFile.InfoHash.ToHexString()}";
+
+        await using var leecherEngine = await CreateEngineAsync(_pathB);
+        var leecherTorrent = await leecherEngine.AddMagnetAsync(magnet, new AddTorrentOptions { StopAfterMetadata = true });
+
+        // Bootstrap the connection and wait for the preview window. On loopback the metadata
+        // exchange can finish (and StopAfterMetadata re-stop the torrent) faster than a
+        // connected peer can be observed, so drive the loop by metadata completion.
+        using var metadataCts = new CancellationTokenSource(MetadataTimeout);
+        var metadataTask = leecherTorrent.WaitForMetadataAsync(metadataCts.Token);
+        var seedListener = seedEngine.PortListener ?? throw new InvalidOperationException("Seed engine has no port listener.");
+        var bootstrapEndpoint = new IPEndPoint(IPAddress.Loopback, seedListener.Port);
+        while (!metadataTask.IsCompleted && !metadataCts.IsCancellationRequested)
+        {
+            leecherEngine.OnPeersFound(leecherTorrent.Hash, [bootstrapEndpoint]);
+            await Task.Delay(100);
+        }
+
+        await metadataTask;
+
+        Assert.True(leecherTorrent.HasMetadata);
+        Assert.False(leecherTorrent.Started);
+        Assert.Equal(0, leecherTorrent.PiecesReceived);
+        Assert.Equal(2, leecherTorrent.FileCount);
+
+        // The user deselects one file, then starts the real download
+        await leecherTorrent.SetFilePriorityAsync(1, Priority.DoNotDownload);
+        await leecherTorrent.StartAsync();
+
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout);
+        await WaitForConditionAsync(leecherTorrent, t => t.SelectionFinished, DownloadTimeout, "selected files completion");
+
+        var keptInfo = leecherTorrent.GetFileInfo(0);
+        var skippedInfo = leecherTorrent.GetFileInfo(1);
+        Assert.Equal(fileA.Data.Length, keptInfo.DownloadedBytes);
+        Assert.Equal(0, skippedInfo.DownloadedBytes);
+
+        byte[] downloadedA = await ReadAllBytesSharedAsync(Path.Combine(_pathB, keptInfo.Path));
+        Assert.Equal(fileA.Data, downloadedA);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetMagnetMetadata_ReturnsTorrentFileAndRemovesTransientTorrent()
+    {
+        const string fileName = "fetched.bin";
+        byte[] dummyData = new byte[32 * 1024];
+        Random.Shared.NextBytes(dummyData);
+
+        await WriteFilesAsync(_pathA, (fileName, dummyData));
+
+        var torrentFile = new ApiTorrentFileBuilder()
+            .WithName(fileName)
+            .WithPieceLength(16_384)
+            .AddFile(fileName, dummyData)
+            .Build();
+
+        await using var seedEngine = await CreateEngineAsync(_pathA);
+        var seedTorrent = await seedEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
+        await seedTorrent.ForceRecheckAsync();
+        await seedTorrent.StartAsync();
+
+        string magnet = $"magnet:?xt=urn:btih:{torrentFile.InfoHash.ToHexString()}";
+
+        await using var leecherEngine = await CreateEngineAsync(_pathB);
+
+        using var cts = new CancellationTokenSource(MetadataTimeout + ConnectionTimeout);
+        var fetchTask = leecherEngine.GetMagnetMetadataAsync(magnet, cts.Token);
+
+        // Bootstrap the transient torrent's connection to the seed (no tracker/DHT in tests)
+        var portListener = seedEngine.PortListener ?? throw new InvalidOperationException("Seed engine has no port listener.");
+        var seedEndpoint = new IPEndPoint(IPAddress.Loopback, portListener.Port);
+        while (!fetchTask.IsCompleted && !cts.IsCancellationRequested)
+        {
+            if (leecherEngine.GetTorrent(torrentFile.InfoHash) != null)
+            {
+                leecherEngine.OnPeersFound(torrentFile.InfoHash, [seedEndpoint]);
+            }
+
+            await Task.Delay(100);
+        }
+
+        var fetched = await fetchTask;
+
+        Assert.Equal(torrentFile.InfoHash, fetched.InfoHash);
+        Assert.Equal(1, fetched.FileCount);
+        Assert.False(fetched.RawData.IsEmpty);
+
+        // The transient fetch torrent must be gone
+        Assert.Empty(leecherEngine.GetTorrents());
+
+        // Metadata reuse: the returned bytes can be cached and re-added with no further
+        // metadata download - the torrent has its file list immediately
+        var reparsed = TorrentFile.Parse(fetched.RawData.ToArray());
+        var added = await leecherEngine.AddTorrentAsync(reparsed, new AddTorrentOptions { StartImmediately = false });
+        Assert.True(added.HasMetadata);
+        Assert.Equal(1, added.FileCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetMagnetMetadata_Cancelled_RemovesTransientTorrent()
+    {
+        await using var engine = await CreateEngineAsync(_pathB);
+
+        // Unreachable swarm: metadata can never arrive
+        string magnet = $"magnet:?xt=urn:btih:{new string('a', 40)}";
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => engine.GetMagnetMetadataAsync(magnet, cts.Token));
+
+        // The transient torrent must be cleaned up even on cancellation
+        Assert.Empty(engine.GetTorrents());
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task DownloadSelectedFiles_SkipsUnselectedPieces()
     {
         var fileA = (Path: "file-a.bin", Data: new byte[16_384]);

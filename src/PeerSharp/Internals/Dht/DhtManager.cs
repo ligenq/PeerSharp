@@ -965,7 +965,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     {
         var e = new BList();
         e.List.Add(new BNumber(code));
-        e.List.Add(new BString(System.Text.Encoding.UTF8.GetBytes(message)));
+        e.List.Add(new BString(Encoding.UTF8.GetBytes(message)));
 
         var dict = new BDict();
         dict.Dict["t"] = t;

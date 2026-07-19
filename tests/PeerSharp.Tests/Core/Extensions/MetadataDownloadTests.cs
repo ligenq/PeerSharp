@@ -93,7 +93,7 @@ public class MetadataDownloadTests
         var metadataBytes = BencodeWriter.Write(infoDict);
 
         // SECURITY: Set the torrent's expected info hash so the new check passes
-        var expectedHash = System.Security.Cryptography.SHA1.HashData(metadataBytes);
+        var expectedHash = SHA1.HashData(metadataBytes);
         torrent.InfoFile.Info.Hash = new InfoHash(expectedHash);
 
         download.InitializeMetadataBuffer(metadataBytes.Length);

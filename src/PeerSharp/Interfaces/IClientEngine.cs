@@ -53,6 +53,21 @@ public interface IClientEngine : IAsyncDisposable
     /// <exception cref="ArgumentNullException">Thrown when magnetLink is null.</exception>
     /// <exception cref="TorrentAlreadyExistsException">Thrown when a torrent with the same hash already exists.</exception>
     /// <exception cref="TorrentException">Thrown when the operation fails.</exception>
+    /// <summary>
+    /// Downloads only the metadata for a magnet link and returns it as a
+    /// <see cref="TorrentFile"/>, without starting (or keeping) a download. Internally a
+    /// transient torrent is added to fetch the metadata from the swarm and removed again
+    /// before this method returns. Use the result to preview the file list, then add it via
+    /// AddTorrentAsync with file selections; persist <see cref="TorrentFile.RawData"/> to
+    /// skip the metadata download for the same magnet in the future.
+    /// </summary>
+    /// <param name="magnetLink">The magnet link to resolve.</param>
+    /// <param name="cancellationToken">Cancellation token; use a timeout-based token to bound the fetch.</param>
+    /// <exception cref="ArgumentNullException">Thrown when magnetLink is null.</exception>
+    /// <exception cref="TorrentAlreadyExistsException">Thrown when a torrent with the same hash is already added.</exception>
+    /// <exception cref="OperationCanceledException">Thrown when the token is cancelled before metadata arrives.</exception>
+    Task<TorrentFile> GetMagnetMetadataAsync(MagnetLink magnetLink, CancellationToken cancellationToken = default);
+
     Task<ITorrent> AddMagnetAsync(
         MagnetLink magnetLink,
         AddTorrentOptions? options = null,

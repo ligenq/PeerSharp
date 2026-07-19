@@ -97,6 +97,15 @@ public sealed class AddTorrentOptions
     public bool StartImmediately { get; set; } = true;
 
     /// <summary>
+    /// Magnet links only: when true, the torrent runs just long enough to download its
+    /// metadata and is then left stopped instead of resuming into the download. This gives
+    /// the application a race-free window to preview the file list and adjust selections
+    /// (await <see cref="Interfaces.ITorrent.WaitForMetadataAsync"/>, then inspect files and
+    /// set priorities) before calling StartAsync. Ignored for torrents added with metadata.
+    /// </summary>
+    public bool StopAfterMetadata { get; set; }
+
+    /// <summary>
     /// Gets or sets the upload bandwidth limit in bytes per second.
     /// If null, uses the global limit.
     /// </summary>

@@ -779,7 +779,7 @@ public class ProxyHelperTests
                     HttpProxyTestResponse.AuthRequired => "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n",
                     _ => "HTTP/1.1 500 Error\r\n\r\n"
                 };
-                var bytes = System.Text.Encoding.ASCII.GetBytes(response);
+                var bytes = Encoding.ASCII.GetBytes(response);
                 await stream.WriteAsync(bytes, _cts.Token).ConfigureAwait(false);
             }
         }

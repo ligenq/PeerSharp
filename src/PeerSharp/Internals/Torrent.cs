@@ -283,6 +283,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             torrent.ApplyResumeData(resumeData);
         }
         torrent.Initialize();
+        if (torrent.HasMetadata)
+        {
+            torrent._metadataApplied.TrySetResult();
+        }
+
         return torrent;
     }
 
@@ -463,19 +468,61 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// </summary>
     internal IReadOnlyList<int>? PendingSelectOnlyFileIndices { get; set; }
 
+    // Completed once metadata is available and applied (immediately for torrents created
+    // from a .torrent file; after the post-download reinitialize for magnet torrents).
+    private readonly TaskCompletionSource _metadataApplied = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// When true, the torrent is left stopped after magnet metadata has been downloaded and
+    /// applied, instead of resuming into the download. This gives applications a race-free
+    /// window to preview the file list and adjust selections before calling StartAsync.
+    /// Set via <see cref="AddTorrentOptions.StopAfterMetadata"/>.
+    /// </summary>
+    internal bool StopAfterMetadata { get; set; }
+
+    public Task WaitForMetadataAsync(CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+        return _metadataApplied.Task.WaitAsync(cancellationToken);
+    }
+
+    public Core.TorrentFile ExportTorrentFile()
+    {
+        _disposal.ThrowIfDisposed(this);
+        if (!HasMetadata)
+        {
+            throw new InvalidOperationException("Metadata has not been downloaded yet. Await WaitForMetadataAsync first.");
+        }
+
+        byte[]? bytes = TorrentFileSerializer.BuildTorrentBytes(InfoFile);
+        if (bytes == null || bytes.Length == 0)
+        {
+            throw new InvalidOperationException("Failed to serialize torrent metadata.");
+        }
+
+        return TorrentFile.Parse(bytes);
+    }
+
     public async Task ReinitializeAfterMetadataAsync(CancellationToken ct = default)
     {
         bool wasStarted = Started;
         await StopAsync(ct).ConfigureAwait(false);
         Initialize();
         await ApplyPendingSelectOnlyFileIndicesAsync(ct).ConfigureAwait(false);
-        if (wasStarted)
+        if (wasStarted && !StopAfterMetadata)
         {
             await StartAsync(ct).ConfigureAwait(false);
         }
         else
         {
             FireAndForgetLsdAnnounce();
+        }
+
+        // Signal only after selections are applied and the start/stop decision is final,
+        // so WaitForMetadataAsync waiters observe a settled torrent.
+        if (HasMetadata)
+        {
+            _metadataApplied.TrySetResult();
         }
     }
 
