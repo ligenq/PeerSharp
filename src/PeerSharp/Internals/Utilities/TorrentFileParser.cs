@@ -195,6 +195,54 @@ internal static class TorrentFileParser
         return value != 0 && (value & (value - 1)) == 0;
     }
 
+    private static long RequireNonNegativeLength(BDict dict, string key, string context)
+    {
+        long? value = dict.GetLong(key);
+        if (!value.HasValue || value.Value < 0)
+        {
+            throw new FormatException($"Invalid {context} length.");
+        }
+
+        return value.Value;
+    }
+
+    private static uint RequireValidPieceLength(BDict info)
+    {
+        long? pieceLength = info.GetLong("piece length");
+        if (!pieceLength.HasValue || pieceLength.Value <= 0 || pieceLength.Value > int.MaxValue)
+        {
+            throw new FormatException("Invalid torrent piece length.");
+        }
+
+        return (uint)pieceLength.Value;
+    }
+
+    private static void ValidateV1PieceHashes(TorrentFileMetadata metadata, ReadOnlyMemory<byte>? pieces)
+    {
+        if (metadata.Info.IsMerkle)
+        {
+            return;
+        }
+
+        if (pieces == null)
+        {
+            throw new FormatException("Missing V1 pieces list.");
+        }
+
+        var pMem = pieces.Value;
+        if (pMem.Length % 20 != 0)
+        {
+            throw new FormatException("Invalid V1 pieces list length.");
+        }
+
+        int expectedPieceCount = metadata.Info.GetPieceCount();
+        int actualPieceCount = pMem.Length / 20;
+        if (actualPieceCount != expectedPieceCount)
+        {
+            throw new FormatException($"Invalid V1 pieces count: expected {expectedPieceCount}, got {actualPieceCount}.");
+        }
+    }
+
     /// <summary>
     /// BEP 47: Applies the "attr" flag characters ('p' padding, 'x' executable,
     /// 'h' hidden, 'l' symlink) and the "symlink path" and "sha1" keys of a file
@@ -243,7 +291,7 @@ internal static class TorrentFileParser
                 if (fileInfoNode is BDict fileInfo)
                 {
                     // This is a file
-                    long length = fileInfo.GetLong("length") ?? 0;
+                    long length = RequireNonNegativeLength(fileInfo, "length", "BEP 52 file");
                     var piecesRootBytes = fileInfo.GetBytes("pieces root");
 
                     var file = new TorrentFileEntry
@@ -323,7 +371,7 @@ internal static class TorrentFileParser
         }
 
         metadata.Info.Name = info.GetString("name") ?? "Unknown";
-        metadata.Info.PieceSize = (uint)(info.GetLong("piece length") ?? 0);
+        metadata.Info.PieceSize = RequireValidPieceLength(info);
 
         // BEP 27: Parse the "private" flag from info dictionary
         long? privateFlag = info.GetLong("private");
@@ -337,21 +385,9 @@ internal static class TorrentFileParser
             logger.LogInformation("BEP 30: Merkle hash torrent detected, root hash: {RootHash}", Convert.ToHexString(metadata.Info.MerkleRootHash));
         }
 
-        // Parse V1 piece hashes (not present in BEP 30 Merkle torrents)
-        if (metadata.Info.IsV1 && !metadata.Info.IsMerkle)
-        {
-            var pieces = info.GetBytes("pieces");
-            if (pieces != null)
-            {
-                var pMem = pieces.Value;
-                // split into 20-byte SHA1 hashes
-                for (int i = 0; i + 20 <= pMem.Length; i += 20)
-                {
-                    var h = pMem.Slice(i, 20).ToArray();
-                    metadata.Info.Pieces.Add(h);
-                }
-            }
-        }
+        var v1Pieces = metadata.Info.IsV1 && !metadata.Info.IsMerkle
+            ? info.GetBytes("pieces")
+            : null;
 
         // BEP 52: Parse piece layers dictionary (outside info dict)
         if (root?.Get("piece layers") is BDict pieceLayers)
@@ -393,7 +429,7 @@ internal static class TorrentFileParser
                 {
                     if (fNode is BDict fDict)
                     {
-                        long len = fDict.GetLong("length") ?? 0;
+                        long len = RequireNonNegativeLength(fDict, "length", "V1 file");
                         string path = fDict.Get("path") is BList pathList
                             ? string.Join(Path.DirectorySeparatorChar, pathList.List.Select(n => n.ToString()))
                             : "Unknown";
@@ -407,7 +443,17 @@ internal static class TorrentFileParser
                         };
                         ApplyBep47Attributes(fDict, entry);
                         metadata.Info.Files.Add(entry);
-                        offset += len;
+                        try
+                        {
+                            checked
+                            {
+                                offset += len;
+                            }
+                        }
+                        catch (OverflowException)
+                        {
+                            throw new FormatException("Torrent total size overflow.");
+                        }
                     }
                 }
                 metadata.Info.FullSize = offset;
@@ -415,7 +461,7 @@ internal static class TorrentFileParser
             else if (metadata.Info.Files.Count == 0)
             {
                 // Single file. BEP 47 keys live directly in the info dictionary here.
-                long len = info.GetLong("length") ?? 0;
+                long len = RequireNonNegativeLength(info, "length", "V1 file");
                 var entry = new TorrentFileEntry
                 {
                     Path = metadata.Info.Name,
@@ -426,6 +472,17 @@ internal static class TorrentFileParser
                 ApplyBep47Attributes(info, entry);
                 metadata.Info.Files.Add(entry);
                 metadata.Info.FullSize = len;
+            }
+        }
+
+        // Parse V1 piece hashes after file sizes are known so the count can be validated.
+        if (metadata.Info.IsV1 && !metadata.Info.IsMerkle)
+        {
+            ValidateV1PieceHashes(metadata, v1Pieces);
+            var pMem = v1Pieces!.Value;
+            for (int i = 0; i < pMem.Length; i += 20)
+            {
+                metadata.Info.Pieces.Add(pMem.Slice(i, 20).ToArray());
             }
         }
 

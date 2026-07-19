@@ -61,6 +61,18 @@ internal sealed class BlockProcessor
 
         if (state != null)
         {
+            if (!IsValidRequestedBlock(peer, block, out _))
+            {
+                _logger.LogDebug(
+                    "Rejected unsolicited or malformed block: Piece {PieceIndex}, Offset {Offset}, Length {Length} from {RemoteEndPoint}",
+                    block.PieceIndex,
+                    block.Offset,
+                    block.Length,
+                    peer.RemoteEndPoint);
+                block.Dispose();
+                return;
+            }
+
             int blockIdx = block.Offset / _blockSize;
 
             if (state.TryAddBlock(blockIdx, block, peer))
@@ -100,6 +112,25 @@ internal sealed class BlockProcessor
         }
 
         _requestCompletionTracker.HandleBlockReceived(peer, block);
+    }
+
+    private bool IsValidRequestedBlock(PeerCommunication peer, Block block, out BlockRequest request)
+    {
+        request = default!;
+        if (block.PieceIndex < 0 ||
+            block.Offset < 0 ||
+            block.Length <= 0 ||
+            block.Offset % _blockSize != 0)
+        {
+            return false;
+        }
+
+        if (!_requestCompletionTracker.TryGetPendingRequest(peer, block, out request))
+        {
+            return false;
+        }
+
+        return request.Length == block.Length;
     }
 
     private async Task ProcessWebSeedBlockAsync(Block block, CancellationToken ct)

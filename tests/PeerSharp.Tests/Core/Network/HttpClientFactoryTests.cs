@@ -64,6 +64,36 @@ public class HttpClientFactoryTests
     }
 
     [Fact]
+    public void CreateClient_HttpProxyPasswordChanges_DoesNotReuseCachedCredentials()
+    {
+        var factory = new HttpClientFactory();
+        var firstProxySettings = new ProxySettings
+        {
+            Type = ProxyType.Http,
+            Host = "cache-key-test.example.com",
+            Port = 8080,
+            Username = "user",
+            Password = "first"
+        };
+        var secondProxySettings = new ProxySettings
+        {
+            Type = ProxyType.Http,
+            Host = "cache-key-test.example.com",
+            Port = 8080,
+            Username = "user",
+            Password = "second"
+        };
+
+        _ = factory.CreateClient(firstProxySettings, true);
+        var secondClient = factory.CreateClient(secondProxySettings, true);
+        var handler = GetHandler(secondClient);
+
+        var webProxy = Assert.IsType<WebProxy>(handler.Proxy);
+        var creds = Assert.IsType<NetworkCredential>(webProxy.Credentials);
+        Assert.Equal("second", creds.Password);
+    }
+
+    [Fact]
     public void CreateClient_Tracker_SetsShorterTimeout()
     {
         var factory = new HttpClientFactory();

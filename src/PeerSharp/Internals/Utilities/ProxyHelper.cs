@@ -455,21 +455,46 @@ internal static class ProxyHelper
             return (ReadOnlyMemory<byte>.Empty, new IPEndPoint(IPAddress.Any, 0));
         }
 
+        if (packet[2] != 0)
+        {
+            return (ReadOnlyMemory<byte>.Empty, new IPEndPoint(IPAddress.Any, 0));
+        }
+
         int offset = 4;
         IPAddress address;
         if (packet[3] == 0x01) // IPv4
         {
+            if (packet.Length < offset + 4 + 2)
+            {
+                return (ReadOnlyMemory<byte>.Empty, new IPEndPoint(IPAddress.Any, 0));
+            }
+
             address = new IPAddress(packet.AsSpan(4, 4).ToArray());
             offset += 4;
         }
         else if (packet[3] == 0x04) // IPv6
         {
+            if (packet.Length < offset + 16 + 2)
+            {
+                return (ReadOnlyMemory<byte>.Empty, new IPEndPoint(IPAddress.Any, 0));
+            }
+
             address = new IPAddress(packet.AsSpan(4, 16).ToArray());
             offset += 16;
         }
         else if (packet[3] == 0x03) // Domain - see remarks above
         {
+            if (packet.Length < 5)
+            {
+                return (ReadOnlyMemory<byte>.Empty, new IPEndPoint(IPAddress.Any, 0));
+            }
+
             int len = packet[4];
+            if (packet.Length < offset + 1 + len + 2)
+            {
+                return (ReadOnlyMemory<byte>.Empty, new IPEndPoint(IPAddress.Any, 0));
+            }
+
             address = IPAddress.Any;
             offset += 1 + len;
         }

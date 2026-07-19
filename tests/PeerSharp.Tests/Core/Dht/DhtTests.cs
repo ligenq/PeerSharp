@@ -71,6 +71,23 @@ public class DhtTests
         var nodes = table.FindClosest(localId, 20);
         Assert.Equal(8, nodes.Count);
     }
+
+    [Fact]
+    public void RoutingTableAddNode_ShortNodeId_IsIgnored()
+    {
+        byte[] localId = new byte[20];
+        var table = new RoutingTable(localId, TimeProvider.System);
+
+        table.AddNode([1, 2, 3], new IPEndPoint(IPAddress.Loopback, 6881));
+
+        Assert.Empty(table.GetAllNodes());
+    }
+
+    [Fact]
+    public void GetDistance_ShortNodeId_ThrowsArgumentException()
+    {
+        Assert.Throws<ArgumentException>(() => RoutingTable.GetDistance([1, 2, 3], new byte[20]));
+    }
 }
 
 

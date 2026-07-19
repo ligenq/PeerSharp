@@ -200,6 +200,20 @@ public class HttpTrackerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_ResponseOverLimit_RaisesFailure()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+        _mockHttp.ResponseBytes = new byte[(1024 * 1024) + 1];
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.False(_callback.Success);
+        Assert.Contains("exceeds maximum size", _callback.ErrorMessage);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task ScrapeAsync_InvalidResponse_RaisesFailure()
     {
         var callback = new MockCallback();

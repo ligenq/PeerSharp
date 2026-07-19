@@ -258,6 +258,70 @@ public class TorrentFileParserTests
         Assert.NotNull(metadata.Info.MerkleRootHash);
         Assert.Empty(metadata.Info.Pieces);
     }
+
+    [Fact]
+    public void Parse_V1NegativePieceLength_Throws()
+    {
+        var info = CreateSingleFileV1Info(pieceLength: -1, length: 1000, pieces: new byte[20]);
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+    }
+
+    [Fact]
+    public void Parse_V1NegativeFileLength_Throws()
+    {
+        var info = CreateSingleFileV1Info(pieceLength: 16384, length: -1, pieces: []);
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+    }
+
+    [Fact]
+    public void Parse_V1MissingPieces_Throws()
+    {
+        var info = new BDict();
+        info.Dict["name"] = new BString("test.txt"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(16384);
+        info.Dict["length"] = new BNumber(1000);
+
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+    }
+
+    [Fact]
+    public void Parse_V1PiecesLengthNotMultipleOfHashSize_Throws()
+    {
+        var info = CreateSingleFileV1Info(pieceLength: 16384, length: 1000, pieces: new byte[21]);
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+    }
+
+    [Fact]
+    public void Parse_V1PiecesCountMismatch_Throws()
+    {
+        var info = CreateSingleFileV1Info(pieceLength: 16, length: 1000, pieces: new byte[20]);
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+    }
+
+    private static BDict CreateSingleFileV1Info(long pieceLength, long length, byte[] pieces)
+    {
+        var info = new BDict();
+        info.Dict["name"] = new BString("test.txt"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(pieceLength);
+        info.Dict["length"] = new BNumber(length);
+        info.Dict["pieces"] = new BString(pieces);
+        return info;
+    }
 }
 
 

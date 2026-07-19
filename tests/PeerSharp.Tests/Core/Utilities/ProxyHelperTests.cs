@@ -171,6 +171,10 @@ public class ProxyHelperTests
     [Theory]
     [InlineData(new byte[] { 0, 0, 0 })]
     [InlineData(new byte[] { 0, 0, 0, 9, 1, 2, 3, 4, 0, 1 })]
+    [InlineData(new byte[] { 0, 0, 1, 1, 127, 0, 0, 1, 0, 80 })]
+    [InlineData(new byte[] { 0, 0, 0, 1, 127 })]
+    [InlineData(new byte[] { 0, 0, 0, 4, 0, 0, 0, 0 })]
+    [InlineData(new byte[] { 0, 0, 0, 3, 10, 1, 2 })]
     public void UnwrapSocks5UdpPacket_InvalidPacket_ReturnsEmptyPayload(byte[] packet)
     {
         var (payload, endpoint) = ProxyHelper.UnwrapSocks5UdpPacket(packet);

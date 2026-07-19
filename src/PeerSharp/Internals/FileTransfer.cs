@@ -197,7 +197,7 @@ internal sealed class PieceState : IDisposable
                 return false;
             }
 
-            if (blockIdx >= Blocks.Length)
+            if (blockIdx < 0 || blockIdx >= Blocks.Length)
             {
                 return false;
             }
@@ -228,7 +228,7 @@ internal sealed class PieceState : IDisposable
                 return false;
             }
 
-            if (blockIdx >= Blocks.Length)
+            if (blockIdx < 0 || blockIdx >= Blocks.Length)
             {
                 return false;
             }
