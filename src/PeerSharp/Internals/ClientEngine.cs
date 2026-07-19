@@ -736,7 +736,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             // Create NetworkManager and its dependencies
             // Note: socketFactory is now required for UdpListener
             var socketFactory = new UdpSocketFactory();
-            var udpListener = new UdpListener(Settings.Connection.UdpPort, socketFactory, Settings, _loggerFactory);
+            var udpListener = new UdpListener(Settings.Connection.UdpPort, socketFactory, Settings, _loggerFactory, _timeProvider);
             var utpManager = new UtpManager(_timeProvider, _loggerFactory);
 
             var dhtManager = DhtManager.Create(Settings.PeerId, udpListener, Settings, _timeProvider, this, new SystemDnsResolver(), _loggerFactory);

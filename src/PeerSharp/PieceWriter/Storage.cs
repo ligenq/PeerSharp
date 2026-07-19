@@ -369,10 +369,22 @@ internal sealed class Storage : IStorage
 
             foreach (var (fileIdx, fileOffset, readSize, bufferOffset) in fileOperations)
             {
-                if (_fileSkipped[fileIdx] || _fileFailed[fileIdx])
+                if (_fileSkipped[fileIdx])
                 {
+                    // Deselected file - the data legitimately does not exist locally
                     buffer.Slice(bufferOffset, readSize).Span.Clear();
                     continue;
+                }
+
+                if (_fileFailed[fileIdx])
+                {
+                    // Serving zeroed data for a failed file would poison uploads: remote peers
+                    // hash-fail the piece and penalize us. Failing the read lets callers drop
+                    // the request instead.
+                    throw new StorageException(
+                        $"File '{_info.Info.Files[fileIdx].Path}' is marked failed after repeated I/O errors",
+                        null,
+                        isRecoverable: false);
                 }
 
                 var entry = _files[fileIdx];
@@ -387,11 +399,17 @@ internal sealed class Storage : IStorage
                     using var lease = await _handleCache.GetHandleAsync(entry.FullPath, false, ct).ConfigureAwait(false);
                     await ReadWithThrottleAsync(lease.Handle, buffer.Slice(bufferOffset, readSize), fileOffset, ct).ConfigureAwait(false);
                 }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
                 catch (Exception ex)
                 {
+                    // Do NOT zero-fill and continue: returning fabricated data makes uploads
+                    // serve garbage (and get this client banned) and makes rechecks loop.
                     var fileName = _info.Info.Files[fileIdx].Path;
                     _logger.LogError(ex, "Read error for file {FileName}", fileName);
-                    buffer.Slice(bufferOffset, readSize).Span.Clear();
+                    throw new StorageException($"Read failed for file '{fileName}'", ex, isRecoverable: true);
                 }
             }
         }
@@ -569,9 +587,21 @@ internal sealed class Storage : IStorage
 
             foreach (var (fileIdx, fileOffset, writeSize, dataOffset) in fileOperations)
             {
-                if (_fileSkipped[fileIdx] || _fileFailed[fileIdx])
+                if (_fileSkipped[fileIdx])
                 {
+                    // Deselected file - dropping this span is intentional
                     continue;
+                }
+
+                if (_fileFailed[fileIdx])
+                {
+                    // Never pretend the write succeeded: silently skipping would let the piece
+                    // be recorded as complete while its bytes were dropped, corrupting the
+                    // download and later poisoning uploads to other peers.
+                    throw new StorageException(
+                        $"File '{_info.Info.Files[fileIdx].Path}' is marked failed after repeated I/O errors",
+                        null,
+                        isRecoverable: false);
                 }
 
                 var entry = _files[fileIdx];
@@ -588,9 +618,18 @@ internal sealed class Storage : IStorage
                         HandleDiskFull(fileIdx, ex);
                         throw new StorageException("Disk full", ex, isRecoverable: false);
                     }
+                    catch (OperationCanceledException)
+                    {
+                        // Shutdown/cancellation is not a disk error - don't count it toward file failure
+                        throw;
+                    }
                     catch (Exception ex)
                     {
-                        HandleFileWriteError(fileIdx, ex);
+                        bool fileNowFailed = HandleFileWriteError(fileIdx, ex);
+                        throw new StorageException(
+                            $"Write failed for file '{_info.Info.Files[fileIdx].Path}'",
+                            ex,
+                            isRecoverable: !fileNowFailed);
                     }
                 }
             }
@@ -624,7 +663,12 @@ internal sealed class Storage : IStorage
         _logger.LogCritical("Disk full - cannot continue download");
     }
 
-    private void HandleFileWriteError(int fileIdx, Exception ex)
+    /// <summary>
+    /// Records a write error. Returns true when the file has just crossed the consecutive-error
+    /// threshold and is now marked failed, meaning further writes are hopeless and the caller
+    /// should treat the failure as non-recoverable.
+    /// </summary>
+    private bool HandleFileWriteError(int fileIdx, Exception ex)
     {
         var fileName = _info.Info.Files[fileIdx].Path;
         _logger.LogError(ex, "Write error for file {FileName}", fileName);
@@ -640,6 +684,8 @@ internal sealed class Storage : IStorage
         {
             _logger.LogCritical("CRITICAL: Too many storage errors ({Errors}), possible disk failure", errors);
         }
+
+        return _fileFailed[fileIdx];
     }
 
     private void TryEnableSparse(FileStream stream)

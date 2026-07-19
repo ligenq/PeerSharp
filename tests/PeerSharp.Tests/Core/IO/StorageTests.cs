@@ -204,19 +204,76 @@ public class StorageTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task WriteAsync_OtherException_CallsHandleFileWriteError()
+    public async Task WriteAsync_TransientError_ThrowsRecoverableStorageException()
     {
         using var handleCache = new ThrowingHandleCache { ToThrow = new IOException("Some other error") };
         var validator = new PathValidator(_tempDir);
         var storage = new Storage(_metadata, _tempDir, validator, handleCache, enableSparseFiles: false);
         await storage.InitAsync();
 
-        // This won't throw StorageException immediately, but it logs and increments errors.
-        await storage.WriteAsync(0, new byte[10]);
+        // A failed write must fail loudly: silently continuing would let the piece be
+        // recorded as complete while its bytes were dropped.
+        var ex = await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
+        Assert.True(ex.IsRecoverable);
+        Assert.IsType<IOException>(ex.InnerException);
+    }
 
-        var consecutiveErrorsField = typeof(Storage).GetField("_consecutiveErrors", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        int errors = (int)consecutiveErrorsField!.GetValue(storage)!;
-        Assert.Equal(1, errors);
+    [Fact]
+    public async Task WriteAsync_PersistentErrors_BecomeNonRecoverable()
+    {
+        using var handleCache = new ThrowingHandleCache { ToThrow = new IOException("Broken disk") };
+        var validator = new PathValidator(_tempDir);
+        var storage = new Storage(_metadata, _tempDir, validator, handleCache, enableSparseFiles: false);
+        await storage.InitAsync();
+
+        // The first 9 consecutive failures are recoverable: the piece can be retried
+        for (int i = 0; i < 9; i++)
+        {
+            var ex = await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
+            Assert.True(ex.IsRecoverable, $"Failure {i + 1} should still be recoverable");
+        }
+
+        // The 10th failure crosses the threshold: the file is marked failed and retrying is hopeless
+        var final = await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
+        Assert.False(final.IsRecoverable);
+
+        // Once marked failed, writes must keep failing loudly instead of silently skipping
+        // the file (silent skipping would record pieces as complete with dropped bytes)
+        var afterMarked = await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
+        Assert.False(afterMarked.IsRecoverable);
+    }
+
+    [Fact]
+    public async Task ReadAsync_ReadError_ThrowsInsteadOfZeroFilling()
+    {
+        using var handleCache = new ThrowingHandleCache { ToThrow = new IOException("Read failure") };
+        var validator = new PathValidator(_tempDir);
+        var storage = new Storage(_metadata, _tempDir, validator, handleCache, enableSparseFiles: false);
+        await storage.InitAsync();
+
+        // Zero-filling on read errors would make uploads serve garbage (getting this client
+        // banned by remote peers) and make rechecks loop; the read must fail loudly instead.
+        var ex = await Assert.ThrowsAsync<StorageException>(() => storage.ReadAsync(0, 10));
+        Assert.True(ex.IsRecoverable);
+    }
+
+    [Fact]
+    public async Task ReadAsync_FileMarkedFailed_ThrowsNonRecoverable()
+    {
+        using var handleCache = new ThrowingHandleCache { ToThrow = new IOException("Broken disk") };
+        var validator = new PathValidator(_tempDir);
+        var storage = new Storage(_metadata, _tempDir, validator, handleCache, enableSparseFiles: false);
+        await storage.InitAsync();
+
+        // Drive file 0 into the failed state via consecutive write errors
+        for (int i = 0; i < 10; i++)
+        {
+            await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
+        }
+
+        // Reads of a failed file must not serve fabricated data
+        var ex = await Assert.ThrowsAsync<StorageException>(() => storage.ReadAsync(0, 10));
+        Assert.False(ex.IsRecoverable);
     }
 
     [Fact(Timeout = 30000)]

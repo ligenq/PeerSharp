@@ -169,7 +169,10 @@ internal sealed class PieceVerificationWriter
             _logger.LogTrace("Piece {PieceIndex} written to disk in {Elapsed}ms", pieceToProcess.Index, Math.Round(writeMs, 1));
             return true;
         }
-        catch (Exception ex)
+        // Non-recoverable storage failures (disk full, permanently failed file) deliberately
+        // propagate: retrying is hopeless, and FileTransfer stops the torrent with an error
+        // instead of re-downloading this piece forever.
+        catch (Exception ex) when (ex is not PieceWriter.StorageException { IsRecoverable: false })
         {
             _logger.LogError(ex, "Write failed for piece {PieceIndex}", pieceToProcess.Index);
             return false;

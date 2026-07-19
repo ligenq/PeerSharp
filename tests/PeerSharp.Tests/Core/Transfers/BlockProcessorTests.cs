@@ -171,6 +171,57 @@ public class BlockProcessorTests
     }
 
     [Fact]
+    public async Task HandlePeerBlockAsync_PieceEnqueueThrows_StillReleasesPendingRequest()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384; // 1 piece, 1 block
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+
+        var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceState = new PieceState(0, 1);
+        pieceStateManager.TryAddPiece(pieceState);
+
+        var requestTracker = new BlockRequestTracker();
+        var removedRequests = new List<(int Piece, int Offset)>();
+        var requestCompletionTracker = new RequestCompletionTracker(requestTracker, TimeProvider.System, (p, o, _) => removedRequests.Add((p, o)));
+
+        var processor = new BlockProcessor(new BlockProcessorOptions
+        {
+            PieceStateManager = pieceStateManager,
+            BlockSize = 16384,
+            EnqueuePeerPiece = _ => throw new InvalidOperationException("enqueue failed"),
+            EnqueueWebSeedPiece = (_, _) => Task.CompletedTask,
+            Downloader = new TransferStats(),
+            RequestCompletionTracker = requestCompletionTracker,
+            Torrent = torrent,
+            CancelBlockRequest = (_, _, _) => Task.CompletedTask,
+            Logger = NullLogger<BlockProcessor>.Instance
+        });
+
+        var peer = new PeerCommunication(torrent, new MockPeerListener(), TimeProvider.System);
+        requestTracker.AddBlockRequest(0, 0, peer, new BlockRequest
+        {
+            PieceIndex = 0,
+            Offset = 0,
+            Length = 16384,
+            Timestamp = TimeProvider.System.GetUtcNow()
+        });
+
+        // The block completes the piece, which triggers the (throwing) enqueue
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => processor.HandlePeerBlockAsync(peer, new Block(0, 0, 16384)));
+
+        // The request was answered; despite the downstream failure its in-flight slot must be
+        // released so the scheduler can re-request instead of waiting for the stale sweep.
+        bool stillPending = requestTracker.TryGetPeerRequests(peer, out var remaining) &&
+                            remaining.TryGetValue((0, 0), out _);
+        Assert.False(stillPending);
+        Assert.Contains((0, 0), removedRequests);
+    }
+
+    [Fact]
     public async Task HandlePeerBlockAsync_RejectsUnsolicitedBlock()
     {
         var metadata = new TorrentFileMetadata();

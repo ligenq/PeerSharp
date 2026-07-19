@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Transfers;
+using PeerSharp.PieceWriter;
 using System.Security.Cryptography;
 
 namespace PeerSharp.Tests.Core.Transfers;
@@ -172,6 +173,97 @@ public class PieceVerificationWriterTests
         piece.Dispose();
         await torrent.DisposeAsync();
         try { Directory.Delete(path, true); } catch { }
+    }
+
+    private static (Torrent torrent, byte[] data, string tempPath) BuildV1TorrentWithHandleCache(Exception toThrow)
+    {
+        int pieceSize = ProtocolConstants.BlockSize * 2;
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Version = TorrentVersion.V1;
+        metadata.Info.Hash = new InfoHash(Enumerable.Range(0, 20).Select(i => (byte)i).ToArray());
+        metadata.Info.PieceSize = (uint)pieceSize;
+        metadata.Info.FullSize = pieceSize;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = pieceSize, Offset = 0 });
+
+        byte[] data = new byte[pieceSize];
+        for (int i = 0; i < data.Length; i++)
+        {
+            data[i] = (byte)(i % 251);
+        }
+
+        metadata.Info.Pieces.Add(SHA1.HashData(data));
+
+        string path = Path.Combine(Path.GetTempPath(), "PeerSharpTests_Verify", Guid.NewGuid().ToString("N"));
+        var settings = new Settings();
+        settings.Files.DefaultDownloadPath = path;
+
+        var torrent = Torrent.Create(
+            metadata,
+            settings,
+            new TorrentTestUtility.MockBandwidthManager(),
+            new TorrentTestUtility.MockAlertsManager(),
+            new TorrentTestUtility.MockFileSelectionManager(),
+            new TorrentTestUtility.MockPeerCommunicationFactory(),
+            new TorrentTestUtility.MockTrackerFactory(),
+            new TorrentTestUtility.MockGeoIpService(),
+            new ThrowingHandleCache { ToThrow = toThrow },
+            new TorrentTestUtility.MockConnectionGovernor(),
+            TimeProvider.System);
+
+        return (torrent, data, path);
+    }
+
+    [Fact]
+    public async Task WriteAsync_RecoverableStorageFailure_ReturnsFalse()
+    {
+        var (torrent, data, path) = BuildV1TorrentWithHandleCache(new IOException("Transient failure"));
+        var selection = new List<FileSelection> { new FileSelection { Selected = true, Priority = Priority.Normal } };
+        await torrent.FilesInternal.InitializeAsync(selection, CancellationToken.None);
+
+        var writer = new PieceVerificationWriter(torrent, TimeProvider.System, NullLogger<PieceVerificationWriter>.Instance, ProtocolConstants.BlockSize, _ => { });
+        var piece = BuildPieceState(data);
+
+        // A transient disk error is retryable: report failure so the piece gets reset
+        bool result = await writer.WriteAsync(piece, data.Length, data, CancellationToken.None);
+
+        Assert.False(result);
+
+        piece.Dispose();
+        await torrent.DisposeAsync();
+        try { Directory.Delete(path, true); } catch { }
+    }
+
+    [Fact]
+    public async Task WriteAsync_NonRecoverableStorageFailure_Propagates()
+    {
+        var diskFull = new IOException("Disk full");
+        diskFull.HResult = unchecked((int)0x80070070); // ERROR_DISK_FULL
+
+        var (torrent, data, path) = BuildV1TorrentWithHandleCache(diskFull);
+        var selection = new List<FileSelection> { new FileSelection { Selected = true, Priority = Priority.Normal } };
+        await torrent.FilesInternal.InitializeAsync(selection, CancellationToken.None);
+
+        var writer = new PieceVerificationWriter(torrent, TimeProvider.System, NullLogger<PieceVerificationWriter>.Instance, ProtocolConstants.BlockSize, _ => { });
+        var piece = BuildPieceState(data);
+
+        // Disk full must NOT be flattened to a bool: flattening would make FileTransfer
+        // retry the piece against a full disk forever instead of stopping the torrent.
+        var ex = await Assert.ThrowsAsync<StorageException>(
+            () => writer.WriteAsync(piece, data.Length, data, CancellationToken.None));
+        Assert.False(ex.IsRecoverable);
+
+        piece.Dispose();
+        await torrent.DisposeAsync();
+        try { Directory.Delete(path, true); } catch { }
+    }
+
+    private sealed class ThrowingHandleCache : IFileHandleCache
+    {
+        public required Exception ToThrow { get; init; }
+        public void CloseTorrentHandles(string rootPath) { }
+        public ValueTask<IFileHandleLease> GetHandleAsync(string path, bool writable, CancellationToken cancellationToken = default)
+            => throw ToThrow;
+        public void Dispose() { }
     }
 
     [Fact]
