@@ -1,0 +1,6 @@
+{
+  "AssembliesPath": "tests/PeerSharp.Tests/bin/Release/net10.0",
+  "Assemblies": [
+    "PeerSharp.Tests.dll"
+  ]
+}
