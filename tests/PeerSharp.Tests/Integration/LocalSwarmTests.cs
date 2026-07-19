@@ -404,7 +404,7 @@ public class LocalSwarmTests : IDisposable
         }
 
         Assert.True(leecherTorrent.Peers.ConnectedCount > 0,
-            $"Timed out after {timeout} waiting for peer connection. {DescribeTorrent(leecherTorrent)}");
+            $"Timed out after {timeout} waiting for peer connection. {IntegrationTestDiagnostics.DescribeTorrent(leecherTorrent)}");
     }
 
     private static async Task WaitForConditionAsync(ITorrent torrent, Func<ITorrent, bool> condition, TimeSpan timeout, string description)
@@ -420,12 +420,7 @@ public class LocalSwarmTests : IDisposable
             await Task.Delay(200);
         }
 
-        Assert.True(condition(torrent), $"Timed out after {timeout} waiting for {description}. {DescribeTorrent(torrent)}");
-    }
-
-    private static string DescribeTorrent(ITorrent torrent)
-    {
-        return $"State={torrent.State}, Progress={torrent.Progress:P0}, SelectionProgress={torrent.SelectionProgress:P0}, Pieces={torrent.PiecesReceived}/{torrent.PieceCount}, Peers={torrent.Peers.ConnectedCount}";
+        Assert.True(condition(torrent), $"Timed out after {timeout} waiting for {description}. {IntegrationTestDiagnostics.DescribeTorrent(torrent)}");
     }
 
     private static async Task WriteFilesAsync(string rootPath, params (string Path, byte[] Data)[] files)

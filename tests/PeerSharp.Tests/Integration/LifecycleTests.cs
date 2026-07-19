@@ -229,7 +229,8 @@ public class LifecycleTests : IDisposable
             try { await Task.Delay(200, cts.Token); } catch { break; }
         }
 
-        Assert.True(leecherTorrent.Peers.ConnectedCount > 0, "Timed out waiting for peer connection.");
+        Assert.True(leecherTorrent.Peers.ConnectedCount > 0,
+            $"Timed out waiting for peer connection. {IntegrationTestDiagnostics.DescribeTorrent(leecherTorrent)}");
     }
 
     private static async Task WaitForProgressOrCompletionAsync(ITorrent torrent, TimeSpan timeout)
@@ -249,7 +250,9 @@ public class LifecycleTests : IDisposable
 
             if (torrent.LastException != null)
             {
-                throw new InvalidOperationException($"Torrent error: {torrent.LastException.Message}", torrent.LastException);
+                throw new InvalidOperationException(
+                    $"Torrent error while waiting for progress or completion: {IntegrationTestDiagnostics.DescribeTorrent(torrent)}",
+                    torrent.LastException);
             }
 
             try { await Task.Delay(200, cts.Token); } catch { break; }
@@ -263,12 +266,15 @@ public class LifecycleTests : IDisposable
         {
             if (torrent.LastException != null)
             {
-                throw new InvalidOperationException($"Torrent error: {torrent.LastException.Message}", torrent.LastException);
+                throw new InvalidOperationException(
+                    $"Torrent error while waiting for {description}: {IntegrationTestDiagnostics.DescribeTorrent(torrent)}",
+                    torrent.LastException);
             }
             try { await Task.Delay(200, cts.Token); } catch { break; }
         }
 
-        Assert.True(condition(torrent), $"Timed out waiting for {description}. State={torrent.State}, Pieces={torrent.PiecesReceived}/{torrent.PieceCount}");
+        Assert.True(condition(torrent),
+            $"Timed out waiting for {description}. {IntegrationTestDiagnostics.DescribeTorrent(torrent)}");
     }
 
     private static async Task WaitForFileDeletionAsync(string path, TimeSpan timeout)

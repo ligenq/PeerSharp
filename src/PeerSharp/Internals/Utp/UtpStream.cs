@@ -337,7 +337,10 @@ internal class UtpStream : Stream
 
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         Task connectTask;
+        TaskCompletionSource<bool> connectTcs;
         lock (_lock)
         {
             if (_state != UtpState.None)
@@ -347,21 +350,15 @@ internal class UtpStream : Stream
 
             _state = UtpState.SynSend;
             _connectTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            connectTcs = _connectTcs;
             SendPacket(MessageType.ST_SYN, null);
-            connectTask = _connectTcs.Task;
-        }
-
-        if (cancellationToken.IsCancellationRequested)
-        {
-            _connectTcs?.TrySetCanceled(cancellationToken);
-            CloseInternal(false);
-            throw new OperationCanceledException(cancellationToken);
+            connectTask = connectTcs.Task;
         }
 
         // Register cancellation to abort the connection attempt
         await using var registration = cancellationToken.Register(() =>
         {
-            _connectTcs?.TrySetCanceled(cancellationToken);
+            connectTcs.TrySetCanceled(cancellationToken);
             CloseInternal(false);
         });
 

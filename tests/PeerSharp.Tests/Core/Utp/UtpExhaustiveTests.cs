@@ -573,6 +573,8 @@ public class UtpExhaustiveTests
         cts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.ConnectAsync(cts.Token));
+        Assert.Empty(_listener.SentPackets);
+        Assert.Equal(UtpState.None, stream.State);
     }
 
     [Fact(Timeout = 10000)]

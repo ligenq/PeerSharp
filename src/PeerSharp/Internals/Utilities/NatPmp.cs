@@ -207,21 +207,19 @@ internal class NatPmpPortMapping : IPortMapper
             var endpoint = new IPEndPoint(gateway, natPmpPort);
             await client.SendAsync(request, endpoint, ct).ConfigureAwait(false);
 
-            var receiveTask = client.ReceiveAsync(ct).AsTask();
-            if (await Task.WhenAny(receiveTask, Task.Delay(TimeSpan.FromSeconds(2), timeProvider, ct)).ConfigureAwait(false) == receiveTask)
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(2), timeProvider);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ct);
+            var response = await client.ReceiveAsync(linkedCts.Token).ConfigureAwait(false);
+            if (response.Buffer.Length >= 12 && response.Buffer[0] == 0 && response.Buffer[1] == (128 + opCode))
             {
-                var response = await receiveTask.ConfigureAwait(false);
-                if (response.Buffer.Length >= 12 && response.Buffer[0] == 0 && response.Buffer[1] == (128 + opCode))
+                int resultCode = (response.Buffer[2] << 8) | response.Buffer[3];
+                if (resultCode == 0)
                 {
-                    int resultCode = (response.Buffer[2] << 8) | response.Buffer[3];
-                    if (resultCode == 0)
-                    {
-                        int extPort = (response.Buffer[8] << 8) | response.Buffer[9];
-                        logger.LogInformation("NAT-PMP: Mapped {Protocol} port {Internal}->{External} on {Gateway}", protocol, port, extPort, gateway);
-                        return (true, extPort);
-                    }
-                    logger.LogWarning("NAT-PMP: Gateway {Gateway} returned error code {Result}", gateway, resultCode);
+                    int extPort = (response.Buffer[8] << 8) | response.Buffer[9];
+                    logger.LogInformation("NAT-PMP: Mapped {Protocol} port {Internal}->{External} on {Gateway}", protocol, port, extPort, gateway);
+                    return (true, extPort);
                 }
+                logger.LogWarning("NAT-PMP: Gateway {Gateway} returned error code {Result}", gateway, resultCode);
             }
         }
         catch (Exception ex)

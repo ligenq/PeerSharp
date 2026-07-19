@@ -40,7 +40,16 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Releasing version $VERSION"
 
+      - name: Verify release branch
+        if: ${{ !inputs.dry_run }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Releases must run from main. Current ref is $GITHUB_REF."
+            exit 1
+          fi
+
       - name: Fail if tag already exists
+        if: ${{ !inputs.dry_run }}
         run: |
           git fetch --tags --quiet
           if git rev-parse -q --verify "refs/tags/v${{ steps.version.outputs.version }}" > /dev/null; then

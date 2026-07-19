@@ -6,8 +6,72 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+
 jobs:
-  build-and-test:
+  core-tests:
+    name: Core ${{ matrix.lane }} (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            lane: fast
+            filter: FullyQualifiedName!~PeerSharp.Tests.Integration&FullyQualifiedName!~PeerSharp.Tests.Concurrency&FullyQualifiedName!~PeerSharp.Tests.Robustness
+          - os: windows-latest
+            lane: fast
+            filter: FullyQualifiedName!~PeerSharp.Tests.Integration&FullyQualifiedName!~PeerSharp.Tests.Concurrency&FullyQualifiedName!~PeerSharp.Tests.Robustness
+          - os: ubuntu-latest
+            lane: integration
+            filter: FullyQualifiedName~PeerSharp.Tests.Integration
+          - os: windows-latest
+            lane: integration
+            filter: FullyQualifiedName~PeerSharp.Tests.Integration
+          - os: ubuntu-latest
+            lane: concurrency-robustness
+            filter: FullyQualifiedName~PeerSharp.Tests.Concurrency|FullyQualifiedName~PeerSharp.Tests.Robustness
+          - os: windows-latest
+            lane: concurrency-robustness
+            filter: FullyQualifiedName~PeerSharp.Tests.Concurrency|FullyQualifiedName~PeerSharp.Tests.Robustness
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore tests/PeerSharp.Tests/PeerSharp.Tests.csproj
+
+      - name: Build (warnings as errors)
+        run: dotnet build tests/PeerSharp.Tests/PeerSharp.Tests.csproj --no-restore --configuration Release -warnaserror
+
+      - name: Test ${{ matrix.lane }}
+        run: >
+          dotnet test tests/PeerSharp.Tests/PeerSharp.Tests.csproj
+          --no-build
+          --configuration Release
+          --filter "${{ matrix.filter }}"
+          --logger "console;verbosity=minimal"
+          --logger "trx;LogFileName=core-${{ matrix.lane }}-${{ matrix.os }}.trx"
+          --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.lane }}-${{ matrix.os }}-test-results
+          path: TestResults/*.trx
+          if-no-files-found: ignore
+
+  webtorrent-tests:
+    name: WebTorrent (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -24,10 +88,24 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Restore
-        run: dotnet restore PeerSharp.slnx
+        run: dotnet restore tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj
 
       - name: Build (warnings as errors)
-        run: dotnet build PeerSharp.slnx --no-restore --configuration Release -warnaserror
+        run: dotnet build tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj --no-restore --configuration Release -warnaserror
 
       - name: Test
-        run: dotnet test PeerSharp.slnx --no-build --configuration Release --logger "console;verbosity=minimal"
+        run: >
+          dotnet test tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj
+          --no-build
+          --configuration Release
+          --logger "console;verbosity=minimal"
+          --logger "trx;LogFileName=webtorrent-${{ matrix.os }}.trx"
+          --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webtorrent-${{ matrix.os }}-test-results
+          path: TestResults/*.trx
+          if-no-files-found: ignore

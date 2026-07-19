@@ -262,7 +262,8 @@ public sealed class FullSystemTests : IDisposable
             try { await Task.Delay(200, cts.Token); } catch { break; }
         }
 
-        Assert.True(leecherTorrent.Peers.ConnectedCount > 0, "Timed out waiting for peer connection.");
+        Assert.True(leecherTorrent.Peers.ConnectedCount > 0,
+            $"Timed out waiting for peer connection. {IntegrationTestDiagnostics.DescribeTorrent(leecherTorrent)}");
     }
 
     private static async Task WaitForConditionAsync(ITorrent torrent, Func<ITorrent, bool> condition, TimeSpan timeout, string description, Action? onPoll = null)
@@ -272,13 +273,16 @@ public sealed class FullSystemTests : IDisposable
         {
             if (torrent.LastException != null)
             {
-                throw new InvalidOperationException($"Torrent error: {torrent.LastException.Message}", torrent.LastException);
+                throw new InvalidOperationException(
+                    $"Torrent error while waiting for {description}: {IntegrationTestDiagnostics.DescribeTorrent(torrent)}",
+                    torrent.LastException);
             }
             onPoll?.Invoke();
             try { await Task.Delay(200, cts.Token); } catch { break; }
         }
 
-        Assert.True(condition(torrent), $"Timed out waiting for {description}. State={torrent.State}, Pieces={torrent.PiecesReceived}/{torrent.PieceCount}");
+        Assert.True(condition(torrent),
+            $"Timed out waiting for {description}. {IntegrationTestDiagnostics.DescribeTorrent(torrent)}");
     }
 
     /// <summary>

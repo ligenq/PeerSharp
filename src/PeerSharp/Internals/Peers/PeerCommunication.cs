@@ -660,7 +660,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     RemoteEndPoint = endpoint;
 
                     _logger.LogDebug("Initiating uTP connection to {Endpoint}", endpoint);
-                    await UtpStream.ConnectAsync(ct).WaitAsync(linkedCts.Token).ConfigureAwait(false);
+                    await UtpStream.ConnectAsync(linkedCts.Token).ConfigureAwait(false);
                     _logger.LogDebug("uTP connection to {Endpoint} successful", endpoint);
                 }
             }
@@ -774,7 +774,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         var endpoint = new System.Net.IPEndPoint(ipAddress, port);
                         UtpStream = _torrent.UtpManager.CreateStream(endpoint);
                         Stream = UtpStream;
-                        await UtpStream.ConnectAsync(ct).WaitAsync(linkedCts.Token).ConfigureAwait(false);
+                        await UtpStream.ConnectAsync(linkedCts.Token).ConfigureAwait(false);
                     }
                     else
                     {
