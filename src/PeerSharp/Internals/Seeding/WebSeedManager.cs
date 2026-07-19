@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
+using System.Buffers;
 using System.Net;
 using System.Net.Http.Headers;
 
@@ -17,6 +18,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     private const int MaxConcurrentDownloads = 2;
     private const int MaxRetries = 3;
     private const int RetryDelayMs = 5000;
+    private const int StreamBufferSize = 8192;
 
     // Configuration
     private const int WorkerIntervalMs = 1000;
@@ -187,25 +189,24 @@ internal sealed class WebSeedManager : IAsyncDisposable
         return resultOffset == pieceLength ? result : null!;
     }
 
-    internal async Task<byte[]> DownloadSingleFilePieceAsync(WebSeedSource source, long offset, int length, CancellationToken ct)
+    internal async Task<byte[]?> DownloadSingleFilePieceAsync(WebSeedSource source, long offset, int length, CancellationToken ct)
     {
         // For single-file torrents, the URL points directly to the file
         var request = new HttpRequestMessage(HttpMethod.Get, source.Url);
         request.Headers.Range = new RangeHeaderValue(offset, offset + length - 1);
 
         var client = GetClient();
-        var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
         if (response.StatusCode == HttpStatusCode.PartialContent)
         {
-            return await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            return await ReadExactContentAsync(response.Content, length, ct).ConfigureAwait(false);
         }
         else if (response.StatusCode == HttpStatusCode.OK)
         {
             // Server ignored the Range header and sent the whole file
             _logger.LogDebug("Web seed {Url} doesn't support range requests; slicing full response", source.Url);
-            var content = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-            return SliceFullContentResponse(content, offset, length)!;
+            return await ReadRangeFromFullContentAsync(response.Content, offset, length, ct).ConfigureAwait(false);
         }
         else if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
@@ -268,35 +269,116 @@ internal sealed class WebSeedManager : IAsyncDisposable
         request.Headers.Range = new RangeHeaderValue(offset, offset + length - 1);
 
         var client = GetClient();
-        var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
         if (response.StatusCode == HttpStatusCode.PartialContent)
         {
-            return await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            return await ReadExactContentAsync(response.Content, length, ct).ConfigureAwait(false);
         }
         else if (response.StatusCode == HttpStatusCode.OK)
         {
-            return SliceFullContentResponse(
-                await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false),
-                offset,
-                length);
+            return await ReadRangeFromFullContentAsync(response.Content, offset, length, ct).ConfigureAwait(false);
         }
 
         return null;
     }
 
-    /// <summary>
-    /// A server that ignores the Range header replies 200 with the whole file.
-    /// Like libtorrent, accept that and slice the requested range out of the body.
-    /// </summary>
-    private static byte[]? SliceFullContentResponse(byte[] content, long offset, int length)
+    private static async Task<byte[]?> ReadExactContentAsync(HttpContent content, int length, CancellationToken ct)
     {
-        if (offset < 0 || offset > content.LongLength - length)
+        if (length < 0)
         {
             return null;
         }
 
-        return content.AsSpan((int)offset, length).ToArray();
+        if (content.Headers.ContentLength is long contentLength)
+        {
+            if (contentLength > length)
+            {
+                return null;
+            }
+
+            if (contentLength == length)
+            {
+                return await content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            }
+        }
+
+        var result = new byte[length];
+        await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        int total = 0;
+        while (total < length)
+        {
+            int read = await stream.ReadAsync(result.AsMemory(total, length - total), ct).ConfigureAwait(false);
+            if (read == 0)
+            {
+                return null;
+            }
+            total += read;
+        }
+
+        byte[] extra = ArrayPool<byte>.Shared.Rent(1);
+        try
+        {
+            int read = await stream.ReadAsync(extra.AsMemory(0, 1), ct).ConfigureAwait(false);
+            return read == 0 ? result : null;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(extra);
+        }
+    }
+
+    /// <summary>
+    /// A server that ignores the Range header replies 200 with the whole file.
+    /// Like libtorrent, accept that and stream-slice the requested range without
+    /// buffering the full response.
+    /// </summary>
+    private static async Task<byte[]?> ReadRangeFromFullContentAsync(HttpContent content, long offset, int length, CancellationToken ct)
+    {
+        if (offset < 0 || length < 0)
+        {
+            return null;
+        }
+
+        if (content.Headers.ContentLength is long contentLength && offset > contentLength - length)
+        {
+            return null;
+        }
+
+        await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        byte[] scratch = ArrayPool<byte>.Shared.Rent(StreamBufferSize);
+        byte[] result = new byte[length];
+        try
+        {
+            long skipped = 0;
+            while (skipped < offset)
+            {
+                int toRead = (int)Math.Min(scratch.Length, offset - skipped);
+                int read = await stream.ReadAsync(scratch.AsMemory(0, toRead), ct).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    return null;
+                }
+                skipped += read;
+            }
+
+            int total = 0;
+            while (total < length)
+            {
+                int read = await stream.ReadAsync(result.AsMemory(total, length - total), ct).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    return null;
+                }
+                total += read;
+            }
+
+            return result;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(scratch);
+        }
     }
 
     private static string BuildFileUrl(string baseUrl, params string[] paths)

@@ -37,4 +37,11 @@ internal sealed class RequestCompletionTracker
             }
         }
     }
+
+    public bool TryGetPendingRequest(PeerCommunication peer, Block block, out BlockRequest request)
+    {
+        request = default!;
+        return _requestTracker.TryGetPeerRequests(peer, out var requests) &&
+            requests.TryGetValue((block.PieceIndex, block.Offset), out request);
+    }
 }

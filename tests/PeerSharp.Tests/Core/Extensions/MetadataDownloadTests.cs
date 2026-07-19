@@ -224,7 +224,7 @@ public class MetadataDownloadTests
         var infoDict = new BDict();
         infoDict.Dict["name"] = new BString(Encoding.UTF8.GetBytes("two-piece"));
         infoDict.Dict["piece length"] = new BNumber(16384);
-        infoDict.Dict["pieces"] = new BString(new byte[20]);
+        infoDict.Dict["pieces"] = new BString(new byte[40]);
         infoDict.Dict["length"] = new BNumber(16384 + 1024);
         infoDict.Dict["_pad"] = new BString(new byte[20000]); // forces > 16384 bytes
         var bytes = BencodeWriter.Write(infoDict);
@@ -285,6 +285,21 @@ public class MetadataDownloadTests
         Assert.Empty(((MockUtMetadata)peer.UtMetadata).RequestedPieces);
     }
 
+    [Fact]
+    public void MetadataRejectReceived_NegativePieceIndex_IsNoOp()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var download = new MetadataDownload(torrent);
+        download.Start();
+        download.InitializeMetadataBuffer(UtMetadata.PieceSize);
+
+        var peer = MakePeer(UtMetadata.PieceSize);
+
+        download.MetadataRejectReceived(peer, -1);
+
+        Assert.Empty(((MockUtMetadata)peer.UtMetadata).RequestedPieces);
+    }
+
     // ── MetadataPieceReceivedAsync – guard paths ──────────────────────────────
 
     [Fact]
@@ -324,6 +339,21 @@ public class MetadataDownloadTests
 
         var peer = new MockPeerCommunication { UtMetadata = new MockUtMetadata() };
         await download.MetadataPieceReceivedAsync(peer, 5, new byte[10]);
+
+        Assert.False(download.Finished);
+        Assert.Equal(0.0f, download.Progress);
+    }
+
+    [Fact]
+    public async Task MetadataPieceReceivedAsync_NegativePieceIndex_IgnoresPiece()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var download = new MetadataDownload(torrent);
+        download.Start();
+        download.InitializeMetadataBuffer(UtMetadata.PieceSize);
+
+        var peer = new MockPeerCommunication { UtMetadata = new MockUtMetadata() };
+        await download.MetadataPieceReceivedAsync(peer, -1, new byte[10]);
 
         Assert.False(download.Finished);
         Assert.Equal(0.0f, download.Progress);
@@ -592,6 +622,22 @@ public class MetadataDownloadTests
         download.MetadataRequestReceived(peer, 1); // piece 1 is out of range
 
         Assert.Contains(1, utMeta.RejectedPieces);
+    }
+
+    [Fact]
+    public void MetadataRequestReceived_NegativePieceIndex_SendsReject()
+    {
+        var content = Encoding.UTF8.GetBytes("metadata");
+        var download = new MetadataDownload(TorrentTestUtility.CreateMinimal());
+        download.SetMetadata(content);
+
+        var utMeta = new MockUtMetadata();
+        var peer = new MockPeerCommunication { UtMetadata = utMeta };
+
+        download.MetadataRequestReceived(peer, -1);
+
+        Assert.Contains(-1, utMeta.RejectedPieces);
+        Assert.Empty(utMeta.SentDataPieces);
     }
 
     [Fact]

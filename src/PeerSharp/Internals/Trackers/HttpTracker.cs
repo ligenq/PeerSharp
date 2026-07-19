@@ -4,12 +4,14 @@ using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
 using PeerSharp.Internals.Network;
+using System.Buffers;
 using System.Net;
 
 namespace PeerSharp.Internals.Trackers;
 
 internal class HttpTracker : TrackerBase, IDisposable
 {
+    private const int MaxTrackerResponseBytes = 1024 * 1024;
     private readonly ILogger<HttpTracker> _logger;
     private readonly IHttpClientFactory _httpClientFactory = new HttpClientFactory();
     private AtomicDisposal _disposal = new();
@@ -32,8 +34,7 @@ internal class HttpTracker : TrackerBase, IDisposable
             string url = BuildUrl(evt);
             _logger.LogDebug("Announcing to {Url}", url);
 
-            var client = GetClient();
-            var responseBytes = await client.GetByteArrayAsync(url, ct).ConfigureAwait(false);
+            var responseBytes = await GetResponseBytesAsync(url, ct).ConfigureAwait(false);
             var response = ParseResponse(responseBytes);
 
             RaiseAnnounceResult(true, response);
@@ -80,8 +81,7 @@ internal class HttpTracker : TrackerBase, IDisposable
 
             _logger.LogDebug("Scraping {Url}", url);
 
-            var client = GetClient();
-            var responseBytes = await client.GetByteArrayAsync(url, ct).ConfigureAwait(false);
+            var responseBytes = await GetResponseBytesAsync(url, ct).ConfigureAwait(false);
             var response = ParseScrapeResponse(responseBytes);
 
             RaiseScrapeResult(true, response);
@@ -122,8 +122,7 @@ internal class HttpTracker : TrackerBase, IDisposable
 
             _logger.LogDebug("Multi-scraping {Url}", url);
 
-            var client = GetClient();
-            var responseBytes = await client.GetByteArrayAsync(url, ct).ConfigureAwait(false);
+            var responseBytes = await GetResponseBytesAsync(url, ct).ConfigureAwait(false);
             var response = ParseMultiScrapeResponse(responseBytes);
 
             RaiseMultiScrapeResult(true, response);
@@ -156,6 +155,53 @@ internal class HttpTracker : TrackerBase, IDisposable
         if (_disposal.MarkDisposed() && disposing)
         {
             // No resources to dispose - SharedClient is static and shouldn't be disposed
+        }
+    }
+
+    private async Task<byte[]> GetResponseBytesAsync(string url, CancellationToken ct)
+    {
+        var client = GetClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        return await ReadContentWithLimitAsync(response.Content, MaxTrackerResponseBytes, ct).ConfigureAwait(false);
+    }
+
+    private static async Task<byte[]> ReadContentWithLimitAsync(HttpContent content, int maxBytes, CancellationToken ct)
+    {
+        if (content.Headers.ContentLength is long contentLength && contentLength > maxBytes)
+        {
+            throw new InvalidDataException($"Tracker response exceeds maximum size ({maxBytes} bytes).");
+        }
+
+        await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var ms = new MemoryStream();
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(8192);
+        int total = 0;
+        try
+        {
+            while (true)
+            {
+                int remaining = maxBytes - total;
+                int requestBytes = remaining <= 0 ? 1 : Math.Min(buffer.Length, remaining);
+                int read = await stream.ReadAsync(buffer.AsMemory(0, requestBytes), ct).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    return ms.ToArray();
+                }
+
+                total += read;
+                if (total > maxBytes)
+                {
+                    throw new InvalidDataException($"Tracker response exceeds maximum size ({maxBytes} bytes).");
+                }
+
+                await ms.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 

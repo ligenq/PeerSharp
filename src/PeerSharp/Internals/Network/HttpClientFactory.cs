@@ -15,7 +15,7 @@ internal class HttpClientFactory : IHttpClientFactory
     public HttpClient CreateClient(ProxySettings proxy, bool isTracker)
     {
         // Cache key based on proxy settings and usage type (tracker vs web seed might have different timeouts/headers)
-        string key = $"{proxy.Type}|{proxy.Host}|{proxy.Port}|{proxy.Username}|{isTracker}";
+        string key = $"{proxy.Type}|{proxy.Host}|{proxy.Port}|{proxy.Username}|{proxy.Password}|{isTracker}";
 
         return Cache.GetOrAdd(key, _ => CreateNewClient(proxy, isTracker));
     }

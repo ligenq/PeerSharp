@@ -124,6 +124,21 @@ public class WebSeedManagerTests
     }
 
     [Fact]
+    public async Task DownloadSingleFilePieceAsync_PartialContentTooLong_ReturnsNull()
+    {
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
+        manager.SetTestClient(_mockHttp);
+        _mockHttp.StatusCode = HttpStatusCode.PartialContent;
+        _mockHttp.ResponseBytes = new byte[17];
+
+        var source = new WebSeedManager.WebSeedSource("http://seed.com", false);
+
+        var data = await manager.DownloadSingleFilePieceAsync(source, 0, 16, CancellationToken.None);
+
+        Assert.Null(data);
+    }
+
+    [Fact]
     public async Task DownloadMultiFilePieceAsync_SpansFiles()
     {
         var metadata = new TorrentFileMetadata();

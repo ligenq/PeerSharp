@@ -153,6 +153,13 @@ public class BlockProcessorTests
 
         var peer = new PeerCommunication(torrent, new MockPeerListener(), TimeProvider.System);
         var block = new Block(0, 0, 16384);
+        requestTracker.AddBlockRequest(0, 0, peer, new BlockRequest
+        {
+            PieceIndex = 0,
+            Offset = 0,
+            Length = 16384,
+            Timestamp = TimeProvider.System.GetUtcNow()
+        });
 
         // Act
         await processor.HandlePeerBlockAsync(peer, block);
@@ -161,6 +168,86 @@ public class BlockProcessorTests
         Assert.True(pieceState.Blocks[0]); // Block marked received
         Assert.Equal(16384, downloader.Downloaded); // Stats updated
         Assert.True(enqueued); // Piece enqueued for processing (verification/writing)
+    }
+
+    [Fact]
+    public async Task HandlePeerBlockAsync_RejectsUnsolicitedBlock()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384;
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+
+        var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceState = new PieceState(0, 1);
+        pieceStateManager.TryAddPiece(pieceState);
+
+        var requestTracker = new BlockRequestTracker();
+        var requestCompletionTracker = new RequestCompletionTracker(requestTracker, TimeProvider.System, (_, _, _) => { });
+        var downloader = new TransferStats();
+        bool enqueued = false;
+
+        var processor = new BlockProcessor(new BlockProcessorOptions
+        {
+            PieceStateManager = pieceStateManager,
+            BlockSize = 16384,
+            EnqueuePeerPiece = _ => { enqueued = true; return Task.CompletedTask; },
+            EnqueueWebSeedPiece = (_, _) => Task.CompletedTask,
+            Downloader = downloader,
+            RequestCompletionTracker = requestCompletionTracker,
+            Torrent = torrent,
+            CancelBlockRequest = (_, _, _) => Task.CompletedTask,
+            Logger = NullLogger<BlockProcessor>.Instance
+        });
+
+        var peer = new PeerCommunication(torrent, new MockPeerListener(), TimeProvider.System);
+        var block = new Block(0, 0, 16384);
+
+        await processor.HandlePeerBlockAsync(peer, block);
+
+        Assert.False(pieceState.Blocks[0]);
+        Assert.False(enqueued);
+        Assert.Equal(0, downloader.Downloaded);
+        Assert.True(block.Data.IsEmpty);
+    }
+
+    [Fact]
+    public async Task HandlePeerBlockAsync_RejectsNegativeOffset()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384;
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+
+        var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceState = new PieceState(0, 1);
+        pieceStateManager.TryAddPiece(pieceState);
+
+        var requestTracker = new BlockRequestTracker();
+        var requestCompletionTracker = new RequestCompletionTracker(requestTracker, TimeProvider.System, (_, _, _) => { });
+        var processor = new BlockProcessor(new BlockProcessorOptions
+        {
+            PieceStateManager = pieceStateManager,
+            BlockSize = 16384,
+            EnqueuePeerPiece = _ => Task.CompletedTask,
+            EnqueueWebSeedPiece = (_, _) => Task.CompletedTask,
+            Downloader = new TransferStats(),
+            RequestCompletionTracker = requestCompletionTracker,
+            Torrent = torrent,
+            CancelBlockRequest = (_, _, _) => Task.CompletedTask,
+            Logger = NullLogger<BlockProcessor>.Instance
+        });
+
+        var peer = new PeerCommunication(torrent, new MockPeerListener(), TimeProvider.System);
+        requestTracker.AddBlockRequest(0, -16384, peer, new BlockRequest { PieceIndex = 0, Offset = -16384, Length = 16384 });
+        var block = new Block(0, -16384, 16384);
+
+        await processor.HandlePeerBlockAsync(peer, block);
+
+        Assert.False(pieceState.Blocks[0]);
+        Assert.True(block.Data.IsEmpty);
     }
 
     [Fact]

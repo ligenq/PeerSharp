@@ -133,7 +133,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
             // Check _receivedPieces.Length > 0 to handle uninitialized state (empty BitArray)
             if (!Active || Finished || _metadataSize == 0 || _receivedPieces.Length == 0 ||
-                pieceIndex >= _receivedPieces.Length || _receivedPieces[pieceIndex])
+                pieceIndex < 0 || pieceIndex >= _receivedPieces.Length || _receivedPieces[pieceIndex])
             {
                 if (Active && !Finished && _metadataSize > 0)
                 {
@@ -239,7 +239,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             if (_pendingRequests.Remove(pieceIndex))
             {
                 _logger.LogWarning("Peer {PeerId} rejected metadata piece {PieceIndex}", peer.PeerId, pieceIndex);
-                if (pieceIndex < _receivedPieces.Length && !_receivedPieces[pieceIndex])
+                if (pieceIndex >= 0 && pieceIndex < _receivedPieces.Length && !_receivedPieces[pieceIndex])
                 {
                     RequestPiece(pieceIndex, preferredPeer: GetAlternatePeer(peer));
                 }
@@ -252,6 +252,12 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         lock (_lock)
         {
             if (!Finished || _metadataBuffer.Length == 0)
+            {
+                peer.UtMetadata.SendReject(pieceIndex);
+                return;
+            }
+
+            if (pieceIndex < 0)
             {
                 peer.UtMetadata.SendReject(pieceIndex);
                 return;

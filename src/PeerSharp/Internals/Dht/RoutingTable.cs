@@ -51,6 +51,11 @@ internal class RoutingTable
 
     public static int GetDistance(ReadOnlySpan<byte> n1, ReadOnlySpan<byte> n2)
     {
+        if (n1.Length < 20 || n2.Length < 20)
+        {
+            throw new ArgumentException("DHT node IDs must be 20 bytes.");
+        }
+
         // 160 - leading zeros of XOR
         for (int i = 0; i < 20; i++)
         {
@@ -70,6 +75,11 @@ internal class RoutingTable
 
     public void AddNode(ReadOnlySpan<byte> id, IPEndPoint ep)
     {
+        if (id.Length != 20)
+        {
+            return;
+        }
+
         // BEP 42: Validate node ID against IP address
         bool isSecure = false;
         if (DhtSecurity.ShouldValidate(ep.Address))
