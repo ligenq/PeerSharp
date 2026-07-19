@@ -15,7 +15,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>BEP 52 (BitTorrent v2) interop fixes: correct merkle pad propagation, libtorrent-compatible piece-layer hash chunking, virtual padding past file_num_pieces, thread-safe piece-layer cache, and request dedup. HTTP streaming: RFC 7233 suffix-byte-range support, stricter rejection of malformed Range headers, ArrayPool-backed buffers, and cancellation. Hardened path validation in the torrent builder against `.`/`..` segments. Various smaller fixes around torrent disposal, tracker scrape, and storage.</PackageReleaseNotes>
+		<PackageReleaseNotes>New magnet APIs: preview a magnet's file list before downloading (GetMagnetMetadataAsync, AddTorrentOptions.StopAfterMetadata, ITorrent.WaitForMetadataAsync) and export/cache metadata to skip re-downloading it (ITorrent.ExportTorrentFile). BEP 53: magnet URI file selection (so=). BEP 47: full support for file attributes, symlinks, and per-file SHA-1 in v1/v2/hybrid torrents. Storage reliability: write/read failures now surface instead of being swallowed - disk-full or a permanently failed file stops the torrent with an error instead of re-downloading pieces forever or serving zero-filled data that gets the client banned. Duplicate peer connections are deduplicated by endpoint and peer id, and failed handshakes close the incomplete peer. Hardening: UDP receive-loop backoff on persistent socket errors, uTP connect cancellation fixes, NAT-PMP receive timeout fix, PeerManager decomposition, and eight correctness/security fixes across DHT, blocklist, cache, and trackers.</PackageReleaseNotes>
 		<IsTrimmable>true</IsTrimmable>
 	</PropertyGroup>
 
