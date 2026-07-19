@@ -67,6 +67,39 @@ public class TorrentFileParserTests
     }
 
     [Fact]
+    public void Parse_MultiFileV1_AttrPMarksPaddingEvenWithoutPadPath()
+    {
+        var f1 = new BDict();
+        f1.Dict["length"] = new BNumber(100);
+        var p1 = new BList(); p1.List.Add(new BString("file.bin"u8.ToArray()));
+        f1.Dict["path"] = p1;
+
+        var padding = new BDict();
+        padding.Dict["length"] = new BNumber(156);
+        padding.Dict["attr"] = new BString("p"u8.ToArray());
+        var padPath = new BList(); padPath.List.Add(new BString("padding.bin"u8.ToArray()));
+        padding.Dict["path"] = padPath;
+
+        var files = new BList();
+        files.List.Add(f1);
+        files.List.Add(padding);
+
+        var info = new BDict();
+        info.Dict["name"] = new BString("root"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(256);
+        info.Dict["files"] = files;
+        info.Dict["pieces"] = new BString(new byte[20]);
+
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        var metadata = TorrentFileParser.Parse(BencodeWriter.Write(root));
+
+        Assert.False(metadata.Info.Files[0].IsPadding);
+        Assert.True(metadata.Info.Files[1].IsPadding);
+    }
+
+    [Fact]
     public void Parse_V2FileTree_ParsesCorrectly()
     {
         // BEP 52 structure

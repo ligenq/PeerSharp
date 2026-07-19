@@ -1,4 +1,6 @@
+using PeerSharp.BEncoding;
 using PeerSharp.Internals;
+using PeerSharp.Internals.Utilities;
 using PeerSharp.PieceWriter;
 
 namespace PeerSharp.Tests.Core.IO;
@@ -235,6 +237,39 @@ public class StorageTests : IAsyncLifetime
     }
 
     [Fact(Timeout = 30000)]
+    public async Task InitAndWrite_AttrPaddingWithoutPadPath_IsNotWrittenToDisk()
+    {
+        var metadata = TorrentFileParser.Parse(BuildTorrentWithAttrPaddingPath("filler.bin"));
+        string storageRoot = Path.Combine(_tempDir, "attr-padding");
+
+        using var handleCache = new FileHandleCache();
+        var validator = new PathValidator(storageRoot);
+        var storage = new Storage(metadata, storageRoot, validator, handleCache, enableSparseFiles: false);
+        try
+        {
+            await storage.InitAsync();
+
+            byte[] data = Enumerable.Range(0, 356).Select(i => (byte)i).ToArray();
+            await storage.WriteAsync(0, data);
+            handleCache.CloseTorrentHandles(storageRoot);
+
+            Assert.True(File.Exists(Path.Combine(storageRoot, "a.bin")));
+            Assert.False(File.Exists(Path.Combine(storageRoot, "filler.bin")));
+            Assert.True(File.Exists(Path.Combine(storageRoot, "b.bin")));
+
+            Assert.Equal(data[..100], File.ReadAllBytes(Path.Combine(storageRoot, "a.bin")));
+            Assert.Equal(data[256..356], File.ReadAllBytes(Path.Combine(storageRoot, "b.bin")));
+
+            byte[] paddingBytes = await storage.ReadAsync(100, 156);
+            Assert.All(paddingBytes, b => Assert.Equal(0, b));
+        }
+        finally
+        {
+            await storage.DisposeAsync();
+        }
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task UpdateFileSelection_DisablesWrites()
     {
         var selection = new List<FileSelection>
@@ -255,6 +290,38 @@ public class StorageTests : IAsyncLifetime
 
         byte[] file2Data = File.ReadAllBytes(Path.Combine(_tempDir, "folder", "file2.txt"));
         Assert.All(file2Data.Take(100), b => Assert.Equal(0, b));
+    }
+
+    private static byte[] BuildTorrentWithAttrPaddingPath(string paddingPath)
+    {
+        static BDict FileEntry(long length, string path, string? attr = null)
+        {
+            var entry = new BDict();
+            entry.Dict["length"] = new BNumber(length);
+            var pathList = new BList();
+            pathList.List.Add(new BString(System.Text.Encoding.UTF8.GetBytes(path)));
+            entry.Dict["path"] = pathList;
+            if (attr != null)
+            {
+                entry.Dict["attr"] = new BString(System.Text.Encoding.UTF8.GetBytes(attr));
+            }
+            return entry;
+        }
+
+        var files = new BList();
+        files.List.Add(FileEntry(100, "a.bin"));
+        files.List.Add(FileEntry(156, paddingPath, "p"));
+        files.List.Add(FileEntry(100, "b.bin"));
+
+        var info = new BDict();
+        info.Dict["name"] = new BString("attr-padding"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(256);
+        info.Dict["pieces"] = new BString(new byte[40]);
+        info.Dict["files"] = files;
+
+        var root = new BDict();
+        root.Dict["info"] = info;
+        return BencodeWriter.Write(root);
     }
 }
 

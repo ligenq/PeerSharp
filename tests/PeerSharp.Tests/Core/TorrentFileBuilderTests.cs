@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using PeerSharp.BEncoding;
 using CoreBuilder = PeerSharp.Core.TorrentFileBuilder;
 
 namespace PeerSharp.Tests.Core;
@@ -348,6 +349,21 @@ public class TorrentFileBuilderTests
         Assert.Equal(2, torrent.FileCount);
     }
 
+    [Fact]
+    public void Build_V1_WithPadding_WritesBep47PaddingAttribute()
+    {
+        var torrent = new CoreBuilder()
+            .AddFile("root/a.bin", MakeData(100))
+            .AddFile("root/b.bin", MakeData(100))
+            .WithPieceLength(256)
+            .WithPaddingFiles(true)
+            .Build();
+
+        var paddingFile = GetRawV1Files(torrent).Single(f => GetPath(f).StartsWith(".pad/", StringComparison.Ordinal));
+
+        Assert.Equal("p", paddingFile.GetString("attr"));
+    }
+
     // ── V2 ─────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -393,6 +409,23 @@ public class TorrentFileBuilderTests
         Assert.True(torrent.IsHybrid);
         Assert.False(torrent.InfoHash.IsEmpty);
         Assert.False(torrent.InfoHashV2.IsEmpty);
+    }
+
+    [Fact]
+    public void Build_Hybrid_WritesV1PaddingFileWithBep47Attribute()
+    {
+        var torrent = new CoreBuilder()
+            .AddFile("root/a.bin", MakeData(100))
+            .AddFile("root/b.bin", MakeData(100))
+            .WithPieceLength(16_384)
+            .WithVersion(TorrentFileVersion.Hybrid)
+            .Build();
+
+        var rawFiles = GetRawV1Files(torrent);
+        var paddingFile = rawFiles.Single(f => GetPath(f).StartsWith(".pad/", StringComparison.Ordinal));
+
+        Assert.Equal(3, rawFiles.Count);
+        Assert.Equal("p", paddingFile.GetString("attr"));
     }
 
     // ── Async ──────────────────────────────────────────────────────────────
@@ -669,5 +702,19 @@ public class TorrentFileBuilderTests
         {
             File.Delete(tempFile);
         }
+    }
+
+    private static List<BDict> GetRawV1Files(TorrentFile torrent)
+    {
+        var root = Assert.IsType<BDict>(BencodeParser.Parse(torrent.RawData.ToArray()));
+        var info = Assert.IsType<BDict>(root.Get("info"));
+        var files = Assert.IsType<BList>(info.Get("files"));
+        return files.List.Cast<BDict>().ToList();
+    }
+
+    private static string GetPath(BDict file)
+    {
+        var path = Assert.IsType<BList>(file.Get("path"));
+        return string.Join("/", path.List.Select(part => Assert.IsType<BString>(part).Text));
     }
 }
