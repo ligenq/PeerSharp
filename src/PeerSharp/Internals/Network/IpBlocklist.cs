@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Utilities;
 using System.Net;
 
@@ -12,9 +13,19 @@ namespace PeerSharp.Internals.Network;
 internal class IpBlocklist
 {
     private readonly Lock _lock = new();
-    private readonly ILogger<IpBlocklist> _logger = TorrentLoggerFactory.CreateLogger<IpBlocklist>();
+    private readonly ILogger<IpBlocklist> _logger;
     private readonly List<IpRange> _ranges = [];
     private bool _sorted;
+
+    public IpBlocklist()
+        : this(NullLoggerFactory.Instance)
+    {
+    }
+
+    public IpBlocklist(ILoggerFactory loggerFactory)
+    {
+        _logger = loggerFactory.CreateLogger<IpBlocklist>();
+    }
 
     /// <summary>
     /// Gets or sets whether the blocklist is enabled.

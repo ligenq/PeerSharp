@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Extensions;
 using System.Collections.Concurrent;
 using PeerSharp.Messages;
@@ -28,7 +29,7 @@ internal class SuperSeedManager
     private readonly HashSet<int> _distributedPieces = [];
 
     private readonly Lock _lock = new();
-    private readonly ILogger<SuperSeedManager> _logger = TorrentLoggerFactory.CreateLogger<SuperSeedManager>();
+    private readonly ILogger<SuperSeedManager> _logger;
 
     // Track which pieces each peer has reported having
     private readonly ConcurrentDictionary<IPeerCommunication, HashSet<int>> _peerPieces = new();
@@ -42,8 +43,14 @@ internal class SuperSeedManager
     private readonly Torrent _torrent;
 
     public SuperSeedManager(Torrent torrent)
+        : this(torrent, NullLogger<SuperSeedManager>.Instance)
+    {
+    }
+
+    internal SuperSeedManager(Torrent torrent, ILogger<SuperSeedManager> logger)
     {
         _torrent = torrent;
+        _logger = logger;
         _pieceSightings = new int[torrent.Pieces.Count];
     }
 

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.BEncoding;
 using System.Security.Cryptography;
 
@@ -6,10 +7,9 @@ namespace PeerSharp.Internals.Utilities;
 
 internal static class TorrentFileParser
 {
-    private static readonly ILogger Logger = TorrentLoggerFactory.CreateLogger(nameof(TorrentFileParser));
-
-    public static TorrentFileMetadata Parse(byte[] data)
+    public static TorrentFileMetadata Parse(byte[] data, ILoggerFactory? loggerFactory = null)
     {
+        var logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger(nameof(TorrentFileParser));
         if (BencodeParser.Parse(data) is not BDict root)
         {
             throw new FormatException("Invalid torrent file");
@@ -101,13 +101,14 @@ internal static class TorrentFileParser
         }
 
         var infoBytes = BencodeWriter.Write(info);
-        ParseInfoDictionary(info, metadata, infoBytes, root);
+        ParseInfoDictionary(info, metadata, infoBytes, root, logger);
 
         return metadata;
     }
 
-    public static TorrentFileMetadata ParseInfoBytes(byte[] infoBytes)
+    public static TorrentFileMetadata ParseInfoBytes(byte[] infoBytes, ILoggerFactory? loggerFactory = null)
     {
+        var logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger(nameof(TorrentFileParser));
         if (BencodeParser.Parse(infoBytes) is not BDict info)
         {
             throw new FormatException("Invalid info dictionary");
@@ -118,7 +119,7 @@ internal static class TorrentFileParser
             InfoBytes = infoBytes
         };
 
-        ParseInfoDictionary(info, metadata, infoBytes, root: null);
+        ParseInfoDictionary(info, metadata, infoBytes, root: null, logger);
 
         return metadata;
     }
@@ -281,7 +282,7 @@ internal static class TorrentFileParser
         return currentOffset;
     }
 
-    private static void ParseInfoDictionary(BDict info, TorrentFileMetadata metadata, byte[] infoBytes, BDict? root)
+    private static void ParseInfoDictionary(BDict info, TorrentFileMetadata metadata, byte[] infoBytes, BDict? root, ILogger logger)
     {
         // BEP 52: Check meta version to determine torrent type
         long? metaVersion = info.GetLong("meta version");
@@ -333,7 +334,7 @@ internal static class TorrentFileParser
         if (rootHash?.Length == 20)
         {
             metadata.Info.MerkleRootHash = rootHash.Value.ToArray();
-            Logger.LogInformation("BEP 30: Merkle hash torrent detected, root hash: {RootHash}", Convert.ToHexString(metadata.Info.MerkleRootHash));
+            logger.LogInformation("BEP 30: Merkle hash torrent detected, root hash: {RootHash}", Convert.ToHexString(metadata.Info.MerkleRootHash));
         }
 
         // Parse V1 piece hashes (not present in BEP 30 Merkle torrents)

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Utp;
 using System.Net;
 
@@ -15,16 +16,26 @@ internal interface IPeerCommunicationFactory
 
 internal class PeerCommunicationFactory : IPeerCommunicationFactory
 {
-    private static readonly ILogger Logger = TorrentLoggerFactory.CreateLogger<PeerCommunicationFactory>();
+    private readonly ILoggerFactory _loggerFactory;
+
+    public PeerCommunicationFactory()
+        : this(NullLoggerFactory.Instance)
+    {
+    }
+
+    public PeerCommunicationFactory(ILoggerFactory loggerFactory)
+    {
+        _loggerFactory = loggerFactory;
+    }
 
     public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
     {
-        return new PeerCommunication(torrent, listener, timeProvider);
+        return new PeerCommunication(torrent, listener, timeProvider, _loggerFactory);
     }
 
     public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, Stream stream, IPEndPoint? endpoint = null)
     {
-        var peer = new PeerCommunication(torrent, listener, timeProvider)
+        var peer = new PeerCommunication(torrent, listener, timeProvider, _loggerFactory)
         {
             Stream = stream,
             RemoteEndPoint = endpoint,
@@ -39,8 +50,8 @@ internal class PeerCommunicationFactory : IPeerCommunicationFactory
 
     public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, System.Net.Sockets.TcpClient client)
     {
-        PeerCommunication.ConfigureTcpClient(client, torrent.Settings, Logger);
-        var peer = new PeerCommunication(torrent, listener, timeProvider)
+        PeerCommunication.ConfigureTcpClient(client, torrent.Settings, _loggerFactory.CreateLogger<PeerCommunicationFactory>());
+        var peer = new PeerCommunication(torrent, listener, timeProvider, _loggerFactory)
         {
             Client = client,
             Stream = client.GetStream(),

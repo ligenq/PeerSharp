@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Network;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -21,11 +22,22 @@ internal static class UpnpDiscovery
 
     private const int SsdpPort = 1900;
     private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(2) };
-    private static readonly ILogger Logger = TorrentLoggerFactory.CreateLogger(nameof(UpnpDiscovery));
 
     public static Task<List<UpnpGateway>> DiscoverAsync(CancellationToken ct = default)
     {
-        return DiscoverAsync(GetLocalIPs, new IPEndPoint(IPAddress.Parse(SsdpIp), SsdpPort), ParseDescriptionAsync, TimeProvider.System, ct);
+        return DiscoverAsync(NullLoggerFactory.Instance, ct);
+    }
+
+    public static Task<List<UpnpGateway>> DiscoverAsync(ILoggerFactory loggerFactory, CancellationToken ct = default)
+    {
+        var logger = loggerFactory.CreateLogger(nameof(UpnpDiscovery));
+        return DiscoverAsync(
+            GetLocalIPs,
+            new IPEndPoint(IPAddress.Parse(SsdpIp), SsdpPort),
+            (location, localIp, token) => ParseDescriptionAsync(location, localIp, logger, token),
+            TimeProvider.System,
+            logger,
+            ct);
     }
 
     internal static async Task<List<UpnpGateway>> DiscoverAsync(
@@ -34,6 +46,17 @@ internal static class UpnpDiscovery
         Func<string, IPAddress, CancellationToken, Task<UpnpGateway?>> parseDescriptionAsync,
         TimeProvider? timeProvider = null,
         CancellationToken ct = default)
+    {
+        return await DiscoverAsync(localIpProvider, ssdpEndpoint, parseDescriptionAsync, timeProvider, NullLogger.Instance, ct).ConfigureAwait(false);
+    }
+
+    private static async Task<List<UpnpGateway>> DiscoverAsync(
+        Func<IEnumerable<IPAddress>> localIpProvider,
+        IPEndPoint ssdpEndpoint,
+        Func<string, IPAddress, CancellationToken, Task<UpnpGateway?>> parseDescriptionAsync,
+        TimeProvider? timeProvider,
+        ILogger logger,
+        CancellationToken ct)
     {
         timeProvider ??= TimeProvider.System;
         var gateways = new List<UpnpGateway>();
@@ -52,7 +75,7 @@ internal static class UpnpDiscovery
                     };
                     clients.Add(client);
 
-                    tasks.Add(ReceiveLoopAsync(client, gateways, ip, parseDescriptionAsync, ct));
+                    tasks.Add(ReceiveLoopAsync(client, gateways, ip, parseDescriptionAsync, logger, ct));
 
                     // Send M-SEARCH
                     var data = Encoding.ASCII.GetBytes(SsdpMessage);
@@ -64,7 +87,7 @@ internal static class UpnpDiscovery
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogError(ex, "Bind error on {Ip}", ip);
+                    logger.LogError(ex, "Bind error on {Ip}", ip);
                 }
             }
 
@@ -83,6 +106,12 @@ internal static class UpnpDiscovery
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S1075:URIs should not be hardcoded", Justification = "URL separator, not path delimiter")]
     internal static async Task<UpnpGateway?> ParseDescriptionAsync(string location, IPAddress localIp, CancellationToken ct)
+    {
+        return await ParseDescriptionAsync(location, localIp, NullLogger.Instance, ct).ConfigureAwait(false);
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S1075:URIs should not be hardcoded", Justification = "URL separator, not path delimiter")]
+    private static async Task<UpnpGateway?> ParseDescriptionAsync(string location, IPAddress localIp, ILogger logger, CancellationToken ct)
     {
         try
         {
@@ -136,20 +165,20 @@ internal static class UpnpDiscovery
         }
         catch (HttpRequestException ex)
         {
-            Logger.LogWarning(ex, "UPnP HTTP error fetching {Location}", location);
+            logger.LogWarning(ex, "UPnP HTTP error fetching {Location}", location);
         }
         catch (TaskCanceledException ex)
         {
             // Timeout - common for UPnP discovery
-            Logger.LogDebug(ex, "UPnP timeout fetching {Location}", location);
+            logger.LogDebug(ex, "UPnP timeout fetching {Location}", location);
         }
         catch (System.Xml.XmlException ex)
         {
-            Logger.LogWarning(ex, "UPnP XML parse error for {Location}", location);
+            logger.LogWarning(ex, "UPnP XML parse error for {Location}", location);
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "UPnP error parsing {Location}", location);
+            logger.LogError(ex, "UPnP error parsing {Location}", location);
         }
         return null;
     }
@@ -182,6 +211,7 @@ internal static class UpnpDiscovery
         List<UpnpGateway> gateways,
         IPAddress localIp,
         Func<string, IPAddress, CancellationToken, Task<UpnpGateway?>> parseDescriptionAsync,
+        ILogger logger,
         CancellationToken ct)
     {
         while (client.Client != null && !ct.IsCancellationRequested)
@@ -228,7 +258,7 @@ internal static class UpnpDiscovery
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "UPnP receive error");
+                logger.LogError(ex, "UPnP receive error");
                 break;
             }
         }
@@ -247,19 +277,30 @@ internal class UpnpPortMapping : IPortMapper
 {
     private static readonly HttpClient SoapClient = new() { Timeout = TimeSpan.FromSeconds(10) };
     private readonly Func<CancellationToken, Task<List<UpnpGateway>>> _discoverGatewaysAsync;
-    private readonly ILogger<UpnpPortMapping> _logger = TorrentLoggerFactory.CreateLogger<UpnpPortMapping>();
+    private readonly ILogger<UpnpPortMapping> _logger;
     private readonly List<(int Port, string Protocol, string Description)> _mappings = [];
     private readonly Dictionary<UpnpGateway, (PortMappingResult MappingResult, string? Error)> _status = [];
     private List<UpnpGateway> _gateways = [];
 
     public UpnpPortMapping()
-        : this(UpnpDiscovery.DiscoverAsync)
+        : this(UpnpDiscovery.DiscoverAsync, NullLoggerFactory.Instance)
+    {
+    }
+
+    public UpnpPortMapping(ILoggerFactory loggerFactory)
+        : this(ct => UpnpDiscovery.DiscoverAsync(loggerFactory, ct), loggerFactory)
     {
     }
 
     internal UpnpPortMapping(Func<CancellationToken, Task<List<UpnpGateway>>> discoverGatewaysAsync)
+        : this(discoverGatewaysAsync, NullLoggerFactory.Instance)
+    {
+    }
+
+    internal UpnpPortMapping(Func<CancellationToken, Task<List<UpnpGateway>>> discoverGatewaysAsync, ILoggerFactory loggerFactory)
     {
         _discoverGatewaysAsync = discoverGatewaysAsync;
+        _logger = loggerFactory.CreateLogger<UpnpPortMapping>();
     }
 
     public string Name => "UPnP";

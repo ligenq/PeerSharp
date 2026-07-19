@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Peers;
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
@@ -47,7 +48,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     {
         return (int)Math.Clamp(seconds, (uint)MinAnnounceIntervalSeconds, (uint)MaxAnnounceIntervalSeconds);
     }
-    private readonly ILogger<TrackerManager> _logger = TorrentLoggerFactory.CreateLogger<TrackerManager>();
+    private readonly ILogger<TrackerManager> _logger;
 
     // Track tasks for removed trackers (cleanup)
     private readonly ConcurrentDictionary<Task, byte> _removalTasks = new();
@@ -72,7 +73,13 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     // Exponential backoff multiplier
 
     public TrackerManager(Torrent torrent, ITrackerFactory trackerFactory, TimeProvider timeProvider)
+        : this(torrent, trackerFactory, timeProvider, NullLogger<TrackerManager>.Instance)
     {
+    }
+
+    internal TrackerManager(Torrent torrent, ITrackerFactory trackerFactory, TimeProvider timeProvider, ILogger<TrackerManager> logger)
+    {
+        _logger = logger;
         _torrent = torrent;
         _trackerFactory = trackerFactory;
         _timeProvider = timeProvider;

@@ -5,6 +5,14 @@ namespace PeerSharp.Tests.Core.Streaming;
 
 public class HttpStreamServerTests
 {
+    [Fact]
+    public void Constructor_WithNullLoggerFactory_ThrowsArgumentNullException()
+    {
+        var torrent = new FakeTorrent("movie.mp4", [1]);
+
+        Assert.Throws<ArgumentNullException>(() => new HttpStreamServer(torrent, 0, null!));
+    }
+
     [Fact(Timeout = 30000)]
     public async Task Get_Stream_ReturnsFileBytesAndMimeType()
     {

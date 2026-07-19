@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 
 namespace PeerSharp.Streaming;
@@ -23,7 +24,7 @@ internal class TorrentStream : Stream
     private readonly long _fileStartOffset;
     private readonly int _firstPieceIndex;
     private readonly int _lastPieceIndex;
-    private readonly ILogger<TorrentStream> _logger = TorrentLoggerFactory.CreateLogger<TorrentStream>();
+    private readonly ILogger<TorrentStream> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
     private AtomicDisposal _disposal = new();
@@ -40,9 +41,15 @@ internal class TorrentStream : Stream
     // Update priorities every 1MB
 
     internal TorrentStream(StreamingController controller, Torrent torrent, int fileIndex, TimeProvider timeProvider)
+        : this(controller, torrent, fileIndex, timeProvider, NullLogger<TorrentStream>.Instance)
+    {
+    }
+
+    internal TorrentStream(StreamingController controller, Torrent torrent, int fileIndex, TimeProvider timeProvider, ILogger<TorrentStream> logger)
     {
         _controller = controller;
         _torrent = torrent;
+        _logger = logger;
         _timeProvider = timeProvider;
 
         // Validate file index

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
 using System.Net;
@@ -22,7 +23,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
     private readonly IHttpClientFactory _httpClientFactory = new HttpClientFactory();
     private readonly Lock _lock = new();
-    private readonly ILogger<WebSeedManager> _logger = TorrentLoggerFactory.CreateLogger<WebSeedManager>();
+    private readonly ILogger<WebSeedManager> _logger;
     private readonly List<WebSeedSource> _sources = [];
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
@@ -32,8 +33,14 @@ internal sealed class WebSeedManager : IAsyncDisposable
     private Task? _workerTask;
 
     public WebSeedManager(Torrent torrent, IEnumerable<string> urls, TimeProvider timeProvider)
+        : this(torrent, urls, timeProvider, NullLogger<WebSeedManager>.Instance)
+    {
+    }
+
+    internal WebSeedManager(Torrent torrent, IEnumerable<string> urls, TimeProvider timeProvider, ILogger<WebSeedManager> logger)
     {
         _torrent = torrent;
+        _logger = logger;
         _timeProvider = timeProvider;
         bool isMultiFile = torrent.InfoFile.Info.Files.Count > 1;
 

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Pipelines;
@@ -51,7 +52,7 @@ internal class UtpStream : Stream
 
     private readonly uint[] _delayBaseHist = new uint[DelayBaseHistory];
     private readonly Lock _lock = new();
-    private readonly ILogger<UtpStream> _logger = TorrentLoggerFactory.CreateLogger<UtpStream>();
+    private readonly ILogger<UtpStream> _logger;
     private readonly IUtpManager _manager;
 
     private readonly Pipe _pipe = new();
@@ -147,12 +148,18 @@ internal class UtpStream : Stream
     private uint _wndSize = 65535;
 
     public UtpStream(IUtpManager manager, IPEndPoint remote, ushort idRecv, ushort idSend, TimeProvider timeProvider)
+        : this(manager, remote, idRecv, idSend, timeProvider, NullLoggerFactory.Instance)
+    {
+    }
+
+    public UtpStream(IUtpManager manager, IPEndPoint remote, ushort idRecv, ushort idSend, TimeProvider timeProvider, ILoggerFactory loggerFactory)
     {
         _manager = manager;
         RemoteEndPoint = remote;
         ConnectionIdRecv = idRecv;
         ConnectionIdSend = idSend;
         _timeProvider = timeProvider;
+        _logger = loggerFactory.CreateLogger<UtpStream>();
         // Use Random.Shared for thread-safe random number generation (.NET 6+)
         // This avoids creating new Random() instances which can have poor entropy
         // when created in quick succession

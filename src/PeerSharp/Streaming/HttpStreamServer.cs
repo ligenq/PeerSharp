@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Net;
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 
 namespace PeerSharp.Streaming;
@@ -16,13 +17,21 @@ public sealed class HttpStreamServer : IDisposable
     private readonly HttpListener _listener;
     private readonly HttpStreamRequestHandler _handler;
     private readonly CancellationTokenSource _cts = new();
-    private readonly ILogger<HttpStreamServer> _logger = TorrentLoggerFactory.CreateLogger<HttpStreamServer>();
+    private readonly ILogger<HttpStreamServer> _logger;
     private readonly string _baseUrl;
     private AtomicDisposal _disposal = new();
 
     public HttpStreamServer(ITorrent torrent, int fileIndex)
+        : this(torrent, fileIndex, NullLoggerFactory.Instance)
     {
-        _handler = new HttpStreamRequestHandler(torrent, fileIndex);
+    }
+
+    public HttpStreamServer(ITorrent torrent, int fileIndex, ILoggerFactory loggerFactory)
+    {
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        _logger = loggerFactory.CreateLogger<HttpStreamServer>();
+        _handler = new HttpStreamRequestHandler(torrent, fileIndex, loggerFactory);
         _listener = new HttpListener();
 
         // Find an available port
@@ -133,10 +142,16 @@ internal sealed class HttpStreamRequestHandler
     private const int BufferSize = 81920;
     private readonly ITorrent _torrent;
     private readonly int _fileIndex;
-    private readonly ILogger<HttpStreamRequestHandler> _logger = TorrentLoggerFactory.CreateLogger<HttpStreamRequestHandler>();
+    private readonly ILogger<HttpStreamRequestHandler> _logger;
 
     public HttpStreamRequestHandler(ITorrent torrent, int fileIndex)
+        : this(torrent, fileIndex, NullLoggerFactory.Instance)
     {
+    }
+
+    internal HttpStreamRequestHandler(ITorrent torrent, int fileIndex, ILoggerFactory loggerFactory)
+    {
+        _logger = loggerFactory.CreateLogger<HttpStreamRequestHandler>();
         _torrent = torrent;
         _fileIndex = fileIndex;
     }

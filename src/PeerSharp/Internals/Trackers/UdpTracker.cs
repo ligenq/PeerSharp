@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
 using System.Buffers;
@@ -39,7 +40,7 @@ internal class UdpTracker : TrackerBase, IDisposable
     private static readonly TimeSpan ConnectionIdLifetime = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(15);
     private static readonly int[] RetryDelaysMs = [1000, 2000, 4000];
-    private readonly ILogger<UdpTracker> _logger = TorrentLoggerFactory.CreateLogger<UdpTracker>();
+    private readonly ILogger<UdpTracker> _logger;
     private readonly IUdpSocketFactory _socketFactory;
 
     private readonly SemaphoreSlim _syncLock = new(1, 1);
@@ -57,14 +58,25 @@ internal class UdpTracker : TrackerBase, IDisposable
     private IPEndPoint? _proxyUdpEndPoint;
 
     public UdpTracker(TimeProvider timeProvider)
-        : this(timeProvider, new UdpSocketFactory())
+        : this(timeProvider, new UdpSocketFactory(), NullLoggerFactory.Instance)
+    {
+    }
+
+    public UdpTracker(TimeProvider timeProvider, ILoggerFactory loggerFactory)
+        : this(timeProvider, new UdpSocketFactory(), loggerFactory)
     {
     }
 
     internal UdpTracker(TimeProvider timeProvider, IUdpSocketFactory socketFactory)
+        : this(timeProvider, socketFactory, NullLoggerFactory.Instance)
+    {
+    }
+
+    internal UdpTracker(TimeProvider timeProvider, IUdpSocketFactory socketFactory, ILoggerFactory loggerFactory)
     {
         _timeProvider = timeProvider;
         _socketFactory = socketFactory;
+        _logger = loggerFactory.CreateLogger<UdpTracker>();
     }
 
     public override async Task AnnounceAsync(TrackerEvent evt, CancellationToken ct)
@@ -466,7 +478,7 @@ internal class UdpTracker : TrackerBase, IDisposable
                 if (proxy.Type == ProxyType.Socks5 && proxy.ProxyTrackers && !string.IsNullOrEmpty(proxy.Host))
                 {
                     _logger.LogDebug("Connecting to UDP tracker {Url} via SOCKS5 proxy {ProxyHost}:{ProxyPort}", Url, proxy.Host, proxy.Port);
-                    var result = await ProxyHelper.ConnectSocks5UdpAsync(proxy.Host, proxy.Port, proxy.Username, proxy.Password, ct).ConfigureAwait(false);
+                    var result = await ProxyHelper.ConnectSocks5UdpAsync(proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, ct).ConfigureAwait(false);
                     _client = new UdpSocketAdapter(result.UdpClient, true);
                     _proxyUdpEndPoint = result.ProxyUdpEndPoint;
                     _proxyControlClient = result.ControlClient;

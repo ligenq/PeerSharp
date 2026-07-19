@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
@@ -76,7 +77,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private readonly IGeoIpService _geoIp;
     private readonly IConnectionGovernor _governor;
     private readonly ConcurrentDictionary<IPEndPoint, PeerHistory> _knownPeersCache = new();
-    private readonly ILogger<PeerManager> _logger = TorrentLoggerFactory.CreateLogger<PeerManager>();
+    private readonly ILogger<PeerManager> _logger;
     private readonly IPeerCommunicationFactory _peerFactory;
     private readonly ConcurrentDictionary<IPEndPoint, PeerCommunication> _peerSources = new();
 
@@ -120,8 +121,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private DateTimeOffset _stableSpeedSince = DateTimeOffset.MinValue;
 
     public PeerManager(Torrent torrent, IGeoIpService geoIp, IPeerCommunicationFactory peerFactory, TimeProvider timeProvider, IConnectionGovernor governor)
+        : this(torrent, geoIp, peerFactory, timeProvider, governor, NullLogger<PeerManager>.Instance)
+    {
+    }
+
+    internal PeerManager(Torrent torrent, IGeoIpService geoIp, IPeerCommunicationFactory peerFactory, TimeProvider timeProvider, IConnectionGovernor governor, ILogger<PeerManager> logger)
     {
         _torrent = torrent;
+        _logger = logger;
         _settings = torrent.Settings;
         _governor = governor;
 

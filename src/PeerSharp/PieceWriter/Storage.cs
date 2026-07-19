@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32.SafeHandles;
 using PeerSharp.Internals;
 
@@ -38,7 +39,7 @@ internal sealed class Storage : IStorage
     private readonly SemaphoreSlim _fileSelectionLock = new(1, 1);
     private readonly IFileHandleCache _handleCache;
     private readonly TorrentFileMetadata _info;
-    private readonly ILogger<Storage> _logger = TorrentLoggerFactory.CreateLogger<Storage>();
+    private readonly ILogger<Storage> _logger;
     private readonly ManualResetEventSlim _noWritesInFlight = new(true);
     private readonly IPathValidator _pathValidator;
     private readonly string _rootPath;
@@ -68,6 +69,11 @@ internal sealed class Storage : IStorage
     private readonly record struct FileEntry(long Length, string? FullPath);
 
     public Storage(TorrentFileMetadata info, string rootPath, IPathValidator pathValidator, IFileHandleCache handleCache, bool enableSparseFiles, DiskBandwidthLimiter? diskLimiter = null)
+        : this(info, rootPath, pathValidator, handleCache, enableSparseFiles, diskLimiter, NullLoggerFactory.Instance)
+    {
+    }
+
+    public Storage(TorrentFileMetadata info, string rootPath, IPathValidator pathValidator, IFileHandleCache handleCache, bool enableSparseFiles, DiskBandwidthLimiter? diskLimiter, ILoggerFactory loggerFactory)
     {
         _info = info;
         _rootPath = rootPath;
@@ -75,6 +81,7 @@ internal sealed class Storage : IStorage
         _handleCache = handleCache;
         _enableSparseFiles = enableSparseFiles;
         _diskLimiter = diskLimiter;
+        _logger = loggerFactory.CreateLogger<Storage>();
     }
 
     public void DeleteAll()

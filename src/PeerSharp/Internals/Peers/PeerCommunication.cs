@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Utilities;
@@ -302,7 +303,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private readonly HashSet<int> _allowedFastPieces = [];
     private readonly Lock _fastPiecesLock = new();
     private readonly int _lastLoggedPipelineDepth = 0;
-    private readonly ILogger<PeerCommunication> _logger = TorrentLoggerFactory.CreateLogger<PeerCommunication>();
+    private readonly ILogger<PeerCommunication> _logger;
     private readonly MessageQueue _sendQueue;
     private readonly List<int> _suggestedPieces = [];
     private readonly Torrent _torrent;
@@ -363,8 +364,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private long _uploaded;
 
     public PeerCommunication(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
+        : this(torrent, listener, timeProvider, NullLoggerFactory.Instance)
+    {
+    }
+
+    internal PeerCommunication(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, ILoggerFactory loggerFactory)
     {
         _torrent = torrent;
+        _logger = loggerFactory.CreateLogger<PeerCommunication>();
         Listener = listener;
         this._timeProvider = timeProvider;
         PeerPieces = new PiecesProgress(torrent.Pieces.Count);
@@ -375,7 +382,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // BEP 30: Initialize ut_hash_piece extension for Merkle hash torrents
         if (torrent.InfoFile.Info.IsMerkle)
         {
-            UtHashPiece = new UtHashPiece(this, torrent);
+            UtHashPiece = new UtHashPiece(this, torrent, loggerFactory.CreateLogger<UtHashPiece>());
         }
 
         // Use Wait mode to provide back-pressure. DropNewest causes protocol violations
@@ -666,8 +673,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     _logger.LogDebug("Connecting to {Ip}:{Port} via {ProxyType} proxy {ProxyHost}:{ProxyPort}", ip, port, proxy.Type, proxy.Host, proxy.Port);
                     var result = proxy.Type switch
                     {
-                        ProxyType.Socks5 => await ProxyHelper.ConnectSocks5Async(ip, port, proxy.Host, proxy.Port, proxy.Username, proxy.Password, linkedCts.Token).ConfigureAwait(false),
-                        ProxyType.Http => await ProxyHelper.ConnectHttpProxyAsync(ip, port, proxy.Host, proxy.Port, proxy.Username, proxy.Password, linkedCts.Token).ConfigureAwait(false),
+                        ProxyType.Socks5 => await ProxyHelper.ConnectSocks5Async(ip, port, proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, linkedCts.Token).ConfigureAwait(false),
+                        ProxyType.Http => await ProxyHelper.ConnectHttpProxyAsync(ip, port, proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, linkedCts.Token).ConfigureAwait(false),
                         _ => throw new NotSupportedException($"Proxy type {proxy.Type} not supported")
                     };
 

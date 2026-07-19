@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -7,18 +8,21 @@ namespace PeerSharp.Internals.Utilities;
 
 internal static class ProxyHelper
 {
-    private static readonly ILogger Logger = TorrentLoggerFactory.CreateLogger(nameof(ProxyHelper));
-
-    public static async Task<(Stream Stream, TcpClient Client)> ConnectHttpProxyAsync(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
+    public static Task<(Stream Stream, TcpClient Client)> ConnectHttpProxyAsync(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
     {
-        Logger.LogDebug("HTTP Proxy: Connecting to proxy {ProxyHost}:{ProxyPort} for target {TargetHost}:{TargetPort}", proxyHost, proxyPort, targetHost, targetPort);
+        return ConnectHttpProxyAsync(targetHost, targetPort, proxyHost, proxyPort, username, password, NullLogger.Instance, cancellationToken);
+    }
+
+    public static async Task<(Stream Stream, TcpClient Client)> ConnectHttpProxyAsync(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, ILogger logger, CancellationToken cancellationToken)
+    {
+        logger.LogDebug("HTTP Proxy: Connecting to proxy {ProxyHost}:{ProxyPort} for target {TargetHost}:{TargetPort}", proxyHost, proxyPort, targetHost, targetPort);
 
         var tcpClient = new TcpClient();
         try
         {
             await tcpClient.ConnectAsync(proxyHost, proxyPort, cancellationToken).ConfigureAwait(false);
             var stream = tcpClient.GetStream();
-            return await NegotiateHttpProxyAsync(stream, tcpClient, targetHost, targetPort, username, password, cancellationToken).ConfigureAwait(false);
+            return await NegotiateHttpProxyAsync(stream, tcpClient, targetHost, targetPort, username, password, logger, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -27,10 +31,20 @@ internal static class ProxyHelper
         }
     }
 
+    internal static Task<(Stream Stream, TcpClient Client)> NegotiateHttpProxyAsync(
+        Stream stream, TcpClient client,
+        string targetHost, int targetPort,
+        string? username, string? password,
+        CancellationToken cancellationToken)
+    {
+        return NegotiateHttpProxyAsync(stream, client, targetHost, targetPort, username, password, NullLogger.Instance, cancellationToken);
+    }
+
     internal static async Task<(Stream Stream, TcpClient Client)> NegotiateHttpProxyAsync(
         Stream stream, TcpClient client,
         string targetHost, int targetPort,
         string? username, string? password,
+        ILogger logger,
         CancellationToken cancellationToken)
     {
         var connectRequest = $"CONNECT {targetHost}:{targetPort} HTTP/1.1\r\n" +
@@ -72,20 +86,25 @@ internal static class ProxyHelper
             throw new IOException($"HTTP Proxy connection failed: {statusLine}");
         }
 
-        Logger.LogDebug("HTTP Proxy: Connection established to {TargetHost}:{TargetPort}", targetHost, targetPort);
+        logger.LogDebug("HTTP Proxy: Connection established to {TargetHost}:{TargetPort}", targetHost, targetPort);
         return (stream, client);
     }
 
-    public static async Task<(Stream Stream, TcpClient Client)> ConnectSocks5Async(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
+    public static Task<(Stream Stream, TcpClient Client)> ConnectSocks5Async(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
     {
-        Logger.LogDebug("SOCKS5 TCP: Connecting to proxy {ProxyHost}:{ProxyPort} for target {TargetHost}:{TargetPort}", proxyHost, proxyPort, targetHost, targetPort);
+        return ConnectSocks5Async(targetHost, targetPort, proxyHost, proxyPort, username, password, NullLogger.Instance, cancellationToken);
+    }
+
+    public static async Task<(Stream Stream, TcpClient Client)> ConnectSocks5Async(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, ILogger logger, CancellationToken cancellationToken)
+    {
+        logger.LogDebug("SOCKS5 TCP: Connecting to proxy {ProxyHost}:{ProxyPort} for target {TargetHost}:{TargetPort}", proxyHost, proxyPort, targetHost, targetPort);
 
         var tcpClient = new TcpClient();
         try
         {
             await tcpClient.ConnectAsync(proxyHost, proxyPort, cancellationToken).ConfigureAwait(false);
             var stream = tcpClient.GetStream();
-            return await NegotiateSocks5Async(stream, tcpClient, targetHost, targetPort, username, password, cancellationToken).ConfigureAwait(false);
+            return await NegotiateSocks5Async(stream, tcpClient, targetHost, targetPort, username, password, logger, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -94,10 +113,20 @@ internal static class ProxyHelper
         }
     }
 
+    internal static Task<(Stream Stream, TcpClient Client)> NegotiateSocks5Async(
+        Stream stream, TcpClient client,
+        string targetHost, int targetPort,
+        string? username, string? password,
+        CancellationToken cancellationToken)
+    {
+        return NegotiateSocks5Async(stream, client, targetHost, targetPort, username, password, NullLogger.Instance, cancellationToken);
+    }
+
     internal static async Task<(Stream Stream, TcpClient Client)> NegotiateSocks5Async(
         Stream stream, TcpClient client,
         string targetHost, int targetPort,
         string? username, string? password,
+        ILogger logger,
         CancellationToken cancellationToken)
     {
         // 1. Version identifier/method selection message
@@ -211,20 +240,25 @@ internal static class ProxyHelper
         byte[] skipBuf = new byte[skipBytes];
         await ReadExactAsync(stream, skipBuf, cancellationToken).ConfigureAwait(false);
 
-        Logger.LogDebug("SOCKS5 TCP: Connection established to {TargetHost}:{TargetPort}", targetHost, targetPort);
+        logger.LogDebug("SOCKS5 TCP: Connection established to {TargetHost}:{TargetPort}", targetHost, targetPort);
         return (stream, client);
     }
 
-    public static async Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> ConnectSocks5UdpAsync(string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
+    public static Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> ConnectSocks5UdpAsync(string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
     {
-        Logger.LogDebug("SOCKS5 UDP: Initiating UDP ASSOCIATE with proxy {ProxyHost}:{ProxyPort}", proxyHost, proxyPort);
+        return ConnectSocks5UdpAsync(proxyHost, proxyPort, username, password, NullLogger.Instance, cancellationToken);
+    }
+
+    public static async Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> ConnectSocks5UdpAsync(string proxyHost, int proxyPort, string? username, string? password, ILogger logger, CancellationToken cancellationToken)
+    {
+        logger.LogDebug("SOCKS5 UDP: Initiating UDP ASSOCIATE with proxy {ProxyHost}:{ProxyPort}", proxyHost, proxyPort);
 
         var tcpClient = new TcpClient();
         try
         {
             await tcpClient.ConnectAsync(proxyHost, proxyPort, cancellationToken).ConfigureAwait(false);
             var stream = tcpClient.GetStream();
-            return await NegotiateSocks5UdpAsync(stream, tcpClient, proxyHost, username, password, cancellationToken).ConfigureAwait(false);
+            return await NegotiateSocks5UdpAsync(stream, tcpClient, proxyHost, username, password, logger, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -233,10 +267,20 @@ internal static class ProxyHelper
         }
     }
 
+    internal static Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> NegotiateSocks5UdpAsync(
+        Stream stream, TcpClient client,
+        string proxyHost,
+        string? username, string? password,
+        CancellationToken cancellationToken)
+    {
+        return NegotiateSocks5UdpAsync(stream, client, proxyHost, username, password, NullLogger.Instance, cancellationToken);
+    }
+
     internal static async Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> NegotiateSocks5UdpAsync(
         Stream stream, TcpClient client,
         string proxyHost,
         string? username, string? password,
+        ILogger logger,
         CancellationToken cancellationToken)
     {
         // 1. Handshake (Method Selection)
@@ -330,7 +374,7 @@ internal static class ProxyHelper
         var proxyUdpEndPoint = new IPEndPoint(proxyUdpAddress, proxyUdpPort);
         var udpClient = new UdpClient(proxyUdpAddress.AddressFamily);
 
-        Logger.LogDebug("SOCKS5 UDP: Association established, relay endpoint {ProxyUdpEndPoint}", proxyUdpEndPoint);
+        logger.LogDebug("SOCKS5 UDP: Association established, relay endpoint {ProxyUdpEndPoint}", proxyUdpEndPoint);
         return (udpClient, proxyUdpEndPoint, client);
     }
 
