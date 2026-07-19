@@ -137,12 +137,12 @@ public class FileTransferTests
 
         Assert.Single(torrent.PeersInternal.GetConnectedPeersInternal()); // Ensure connected peers contains the peer
 
-        var requestMerkleHashes = typeof(FileTransfer).GetMethod("RequestMerkleHashes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var requestMerkleHashes = typeof(FileTransfer).GetMethod("RequestMerkleHashes", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(requestMerkleHashes);
         requestMerkleHashes.Invoke(fileTransfer, [0]);
 
         // Ensure a message was queued for the peer
-        var queue = peer.GetType().GetField("_sendQueue", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(peer) as MessageQueue;
+        var queue = peer.GetType().GetField("_sendQueue", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(peer) as MessageQueue;
         Assert.NotNull(queue);
         bool dequeued = queue.TryDequeue(out var msg);
         Assert.True(dequeued, "Queue was empty");

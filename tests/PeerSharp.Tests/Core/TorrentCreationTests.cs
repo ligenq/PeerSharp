@@ -17,7 +17,7 @@ public class TorrentCreationTests
         var builder = new ApiTorrentFileBuilder()
             .WithName(fileName)
             .WithPieceLength(16_384)
-            .WithVersion(PeerSharp.Core.TorrentFileVersion.V2)
+            .WithVersion(TorrentFileVersion.V2)
             .AddFile(fileName, data);
 
         var torrent = await builder.BuildAsync();
@@ -41,7 +41,7 @@ public class TorrentCreationTests
         var builder = new ApiTorrentFileBuilder()
             .WithName("HybridTest")
             .WithPieceLength(16_384)
-            .WithVersion(PeerSharp.Core.TorrentFileVersion.Hybrid)
+            .WithVersion(TorrentFileVersion.Hybrid)
             .AddFile("Folder/a.bin", fileA)
             .AddFile("Folder/b.bin", fileB);
 

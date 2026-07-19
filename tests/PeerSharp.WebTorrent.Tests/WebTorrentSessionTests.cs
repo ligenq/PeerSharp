@@ -1183,6 +1183,8 @@ public class WebTorrentSessionTests
         public Task SetFileSelectionAsync(int fileIndex, FileSelection selection, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task StartAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task StopAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task WaitForMetadataAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public TorrentFile ExportTorrentFile() => throw new NotSupportedException();
         public void RegisterPeerTransport(IPeerTransport transport) => throw new NotSupportedException();
     }
 

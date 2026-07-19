@@ -332,6 +332,23 @@ public interface ITorrent
     Task StopAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Completes once the torrent's metadata is available and fully applied: immediately for
+    /// torrents added from a .torrent file, or after the metadata download finishes for
+    /// torrents added from a magnet link. When the metadata task completes, the file list
+    /// (<see cref="FileCount"/>, <see cref="GetFileInfo"/>) and file selection APIs are usable.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token to stop waiting.</param>
+    Task WaitForMetadataAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reconstructs a <see cref="TorrentFile"/> from this torrent's metadata, e.g. to cache
+    /// magnet-link metadata so a later add can skip the metadata download entirely
+    /// (persist <see cref="TorrentFile.RawData"/> and re-add via <see cref="TorrentFile.Parse(byte[])"/>).
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Thrown when metadata is not yet available.</exception>
+    TorrentFile ExportTorrentFile();
+
+    /// <summary>
     /// Registers an optional peer transport (e.g. WebTorrent over WebRTC). The torrent will
     /// start, stop, and dispose the transport in step with its own lifecycle. Must be called
     /// before <see cref="StartAsync"/>; transports registered after the torrent has started

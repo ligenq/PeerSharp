@@ -285,6 +285,8 @@ public class HttpStreamServerTests
         public Task SetFileSelectionAsync(int fileIndex, FileSelection selection, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task WaitForMetadataAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public TorrentFile ExportTorrentFile() => throw new NotImplementedException();
         public void RegisterPeerTransport(IPeerTransport transport) => throw new NotImplementedException();
     }
 }

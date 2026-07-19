@@ -509,7 +509,7 @@ public class PeerCommunicationTests
         metadata.Info.Files[0].PieceLayers = [hash1, hash2];
 
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
-        int baseLayer = PeerSharp.Internals.Utilities.MerkleTree.GetPieceLayerDepth(metadata.Info.PieceSize);
+        int baseLayer = Internals.Utilities.MerkleTree.GetPieceLayerDepth(metadata.Info.PieceSize);
 
         var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
         SetPrivateProperty(peer, "RemoteSupportsV2", true);

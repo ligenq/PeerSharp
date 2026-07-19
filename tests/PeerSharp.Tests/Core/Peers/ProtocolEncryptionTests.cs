@@ -15,6 +15,8 @@ public class ProtocolEncryptionTests
         public InfoHash HashV2 => InfoHash.EmptyV2;
         public Task StartAsync(CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task StopAsync(CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task WaitForMetadataAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public TorrentFile ExportTorrentFile() => throw new NotImplementedException();
         public bool Started => false;
         public TorrentState State => TorrentState.Stopped;
         public DateTimeOffset StateTimestamp => DateTimeOffset.MinValue;

@@ -1110,6 +1110,10 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             await torrent.ApplyPendingSelectOnlyFileIndicesAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        // Preview mode: leave the torrent stopped once metadata has been downloaded so the
+        // application can inspect the file list and adjust selections before starting.
+        torrent.StopAfterMetadata = options?.StopAfterMetadata ?? false;
+
         // Start if requested
         if (options?.StartImmediately ?? true)
         {
@@ -1135,6 +1139,40 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         await RebalanceQueueAsync(_queueCts?.Token ?? default).ConfigureAwait(false);
 
         return torrent;
+    }
+
+    public async Task<TorrentFile> GetMagnetMetadataAsync(MagnetLink magnetLink, CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+        ArgumentNullException.ThrowIfNull(magnetLink);
+
+        // Transient fetch: add the magnet in preview mode, wait for its metadata, export it
+        // as a TorrentFile, and remove the transient torrent again. The caller can then show
+        // a file-selection UI and add the returned TorrentFile like a regular .torrent
+        // (its RawData can also be cached to skip the metadata download entirely next time).
+        var torrent = await AddMagnetAsync(magnetLink, new AddTorrentOptions
+        {
+            StopAfterMetadata = true
+        }, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await torrent.WaitForMetadataAsync(cancellationToken).ConfigureAwait(false);
+            return torrent.ExportTorrentFile();
+        }
+        finally
+        {
+            // Always remove the transient torrent, including on cancellation/timeout, so a
+            // later AddTorrentAsync for the same hash does not hit the duplicate guard.
+            try
+            {
+                await RemoveTorrentAsync(torrent, RemoveOptions.None, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to remove transient metadata-fetch torrent {Hash}", torrent.Hash);
+            }
+        }
     }
 
     private async Task<(TorrentFileMetadata Metadata, byte[] Bytes)?> TryFetchTorrentFromMagnetAsync(
