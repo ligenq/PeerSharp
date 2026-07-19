@@ -17,6 +17,30 @@ public class FileTransferTests
     private readonly FileTransfer _fileTransfer;
     private readonly PeerCommunication _peer;
 
+    [Fact]
+    public async Task HandleFatalStorageError_RecordsErrorNotifiesAndStopsTorrent()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        Exception? observedError = null;
+        torrent.Events = new TorrentEventsBuilder()
+            .OnError((_, ex) => observedError = ex)
+            .Build();
+
+        var fileTransfer = new FileTransfer(torrent, TimeProvider.System);
+        var storageException = new StorageException("Disk full", null, isRecoverable: false);
+
+        await fileTransfer.HandleFatalStorageErrorAsync(storageException);
+
+        // The failure must surface to the application instead of silently looping
+        Assert.NotNull(torrent.LastException);
+        var torrentException = Assert.IsType<TorrentException>(torrent.LastException);
+        Assert.Same(storageException, torrentException.InnerException);
+        Assert.NotNull(observedError);
+
+        // And the torrent must not keep downloading against a broken disk
+        Assert.False(torrent.Started);
+    }
+
     public FileTransferTests()
     {
         _torrent = TorrentTestUtility.CreateMinimal();

@@ -31,6 +31,7 @@ internal class UdpListener : IUdpListener
     private IUdpReceiver[] _receivers = [];
     private Task? _receiveTask;
     private bool _running;
+    private readonly TimeProvider _timeProvider;
 
     public UdpListener(int port, IUdpSocketFactory socketFactory, Settings settings)
         : this(port, socketFactory, settings, NullLoggerFactory.Instance)
@@ -38,11 +39,17 @@ internal class UdpListener : IUdpListener
     }
 
     public UdpListener(int port, IUdpSocketFactory socketFactory, Settings settings, ILoggerFactory loggerFactory)
+        : this(port, socketFactory, settings, loggerFactory, TimeProvider.System)
+    {
+    }
+
+    public UdpListener(int port, IUdpSocketFactory socketFactory, Settings settings, ILoggerFactory loggerFactory, TimeProvider timeProvider)
     {
         _port = port;
         _socketFactory = socketFactory;
         _settings = settings;
         _logger = loggerFactory.CreateLogger<UdpListener>();
+        _timeProvider = timeProvider;
     }
 
     public int Port => _client?.Client.LocalEndPoint is IPEndPoint ep ? ep.Port : _port;
@@ -266,12 +273,14 @@ internal class UdpListener : IUdpListener
     {
         // Fallback to non-cancelable if listener isn't started yet.
         var token = _cts?.Token ?? CancellationToken.None;
+        int consecutiveReceiveErrors = 0;
 
         while (_running && _client != null && !token.IsCancellationRequested)
         {
             try
             {
                 var result = await _client.ReceiveAsync(token).ConfigureAwait(false);
+                consecutiveReceiveErrors = 0;
                 var data = result.Buffer;
                 var remoteEndPoint = result.RemoteEndPoint;
 
@@ -297,6 +306,11 @@ internal class UdpListener : IUdpListener
                 // Expected during shutdown - socket was disposed
                 break;
             }
+            catch (OperationCanceledException)
+            {
+                // Listener stopping
+                break;
+            }
             catch (SocketException ex)
             {
                 // Network errors are expected (e.g., ICMP port unreachable, connection reset)
@@ -304,12 +318,29 @@ internal class UdpListener : IUdpListener
                 {
                     _logger.LogWarning(ex, "UDP receive socket error: {SocketErrorCode} - {Message}", ex.SocketErrorCode, ex.Message);
                 }
+                consecutiveReceiveErrors++;
             }
             catch (Exception ex)
             {
                 if (_running)
                 {
                     _logger.LogError(ex, "UDP receive unexpected error");
+                }
+                consecutiveReceiveErrors++;
+            }
+
+            // A persistently failing socket must not hot-spin the loop (and flood the log).
+            // Single transient errors (ICMP resets) keep full speed; repeated failures back off.
+            int delayMs = UdpReceiveBackoff.ComputeDelayMs(consecutiveReceiveErrors);
+            if (delayMs > 0)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(delayMs), _timeProvider, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
                 }
             }
         }

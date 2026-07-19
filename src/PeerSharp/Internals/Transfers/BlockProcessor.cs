@@ -59,59 +59,64 @@ internal sealed class BlockProcessor
 
         _pieceStateManager.TryGetPiece(block.PieceIndex, out var state);
 
-        if (state != null)
+        if (state != null && !IsValidRequestedBlock(peer, block, out _))
         {
-            if (!IsValidRequestedBlock(peer, block, out _))
+            _logger.LogDebug(
+                "Rejected unsolicited or malformed block: Piece {PieceIndex}, Offset {Offset}, Length {Length} from {RemoteEndPoint}",
+                block.PieceIndex,
+                block.Offset,
+                block.Length,
+                peer.RemoteEndPoint);
+            block.Dispose();
+            return;
+        }
+
+        try
+        {
+            if (state != null)
             {
-                _logger.LogDebug(
-                    "Rejected unsolicited or malformed block: Piece {PieceIndex}, Offset {Offset}, Length {Length} from {RemoteEndPoint}",
-                    block.PieceIndex,
-                    block.Offset,
-                    block.Length,
-                    peer.RemoteEndPoint);
-                block.Dispose();
-                return;
-            }
+                int blockIdx = block.Offset / _blockSize;
 
-            int blockIdx = block.Offset / _blockSize;
-
-            if (state.TryAddBlock(blockIdx, block, peer))
-            {
-                stored = true;
-
-                _downloader.AddDownloaded(block.Length);
-                peer.AddDownloaded(block.Length);
-
-                await _cancelBlockRequestAsync(block.PieceIndex, block.Offset, peer).ConfigureAwait(false);
-
-                if (state.TryCompleteAndSetWriting())
+                if (state.TryAddBlock(blockIdx, block, peer))
                 {
-                    pieceToProcess = state;
+                    stored = true;
 
-                    _logger.LogDebug("Piece {PieceIndex} all blocks received ({BlockCount} blocks), starting hash verification", state.Index, state.Blocks.Length);
+                    _downloader.AddDownloaded(block.Length);
+                    peer.AddDownloaded(block.Length);
+
+                    await _cancelBlockRequestAsync(block.PieceIndex, block.Offset, peer).ConfigureAwait(false);
+
+                    if (state.TryCompleteAndSetWriting())
+                    {
+                        pieceToProcess = state;
+
+                        _logger.LogDebug("Piece {PieceIndex} all blocks received ({BlockCount} blocks), starting hash verification", state.Index, state.Blocks.Length);
+                    }
                 }
             }
-        }
-        else
-        {
-            _logger.LogDebug("Received block for inactive piece {PieceIndex}", block.PieceIndex);
-        }
-
-        if (!stored)
-        {
-            block.Dispose();
-            if (state == null)
+            else
             {
-                return;
+                _logger.LogDebug("Received block for inactive piece {PieceIndex}", block.PieceIndex);
+            }
+
+            if (!stored)
+            {
+                block.Dispose();
+            }
+
+            if (pieceToProcess != null)
+            {
+                await _enqueuePeerPieceAsync(pieceToProcess).ConfigureAwait(false);
             }
         }
-
-        if (pieceToProcess != null)
+        finally
         {
-            await _enqueuePeerPieceAsync(pieceToProcess).ConfigureAwait(false);
+            // Always release the pending-request slot, even when a later step (cancel
+            // broadcast, piece enqueue) throws: the request was answered, and leaving it
+            // in-flight depresses the request pipeline until the stale-piece sweep runs.
+            // Only reads the block's index/offset ints, so a disposed block is fine here.
+            _requestCompletionTracker.HandleBlockReceived(peer, block);
         }
-
-        _requestCompletionTracker.HandleBlockReceived(peer, block);
     }
 
     private bool IsValidRequestedBlock(PeerCommunication peer, Block block, out BlockRequest request)

@@ -519,7 +519,48 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         {
             block.Dispose();
             Logger.LogError(ex, "Failed to enqueue block from {RemoteEndPoint}", peer.RemoteEndPoint);
+            // The block was answered but dropped - free its request slot so the scheduler
+            // can re-request it instead of waiting for the stale-piece sweep.
+            ReleasePendingRequest(peer, block);
         }
+    }
+
+    /// <summary>
+    /// Removes the in-flight request entry for a block that arrived but could not be
+    /// processed, so the request pipeline is not depressed until the stale-piece sweep.
+    /// </summary>
+    private void ReleasePendingRequest(PeerCommunication peer, Block block)
+    {
+        var key = (block.PieceIndex, block.Offset);
+        if (_requestTracker.TryRemovePeerRequest(peer, key, out var r))
+        {
+            RemoveBlockRequest(r.PieceIndex, r.Offset, peer);
+        }
+    }
+
+    /// <summary>
+    /// Non-recoverable storage failure (disk full, permanently failed file): records the
+    /// error on the torrent, notifies the application, and stops the torrent so it does not
+    /// keep re-downloading pieces it can never store. Returns the background stop task.
+    /// The stop must not be awaited from inside FileTransfer's own processing loops
+    /// (StopAsync waits for them), which is why callers fire-and-forget this.
+    /// </summary>
+    internal Task HandleFatalStorageErrorAsync(StorageException ex)
+    {
+        Logger.LogCritical(ex, "Fatal storage error for {TorrentName} - stopping torrent", _torrent.Name);
+        _torrent.FireErrorEvent(new TorrentException($"Fatal storage error: {ex.Message}", _torrent.Hash, ex));
+
+        return Task.Run(async () =>
+        {
+            try
+            {
+                await _torrent.StopAsync().ConfigureAwait(false);
+            }
+            catch (Exception stopEx)
+            {
+                Logger.LogError(stopEx, "Failed to stop torrent after fatal storage error");
+            }
+        });
     }
 
     public async Task BlockRejectedAsync(PeerCommunication peer, PeerMessage msg)
@@ -1140,6 +1181,8 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                     Logger.LogError(ex, "Error processing block from {RemoteEndPoint}", item.Peer.RemoteEndPoint);
                     // Ensure block is disposed even on error
                     item.Block.Dispose();
+                    // And free its request slot so the block gets re-requested promptly
+                    ReleasePendingRequest(item.Peer, item.Block);
                 }
             }
         }
@@ -1245,6 +1288,18 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                     {
                         bool writeSuccess = await _pieceVerificationWriter.WriteAsync(pieceToProcess, outcome.PieceSize, outcome.FullData, ct).ConfigureAwait(false);
                         writeFailed = !writeSuccess;
+                    }
+                    catch (StorageException ex) when (!ex.IsRecoverable)
+                    {
+                        // Disk full or permanently failed file: retrying would re-download this
+                        // piece against a broken disk forever. Surface the error and stop.
+                        pieceToProcess.Reset();
+                        _ = HandleFatalStorageErrorAsync(ex).ContinueWith(
+                            t => Logger.LogError(t.Exception, "Fatal storage error handler faulted"),
+                            CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted,
+                            TaskScheduler.Default);
+                        return;
                     }
                     finally
                     {
