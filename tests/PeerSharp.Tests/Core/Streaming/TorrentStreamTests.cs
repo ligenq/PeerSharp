@@ -212,8 +212,12 @@ public class TorrentStreamTests
         _torrent.Pieces.AddPiece(0);
         _torrent.OnPieceVerified(0);
 
-        // Should complete now
-        int read = await readTask.WaitAsync(TimeSpan.FromSeconds(1));
+        // This test constructs the stream directly, bypassing StreamingController.OpenStreamAsync
+        // (which is what registers a stream as the controller's active stream). So OnPieceVerified
+        // never reaches this stream's fast SemaphoreSlim signal, and the read recovers only via
+        // WaitForDataAsync's 1-second poll fallback. The deadline must therefore comfortably
+        // exceed that 1s poll, or it races the internal re-check on a loaded runner.
+        int read = await readTask.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(100, read);
     }
 
