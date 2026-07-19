@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: build, test and pack, but do not push to NuGet or create a release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write # required for Trusted Publishing: enables GitHub OIDC token issuance
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Read version from Directory.Build.props
+        id: version
+        run: |
+          VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read <Version> from Directory.Build.props"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing version $VERSION"
+
+      - name: Fail if tag already exists
+        run: |
+          git fetch --tags --quiet
+          if git rev-parse -q --verify "refs/tags/v${{ steps.version.outputs.version }}" > /dev/null; then
+            echo "::error::Tag v${{ steps.version.outputs.version }} already exists. Bump <Version> in Directory.Build.props before releasing."
+            exit 1
+          fi
+
+      - name: Restore
+        run: dotnet restore PeerSharp.slnx
+
+      - name: Build (warnings as errors)
+        run: dotnet build PeerSharp.slnx --no-restore --configuration Release -warnaserror
+
+      - name: Test
+        run: dotnet test PeerSharp.slnx --no-build --configuration Release --logger "console;verbosity=minimal"
+
+      - name: Pack
+        run: |
+          dotnet pack src/PeerSharp/PeerSharp.csproj --no-build --configuration Release --output packages
+          dotnet pack src/PeerSharp.WebTorrent/PeerSharp.WebTorrent.csproj --no-build --configuration Release --output packages
+          ls -l packages
+
+      # Trusted Publishing: exchange the GitHub OIDC token for a short-lived (1h) NuGet API
+      # key. No stored secrets; nuget.org validates this workflow against the trusted
+      # publishing policy configured for the account. Runs right before the push because
+      # the temporary key expires.
+      - name: NuGet login (OIDC -> temp API key)
+        if: ${{ !inputs.dry_run }}
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: ligenq # nuget.org profile name (not email)
+
+      - name: Push to NuGet
+        if: ${{ !inputs.dry_run }}
+        run: >
+          dotnet nuget push "packages/*.nupkg"
+          --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+
+      - name: Create git tag and GitHub release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "v${{ steps.version.outputs.version }}"
+          packages/*.nupkg
+          --title "v${{ steps.version.outputs.version }}"
+          --generate-notes
+          --target "${{ github.sha }}"
