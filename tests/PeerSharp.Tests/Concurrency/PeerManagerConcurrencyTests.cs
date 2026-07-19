@@ -262,4 +262,23 @@ public class PeerManagerConcurrencyTests
                 "The peer-id owner could not release its own registration.");
         });
     }
+
+    [Fact]
+    public void PeerManagerFailureTracker_ConcurrentFailures_EscalatesOnce()
+    {
+        RunCoyoteTest(() =>
+        {
+            var tracker = new PeerManagerFailureTracker();
+            var results = new ConcurrentBag<PeerManagerFailureTracker.FailureRecord>();
+            var now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+            Task.WaitAll(Enumerable.Range(0, 8)
+                .Select(_ => Task.Run(() => results.Add(tracker.Record(now))))
+                .ToArray());
+
+            Specification.Assert(tracker.TotalFailures == 8, $"Expected 8 recorded failures, got {tracker.TotalFailures}");
+            Specification.Assert(results.Count(result => result.ShouldEscalate) == 1,
+                "Concurrent failures should produce exactly one escalation per rate-limit window.");
+        });
+    }
 }

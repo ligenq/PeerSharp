@@ -90,6 +90,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private readonly PeerChoker _choker;
     private readonly PeerExchangeCoordinator _peerExchange;
     private readonly PeerHealthMonitor _peerHealth;
+    private readonly PeerManagerFailureTracker _failureTracker = new();
 
     // Track pending connections separately
     // O(1) lookup for connected endpoints
@@ -785,6 +786,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "HandshakeFinished error for {RemoteEndPoint}", p.RemoteEndPoint);
+            RecordInternalFailure("HandshakeFinished", ex);
+            await CloseAfterHandshakeFailureAsync(p).ConfigureAwait(false);
         }
     }
 
@@ -1509,9 +1512,43 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             if (t.IsFaulted && t.Exception != null)
             {
-                _logger.LogWarning(t.Exception.GetBaseException(), "Async operation failed: {Context}", context);
+                Exception exception = t.Exception.GetBaseException();
+                _logger.LogWarning(exception, "Async operation failed: {Context}", context);
+                RecordInternalFailure(context, exception);
             }
         }, TaskScheduler.Default);
+    }
+
+    private async Task CloseAfterHandshakeFailureAsync(PeerCommunication peer)
+    {
+        try
+        {
+            await peer.CloseAsync().ConfigureAwait(false);
+        }
+        catch (Exception closeException)
+        {
+            _logger.LogWarning(closeException, "Failed to close peer after handshake callback failure for {RemoteEndPoint}", peer.RemoteEndPoint);
+        }
+    }
+
+    private void RecordInternalFailure(string operation, Exception exception)
+    {
+        var record = _failureTracker.Record(_timeProvider.GetUtcNow());
+        if (record.ShouldEscalate)
+        {
+            _logger.LogError(exception, "Peer manager observed {FailureCount} internal failures within one minute; escalating {Operation}", record.RecentCount, operation);
+            try
+            {
+                _torrent.FireErrorEvent(new TorrentException(
+                    $"Peer manager observed {record.RecentCount} internal failures within one minute (latest: {operation}).",
+                    _torrent.Hash,
+                    exception));
+            }
+            catch (Exception eventException)
+            {
+                _logger.LogError(eventException, "Torrent error subscriber failed while escalating peer-manager failures");
+            }
+        }
     }
 
     private int GetUtpRatioPercent()
@@ -1811,6 +1848,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     internal Task CheckPeerHealthForTestingAsync() => CheckPeerHealthAsync();
 
     internal int SlowPeerCountForTesting => _peerHealth.SlowPeerCountForTesting;
+
+    internal int InternalFailureCountForTesting => _failureTracker.TotalFailures;
+
+    internal void RecordInternalFailureForTesting(string operation, Exception exception) => RecordInternalFailure(operation, exception);
+
+    internal void FireAndForgetForTesting(Task task, string context) => FireAndForget(task, context);
 
     internal void MarkPeerSlowForTesting(PeerCommunication peer, long startedAt) => _peerHealth.MarkSlowForTesting(peer, startedAt);
 
