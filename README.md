@@ -33,7 +33,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 ### Installation
 
 ```bash
-dotnet add package PeerSharp --version 2.0.0
+dotnet add package PeerSharp --version 2.1.0
 ```
 
 Requires .NET 10.0 or later.
