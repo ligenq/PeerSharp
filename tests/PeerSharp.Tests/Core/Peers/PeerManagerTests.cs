@@ -1,6 +1,5 @@
 using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
-using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Messages;
@@ -124,13 +123,11 @@ public class PeerManagerTests
         var connectedPeers = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
         connectedPeers.TryAdd(peer, 0);
         SetPrivateField(ctx.Manager, "_connectedPeersCount", 1);
+        ctx.Manager.MarkPeerSlowForTesting(peer, Environment.TickCount64 - 10_000);
 
-        var slowPeers = GetPrivateField<ConcurrentDictionary<PeerCommunication, long>>(ctx.Manager, "_slowPeers");
-        slowPeers.TryAdd(peer, Environment.TickCount64 - 10_000);
+        await ctx.Manager.CheckPeerHealthForTestingAsync();
 
-        await (Task)InvokePrivate(ctx.Manager, "CheckPeerHealthAsync")!;
-
-        Assert.False(slowPeers.ContainsKey(peer));
+        Assert.Equal(0, ctx.Manager.SlowPeerCountForTesting);
 
         await CleanupAsync(ctx);
     }
@@ -210,11 +207,11 @@ public class PeerManagerTests
         var ctx = CreateContext();
         ctx.Torrent.Settings.Connection.OptimisticUnchokeIntervalSeconds = 1;
 
-        int seconds = (int)InvokePrivate(ctx.Manager, "GetOptimisticUnchokeIntervalSeconds")!;
+        int seconds = ctx.Manager.GetOptimisticUnchokeIntervalSecondsForTesting();
         Assert.Equal(5, seconds);
 
         ctx.Torrent.Settings.Connection.OptimisticUnchokeIntervalSeconds = 30;
-        seconds = (int)InvokePrivate(ctx.Manager, "GetOptimisticUnchokeIntervalSeconds")!;
+        seconds = ctx.Manager.GetOptimisticUnchokeIntervalSecondsForTesting();
         Assert.Equal(30, seconds);
 
         await CleanupAsync(ctx);
@@ -229,17 +226,17 @@ public class PeerManagerTests
         ctx.Torrent.Settings.Transfer.MaxUploadSpeed = 0;
 
         // No connected peers and no upload limit: result = min(max, max(min, count)) = min(8, max(4,0)) = 4
-        int slots = (int)InvokePrivate(ctx.Manager, "GetUploadSlots")!;
+        int slots = ctx.Manager.GetUploadSlotsForTesting();
         Assert.Equal(4, slots);
 
         // With 6 connected peers, min<=slots<=max
         SetPrivateField(ctx.Manager, "_connectedPeersCount", 6);
-        slots = (int)InvokePrivate(ctx.Manager, "GetUploadSlots")!;
+        slots = ctx.Manager.GetUploadSlotsForTesting();
         Assert.Equal(6, slots);
 
         // With 12 connected peers, capped by max
         SetPrivateField(ctx.Manager, "_connectedPeersCount", 12);
-        slots = (int)InvokePrivate(ctx.Manager, "GetUploadSlots")!;
+        slots = ctx.Manager.GetUploadSlotsForTesting();
         Assert.Equal(8, slots);
 
         await CleanupAsync(ctx);
@@ -255,7 +252,7 @@ public class PeerManagerTests
         ctx.Torrent.Settings.Transfer.MaxUploadSpeed = 1_000_000;
         SetPrivateField(ctx.Manager, "_connectedPeersCount", 32);
 
-        int slots = (int)InvokePrivate(ctx.Manager, "GetUploadSlots")!;
+        int slots = ctx.Manager.GetUploadSlotsForTesting();
         // 1_000_000 / 100_000 = 10 slots
         Assert.Equal(10, slots);
 
@@ -995,7 +992,4 @@ public class PeerManagerTests
         public void ReleasePendingSlot() { }
     }
 }
-
-
-
 

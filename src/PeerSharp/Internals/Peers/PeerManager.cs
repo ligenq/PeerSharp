@@ -36,27 +36,24 @@ namespace PeerSharp.Internals.Peers;
  * - _connectedPeersCount reflects _connectedPeers.Count
  * - Connection queue enforces rate limiting (5 connections/second)
  *
- * ALLOCATION OPTIMIZATION:
- * - _unchokePeersList, _unchokeCandidates, _unchokeSet are reused to avoid GC pressure
+ * POLICY COLLABORATORS:
+ * - PeerChoker owns upload-slot and optimistic-unchoke policy.
+ * - PeerExchangeCoordinator owns BEP 11 payload construction and fan-out.
+ * - PeerHealthMonitor owns idle and slow-peer disconnect policy.
  */
 
 internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 {
-    // relative to the top candidate are kept unchoked to maintain stability
     private const int AllowedFastSetSize = 10;
-    private const double GradualUnchokeThreshold = 0.7;
-
     // Periodic task intervals
     private const int MainLoopIntervalMs = 1000;
 
-    private const int OptimisticUnchokeIntervalMinSeconds = 5;
     private const int PendingConnectionTimeoutMs = 10000;
     private const int PexIntervalSeconds = 60;
 
     // 1 second base loop
     private const int WatchdogIntervalSeconds = 5;
 
-    private static readonly Random PexRandom = new();
 
     // Track active connection attempts for clean shutdown
     private readonly ConcurrentDictionary<Task, byte> _activeConnectionTasks = new();
@@ -85,18 +82,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     // Value is timestamp (Environment.TickCount64) when connection was initiated
     private readonly ConcurrentDictionary<IPEndPoint, long> _pendingConnections = new();
-    private readonly ConcurrentDictionary<PeerCommunication, long> _slowPeers = new();
 
     private readonly Settings _settings;
     private readonly DateTimeOffset _startTime;
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
-    private readonly List<PeerCommunication> _unchokeCandidates = [];
-
-    // Reusable collections for UnchokePeers to avoid allocations every 10 seconds
-    private readonly List<PeerCommunication> _unchokePeersList = [];
-
-    private readonly HashSet<PeerCommunication> _unchokeSet = [];
+    private readonly PeerChoker _choker;
+    private readonly PeerExchangeCoordinator _peerExchange;
+    private readonly PeerHealthMonitor _peerHealth;
 
     // Track pending connections separately
     // O(1) lookup for connected endpoints
@@ -114,16 +107,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private int _lastAggregateSpeed = 0;
 
-    private DateTimeOffset _lastOptimisticChange = DateTimeOffset.MinValue;
 
     private DateTimeOffset _lastSpeedLog = DateTimeOffset.MinValue;
 
     private CancellationTokenSource? _mainLoopCts;
 
     private Task? _mainLoopTask;
-
-    // Keep peers at 70%+ of best speed (libtransmission inspired)
-    private PeerCommunication? _optimisticPeer;
 
     private int _peakSpeed = 0;
 
@@ -139,6 +128,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _peerFactory = peerFactory;
         _timeProvider = timeProvider;
         _startTime = _timeProvider.GetUtcNow();
+        _choker = new PeerChoker(_torrent, _timeProvider, _logger);
+        _peerExchange = new PeerExchangeCoordinator(_torrent, _knownPeersCache, _logger);
+        _peerHealth = new PeerHealthMonitor(_torrent, _logger);
 
         // Initialize adaptive timeout based on settings
         var connSettings = _settings.Connection;
@@ -412,7 +404,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // Release global connection slot
             _governor.ReleaseConnectionSlot();
         }
-        _slowPeers.TryRemove(p, out _);
+        _peerHealth.Remove(p);
 
         // Only remove the endpoint/id entries if this peer owns them. A rejected duplicate
         // closing must not evict the surviving connection's entries, or the dedup gates would
@@ -1081,19 +1073,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    private static void ApplyPexFlags(PeerHistory history, byte flags)
-    {
-        if ((flags & (byte)UtPex.Peer.Seed) != 0)
-        {
-            history.IsSeed = true;
-        }
+    private static void ApplyPexFlags(PeerHistory history, byte flags) => PeerExchangeCoordinator.ApplyFlags(history, flags);
 
-        if ((flags & (byte)UtPex.Peer.Utp) != 0)
-        {
-            history.UtpSupported = true;
-            history.UtpHinted = true;
-        }
-    }
+    internal void BroadcastPex() => _peerExchange.Broadcast(_connectedPeers.Keys);
 
     private void AddPeersInternal(IEnumerable<IPEndPoint> peers, PeerSourceKind sourceKind, PeerCommunication? source, List<byte>? flags)
     {
@@ -1102,7 +1084,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        // Prune oldest entries if cache is at limit (prevents PEX flooding)
         if (Interlocked.CompareExchange(ref _knownPeersCacheCount, 0, 0) >= _settings.MaxKnownPeersCache)
         {
             PruneKnownPeersCache();
@@ -1110,156 +1091,40 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
         bool isSeeding = _torrent.Finished;
         var now = _timeProvider.GetUtcNow();
-        var blocklist = _torrent.Blocklist;
-
         var candidates = new List<(PeerHistory History, long Score)>();
         int index = 0;
-
-        foreach (var rawEp in peers)
+        foreach (var rawEndpoint in peers)
         {
-            // Normalize IPv4-mapped IPv6 so cache and dedup keys match what connections store
-            var ep = NetworkUtils.NormalizeEndPoint(rawEp);
-            if (blocklist?.IsBlocked(ep) == true)
+            var endpoint = NetworkUtils.NormalizeEndPoint(rawEndpoint);
+            if (_torrent.Blocklist?.IsBlocked(endpoint) == true)
             {
                 index++;
                 continue;
             }
 
-            // Get or create history
-            var history = GetOrAddKnownPeerHistory(ep);
+            var history = GetOrAddKnownPeerHistory(endpoint);
             history.UpdateSource(sourceKind);
-
             if (flags != null && index < flags.Count)
             {
                 ApplyPexFlags(history, flags[index]);
             }
-
-            // Only consider for immediate connection if not already connected
-            if (!_connectedEndpoints.ContainsKey(ep))
+            if (!_connectedEndpoints.ContainsKey(endpoint))
             {
                 candidates.Add((history, history.GetScore(isSeeding, Priority.Normal, now)));
             }
-
             if (source != null && _peerSources.Count < _settings.MaxKnownPeersCache)
             {
-                _peerSources[ep] = source;
+                _peerSources[endpoint] = source;
             }
-
             index++;
         }
 
-        // Sort by score (lower is better)
         candidates.Sort((a, b) => a.Score.CompareTo(b.Score));
-
         int max = (int)_settings.MaxPeersPerTrackerRequest;
-        int count = 0;
-        foreach (var (history, _) in candidates)
+        foreach (var (history, _) in candidates.Take(max))
         {
-            if (count >= max)
-            {
-                break;
-            }
-
-            try
-            {
-                ConnectTo(history.EndPoint.Address.ToString(), history.EndPoint.Port);
-            }
+            try { ConnectTo(history.EndPoint.Address.ToString(), history.EndPoint.Port); }
             catch (Exception ex) { _logger.LogDebug(ex, "Failed to initiate connection"); }
-            count++;
-        }
-    }
-
-    internal void BroadcastPex()
-    {
-        // BEP 27: Don't broadcast PEX for private torrents
-        if (_torrent.InfoFile.Info.IsPrivate)
-        {
-            return;
-        }
-
-        // Build peer data and connected endpoints set in single pass
-        var peerData = new List<(IPEndPoint, byte)>();
-        var connectedEndpoints = new HashSet<IPEndPoint>();
-        var peersList = new List<PeerCommunication>();
-
-        foreach (var kvp in _connectedPeers)
-        {
-            var p = kvp.Key;
-            peersList.Add(p);
-            if (p.RemoteEndPoint == null)
-            {
-                continue;
-            }
-
-            connectedEndpoints.Add(p.RemoteEndPoint);
-            byte flags = 0;
-            if (p.PeerPieces != null && p.PeerPieces.ReceivedCount == p.PeerPieces.Count)
-            {
-                flags |= (byte)UtPex.Peer.Seed;
-            }
-
-            if (p.UtpStream != null)
-            {
-                flags |= (byte)UtPex.Peer.Utp;
-            }
-
-            if (p.Stream is EncryptedStream)
-            {
-                flags |= (byte)UtPex.Peer.Encryption;
-            }
-
-            if (p.RemoteExtensions?.MessageIds.ContainsKey(UtHolepunch.Name) == true)
-            {
-                flags |= (byte)UtPex.Peer.Holepunch;
-            }
-
-            peerData.Add((p.RemoteEndPoint, flags));
-        }
-
-        // Filter known peers using HashSet for O(1) lookup, shuffle without LINQ
-        var knownCandidates = new List<IPEndPoint>();
-        foreach (var kvp in _knownPeersCache)
-        {
-            var k = kvp.Key;
-            if (!connectedEndpoints.Contains(k))
-            {
-                knownCandidates.Add(k);
-            }
-        }
-
-        // Fisher-Yates shuffle for random selection (only shuffle what we need)
-        int takeCount = Math.Min(50, knownCandidates.Count);
-        for (int i = 0; i < takeCount; i++)
-        {
-            int j = i + PexRandom.Next(knownCandidates.Count - i);
-            (knownCandidates[i], knownCandidates[j]) = (knownCandidates[j], knownCandidates[i]);
-        }
-
-        // Build allPeers list
-        var allPeers = new List<(IPEndPoint, byte)>(peerData.Count + takeCount);
-        allPeers.AddRange(peerData);
-        for (int i = 0; i < takeCount; i++)
-        {
-            allPeers.Add((knownCandidates[i], 0));
-        }
-
-        // Reusable filtered list to avoid LINQ allocation per peer
-        var filteredPeers = new List<(IPEndPoint, byte)>(allPeers.Count);
-        foreach (var p in peersList)
-        {
-            try
-            {
-                filteredPeers.Clear();
-                foreach (var peer in allPeers)
-                {
-                    if (!peer.Item1.Equals(p.RemoteEndPoint))
-                    {
-                        filteredPeers.Add(peer);
-                    }
-                }
-                p.UtPex.Update(filteredPeers);
-            }
-            catch (Exception ex) { _logger.LogError(ex, "BroadcastPex error for {RemoteEndPoint}", p.RemoteEndPoint); }
         }
     }
 
@@ -1281,68 +1146,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             CurrentUtpRatioPercent: GetUtpRatioPercent));
     }
 
-    private async Task CheckPeerHealthAsync()
-    {
-        long now = Environment.TickCount64;
-        var tasks = new List<Task>();
-        int connectedCount = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        var settings = _settings.Connection;
-        bool isSeeding = _torrent.Finished;
-
-        foreach (var kvp in _connectedPeers)
-        {
-            var peer = kvp.Key;
-            if (now - peer.LastActivityTicks > ProtocolConstants.IdleTimeoutMs)
-            {
-                _logger.LogDebug("Connection timed out for {PeerName} (Idle > {IdleTimeout}ms)", peer.Name, ProtocolConstants.IdleTimeoutMs);
-                tasks.Add(peer.CloseAsync());
-                _slowPeers.TryRemove(peer, out _);
-                continue;
-            }
-
-            if (connectedCount >= settings.SlowPeerMinConnectedPeers)
-            {
-                int threshold = isSeeding
-                    ? settings.SlowPeerMinUploadSpeedBytesPerSec
-                    : settings.SlowPeerMinDownloadSpeedBytesPerSec;
-
-                bool activeTransfer = isSeeding
-                    ? (peer.PeerInterested && !peer.AmChoking)
-                    : (peer.AmInterested && !peer.PeerChoking);
-
-                if (threshold > 0 && activeTransfer)
-                {
-                    int speed = isSeeding ? peer.UploadSpeed : peer.SmoothedDownloadSpeed;
-                    if (speed < threshold)
-                    {
-                        long start = _slowPeers.GetOrAdd(peer, _ => now);
-                        long elapsedMs = now - start;
-                        if (elapsedMs >= Math.Max(1, settings.SlowPeerGraceSeconds) * 1000L)
-                        {
-                            _logger.LogDebug("Disconnecting slow peer {PeerName} (speed={Speed}B/s < {Threshold}B/s for {Elapsed}ms)",
-                                peer.Name, speed, threshold, elapsedMs);
-                            tasks.Add(peer.CloseAsync());
-                            _slowPeers.TryRemove(peer, out _);
-                        }
-                    }
-                    else
-                    {
-                        _slowPeers.TryRemove(peer, out _);
-                    }
-                }
-                else
-                {
-                    _slowPeers.TryRemove(peer, out _);
-                }
-            }
-        }
-
-        if (tasks.Count > 0)
-        {
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-        }
-    }
-
+    private Task CheckPeerHealthAsync() => _peerHealth.CheckAsync(_connectedPeers.Keys, ConnectedCount);
     private void CleanupPendingConnections()
     {
         long now = Environment.TickCount64;
@@ -1710,33 +1514,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }, TaskScheduler.Default);
     }
 
-    private int GetOptimisticUnchokeIntervalSeconds()
-    {
-        return Math.Max(OptimisticUnchokeIntervalMinSeconds, _settings.Connection.OptimisticUnchokeIntervalSeconds);
-    }
-
-    private int GetUploadSlots()
-    {
-        int minSlots = Math.Max(1, _settings.Connection.UploadSlotsMin);
-        int maxSlots = Math.Max(minSlots, _settings.Connection.UploadSlotsMax);
-
-        int uploadLimit = _torrent.UploadLimitBytesPerSecond;
-        if (uploadLimit <= 0)
-        {
-            uploadLimit = (int)_settings.Transfer.MaxUploadSpeed;
-        }
-
-        if (uploadLimit <= 0)
-        {
-            return Math.Min(maxSlots, Math.Max(minSlots, _connectedPeersCount));
-        }
-
-        int targetPerSlot = Math.Max(8000, _settings.Connection.TargetUploadPerSlotBytesPerSec);
-        int slots = (int)Math.Ceiling(uploadLimit / (double)targetPerSlot);
-        slots = Math.Clamp(slots, minSlots, maxSlots);
-        return Math.Min(slots, Math.Max(minSlots, _connectedPeersCount));
-    }
-
     private int GetUtpRatioPercent()
     {
         int total = 0;
@@ -2027,11 +1804,33 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// <summary>Test hook: number of peer-id registrations currently held.</summary>
     internal int ConnectedPeerIdCountForTesting => _connectedPeerIds.Count;
 
+    internal int GetOptimisticUnchokeIntervalSecondsForTesting() => _choker.GetOptimisticUnchokeIntervalSeconds();
+
+    internal int GetUploadSlotsForTesting() => _choker.GetUploadSlotsForTesting(ConnectedCount);
+
+    internal Task CheckPeerHealthForTestingAsync() => CheckPeerHealthAsync();
+
+    internal int SlowPeerCountForTesting => _peerHealth.SlowPeerCountForTesting;
+
+    internal void MarkPeerSlowForTesting(PeerCommunication peer, long startedAt) => _peerHealth.MarkSlowForTesting(peer, startedAt);
+
+    internal int ConnectedEndpointCountForTesting => _connectedEndpoints.Count;
+
+    internal bool TryRegisterConnectedEndpointForTesting(PeerCommunication peer) => TryRegisterConnectedEndpoint(peer);
+
+    internal bool TryRegisterConnectedPeerIdForTesting(PeerCommunication peer)
+    {
+        return IsPeerIdSet(peer.PeerId) && _connectedPeerIds.TryAdd(Convert.ToHexString(peer.PeerId), peer);
+    }
+
+    internal void UnregisterConnectedEndpointForTesting(PeerCommunication peer) => UnregisterConnectedEndpoint(peer);
+
+    internal void UnregisterConnectedPeerIdForTesting(PeerCommunication peer) => UnregisterConnectedPeerId(peer);
+
     /// <summary>Test hook: pins the optimistic-unchoke slot to make rechoke tests deterministic.</summary>
     internal void SetOptimisticPeerForTesting(PeerCommunication? peer, DateTimeOffset changedAt)
     {
-        _optimisticPeer = peer;
-        _lastOptimisticChange = changedAt;
+        _choker.SetOptimisticPeerForTesting(peer, changedAt);
     }
 
     /// <summary>Test hook: sets the global uTP penalty window.</summary>
@@ -2124,210 +1923,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private void TryImmediateUnchoke(PeerCommunication peer)
     {
-        int unchoked = 0;
-        foreach (var kvp in _connectedPeers)
-        {
-            if (!kvp.Key.AmChoking)
-            {
-                unchoked++;
-            }
-        }
-
-        if (unchoked < GetUploadSlots())
+        if (_choker.HasAvailableUploadSlot(_connectedPeers.Keys, ConnectedCount))
         {
             peer.Unchoke();
         }
     }
 
-    internal void UnchokePeers()
-    {
-        // libtransmission optimization: don't rechoke/reconnect if we are seeding
-        // and everyone we know is also seeding (and we aren't doing PEX)
-        bool isSeeding = _torrent.Finished;
-        if (isSeeding && !_torrent.Settings.Connection.EnableLsd && !_torrent.Settings.Dht.Enabled && _connectedPeers.All(p => p.Key.PeerPieces?.IsFull == true))
-        {
-            _logger.LogTrace("Seeding saturated - skipping unchoke cycle");
-            return;
-        }
-
-        // Clear and reuse collections to avoid allocations
-        _unchokePeersList.Clear();
-        _unchokeCandidates.Clear();
-        _unchokeSet.Clear();
-
-        // Use local references for the reusable collections
-        var peers = _unchokePeersList;
-        var candidates = _unchokeCandidates;
-        var toUnchokeSet = _unchokeSet;
-
-        // Ensure capacity to avoid reallocations during enumeration
-        if (peers.Capacity < _connectedPeersCount)
-        {
-            peers.Capacity = _connectedPeersCount;
-        }
-
-        foreach (var kvp in _connectedPeers)
-        {
-            peers.Add(kvp.Key);
-        }
-
-        foreach (var p in peers)
-        {
-            p.UpdateSpeed();
-        }
-
-        // Build candidates list and sort
-        foreach (var p in peers)
-        {
-            if (p.PeerInterested)
-            {
-                candidates.Add(p);
-            }
-        }
-
-        if (isSeeding)
-        {
-            // Seeding: round-robin rotation.
-            // Peers that have exceeded their piece quota and been unchoked for at least
-            // one minute are de-prioritized so that waiting peers can rotate in.
-            long pieceLength = _torrent.PieceSize;
-            var now = _timeProvider.GetUtcNow();
-            candidates.Sort((a, b) => SeedingChoker.Compare(
-                SeedingChoker.FromPeer(a), SeedingChoker.FromPeer(b),
-                pieceLength, SeedingChoker.DefaultPieceQuota, now));
-        }
-        else
-        {
-            // Leeching: Tit-for-tat (reciprocity) -> Prioritize peers sending data fastest
-            // where a peer appears slow just because they finished their requests
-            candidates.Sort((a, b) => b.SmoothedDownloadSpeed.CompareTo(a.SmoothedDownloadSpeed));
-        }
-
-        int slots = GetUploadSlots();
-
-        // Reserve one slot for optimistic unchoke if we have overflow
-        int regularSlots = (candidates.Count > slots) ? slots - 1 : slots;
-
-        // Instead of just taking top N candidates, we:
-        // 1. Always include top candidates (up to regularSlots)
-        // 2. Keep currently unchoked peers if they're performing at 50%+ of the best
-        // This prevents sudden peer swaps that cause speed drops
-
-        int bestSpeed = 0;
-        if (candidates.Count > 0)
-        {
-            bestSpeed = isSeeding ? candidates[0].UploadSpeed : candidates[0].SmoothedDownloadSpeed;
-        }
-        int gradualThreshold = (int)(bestSpeed * GradualUnchokeThreshold);
-
-        // First, add top candidates
-        int count = Math.Min(regularSlots, candidates.Count);
-        for (int i = 0; i < count; i++)
-        {
-            toUnchokeSet.Add(candidates[i]);
-        }
-
-        // This prevents sudden disconnection of productive peers
-        int keptFromPrevious = 0;
-        foreach (var p in peers)
-        {
-            if (!p.AmChoking && p.PeerInterested && !toUnchokeSet.Contains(p))
-            {
-                int peerSpeed = isSeeding ? p.UploadSpeed : p.SmoothedDownloadSpeed;
-                if (peerSpeed >= gradualThreshold && toUnchokeSet.Count < slots + 2) // Allow slight overflow
-                {
-                    toUnchokeSet.Add(p);
-                    keptFromPrevious++;
-                }
-            }
-        }
-
-        // Optimistic unchoke: add one random peer from remaining
-        if (candidates.Count > slots)
-        {
-            int remainingCount = candidates.Count - regularSlots;
-            int optimisticIndex = -1;
-
-            bool keepCurrent = false;
-            if (_optimisticPeer != null &&
-                (_timeProvider.GetUtcNow() - _lastOptimisticChange).TotalSeconds < GetOptimisticUnchokeIntervalSeconds())
-            {
-                // Is the current optimistic peer in the remaining candidates?
-                int index = candidates.IndexOf(_optimisticPeer, regularSlots);
-                if (index != -1)
-                {
-                    optimisticIndex = index;
-                    keepCurrent = true;
-                }
-            }
-
-            if (!keepCurrent)
-            {
-                // Pick a new random peer from remaining (using thread-safe Random.Shared)
-                optimisticIndex = regularSlots + Random.Shared.Next(remainingCount);
-                _optimisticPeer = candidates[optimisticIndex];
-                _lastOptimisticChange = _timeProvider.GetUtcNow();
-            }
-
-            if (optimisticIndex != -1)
-            {
-                toUnchokeSet.Add(candidates[optimisticIndex]);
-            }
-        }
-        else
-        {
-            _optimisticPeer = null;
-        }
-
-        int unchoked = 0;
-        int choked = 0;
-        foreach (var p in peers)
-        {
-            if (toUnchokeSet.Contains(p))
-            {
-                if (p.AmChoking)
-                {
-                    unchoked++;
-                }
-
-                p.Unchoke();
-            }
-            else
-            {
-                if (!p.AmChoking)
-                {
-                    choked++;
-                }
-
-                p.Choke();
-            }
-        }
-
-        // Log unchoke algorithm results
-        int interestedPeers = candidates.Count;
-        int totalPeers = peers.Count;
-        double avgSpeed = 0;
-        double maxSpeed = 0;
-        if (candidates.Count > 0)
-        {
-            double sum = 0;
-            foreach (var c in candidates)
-            {
-                double speed = isSeeding ? c.UploadSpeed : c.SmoothedDownloadSpeed;
-                sum += speed;
-                if (speed > maxSpeed)
-                {
-                    maxSpeed = speed;
-                }
-            }
-            avgSpeed = sum / candidates.Count;
-        }
-
-        string mode = isSeeding ? "Seeding" : "Leeching";
-        _logger.LogDebug("Unchoke ({Mode}): {TotalPeers} peers, {InterestedPeers} interested, {UnchokedCount} unchoked (+{NewUnchoked} new, {Kept} kept), {NewChoked} newly choked, avg={AvgSpeed}B/s, max={MaxSpeed}B/s, threshold={Threshold}B/s",
-            mode, totalPeers, interestedPeers, toUnchokeSet.Count, unchoked, keptFromPrevious, choked, Math.Round(avgSpeed), maxSpeed, gradualThreshold);
-    }
-
+    internal void UnchokePeers() => _choker.Rechoke(_connectedPeers.Keys, ConnectedCount);
     private async Task UpdateSpeedsAsync()
     {
         int totalDownloadSpeed = 0;

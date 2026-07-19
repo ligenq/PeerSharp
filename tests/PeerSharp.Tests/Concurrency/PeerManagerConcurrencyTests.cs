@@ -5,9 +5,7 @@ using PeerSharp.Internals.Peers;
 using PeerSharp.Internals;
 using System.Net;
 using System.Net.Sockets;
-using PeerSharp.Internals.Framework;
 using System.Collections.Concurrent;
-using System.Reflection;
 
 namespace PeerSharp.Tests.Concurrency;
 
@@ -26,7 +24,7 @@ public class PeerManagerConcurrencyTests
             .WithTestingIterations(iterations)
             .WithMaxSchedulingSteps(1000);
 
-        var engine = TestingEngine.Create(config, test);
+        using var engine = TestingEngine.Create(config, test);
         engine.Run();
 
         var report = engine.TestReport;
@@ -149,6 +147,119 @@ public class PeerManagerConcurrencyTests
 
             Specification.Assert(manager.ConnectedCount <= 1,
                 $"Duplicate connections allowed: {manager.ConnectedCount}");
+        });
+    }
+
+    [Fact]
+    public void PeerManager_ConcurrentEndpointRegistration_HasOneOwner()
+    {
+        RunCoyoteTest(() =>
+        {
+            var torrent = TorrentTestUtility.CreateMinimal();
+            var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new MockFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
+            var endpoint = new IPEndPoint(IPAddress.Loopback, 43210);
+            int claims = 0;
+
+            var tasks = Enumerable.Range(0, 8).Select(_ => Task.Run(() =>
+            {
+                var peer = new MockPeerCommunication(torrent, manager, TimeProvider.System) { RemoteEndPoint = endpoint };
+                if (manager.TryRegisterConnectedEndpointForTesting(peer))
+                {
+                    Interlocked.Increment(ref claims);
+                }
+            })).ToArray();
+
+            Task.WaitAll(tasks);
+
+            Specification.Assert(claims == 1, $"Expected exactly one endpoint owner, got {claims}");
+            Specification.Assert(manager.ConnectedEndpointCountForTesting == 1,
+                $"Endpoint index must contain exactly one entry, got {manager.ConnectedEndpointCountForTesting}");
+        });
+    }
+
+    [Fact]
+    public void PeerManager_ConcurrentPeerIdRegistration_HasOneOwner()
+    {
+        RunCoyoteTest(() =>
+        {
+            var torrent = TorrentTestUtility.CreateMinimal();
+            var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new MockFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
+            byte[] peerId = Enumerable.Repeat((byte)0x5A, 20).ToArray();
+            int claims = 0;
+
+            var tasks = Enumerable.Range(0, 8).Select(_ => Task.Run(() =>
+            {
+                var peer = new MockPeerCommunication(torrent, manager, TimeProvider.System);
+                peerId.CopyTo(peer.PeerId, 0);
+                if (manager.TryRegisterConnectedPeerIdForTesting(peer))
+                {
+                    Interlocked.Increment(ref claims);
+                }
+            })).ToArray();
+
+            Task.WaitAll(tasks);
+
+            Specification.Assert(claims == 1, $"Expected exactly one peer-id owner, got {claims}");
+            Specification.Assert(manager.ConnectedPeerIdCountForTesting == 1,
+                $"Peer-id index must contain exactly one entry, got {manager.ConnectedPeerIdCountForTesting}");
+        });
+    }
+
+    [Fact]
+    public void PeerManager_DuplicateEndpointCleanup_CannotEvictOwner()
+    {
+        RunCoyoteTest(() =>
+        {
+            var torrent = TorrentTestUtility.CreateMinimal();
+            var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new MockFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
+            var endpoint = new IPEndPoint(IPAddress.Loopback, 43211);
+            var owner = new MockPeerCommunication(torrent, manager, TimeProvider.System) { RemoteEndPoint = endpoint };
+            Assert.True(manager.TryRegisterConnectedEndpointForTesting(owner));
+
+            var duplicates = Enumerable.Range(0, 8)
+                .Select(_ => new MockPeerCommunication(torrent, manager, TimeProvider.System) { RemoteEndPoint = endpoint })
+                .ToArray();
+            Assert.All(duplicates, peer => Assert.False(manager.TryRegisterConnectedEndpointForTesting(peer)));
+
+            Task.WaitAll(duplicates.Select(peer => Task.Run(() => manager.UnregisterConnectedEndpointForTesting(peer))).ToArray());
+
+            Specification.Assert(manager.ConnectedEndpointCountForTesting == 1,
+                "A duplicate endpoint cleanup removed the surviving owner's registration.");
+
+            manager.UnregisterConnectedEndpointForTesting(owner);
+            Specification.Assert(manager.ConnectedEndpointCountForTesting == 0,
+                "The endpoint owner could not release its own registration.");
+        });
+    }
+
+    [Fact]
+    public void PeerManager_DuplicatePeerIdCleanup_CannotEvictOwner()
+    {
+        RunCoyoteTest(() =>
+        {
+            var torrent = TorrentTestUtility.CreateMinimal();
+            var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new MockFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
+            byte[] peerId = Enumerable.Repeat((byte)0xA5, 20).ToArray();
+            var owner = new MockPeerCommunication(torrent, manager, TimeProvider.System);
+            peerId.CopyTo(owner.PeerId, 0);
+            Assert.True(manager.TryRegisterConnectedPeerIdForTesting(owner));
+
+            var duplicates = Enumerable.Range(0, 8).Select(_ =>
+            {
+                var peer = new MockPeerCommunication(torrent, manager, TimeProvider.System);
+                peerId.CopyTo(peer.PeerId, 0);
+                return peer;
+            }).ToArray();
+            Assert.All(duplicates, peer => Assert.False(manager.TryRegisterConnectedPeerIdForTesting(peer)));
+
+            Task.WaitAll(duplicates.Select(peer => Task.Run(() => manager.UnregisterConnectedPeerIdForTesting(peer))).ToArray());
+
+            Specification.Assert(manager.ConnectedPeerIdCountForTesting == 1,
+                "A duplicate peer-id cleanup removed the surviving owner's registration.");
+
+            manager.UnregisterConnectedPeerIdForTesting(owner);
+            Specification.Assert(manager.ConnectedPeerIdCountForTesting == 0,
+                "The peer-id owner could not release its own registration.");
         });
     }
 }
