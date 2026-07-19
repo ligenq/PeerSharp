@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Peers;
 using System.Net;
@@ -19,7 +20,7 @@ internal class LsdManager : ILsdManager
     private static readonly TimeSpan AnnounceInterval = TimeSpan.FromMinutes(5);
     private static readonly string[] LineSeparators = ["\r\n", "\n"];
     private readonly string _cookie;
-    private readonly ILogger<LsdManager> _logger = TorrentLoggerFactory.CreateLogger<LsdManager>();
+    private readonly ILogger<LsdManager> _logger;
     private readonly ITorrentResolver _resolver;
     private readonly Settings _settings;
     private readonly IUdpSocketFactory _socketFactory;
@@ -32,16 +33,27 @@ internal class LsdManager : ILsdManager
     private bool _running;
 
     public LsdManager(Settings settings, ITorrentResolver resolver, TimeProvider timeProvider)
-        : this(settings, resolver, timeProvider, new UdpSocketFactory())
+        : this(settings, resolver, timeProvider, new UdpSocketFactory(), NullLoggerFactory.Instance)
+    {
+    }
+
+    public LsdManager(Settings settings, ITorrentResolver resolver, TimeProvider timeProvider, ILoggerFactory loggerFactory)
+        : this(settings, resolver, timeProvider, new UdpSocketFactory(), loggerFactory)
     {
     }
 
     internal LsdManager(Settings settings, ITorrentResolver resolver, TimeProvider timeProvider, IUdpSocketFactory socketFactory)
+        : this(settings, resolver, timeProvider, socketFactory, NullLoggerFactory.Instance)
+    {
+    }
+
+    internal LsdManager(Settings settings, ITorrentResolver resolver, TimeProvider timeProvider, IUdpSocketFactory socketFactory, ILoggerFactory loggerFactory)
     {
         _settings = settings;
         _resolver = resolver;
         _timeProvider = timeProvider;
         _socketFactory = socketFactory;
+        _logger = loggerFactory.CreateLogger<LsdManager>();
         _cookie = Guid.NewGuid().ToString("N")[..8]; // Opaque string to identify ourselves
     }
 

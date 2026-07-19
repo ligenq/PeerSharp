@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Utilities;
 using System.Collections;
 
@@ -8,7 +9,8 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 {
     private readonly List<IPeerCommunication> _activePeers = [];
     private readonly Lock _lock = new();
-    private readonly ILogger<MetadataDownload> _logger = TorrentLoggerFactory.CreateLogger<MetadataDownload>();
+    private readonly ILogger<MetadataDownload> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly Dictionary<int, PendingMetadataRequest> _pendingRequests = [];
 
     /// <summary>Test hook: number of in-flight metadata piece requests.</summary>
@@ -38,8 +40,15 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private int _nextPieceCursor = 0;
 
     public MetadataDownload(Torrent torrent)
+        : this(torrent, NullLoggerFactory.Instance)
+    {
+    }
+
+    internal MetadataDownload(Torrent torrent, ILoggerFactory loggerFactory)
     {
         _torrent = torrent;
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory.CreateLogger<MetadataDownload>();
     }
 
     public bool Active { get; private set; }
@@ -149,7 +158,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             if (_receivedPieces.Cast<bool>().All(b => b)) // All pieces received
             {
                 // Reconstruct TorrentFileMetadata from raw info dictionary bytes
-                var newMetadata = TorrentFileParser.ParseInfoBytes(_metadataBuffer);
+                var newMetadata = TorrentFileParser.ParseInfoBytes(_metadataBuffer, _loggerFactory);
 
                 // SECURITY: Verify the downloaded metadata hash matches the requested hash.
                 // Require at least one expected hash to be present: with no known hash we

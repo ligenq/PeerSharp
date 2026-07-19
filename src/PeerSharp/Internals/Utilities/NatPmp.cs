@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Network;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -13,29 +14,40 @@ namespace PeerSharp.Internals.Utilities;
 internal class NatPmpPortMapping : IPortMapper
 {
     private const int NatPmpPort = 5351;
-    private static readonly ILogger Logger = TorrentLoggerFactory.CreateLogger<NatPmpPortMapping>();
     private readonly Func<IEnumerable<IPAddress>> _gatewayProvider;
     private readonly List<IPAddress> _gateways = [];
+    private readonly ILogger<NatPmpPortMapping> _logger;
     private readonly List<(int Port, string Protocol)> _mappings = [];
     private readonly int _natPmpPort;
     private readonly Dictionary<IPAddress, (PortMappingResult MappingResult, string? Error, int? ExternalPort)> _status = [];
     private readonly TimeProvider _timeProvider;
 
     public NatPmpPortMapping()
-        : this(GetDefaultGateways, NatPmpPort, TimeProvider.System)
+        : this(GetDefaultGateways, NatPmpPort, TimeProvider.System, NullLoggerFactory.Instance)
+    {
+    }
+
+    public NatPmpPortMapping(ILoggerFactory loggerFactory)
+        : this(GetDefaultGateways, NatPmpPort, TimeProvider.System, loggerFactory)
     {
     }
 
     internal NatPmpPortMapping(Func<IEnumerable<IPAddress>> gatewayProvider, int natPmpPort)
-        : this(gatewayProvider, natPmpPort, TimeProvider.System)
+        : this(gatewayProvider, natPmpPort, TimeProvider.System, NullLoggerFactory.Instance)
     {
     }
 
     internal NatPmpPortMapping(Func<IEnumerable<IPAddress>> gatewayProvider, int natPmpPort, TimeProvider timeProvider)
+        : this(gatewayProvider, natPmpPort, timeProvider, NullLoggerFactory.Instance)
+    {
+    }
+
+    internal NatPmpPortMapping(Func<IEnumerable<IPAddress>> gatewayProvider, int natPmpPort, TimeProvider timeProvider, ILoggerFactory loggerFactory)
     {
         _gatewayProvider = gatewayProvider;
         _natPmpPort = natPmpPort;
         _timeProvider = timeProvider;
+        _logger = loggerFactory.CreateLogger<NatPmpPortMapping>();
     }
 
     public string Name => "NAT-PMP";
@@ -74,7 +86,7 @@ internal class NatPmpPortMapping : IPortMapper
         bool anySuccess = false;
         foreach (var gateway in _gateways)
         {
-            var (Success, ExternalPort) = await MapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _timeProvider, ct).ConfigureAwait(false);
+            var (Success, ExternalPort) = await MapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _timeProvider, _logger, ct).ConfigureAwait(false);
             if (Success)
             {
                 anySuccess = true;
@@ -123,16 +135,16 @@ internal class NatPmpPortMapping : IPortMapper
                 _status[g] = (PortMappingResult.Pending, null, null);
             }
 
-            Logger.LogInformation("NAT-PMP: Found gateway at {GatewayAddress}", g);
+            _logger.LogInformation("NAT-PMP: Found gateway at {GatewayAddress}", g);
         }
 
         if (_gateways.Count == 0)
         {
-            Logger.LogInformation("NAT-PMP: No default gateways found");
+            _logger.LogInformation("NAT-PMP: No default gateways found");
         }
         else if (_gateways.Count > 1)
         {
-            Logger.LogWarning("NAT-PMP: Multiple gateways detected ({Count}). This may indicate a VPN or double-NAT configuration which can cause connectivity issues", _gateways.Count);
+            _logger.LogWarning("NAT-PMP: Multiple gateways detected ({Count}). This may indicate a VPN or double-NAT configuration which can cause connectivity issues", _gateways.Count);
         }
     }
 
@@ -154,7 +166,7 @@ internal class NatPmpPortMapping : IPortMapper
         {
             foreach (var gateway in _gateways)
             {
-                await UnmapOnGatewayAsync(gateway, port, protocol, _natPmpPort, ct).ConfigureAwait(false);
+                await UnmapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _logger, ct).ConfigureAwait(false);
             }
         }
     }
@@ -169,7 +181,7 @@ internal class NatPmpPortMapping : IPortMapper
             .Distinct();
     }
 
-    private static async Task<(bool Success, int? ExternalPort)> MapOnGatewayAsync(IPAddress gateway, int port, string protocol, int natPmpPort, TimeProvider timeProvider, CancellationToken ct)
+    private static async Task<(bool Success, int? ExternalPort)> MapOnGatewayAsync(IPAddress gateway, int port, string protocol, int natPmpPort, TimeProvider timeProvider, ILogger logger, CancellationToken ct)
     {
         try
         {
@@ -205,10 +217,10 @@ internal class NatPmpPortMapping : IPortMapper
                     if (resultCode == 0)
                     {
                         int extPort = (response.Buffer[8] << 8) | response.Buffer[9];
-                        Logger.LogInformation("NAT-PMP: Mapped {Protocol} port {Internal}->{External} on {Gateway}", protocol, port, extPort, gateway);
+                        logger.LogInformation("NAT-PMP: Mapped {Protocol} port {Internal}->{External} on {Gateway}", protocol, port, extPort, gateway);
                         return (true, extPort);
                     }
-                    Logger.LogWarning("NAT-PMP: Gateway {Gateway} returned error code {Result}", gateway, resultCode);
+                    logger.LogWarning("NAT-PMP: Gateway {Gateway} returned error code {Result}", gateway, resultCode);
                 }
             }
         }
@@ -216,13 +228,13 @@ internal class NatPmpPortMapping : IPortMapper
         {
             if (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
-                Logger.LogDebug(ex, "NAT-PMP: Error mapping on {Gateway}", gateway);
+                logger.LogDebug(ex, "NAT-PMP: Error mapping on {Gateway}", gateway);
             }
         }
         return (false, null);
     }
 
-    private static async Task UnmapOnGatewayAsync(IPAddress gateway, int port, string protocol, int natPmpPort, CancellationToken ct)
+    private static async Task UnmapOnGatewayAsync(IPAddress gateway, int port, string protocol, int natPmpPort, ILogger logger, CancellationToken ct)
     {
         try
         {
@@ -238,7 +250,7 @@ internal class NatPmpPortMapping : IPortMapper
             // External port 0 and Lifetime 0
 
             await client.SendAsync(request, new IPEndPoint(gateway, natPmpPort), ct).ConfigureAwait(false);
-            Logger.LogInformation("NAT-PMP: Unmapped {Protocol} port {Port} on {Gateway}", protocol, port, gateway);
+            logger.LogInformation("NAT-PMP: Unmapped {Protocol} port {Port} on {Gateway}", protocol, port, gateway);
         }
         catch { /* Best effort on shutdown */ }
     }

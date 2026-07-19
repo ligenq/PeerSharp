@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
 using PeerSharp.Messages;
@@ -20,7 +21,7 @@ namespace PeerSharp.Internals.Extensions;
 internal class UtHashPiece : IUtHashPiece
 {
     public const string Name = "ut_hash_piece";
-    private readonly ILogger<UtHashPiece> _logger = TorrentLoggerFactory.CreateLogger<UtHashPiece>();
+    private readonly ILogger<UtHashPiece> _logger;
 
     /// <summary>
     /// Merkle tree for this torrent.
@@ -31,9 +32,15 @@ internal class UtHashPiece : IUtHashPiece
     private readonly Torrent _torrent;
 
     public UtHashPiece(IPeerCommunication peer, Torrent torrent)
+        : this(peer, torrent, NullLogger<UtHashPiece>.Instance)
+    {
+    }
+
+    internal UtHashPiece(IPeerCommunication peer, Torrent torrent, ILogger<UtHashPiece> logger)
     {
         _peer = peer;
         _torrent = torrent;
+        _logger = logger;
 
         // Initialize Merkle tree if this is a BEP 30 torrent
         if (torrent.InfoFile.Info.IsMerkle)

@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using Microsoft.Extensions.Logging;
 using PeerSharp.PieceWriter;
 
 namespace PeerSharp.PiecePicking;
@@ -10,16 +11,17 @@ namespace PeerSharp.PiecePicking;
 [ExcludeFromCodeCoverage]
 internal static class PiecePickingModule
 {
-    public static PiecePicker CreatePicker(IPiecePickerContext context, TimeProvider? timeProvider = null, Random? random = null)
+    public static PiecePicker CreatePicker(IPiecePickerContext context, TimeProvider? timeProvider = null, Random? random = null, ILoggerFactory? loggerFactory = null)
     {
         return new PiecePicker(
             context,
             timeProvider ?? TimeProvider.System,
-            random ?? Random.Shared);
+            random ?? Random.Shared,
+            loggerFactory ?? Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance);
     }
 
-    public static PieceChecker CreateChecker(IInternalFiles files, IPieceCheckerContext context, IProgress<PieceCheckProgress>? progress = null)
+    public static PieceChecker CreateChecker(IInternalFiles files, IPieceCheckerContext context, IProgress<PieceCheckProgress>? progress = null, ILoggerFactory? loggerFactory = null)
     {
-        return new PieceChecker(files, context, progress);
+        return new PieceChecker(files, context, progress, loggerFactory ?? Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance);
     }
 }

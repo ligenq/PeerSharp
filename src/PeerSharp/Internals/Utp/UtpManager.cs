@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Network;
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
@@ -11,7 +12,8 @@ internal class UtpManager : IUdpReceiver, IUtpManager
     // SACK extension type per BEP-29
     private const byte ExtensionSack = 1;
 
-    private readonly ILogger<UtpManager> _logger = TorrentLoggerFactory.CreateLogger<UtpManager>();
+    private readonly ILogger<UtpManager> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly ConcurrentDictionary<UtpSocketKey, UtpStream> _streamsByRecvId = new();
     private readonly ConcurrentDictionary<UtpSocketKey, UtpStream> _streamsBySendId = new();
     private readonly TimeProvider _timeProvider;
@@ -20,8 +22,15 @@ internal class UtpManager : IUdpReceiver, IUtpManager
     private ITimer? _timer;
 
     public UtpManager(TimeProvider timeProvider)
+        : this(timeProvider, NullLoggerFactory.Instance)
     {
+    }
+
+    public UtpManager(TimeProvider timeProvider, ILoggerFactory loggerFactory)
+    {
+        _loggerFactory = loggerFactory;
         _timeProvider = timeProvider;
+        _logger = _loggerFactory.CreateLogger<UtpManager>();
     }
 
     public IUdpListener? Listener { get; private set; }
@@ -80,7 +89,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
                 continue;
             }
 
-            var stream = new UtpStream(this, remote, id, sendId, _timeProvider);
+            var stream = new UtpStream(this, remote, id, sendId, _timeProvider, _loggerFactory);
             if (AddStream(remote, id, sendId, stream))
             {
                 return stream;
@@ -137,7 +146,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
             ushort sendId = header.ConnectionId;
             ushort recvId = (ushort)(header.ConnectionId + 1);
 
-            var newStream = new UtpStream(this, remote, recvId, sendId, _timeProvider);
+            var newStream = new UtpStream(this, remote, recvId, sendId, _timeProvider, _loggerFactory);
             if (AddStream(remote, recvId, sendId, newStream))
             {
                 newStream.ProcessPacketWithSack(header, data, headerSize, sackRanges, extensionBits, remote);

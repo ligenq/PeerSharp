@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 
 namespace PeerSharp.Streaming;
@@ -16,7 +17,8 @@ internal class StreamingController : IDisposable
         ".aac", ".m4a", ".opus"
     };
 
-    private readonly ILogger<StreamingController> _logger = TorrentLoggerFactory.CreateLogger<StreamingController>();
+    private readonly ILogger<StreamingController> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
 
@@ -31,8 +33,15 @@ internal class StreamingController : IDisposable
     private List<int>? _priorityPieces;
 
     public StreamingController(Torrent torrent, TimeProvider timeProvider)
+        : this(torrent, timeProvider, NullLoggerFactory.Instance)
+    {
+    }
+
+    internal StreamingController(Torrent torrent, TimeProvider timeProvider, ILoggerFactory loggerFactory)
     {
         _torrent = torrent;
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory.CreateLogger<StreamingController>();
         _timeProvider = timeProvider;
     }
 
@@ -118,7 +127,7 @@ internal class StreamingController : IDisposable
         }
 
         int internalIndex = _torrent.InfoFile.Info.MapVisibleIndexToInternal(fileIndex);
-        var stream = new TorrentStream(this, _torrent, internalIndex, _timeProvider);
+        var stream = new TorrentStream(this, _torrent, internalIndex, _timeProvider, _loggerFactory.CreateLogger<TorrentStream>());
         Interlocked.Exchange(ref _activeStream, stream);
         return stream;
     }

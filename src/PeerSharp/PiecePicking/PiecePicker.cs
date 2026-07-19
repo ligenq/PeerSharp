@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 
@@ -22,7 +23,7 @@ namespace PeerSharp.PiecePicking;
 internal class PiecePicker : IDisposable
 {
     private const int InitialRandomPieceThreshold = 4;
-    private static readonly ILogger<PiecePicker> _logger = TorrentLoggerFactory.CreateLogger<PiecePicker>();
+    private readonly ILogger<PiecePicker> _logger;
 
     private readonly IPiecePickerContext _context;
     private int[] _pieceAvailability;
@@ -40,11 +41,17 @@ internal class PiecePicker : IDisposable
     /// Creates a PiecePicker with full dependency injection.
     /// </summary>
     public PiecePicker(IPiecePickerContext context, TimeProvider timeProvider, Random random)
+        : this(context, timeProvider, random, NullLoggerFactory.Instance)
+    {
+    }
+
+    public PiecePicker(IPiecePickerContext context, TimeProvider timeProvider, Random random, ILoggerFactory loggerFactory)
     {
         _context = context;
         _pieceAvailability = new int[context.PieceCount];
         _timeProvider = timeProvider;
         _random = random;
+        _logger = loggerFactory.CreateLogger<PiecePicker>();
     }
 
     public void DecrementAvailability(int pieceIndex)

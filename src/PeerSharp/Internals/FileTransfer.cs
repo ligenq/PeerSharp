@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Peers;
@@ -314,7 +315,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     private const int MinSoftTimeoutMs = 3000;
 
     private const int SoftTimeoutRttMultiplier = 6;
-    private static readonly ILogger<FileTransfer> Logger = TorrentLoggerFactory.CreateLogger<FileTransfer>();
+    private readonly ILogger<FileTransfer> Logger;
 
     // Track background tasks for proper disposal
     private readonly List<Task> _backgroundTasks = new(3);
@@ -360,11 +361,17 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     // Track if background tasks have failed
     public FileTransfer(Torrent torrent, TimeProvider timeProvider)
+        : this(torrent, timeProvider, NullLoggerFactory.Instance)
+    {
+    }
+
+    internal FileTransfer(Torrent torrent, TimeProvider timeProvider, ILoggerFactory loggerFactory)
     {
         _torrent = torrent;
         _timeProvider = timeProvider;
-        _piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), _timeProvider, Random.Shared);
-        var pieceStateLogger = TorrentLoggerFactory.CreateLogger<PieceStateManager>();
+        Logger = loggerFactory.CreateLogger<FileTransfer>();
+        _piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), _timeProvider, Random.Shared, loggerFactory);
+        var pieceStateLogger = loggerFactory.CreateLogger<PieceStateManager>();
         _pieceStateManager = new PieceStateManager(_piecePicker, pieceStateLogger, MaxActivePieces);
 
         // Use bounded channels to prevent memory exhaustion under load
@@ -392,7 +399,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
         Logger.LogDebug("Piece processing queue initialized with capacity {MaxConcurrentPieces} (configurable via MaxConcurrentPieceProcessing)", maxConcurrentPieces);
 
-        var requestSchedulerLogger = TorrentLoggerFactory.CreateLogger<RequestScheduler>();
+        var requestSchedulerLogger = loggerFactory.CreateLogger<RequestScheduler>();
         _requestScheduler = new RequestScheduler(new RequestSchedulerOptions
         {
             Torrent = _torrent,
@@ -405,7 +412,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             GetSoftTimeoutMs = GetAdaptiveSoftTimeout
         }, _piecePicker);
 
-        var requestTimeoutLogger = TorrentLoggerFactory.CreateLogger<RequestTimeoutManager>();
+        var requestTimeoutLogger = loggerFactory.CreateLogger<RequestTimeoutManager>();
         _requestTimeoutManager = new RequestTimeoutManager(
             _requestTracker,
             RemoveBlockRequest,
@@ -413,14 +420,14 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             requestTimeoutLogger,
             MaxRequestAttempts);
 
-        var pieceCompletionLogger = TorrentLoggerFactory.CreateLogger<PieceCompletionHandler>();
+        var pieceCompletionLogger = loggerFactory.CreateLogger<PieceCompletionHandler>();
         _pieceCompletionHandler = new PieceCompletionHandler(
             _requestTracker,
             RemoveBlockRequest,
             _torrent,
             pieceCompletionLogger);
 
-        var blockProcessorLogger = TorrentLoggerFactory.CreateLogger<BlockProcessor>();
+        var blockProcessorLogger = loggerFactory.CreateLogger<BlockProcessor>();
         var requestCompletionTracker = new RequestCompletionTracker(
             _requestTracker,
             _timeProvider,
@@ -438,10 +445,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             Logger = blockProcessorLogger
         });
 
-        var progressReporterLogger = TorrentLoggerFactory.CreateLogger<TransferProgressReporter>();
+        var progressReporterLogger = loggerFactory.CreateLogger<TransferProgressReporter>();
         _progressReporter = new TransferProgressReporter(_torrent, progressReporterLogger);
 
-        var verificationWriterLogger = TorrentLoggerFactory.CreateLogger<PieceVerificationWriter>();
+        var verificationWriterLogger = loggerFactory.CreateLogger<PieceVerificationWriter>();
         _pieceVerificationWriter = new PieceVerificationWriter(
             _torrent,
             _timeProvider,
@@ -454,7 +461,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _hashSemaphore = new SemaphoreSlim(maxHash, maxHash);
         _writeSemaphore = new SemaphoreSlim(maxWrite, maxWrite);
 
-        var peerSchedulerLogger = TorrentLoggerFactory.CreateLogger<PeerEvaluationScheduler>();
+        var peerSchedulerLogger = loggerFactory.CreateLogger<PeerEvaluationScheduler>();
         _peerEvaluationScheduler = new PeerEvaluationScheduler(
             _peerEvaluationQueue,
             EvaluateNextRequestsInternalAsync,
@@ -462,7 +469,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
         _cts = new CancellationTokenSource();
 
-        var uploadQueueLogger = TorrentLoggerFactory.CreateLogger<UploadQueueManager>();
+        var uploadQueueLogger = loggerFactory.CreateLogger<UploadQueueManager>();
         _uploadQueueManager = new UploadQueueManager(ExecuteUploadItemAsync, uploadQueueLogger, _cts.Token);
 
         // Track background tasks for proper disposal and error handling

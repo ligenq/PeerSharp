@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Extensions;
@@ -21,7 +22,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     internal int _lastReportedDownloadSpeed;
     internal int _lastReportedUploadSpeed;
     private readonly IFileSelectionManager _fileSelectionManager;
-    private readonly ILogger<Torrent> _logger = TorrentLoggerFactory.CreateLogger<Torrent>();
+    private readonly ILogger<Torrent> _logger;
 
     // State
     private readonly SemaphoreSlim _stateLock = new(1, 1);
@@ -63,6 +64,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         InfoFile = infoFile;
         Settings = settings;
         Services = services;
+        _logger = services.LoggerFactory.CreateLogger<Torrent>();
         Configuration = new TorrentConfiguration(this, services.Bandwidth);
         _fileSelectionManager = fileSelectionManager;
         _fileSelectionManager.SetObserver(this);
@@ -267,9 +269,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         IConnectionGovernor connectionGovernor,
         TimeProvider? timeProvider = null,
         ITorrentEvents? events = null,
-        TorrentResumeData? resumeData = null)
+        TorrentResumeData? resumeData = null,
+        ILoggerFactory? loggerFactory = null)
     {
-        var factories = new TorrentFactories(peerFactory, trackerFactory);
+        var factories = new TorrentFactories(peerFactory, trackerFactory, loggerFactory ?? NullLoggerFactory.Instance);
         var services = new TorrentServices(bandwidth, alerts, fileHandleCache, connectionGovernor, geoIpService, factories, timeProvider ?? TimeProvider.System);
         var torrent = new Torrent(infoFile, settings, services, fileSelectionManager)
         {
@@ -329,7 +332,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             try
             {
                 await FilesInternal.InitializeAsync(GetFileSelectionSnapshot(), cancellationToken).ConfigureAwait(false);
-                await using var checker = new PieceChecker(FilesInternal, new TorrentPieceCheckerContext(this), progress);
+                await using var checker = new PieceChecker(FilesInternal, new TorrentPieceCheckerContext(this), progress, Services.LoggerFactory);
                 return await checker.CheckAllPiecesAsync(cancellationToken).ConfigureAwait(false);
             }
             finally
@@ -549,7 +552,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             {
                 await FilesInternal.DisposeAsync().ConfigureAwait(false);
             }
-            FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, path);
+            FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, path);
 
             _logger.LogInformation("Download path changed to: {Path}", path);
         }
@@ -635,7 +638,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
             if (Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
             {
-                WebSeedManager ??= new WebSeedManager(this, InfoFile.WebSeedUrls, Services.TimeProvider);
+                WebSeedManager ??= new WebSeedManager(this, InfoFile.WebSeedUrls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
                 WebSeedManager.Start();
                 _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", InfoFile.WebSeedUrls.Count);
             }
@@ -929,7 +932,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     {
         if (FileTransferInternal?.IsDisposed != false)
         {
-            FileTransferInternal = new FileTransfer(this, Services.TimeProvider);
+            FileTransferInternal = new FileTransfer(this, Services.TimeProvider, Services.LoggerFactory);
             _fileSelectionManager.SetBytesProvider(FileTransferInternal);
         }
     }
@@ -939,7 +942,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         if (FilesInternal == null || FilesInternal.IsDisposed)
         {
             string? downloadPath = !string.IsNullOrEmpty(LocalState.DownloadPath) ? LocalState.DownloadPath : null;
-            FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, downloadPath);
+            FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, downloadPath);
         }
     }
 
@@ -1067,11 +1070,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         // Create Files with persisted download path if available (from applied resume data)
         string? downloadPath = !string.IsNullOrEmpty(LocalState.DownloadPath) ? LocalState.DownloadPath : null;
 
-        FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, downloadPath);
-        Streaming = new StreamingController(this, Services.TimeProvider);
+        FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, downloadPath);
+        Streaming = new StreamingController(this, Services.TimeProvider, Services.LoggerFactory);
 
-        PeersInternal = new PeerManager(this, Services.GeoIp, Services.PeerFactory, Services.TimeProvider, Services.ConnectionGovernor);
-        TrackerManager = new TrackerManager(this, Services.TrackerFactory, Services.TimeProvider);
+        PeersInternal = new PeerManager(this, Services.GeoIp, Services.PeerFactory, Services.TimeProvider, Services.ConnectionGovernor, Services.LoggerFactory.CreateLogger<PeerManager>());
+        TrackerManager = new TrackerManager(this, Services.TrackerFactory, Services.TimeProvider, Services.LoggerFactory.CreateLogger<TrackerManager>());
 
         int piecesCount = 0;
         if (InfoFile.Info.PieceSize > 0)
@@ -1080,9 +1083,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
 
         Pieces = new PiecesProgress(piecesCount);
-        FileTransferInternal = new FileTransfer(this, Services.TimeProvider);
+        FileTransferInternal = new FileTransfer(this, Services.TimeProvider, Services.LoggerFactory);
         _fileSelectionManager.SetBytesProvider(FileTransferInternal);
-        SuperSeedManager = new SuperSeedManager(this);
+        SuperSeedManager = new SuperSeedManager(this, Services.LoggerFactory.CreateLogger<SuperSeedManager>());
 
         // BEP 30: Initialize Merkle tree for Merkle hash torrents
         if (InfoFile.Info.IsMerkle && InfoFile.Info.MerkleRootHash != null)
@@ -1112,7 +1115,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
         if (InfoFile.InfoBytes?.Length > 0)
         {
-            MetadataDownloadInternal = new MetadataDownload(this);
+            MetadataDownloadInternal = new MetadataDownload(this, Services.LoggerFactory);
             MetadataDownloadInternal.SetMetadata(InfoFile.InfoBytes);
         }
 

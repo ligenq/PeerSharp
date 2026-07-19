@@ -1,5 +1,7 @@
 using PeerSharp.Internals;
 using PeerSharp.Internals.Bandwidth;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace PeerSharp.PieceWriter;
 
@@ -19,11 +21,12 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
         bool enableReadAhead,
         long totalSize,
         IBandwidthManager bandwidth,
-        string torrentHash)
+        string torrentHash,
+        ILoggerFactory loggerFactory)
     {
         DownloadPath = path;
         var diskLimiter = new DiskBandwidthLimiter(bandwidth, torrentHash);
-        _storage = new Storage(metadata, path, new PathValidator(path), handleCache, enableSparseFiles, diskLimiter);
+        _storage = new Storage(metadata, path, new PathValidator(path), handleCache, enableSparseFiles, diskLimiter, loggerFactory);
         _blockCache = new BlockCache(cacheSizeBytes, readAheadBlocks, enableReadAhead, totalSize);
         _blockCache.Initialize(_storage);
     }
@@ -46,6 +49,11 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
     /// <param name="customPath">Optional custom download path. If null, uses settings default.</param>
     public static Files Create(Torrent torrent, IFileHandleCache handleCache, string? customPath = null)
     {
+        return Create(torrent, handleCache, NullLoggerFactory.Instance, customPath);
+    }
+
+    internal static Files Create(Torrent torrent, IFileHandleCache handleCache, ILoggerFactory loggerFactory, string? customPath = null)
+    {
         var path = ResolveDownloadPath(torrent, customPath);
         return new Files(
             torrent.InfoFile,
@@ -57,7 +65,8 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
             torrent.Settings.Files.EnableReadAhead,
             torrent.InfoFile.Info.FullSize,
             torrent.Bandwidth,
-            torrent.Hash.ToHexStringUpper());
+            torrent.Hash.ToHexStringUpper(),
+            loggerFactory);
     }
 
     public Task DeleteFilesAsync(CancellationToken ct = default)

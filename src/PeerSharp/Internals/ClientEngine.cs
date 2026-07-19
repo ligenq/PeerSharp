@@ -30,6 +30,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
     private readonly INetworkManager? _injectedNetworkManager;
     private readonly ILogger<ClientEngine> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private readonly bool _ownsNetworkManager;
     private readonly IPeerCommunicationFactory _peerFactory;
     private readonly TorrentRegistry _registry;
@@ -62,17 +63,18 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         _injectedNetworkManager = networkManager;
         _ownsNetworkManager = networkManager == null || ownsNetworkManager;
         _timeProvider = timeProvider;
+        _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<ClientEngine>();
         _registry = registry;
         _sessionManager = sessionManager;
 
-        _fileHandleCache = new FileHandleCache(); // Default 200 handles
+        _fileHandleCache = new FileHandleCache(loggerFactory: loggerFactory); // Default 200 handles
         _connectionGovernor = new ConnectionGovernor(settings);
 
         // Initialize dependencies
         _geoIp = new GeoIpService();
-        _peerFactory = new PeerCommunicationFactory();
-        _trackerFactory = new TrackerFactory();
+        _peerFactory = new PeerCommunicationFactory(loggerFactory);
+        _trackerFactory = new TrackerFactory(loggerFactory);
     }
 
     public IAlerts Alerts => _alerts;
@@ -131,9 +133,6 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         var timeProvider = TimeProvider.System;
         var settings = options.Settings ?? new Settings();
 
-        // Configure the static logger factory for components that need it
-        TorrentLoggerFactory.Configure(loggerFactory);
-
         // Create session persistence: use custom if provided, otherwise default if enabled
         ISessionPersistence? sessionPersistence = options.SessionPersistence;
         if (sessionPersistence == null && settings.Session.Enabled)
@@ -152,7 +151,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
         return new ClientEngine(
             settings,
-            new BandwidthManager(10, timeProvider),
+            new BandwidthManager(10, timeProvider, loggerFactory),
             new AlertsManager(timeProvider),
             null,
             true,
@@ -449,14 +448,11 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         var actualTimeProvider = timeProvider ?? TimeProvider.System;
         var actualLoggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
 
-        // Configure the static logger factory for components that need it
-        TorrentLoggerFactory.Configure(actualLoggerFactory);
-
         var registry = new TorrentRegistry();
 
         return new ClientEngine(
             settings ?? new Settings(),
-            bandwidth ?? new BandwidthManager(10, actualTimeProvider),
+            bandwidth ?? new BandwidthManager(10, actualTimeProvider, actualLoggerFactory),
             alerts ?? new AlertsManager(actualTimeProvider),
             networkManager,
             takeOwnership,
@@ -502,13 +498,13 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         }
 
         var fsm = new FileSelectionManager(metadata);
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, _alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData);
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, _alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
 
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
         torrent.Blocklist = Blocklist;
-        torrent.MetadataDownload = new MetadataDownload(torrent);
+        torrent.MetadataDownload = new MetadataDownload(torrent, _loggerFactory);
         torrent.MetadataDownload.Start();
         torrent.Events = WrapMagnetEvents(torrent.Events);
 
@@ -534,7 +530,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         _disposal.ThrowIfDisposed(this);
 
         var fsm = new FileSelectionManager(metadata);
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, _alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData);
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, _alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
 
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
@@ -740,20 +736,21 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             // Create NetworkManager and its dependencies
             // Note: socketFactory is now required for UdpListener
             var socketFactory = new UdpSocketFactory();
-            var udpListener = new UdpListener(Settings.Connection.UdpPort, socketFactory, Settings);
-            var utpManager = new UtpManager(_timeProvider);
+            var udpListener = new UdpListener(Settings.Connection.UdpPort, socketFactory, Settings, _loggerFactory);
+            var utpManager = new UtpManager(_timeProvider, _loggerFactory);
 
-            var dhtManager = new DhtManager(Settings.PeerId, udpListener, Settings, _timeProvider, this, new SystemDnsResolver());
-            var portListener = new PortListener(this);
-            var lsdManager = new LsdManager(Settings, this, _timeProvider, socketFactory);
-            var portMapperFactory = new PortMapperFactory();
+            var dhtManager = DhtManager.Create(Settings.PeerId, udpListener, Settings, _timeProvider, this, new SystemDnsResolver(), _loggerFactory);
+            var portListener = new PortListener(this, _loggerFactory);
+            var lsdManager = new LsdManager(Settings, this, _timeProvider, socketFactory, _loggerFactory);
+            var portMapperFactory = new PortMapperFactory(_loggerFactory);
 
             var networkServices = new NetworkServices(dhtManager, utpManager, portListener, udpListener, lsdManager, portMapperFactory);
 
-            _networkManager = new NetworkManager(Settings,
-    HandleUtpConnection,
-    networkServices
-);
+            _networkManager = new NetworkManager(
+                Settings,
+                HandleUtpConnection,
+                networkServices,
+                _loggerFactory);
         }
 
         await _networkManager.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -1165,7 +1162,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
                     continue;
                 }
 
-                var metadata = TorrentFileParser.Parse(bytes);
+                var metadata = TorrentFileParser.Parse(bytes, _loggerFactory);
                 if (!MagnetMatchesMetadata(magnetLink, metadata))
                 {
                     continue;

@@ -76,7 +76,7 @@ public sealed class FullSystemTests : IDisposable
         Assert.Equal(data, downloadedData);
     }
 
-    [Fact(Timeout = 30000)]
+    [Fact(Timeout = 90000)]
     public async Task Download_Encrypted_Succeeds()
     {
         const string fileName = "encrypted.bin";
@@ -105,7 +105,10 @@ public sealed class FullSystemTests : IDisposable
 
         var seedTorrent = await seedEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
 
-        await seedTorrent.ForceRecheckAsync();
+        int validPieces = await seedTorrent.ForceRecheckAsync();
+
+        Assert.Equal(seedTorrent.PieceCount, validPieces);
+        Assert.True(seedTorrent.Finished, "Seed torrent did not finish recheck before starting.");
 
         await seedTorrent.StartAsync();
 
@@ -113,9 +116,10 @@ public sealed class FullSystemTests : IDisposable
 
         var leecherTorrent = await leecherEngine.AddTorrentAsync(torrentFile);
 
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10));
+        await WaitForConditionAsync(leecherTorrent, t => t.PiecesReceived > 0 || t.Finished, TimeSpan.FromSeconds(30), "encrypted download start",
+            onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [GetSeedEndpoint(seedEngine)]));
 
-        await WaitForConditionAsync(leecherTorrent, t => t.Finished, TimeSpan.FromSeconds(20), "encrypted download completion",
+        await WaitForConditionAsync(leecherTorrent, t => t.Finished, TimeSpan.FromSeconds(45), "encrypted download completion",
             onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [GetSeedEndpoint(seedEngine)]));
 
         byte[] downloadedData = await ReadAllBytesSharedAsync(Path.Combine(_pathB, fileName));

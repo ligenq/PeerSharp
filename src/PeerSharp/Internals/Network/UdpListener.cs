@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
 using System.Buffers;
@@ -16,7 +17,7 @@ internal interface IUdpReceiver
 internal class UdpListener : IUdpListener
 {
     private readonly Lock _lock = new();
-    private readonly ILogger<UdpListener> _logger = TorrentLoggerFactory.CreateLogger<UdpListener>();
+    private readonly ILogger<UdpListener> _logger;
     private readonly int _port;
     private readonly Settings _settings;
     private readonly IUdpSocketFactory _socketFactory;
@@ -32,10 +33,16 @@ internal class UdpListener : IUdpListener
     private bool _running;
 
     public UdpListener(int port, IUdpSocketFactory socketFactory, Settings settings)
+        : this(port, socketFactory, settings, NullLoggerFactory.Instance)
+    {
+    }
+
+    public UdpListener(int port, IUdpSocketFactory socketFactory, Settings settings, ILoggerFactory loggerFactory)
     {
         _port = port;
         _socketFactory = socketFactory;
         _settings = settings;
+        _logger = loggerFactory.CreateLogger<UdpListener>();
     }
 
     public int Port => _client?.Client.LocalEndPoint is IPEndPoint ep ? ep.Port : _port;
@@ -102,7 +109,7 @@ internal class UdpListener : IUdpListener
             _logger.LogInformation("Starting UDP listener via SOCKS5 proxy {ProxyHost}:{ProxyPort}", proxy.Host, proxy.Port);
             try
             {
-                var result = await ProxyHelper.ConnectSocks5UdpAsync(proxy.Host, proxy.Port, proxy.Username, proxy.Password, _cts.Token).ConfigureAwait(false);
+                var result = await ProxyHelper.ConnectSocks5UdpAsync(proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, _cts.Token).ConfigureAwait(false);
                 _client = new UdpSocketAdapter(result.UdpClient, true);
                 _proxyUdpEndPoint = result.ProxyUdpEndPoint;
                 _proxyControlClient = result.ControlClient;

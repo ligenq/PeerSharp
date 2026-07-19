@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
@@ -9,13 +10,19 @@ namespace PeerSharp.Internals.Trackers;
 
 internal class HttpTracker : TrackerBase, IDisposable
 {
-    private readonly ILogger<HttpTracker> _logger = TorrentLoggerFactory.CreateLogger<HttpTracker>();
+    private readonly ILogger<HttpTracker> _logger;
     private readonly IHttpClientFactory _httpClientFactory = new HttpClientFactory();
     private AtomicDisposal _disposal = new();
     private IHttpClient? _testClient;
 
     public HttpTracker()
+        : this(NullLoggerFactory.Instance)
     {
+    }
+
+    public HttpTracker(ILoggerFactory loggerFactory)
+    {
+        _logger = loggerFactory.CreateLogger<HttpTracker>();
     }
 
     public override async Task AnnounceAsync(TrackerEvent evt, CancellationToken ct)

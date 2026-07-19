@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Utp;
 
@@ -17,7 +18,7 @@ internal sealed record NetworkServices(
 
 internal class NetworkManager : INetworkManager
 {
-    private readonly ILogger<NetworkManager> _logger = TorrentLoggerFactory.CreateLogger<NetworkManager>();
+    private readonly ILogger<NetworkManager> _logger;
     private readonly Action<UtpStream> _onUtpConnection;
     private readonly List<IPortMapper> _portMappers = [];
     private readonly NetworkServices _services;
@@ -30,13 +31,24 @@ internal class NetworkManager : INetworkManager
         Settings settings,
         Action<UtpStream> onUtpConnection,
         NetworkServices services)
+        : this(settings, onUtpConnection, services, NullLoggerFactory.Instance)
     {
+    }
+
+    public NetworkManager(
+        Settings settings,
+        Action<UtpStream> onUtpConnection,
+        NetworkServices services,
+        ILoggerFactory loggerFactory)
+    {
+        _logger = loggerFactory.CreateLogger<NetworkManager>();
         _settings = settings;
         _onUtpConnection = onUtpConnection;
         _services = services;
+        Blocklist = new IpBlocklist(loggerFactory);
     }
 
-    public IpBlocklist Blocklist { get; } = new();
+    public IpBlocklist Blocklist { get; }
     public int BoundTcpPort => PortListener.Port;
     public int BoundUdpPort => UdpListener.Port;
     public IDhtManager Dht => _services.Dht;

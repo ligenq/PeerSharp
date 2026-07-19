@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
@@ -35,6 +36,7 @@ internal sealed class TorrentServices
     public TorrentFactories Factories { get; }
     public IFileHandleCache FileHandleCache { get; }
     public IGeoIpService GeoIp { get; }
+    public ILoggerFactory LoggerFactory => Factories.LoggerFactory;
     public IPeerCommunicationFactory PeerFactory => Factories.Peer;
     public TimeProvider TimeProvider { get; }
     public ITrackerFactory TrackerFactory => Factories.Tracker;

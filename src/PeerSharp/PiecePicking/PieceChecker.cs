@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using PeerSharp.PieceWriter;
 using System.Security.Cryptography;
@@ -13,17 +14,23 @@ internal class PieceChecker : IAsyncDisposable
 {
     private readonly IPieceCheckerContext _context;
     private readonly IInternalFiles _files;
-    private readonly ILogger<PieceChecker> _logger = TorrentLoggerFactory.CreateLogger<PieceChecker>();
+    private readonly ILogger<PieceChecker> _logger;
     private readonly IProgress<PieceCheckProgress>? _progress;
     private CancellationTokenSource? _cts;
     private AtomicDisposal _disposal = new();
     private int _isRunning;
 
     public PieceChecker(IInternalFiles files, IPieceCheckerContext context, IProgress<PieceCheckProgress>? progress = null)
+        : this(files, context, progress, NullLoggerFactory.Instance)
+    {
+    }
+
+    public PieceChecker(IInternalFiles files, IPieceCheckerContext context, IProgress<PieceCheckProgress>? progress, ILoggerFactory loggerFactory)
     {
         _files = files;
         _context = context;
         _progress = progress;
+        _logger = loggerFactory.CreateLogger<PieceChecker>();
     }
 
     public bool IsRunning => Interlocked.CompareExchange(ref _isRunning, 0, 0) == 1;

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32.SafeHandles;
 using PeerSharp.Internals;
 
@@ -8,14 +9,25 @@ internal sealed class FileHandleCache : IFileHandleCache
 {
     private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Lock _lock = new();
-    private readonly ILogger<FileHandleCache> _logger = TorrentLoggerFactory.CreateLogger<FileHandleCache>();
+    private readonly ILogger<FileHandleCache> _logger;
     private readonly LinkedList<string> _lruList = new();
     private readonly int _maxOpenFiles;
     private AtomicDisposal _disposal = new();
 
     public FileHandleCache(int maxOpenFiles = 200)
+        : this(maxOpenFiles, NullLoggerFactory.Instance)
+    {
+    }
+
+    public FileHandleCache(ILoggerFactory loggerFactory)
+        : this(200, loggerFactory)
+    {
+    }
+
+    public FileHandleCache(int maxOpenFiles, ILoggerFactory loggerFactory)
     {
         _maxOpenFiles = Math.Max(32, maxOpenFiles);
+        _logger = loggerFactory.CreateLogger<FileHandleCache>();
         _logger.LogDebug("FileHandleCache initialized with limit of {MaxOpenFiles} handles", _maxOpenFiles);
     }
 

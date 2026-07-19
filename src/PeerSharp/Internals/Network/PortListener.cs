@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Peers;
 using System.Net;
@@ -8,7 +9,7 @@ namespace PeerSharp.Internals.Network;
 
 internal class PortListener : IPortListener
 {
-    private readonly ILogger<PortListener> _logger = TorrentLoggerFactory.CreateLogger<PortListener>();
+    private readonly ILogger<PortListener> _logger;
     private readonly ITorrentResolver _resolver;
     private readonly ITcpListenerFactory _tcpFactory;
     private CancellationTokenSource? _acceptCts;
@@ -17,14 +18,25 @@ internal class PortListener : IPortListener
     private ITcpListener? _tcpListener;
 
     public PortListener(ITorrentResolver resolver)
-        : this(resolver, new TcpListenerFactory())
+        : this(resolver, new TcpListenerFactory(), NullLoggerFactory.Instance)
+    {
+    }
+
+    public PortListener(ITorrentResolver resolver, ILoggerFactory loggerFactory)
+        : this(resolver, new TcpListenerFactory(), loggerFactory)
     {
     }
 
     internal PortListener(ITorrentResolver resolver, ITcpListenerFactory tcpFactory)
+        : this(resolver, tcpFactory, NullLoggerFactory.Instance)
+    {
+    }
+
+    internal PortListener(ITorrentResolver resolver, ITcpListenerFactory tcpFactory, ILoggerFactory loggerFactory)
     {
         _resolver = resolver;
         _tcpFactory = tcpFactory;
+        _logger = loggerFactory.CreateLogger<PortListener>();
     }
 
     public int Port { get; private set; }

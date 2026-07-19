@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Collections.Concurrent;
 
 namespace PeerSharp.Internals.Bandwidth;
@@ -40,7 +41,7 @@ internal class BandwidthManager : IBandwidthManager
     // To prevent duplicates in RR queue
     private readonly Lock _lock = new();
 
-    private readonly ILogger<BandwidthManager> _logger = TorrentLoggerFactory.CreateLogger<BandwidthManager>();
+    private readonly ILogger<BandwidthManager> _logger;
 
     // Fairness structures
     private readonly Dictionary<IBandwidthUser, Queue<BandwidthRequest>> _pendingRequests = [];
@@ -67,9 +68,15 @@ internal class BandwidthManager : IBandwidthManager
     /// 100ms (old default) = lower CPU, higher latency
     /// </summary>
     public BandwidthManager(int updateIntervalMs, TimeProvider timeProvider)
+        : this(updateIntervalMs, timeProvider, NullLoggerFactory.Instance)
+    {
+    }
+
+    public BandwidthManager(int updateIntervalMs, TimeProvider timeProvider, ILoggerFactory loggerFactory)
     {
         _updateIntervalMs = Math.Clamp(updateIntervalMs, 1, 100);
         _timeProvider = timeProvider;
+        _logger = loggerFactory.CreateLogger<BandwidthManager>();
         _channels[GlobalDownload] = new BandwidthChannel(_timeProvider);
         _channels[GlobalUpload] = new BandwidthChannel(_timeProvider);
         _channels[GlobalDiskRead] = new BandwidthChannel(_timeProvider);

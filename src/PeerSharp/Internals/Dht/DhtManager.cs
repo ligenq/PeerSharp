@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Network;
 using PeerSharp.BEncoding;
 using System.Buffers;
@@ -20,7 +21,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     /// <summary>BEP 5: "203 Protocol Error, such as a malformed packet, invalid arguments, or bad token".</summary>
     private const int DhtErrorProtocol = 203;
     private readonly IUdpListener _listener;
-    private readonly ILogger<DhtManager> _logger = TorrentLoggerFactory.CreateLogger<DhtManager>();
+    private readonly ILogger<DhtManager> _logger;
     private readonly ConcurrentDictionary<string, List<DhtPeer>> _peers = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentGetPeersQueries = new();
     private readonly Settings _settings;
@@ -50,6 +51,11 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     private RoutingTable _table;
 
     public DhtManager(InfoHash id, IUdpListener listener, Settings settings, TimeProvider timeProvider, IDhtCallback? callback = null, IDnsResolver? dnsResolver = null)
+        : this(id, listener, settings, timeProvider, callback, dnsResolver, NullLoggerFactory.Instance)
+    {
+    }
+
+    private DhtManager(InfoHash id, IUdpListener listener, Settings settings, TimeProvider timeProvider, IDhtCallback? callback, IDnsResolver? dnsResolver, ILoggerFactory loggerFactory)
     {
         NodeId = id;
         _listener = listener;
@@ -58,6 +64,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         _dnsResolver = dnsResolver!;
         _table = new RoutingTable(NodeId.ToArray(), _timeProvider);
         _callback = callback;
+        _logger = loggerFactory.CreateLogger<DhtManager>();
         _lastSecretRotation = _timeProvider.GetUtcNow();
         _listener.RegisterReceiver(this);
     }
@@ -98,6 +105,18 @@ internal class DhtManager : IUdpReceiver, IDhtManager
                 ExternalIpVotesRequired)
         };
         return manager;
+    }
+
+    public static DhtManager Create(
+        InfoHash id,
+        IUdpListener listener,
+        Settings settings,
+        TimeProvider timeProvider,
+        IDhtCallback? callback,
+        IDnsResolver? dnsResolver,
+        ILoggerFactory loggerFactory)
+    {
+        return new DhtManager(id, listener, settings, timeProvider, callback, dnsResolver, loggerFactory);
     }
 
     public void Announce(InfoHash infoHash, int port)
