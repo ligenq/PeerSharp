@@ -254,7 +254,8 @@ public class PeerManagerDuplicateConnectionTests
 
             await WaitForAsync(() =>
             {
-                var peer = ctx.Manager.GetConnectedPeers().SingleOrDefault();
+                var peers = ctx.Manager.GetConnectedPeers();
+                var peer = peers.Count == 1 ? peers[0] : null;
                 return peer != null &&
                     ctx.Manager.ConnectedCount == 1 &&
                     stream1.Disposed &&
