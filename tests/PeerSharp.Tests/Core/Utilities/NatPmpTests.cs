@@ -80,7 +80,9 @@ public sealed class NatPmpTests
         await mapper.UnmapAllAsync(CancellationToken.None);
 
         // Wait for the server to receive the unmap packet (fire-and-forget send).
-        await server.WaitForPacketAsync(TimeSpan.FromSeconds(5));
+        // Must wait for the packet *count*: the plain packet signal may already be set
+        // by the earlier map request, which makes the wait return before the unmap arrives.
+        await server.WaitForPacketCountAsync(packetsBefore + 1, TimeSpan.FromSeconds(5));
 
         Assert.True(received.Count > packetsBefore);
         var unmapPacket = received[packetsBefore];

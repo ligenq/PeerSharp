@@ -99,26 +99,23 @@ public class FileTransferTests
         var fileTransfer = new FileTransfer(torrent, _timeProvider);
 
         // Peer must support V2 and have the piece
-        var peer = new PeerCommunication(torrent, new MockPeerListener(), _timeProvider);
-        var setRemoteSupportsV2 = peer.GetType().GetProperty("RemoteSupportsV2", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-        setRemoteSupportsV2?.SetValue(peer, true);
-
-        var connectedField = peer.GetType().GetField("_connected", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        connectedField?.SetValue(peer, 1);
+        var peer = new PeerCommunication(torrent, new MockPeerListener(), _timeProvider)
+        {
+            RemoteSupportsV2 = true,
+            Connected = 1
+        };
 
         peer.PeerPieces.AddPiece(0);
         Assert.True(peer.PeerPieces.HasPiece(0)); // Ensure peer has piece
         Assert.True(peer.RemoteSupportsV2); // Ensure supports v2
 
-        var connectedPeersField = torrent.PeersInternal.GetType().GetField("_connectedPeers", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        var connectedPeers = connectedPeersField?.GetValue(torrent.PeersInternal) as System.Collections.Concurrent.ConcurrentDictionary<PeerCommunication, byte>;
-        Assert.NotNull(connectedPeers);
-        connectedPeers.TryAdd(peer, 0);
+        torrent.PeersInternal.AddConnectedPeerForTesting(peer);
 
         Assert.Single(torrent.PeersInternal.GetConnectedPeersInternal()); // Ensure connected peers contains the peer
 
         var requestMerkleHashes = typeof(FileTransfer).GetMethod("RequestMerkleHashes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        requestMerkleHashes?.Invoke(fileTransfer, [0]);
+        Assert.NotNull(requestMerkleHashes);
+        requestMerkleHashes.Invoke(fileTransfer, [0]);
 
         // Ensure a message was queued for the peer
         var queue = peer.GetType().GetField("_sendQueue", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(peer) as MessageQueue;

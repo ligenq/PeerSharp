@@ -24,23 +24,6 @@ public class PeerManagerUtpTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private class FakeGeoIpService : IGeoIpService
-    {
-        public bool Enabled { get; set; }
-        public string GetCountry(IPAddress ip)
-        {
-            return "US";
-        }
-
-        public void Load(Stream stream) { Enabled = true; }
-        public Task LoadAsync(Stream stream, CancellationToken cancellationToken = default)
-        {
-            Enabled = true;
-            return Task.CompletedTask;
-        }
-        public void Clear() { Enabled = false; }
-    }
-
     private class FakePeerCommunicationFactory : IPeerCommunicationFactory
     {
         public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
@@ -64,34 +47,6 @@ public class PeerManagerUtpTests
         }
     }
 
-    private class FakeConnectionGovernor : IConnectionGovernor
-    {
-        public int ActiveConnections => 0;
-        public int PendingConnections => 0;
-        public static bool CanAcceptConnection()
-        {
-            return true;
-        }
-
-        public static bool CanInitiateConnection()
-        {
-            return true;
-        }
-
-        public bool TryAcquireConnectionSlot()
-        {
-            return true;
-        }
-
-        public bool TryAcquirePendingSlot()
-        {
-            return true;
-        }
-
-        public void ReleaseConnectionSlot() { }
-        public void ReleasePendingSlot() { }
-    }
-
     private class FakePeerListener : IPeerListener
     {
         public Task HandshakeFinishedAsync(IPeerCommunication peer) => Task.CompletedTask;
@@ -109,7 +64,7 @@ public class PeerManagerUtpTests
         var torrent = TorrentTestUtility.CreateMinimal();
         torrent.Settings.Connection = settings;
         torrent.UtpManager = new FakeUtpManager();
-        return new PeerManager(torrent, new FakeGeoIpService(), new FakePeerCommunicationFactory(), timeProvider, new FakeConnectionGovernor());
+        return new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new FakePeerCommunicationFactory(), timeProvider, new TorrentTestUtility.MockConnectionGovernor());
     }
 
     private static List<string> GetTransportPlan(PeerManager manager, ConnectionSettings settings, PeerHistory? history)
@@ -128,10 +83,7 @@ public class PeerManagerUtpTests
             UtpStream = new UtpStream(new FakeUtpManager(), new IPEndPoint(IPAddress.Loopback, 1), 1, 2, timeProvider)
         };
 
-        var field = typeof(PeerManager).GetField("_connectedPeers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        Assert.NotNull(field);
-        var dict = (ConcurrentDictionary<PeerCommunication, byte>)field!.GetValue(manager)!;
-        dict.TryAdd(peer, 0);
+        manager.AddConnectedPeerForTesting(peer);
     }
 
     [Fact]
@@ -228,9 +180,7 @@ public class PeerManagerUtpTests
         var manager = CreateManager(settings, timeProvider);
         var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = true };
 
-        var penaltyField = typeof(PeerManager).GetField("_globalUtpPenaltyUntil", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        Assert.NotNull(penaltyField);
-        penaltyField!.SetValue(manager, timeProvider.GetUtcNow().AddMinutes(1));
+        manager.SetGlobalUtpPenaltyForTesting(timeProvider.GetUtcNow().AddMinutes(1));
 
         var plan = GetTransportPlan(manager, settings, history);
 
@@ -311,7 +261,7 @@ public class PeerManagerUtpTests
         var torrent = TorrentTestUtility.CreateMinimal();
         torrent.Settings.Connection = new ConnectionSettings { EnableUtpIn = true };
         torrent.UtpManager = new FakeUtpManager();
-        var manager = new PeerManager(torrent, new FakeGeoIpService(), new FakePeerCommunicationFactory(), timeProvider, new FakeConnectionGovernor());
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new FakePeerCommunicationFactory(), timeProvider, new TorrentTestUtility.MockConnectionGovernor());
 
         var stream = new NeverCompleteStream();
         var handshake = new byte[68];

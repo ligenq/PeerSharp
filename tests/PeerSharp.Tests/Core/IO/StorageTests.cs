@@ -158,10 +158,15 @@ public class StorageTests : IAsyncLifetime
     [Fact]
     public async Task InitAsync_Fails_ResetsInitializationState()
     {
-        const string invalidRoot = "||invalid_root||";
+        // Use an existing *file* as the storage root: creating a directory over it fails
+        // deterministically on every platform (unlike "invalid" characters, which are
+        // perfectly legal in Linux paths).
+        string fileAsRoot = Path.Combine(_tempDir, "root-is-a-file");
+        await File.WriteAllTextAsync(fileAsRoot, "x");
+
         using var handleCache = new FileHandleCache();
-        var validator = new PathValidator(invalidRoot);
-        var storage = new Storage(_metadata, invalidRoot, validator, handleCache, enableSparseFiles: false);
+        var validator = new PathValidator(fileAsRoot);
+        var storage = new Storage(_metadata, fileAsRoot, validator, handleCache, enableSparseFiles: false);
 
         await Assert.ThrowsAnyAsync<Exception>(() => storage.InitAsync());
 

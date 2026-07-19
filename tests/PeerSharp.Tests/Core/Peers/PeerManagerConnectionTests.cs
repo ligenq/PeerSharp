@@ -42,55 +42,23 @@ public class PeerManagerConnectionTests
             => throw new NotImplementedException();
     }
 
-    private class MockGovernor : IConnectionGovernor
-    {
-        public int ActiveConnections => 0;
-        public int PendingConnections => 0;
-        public bool TryAcquireConnectionSlot() => true;
-        public bool TryAcquirePendingSlot() => true;
-        public void ReleaseConnectionSlot() { }
-        public void ReleasePendingSlot() { }
-    }
-
-    private class MockGeoIp : IGeoIpService
-    {
-        public bool Enabled { get; set; }
-        public string GetCountry(IPAddress ip) => "US";
-        public void Load(Stream stream) { }
-        public Task LoadAsync(Stream stream, CancellationToken cancellationToken) => Task.CompletedTask;
-        public void Clear() { }
-    }
-
     [Fact]
     public async Task ConnectTo_QueuesAndProcessesConnection()
     {
         var torrent = TorrentTestUtility.CreateMinimal();
         var timeProvider = new FakeTimeProvider();
         var factory = new MockPeerFactory();
-        var governor = new MockGovernor();
+        var governor = new TorrentTestUtility.MockConnectionGovernor();
 
-        var manager = new PeerManager(torrent, new MockGeoIp(), factory, timeProvider, governor);
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), factory, timeProvider, governor);
         await manager.StartAsync();
 
         // Act
         manager.ConnectTo("127.0.0.1", 12345);
 
-        // Wait for async processing (pump queue)
-        // Since ProcessConnectionQueueAsync runs on Task pool, we wait briefly or poll
-        int attempts = 0;
-        while (factory.LastCreated == null && attempts++ < 100)
-        {
-            await Task.Delay(10);
-        }
-
-        Assert.NotNull(factory.LastCreated);
-
-        // Wait for connect call
-        attempts = 0;
-        while (factory.LastCreated.ConnectCalls == 0 && attempts++ < 100)
-        {
-            await Task.Delay(10);
-        }
+        // Wait for async processing (the connection queue runs on the task pool)
+        await TorrentTestUtility.WaitUntilAsync(() => factory.LastCreated != null, because: "peer to be created");
+        await TorrentTestUtility.WaitUntilAsync(() => factory.LastCreated.ConnectCalls > 0, because: "ConnectAsync to be called");
 
         Assert.Equal(1, factory.LastCreated.ConnectCalls);
 
@@ -105,7 +73,7 @@ public class PeerManagerConnectionTests
 
         var timeProvider = new FakeTimeProvider();
         var factory = new MockPeerFactory();
-        var manager = new PeerManager(torrent, new MockGeoIp(), factory, timeProvider, new MockGovernor());
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), factory, timeProvider, new TorrentTestUtility.MockConnectionGovernor());
         await manager.StartAsync();
 
         // Queue 2 connections
@@ -113,18 +81,12 @@ public class PeerManagerConnectionTests
         manager.ConnectTo("127.0.0.1", 1002);
 
         // First should happen immediately
-        while (factory.LastCreated == null)
-        {
-            await Task.Delay(5);
-        }
+        await TorrentTestUtility.WaitUntilAsync(() => factory.LastCreated != null, because: "first peer to be created");
 
         var first = factory.LastCreated;
 
         // Wait for first connect
-        while (first.ConnectCalls == 0)
-        {
-            await Task.Delay(5);
-        }
+        await TorrentTestUtility.WaitUntilAsync(() => first.ConnectCalls > 0, because: "first ConnectAsync call");
 
         // Reset factory tracker to detect second
         // Since factory.LastCreated is overwritten, we just check if it changes
@@ -152,10 +114,7 @@ public class PeerManagerConnectionTests
         timeProvider.Advance(TimeSpan.FromSeconds(1.1));
 
         // Now second should proceed
-        while (factory.LastCreated == peer1)
-        {
-            await Task.Delay(5);
-        }
+        await TorrentTestUtility.WaitUntilAsync(() => !ReferenceEquals(factory.LastCreated, peer1), because: "second peer to be created");
 
         Assert.NotSame(peer1, factory.LastCreated);
         Assert.Equal(1, factory.LastCreated.ConnectCalls);

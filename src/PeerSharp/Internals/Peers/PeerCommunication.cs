@@ -454,7 +454,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// <summary>
     /// BEP-52 BitTorrent v2 support. Indicates peer can handle v2 info hashes and Merkle trees.
     /// </summary>
-    public bool RemoteSupportsV2 { get; private set; }
+    public bool RemoteSupportsV2 { get; internal set; }
 
     public int SmoothedDownloadSpeed => Volatile.Read(ref _smoothedDownloadSpeed);
 
@@ -493,6 +493,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S2292:Trivial properties should be auto-implemented", Justification = "Backing field used with Interlocked")]
     internal int Connected { get => _connected; set => _connected = value; }
+
+    /// <summary>Test hook: overrides the smoothed download speed used by choke/transport decisions.</summary>
+    internal void SetSmoothedDownloadSpeedForTesting(int speed) => Volatile.Write(ref _smoothedDownloadSpeed, speed);
+
+    /// <summary>Test hook: overrides the remote peer's interested state.</summary>
+    internal void SetPeerInterestedForTesting(bool interested) => Volatile.Write(ref _peerInterested, interested ? 1 : 0);
 
     /// <summary>
     /// True if the local side initiated this connection (outgoing dial). Used by PeerManager
@@ -581,7 +587,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         bool wasConnected = Interlocked.Exchange(ref _connected, 0) == 1;
 
-        if (wasConnected)
+        // Capturing a stack trace is expensive; only pay for it when Debug logging is actually on
+        if (wasConnected && _logger.IsEnabled(LogLevel.Debug))
         {
             var stack = new StackTrace();
             _logger.LogDebug("Closing connection to {PeerName}. wasConnected=true. Trace: {Trace}", Name, stack.ToString());

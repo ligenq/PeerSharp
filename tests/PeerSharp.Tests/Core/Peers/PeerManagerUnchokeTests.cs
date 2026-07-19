@@ -3,7 +3,6 @@ using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Messages;
-using System.Reflection;
 
 namespace PeerSharp.Tests.Core.Peers;
 
@@ -14,10 +13,8 @@ public class PeerManagerUnchokeTests
         public MockPeer(Torrent torrent, TimeProvider? timeProvider = null)
             : base(torrent, new MockListener(), timeProvider ?? TimeProvider.System) { }
 
-        public void SetDownloadSpeed(int speed) => typeof(PeerCommunication).GetField("_smoothedDownloadSpeed", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(this, speed);
-        // Keep old name as an alias so the existing test compiles unchanged.
-        public void SetSpeed(int dl) => SetDownloadSpeed(dl);
-        public void SetInterested(bool val) => typeof(PeerCommunication).GetField("_peerInterested", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(this, val ? 1 : 0);
+        public void SetSpeed(int dl) => SetSmoothedDownloadSpeedForTesting(dl);
+        public void SetInterested(bool val) => SetPeerInterestedForTesting(val);
     }
 
     private class MockListener : IPeerListener
@@ -49,20 +46,15 @@ public class PeerManagerUnchokeTests
         var p2 = new MockPeer(torrent); p2.SetSpeed(200); p2.SetInterested(true); p2.Choke();
         var p3 = new MockPeer(torrent); p3.SetSpeed(50); p3.SetInterested(false); p3.Choke(); // Not interested
 
-        // Add to connected peers via reflection
-        var dict = typeof(PeerManager).GetField("_connectedPeers", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(manager) as System.Collections.Concurrent.ConcurrentDictionary<PeerCommunication, byte>;
-        dict!.TryAdd(p1, 0);
-        dict.TryAdd(p2, 0);
-        dict.TryAdd(p3, 0);
-        typeof(PeerManager).GetField("_connectedPeersCount", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(manager, 3);
+        manager.AddConnectedPeerForTesting(p1);
+        manager.AddConnectedPeerForTesting(p2);
+        manager.AddConnectedPeerForTesting(p3);
 
         // Prevent optimistic unchoke
-        typeof(PeerManager).GetField("_lastOptimisticChange", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(manager, TimeProvider.System.GetUtcNow());
+        manager.SetOptimisticPeerForTesting(null, TimeProvider.System.GetUtcNow());
 
         // Act
-        typeof(PeerManager).GetMethod("UnchokePeers", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(manager, null);
+        manager.UnchokePeers();
 
         // Assert: both interested peers unchoked, non-interested stays choked
         Assert.False(p2.AmChoking, "Fastest peer should be unchoked");
@@ -104,19 +96,14 @@ public class PeerManagerUnchokeTests
 
         var manager = new PeerManager(torrent, null!, null!, TimeProvider.System, null!);
 
-        var dict = typeof(PeerManager)
-            .GetField("_connectedPeers", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(manager) as System.Collections.Concurrent.ConcurrentDictionary<PeerCommunication, byte>;
-        dict!.TryAdd(pOld, 0);
-        dict.TryAdd(pFast, 0);
-        dict.TryAdd(pWaiting, 0);
-        typeof(PeerManager).GetField("_connectedPeersCount", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(manager, 3);
+        manager.AddConnectedPeerForTesting(pOld);
+        manager.AddConnectedPeerForTesting(pFast);
+        manager.AddConnectedPeerForTesting(pWaiting);
 
         // Pin the optimistic unchoke slot to pWaiting so the test is deterministic.
-        typeof(PeerManager).GetField("_optimisticPeer", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(manager, pWaiting);
-        typeof(PeerManager).GetField("_lastOptimisticChange", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(manager, now);
+        manager.SetOptimisticPeerForTesting(pWaiting, now);
 
-        typeof(PeerManager).GetMethod("UnchokePeers", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(manager, null);
+        manager.UnchokePeers();
 
         Assert.False(pFast.AmChoking, "pFast (within quota, fastest) should remain unchoked");
         Assert.False(pWaiting.AmChoking, "pWaiting should be unchoked into the slot freed by pOld");

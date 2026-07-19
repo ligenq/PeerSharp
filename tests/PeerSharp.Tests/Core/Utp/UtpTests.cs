@@ -87,7 +87,8 @@ public class UtpTests
         await connectionTcs.Task;
 
         var cwndField = typeof(UtpStream).GetField("_cwnd", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        cwndField?.SetValue(clientStream, 1000.0); // 1000 bytes window
+        Assert.NotNull(cwndField);
+        cwndField.SetValue(clientStream, 1000.0); // 1000 bytes window
 
         // Stop the server from receiving packets and sending ACKs
         await listener2.StopAsync();
@@ -132,7 +133,8 @@ public class UtpTests
         await connectionTcs.Task;
 
         var cwndField = typeof(UtpStream).GetField("_cwnd", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        cwndField?.SetValue(clientStream, 1000.0);
+        Assert.NotNull(cwndField);
+        cwndField.SetValue(clientStream, 1000.0);
 
         await listener2.StopAsync();
 

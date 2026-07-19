@@ -48,8 +48,19 @@ public class PathValidatorTests
     [Fact]
     public void ValidatePath_InvalidCharacters_ReturnsError()
     {
-        // Characters like < > : " | ? * are invalid on Windows
-        Assert.Equal(PathValidationError.InvalidCharacters, _validator.ValidatePath("test<abc>.txt").Error);
+        // The validator uses Path.GetInvalidFileNameChars(), which is platform-specific:
+        // < > : " | ? * are invalid on Windows but perfectly legal on Linux/macOS.
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(PathValidationError.InvalidCharacters, _validator.ValidatePath("test<abc>.txt").Error);
+        }
+        else
+        {
+            Assert.Equal(PathValidationError.None, _validator.ValidatePath("test<abc>.txt").Error);
+        }
+
+        // The null character is invalid on every platform
+        Assert.Equal(PathValidationError.InvalidCharacters, _validator.ValidatePath("test\0.txt").Error);
     }
 
     [Fact]

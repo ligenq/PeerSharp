@@ -716,7 +716,7 @@ public class PeerManagerTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
         torrent.Settings.Connection.Encryption = Encryption.Refuse;
         var governor = new FakeConnectionGovernor();
-        var manager = new PeerManager(torrent, new FakeGeoIpService(), new RealPeerFactory(), TimeProvider.System, governor);
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new RealPeerFactory(), TimeProvider.System, governor);
         var ctx = new PeerManagerContext(torrent, manager, governor, path);
 
         torrent.Pieces.AddPiece(0); // 1 of 2 pieces
@@ -797,7 +797,7 @@ public class PeerManagerTests
 
         // Use a governor that denies slots
         var denyGovernor = new DenyAllGovernor();
-        var manager = new PeerManager(ctx.Torrent, new FakeGeoIpService(), new RealPeerFactory(), TimeProvider.System, denyGovernor);
+        var manager = new PeerManager(ctx.Torrent, new TorrentTestUtility.MockGeoIpService(), new RealPeerFactory(), TimeProvider.System, denyGovernor);
 
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -878,7 +878,7 @@ public class PeerManagerTests
         torrent.Settings.Connection.Encryption = Encryption.Refuse;
 
         var governor = new FakeConnectionGovernor();
-        var manager = new PeerManager(torrent, new FakeGeoIpService(), new RealPeerFactory(), TimeProvider.System, governor);
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new RealPeerFactory(), TimeProvider.System, governor);
 
         return new PeerManagerContext(torrent, manager, governor, path);
     }
@@ -945,19 +945,6 @@ public class PeerManagerTests
             throw new InvalidOperationException($"Field '{fieldName}' not found on {target.GetType().Name}");
         }
         return (T)field.GetValue(target)!;
-    }
-
-    private sealed class FakeGeoIpService : IGeoIpService
-    {
-        public bool Enabled { get; set; }
-        public string GetCountry(IPAddress ip) => "US";
-        public void Load(Stream stream) { Enabled = true; }
-        public Task LoadAsync(Stream stream, CancellationToken cancellationToken = default)
-        {
-            Enabled = true;
-            return Task.CompletedTask;
-        }
-        public void Clear() { Enabled = false; }
     }
 
     private sealed class TestPeerListener : IPeerListener

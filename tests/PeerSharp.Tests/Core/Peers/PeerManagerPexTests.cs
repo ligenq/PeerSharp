@@ -2,7 +2,6 @@ using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Messages;
-using System.Reflection;
 using System.Net;
 
 namespace PeerSharp.Tests.Core.Peers;
@@ -49,20 +48,21 @@ public class PeerManagerPexTests
         var manager = new PeerManager(torrent, null!, null!, TimeProvider.System, null!);
 
         // Setup 2 peers
-        var p1 = new MockPeer(torrent);
-        p1.SetRemoteEndPoint(new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1000));
+        var p1 = new MockPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1000)
+        };
 
-        var p2 = new MockPeer(torrent);
-        p2.SetRemoteEndPoint(new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000));
+        var p2 = new MockPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000)
+        };
 
-        // Add to connected
-        var dict = typeof(PeerManager).GetField("_connectedPeers", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(manager) as System.Collections.Concurrent.ConcurrentDictionary<PeerCommunication, byte>;
-        dict!.TryAdd(p1, 0);
-        dict.TryAdd(p2, 0);
+        manager.AddConnectedPeerForTesting(p1);
+        manager.AddConnectedPeerForTesting(p2);
 
         // Act
-        typeof(PeerManager).GetMethod("BroadcastPex", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(manager, null);
+        manager.BroadcastPex();
 
         // Assert
         // P1 should receive P2
@@ -81,22 +81,14 @@ public class PeerManagerPexTests
         torrent.InfoFile.Info.IsPrivate = true; // Private!
 
         var manager = new PeerManager(torrent, null!, null!, TimeProvider.System, null!);
-        var p1 = new MockPeer(torrent); p1.SetRemoteEndPoint(new IPEndPoint(IPAddress.Loopback, 1));
-        var dict = typeof(PeerManager).GetField("_connectedPeers", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(manager) as System.Collections.Concurrent.ConcurrentDictionary<PeerCommunication, byte>;
-        dict!.TryAdd(p1, 0);
+        var p1 = new MockPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 1)
+        };
+        manager.AddConnectedPeerForTesting(p1);
 
-        typeof(PeerManager).GetMethod("BroadcastPex", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(manager, null);
+        manager.BroadcastPex();
 
         Assert.Empty(p1.Pex.Updates);
-    }
-}
-
-// Extension to set private field for test
-internal static class PeerExtensions
-{
-    public static void SetRemoteEndPoint(this PeerCommunication peer, IPEndPoint ep)
-    {
-        peer.GetType().GetProperty("RemoteEndPoint")!.SetValue(peer, ep);
     }
 }

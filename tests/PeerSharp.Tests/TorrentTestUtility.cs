@@ -13,6 +13,26 @@ namespace PeerSharp.Tests;
 
 internal static class TorrentTestUtility
 {
+    /// <summary>
+    /// Polls until <paramref name="condition"/> becomes true, failing the test after
+    /// <paramref name="timeoutMs"/> so a broken condition can never hang the test run.
+    /// </summary>
+    public static async Task WaitUntilAsync(Func<bool> condition, int timeoutMs = 5000, string? because = null)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(10);
+        }
+
+        Assert.Fail($"Timed out after {timeoutMs}ms waiting for condition{(because == null ? "" : $": {because}")}");
+    }
+
     internal class MockBandwidthManager : IBandwidthManager
     {
         private readonly Dictionary<string, BandwidthChannel> _channels = [];
