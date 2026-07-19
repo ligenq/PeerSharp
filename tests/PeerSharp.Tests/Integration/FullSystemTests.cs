@@ -116,6 +116,8 @@ public sealed class FullSystemTests : IDisposable
 
         var leecherTorrent = await leecherEngine.AddTorrentAsync(torrentFile);
 
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10));
+
         await WaitForConditionAsync(leecherTorrent, t => t.PiecesReceived > 0 || t.Finished, TimeSpan.FromSeconds(30), "encrypted download start",
             onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [GetSeedEndpoint(seedEngine)]));
 
