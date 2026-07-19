@@ -15,7 +15,7 @@ public class JsonContextTests
             Downloaded = 123456789UL,
             DownloadPath = "C:\\Downloads\\Test",
             LastStateTime = 1_700_000_100L,
-            Pieces = new byte[] { 0b11001010, 0b01010101 },
+            Pieces = [0b11001010, 0b01010101],
             SeedTimeSeconds = 3600L,
             Started = true,
             Uploaded = 987654321UL,
@@ -27,7 +27,7 @@ public class JsonContextTests
             ],
             UnfinishedPieces =
             [
-                new() { Index = 5, Blocks = new[] { true, false, true }, Data = new byte[] { 1, 2, 3 } }
+                new() { Index = 5, Blocks = [true, false, true], Data = [1, 2, 3] }
             ],
             Info = new TorrentStateData.InfoData
             {

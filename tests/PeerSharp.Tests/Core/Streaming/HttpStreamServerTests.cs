@@ -37,7 +37,7 @@ public class HttpStreamServerTests
     [Fact(Timeout = 30000)]
     public async Task Head_Stream_ReturnsHeadersWithoutBody()
     {
-        var handler = new HttpStreamRequestHandler(new FakeTorrent("audio.flac", new byte[] { 1, 2, 3, 4 }), 0);
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("audio.flac", [1, 2, 3, 4]), 0);
         var response = new FakeResponse();
 
         await handler.ProcessAsync(new FakeRequest("HEAD", "/stream"), response);
@@ -51,7 +51,7 @@ public class HttpStreamServerTests
     [Fact(Timeout = 30000)]
     public async Task Get_InvalidPath_ReturnsNotFound()
     {
-        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", new byte[] { 1 }), 0);
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0);
         var response = new FakeResponse();
 
         await handler.ProcessAsync(new FakeRequest("GET", "/missing"), response);
@@ -62,7 +62,7 @@ public class HttpStreamServerTests
     [Fact(Timeout = 30000)]
     public async Task Get_InvalidFileIndex_ReturnsNotFound()
     {
-        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", new byte[] { 1 }), 1);
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 1);
         var response = new FakeResponse();
 
         await handler.ProcessAsync(new FakeRequest("GET", "/stream"), response);
@@ -73,7 +73,7 @@ public class HttpStreamServerTests
     [Fact(Timeout = 30000)]
     public async Task Get_InvalidRange_ReturnsRangeNotSatisfiable()
     {
-        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.bin", new byte[] { 1, 2, 3, 4 }), 0);
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.bin", [1, 2, 3, 4]), 0);
         var response = new FakeResponse();
 
         await handler.ProcessAsync(new FakeRequest("GET", "/stream", "bytes=4-9"), response);
@@ -217,7 +217,7 @@ public class HttpStreamServerTests
         public FakeTorrent(string path, byte[] data)
         {
             _data = data;
-            _files = new[] { new TorrentFileInfo(path, data.Length, 0, data.Length) };
+            _files = [new TorrentFileInfo(path, data.Length, 0, data.Length)];
         }
 
         public long DataLeft => 0;
@@ -253,7 +253,7 @@ public class HttpStreamServerTests
         public bool Started => true;
         public TorrentState State => TorrentState.Active;
         public DateTimeOffset StateTimestamp => DateTimeOffset.UtcNow;
-        public IReadOnlyList<int> StreamableFileIndices => new[] { 0 };
+        public IReadOnlyList<int> StreamableFileIndices => [0];
         public DateTimeOffset TimeAdded => DateTimeOffset.UtcNow;
         public long TotalSize => _data.Length;
         public ITrackers Trackers => throw new NotImplementedException();
@@ -266,7 +266,7 @@ public class HttpStreamServerTests
         public IReadOnlyList<FileSelection> GetAllFileSelections() => Array.Empty<FileSelection>();
         public TorrentFileInfo GetFileInfo(int fileIndex) => _files[fileIndex];
         public FileSelection GetFileSelection(int fileIndex) => throw new NotImplementedException();
-        public byte[] GetPieceBitfield() => new byte[] { 0x80 };
+        public byte[] GetPieceBitfield() => [0x80];
         public TorrentResumeData GetResumeData() => throw new NotImplementedException();
         public Task<Stream> OpenStreamAsync(int fileIndex, CancellationToken cancellationToken = default) =>
             Task.FromResult<Stream>(new MemoryStream(_data, writable: false));

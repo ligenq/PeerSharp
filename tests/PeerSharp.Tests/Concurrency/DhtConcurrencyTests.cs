@@ -97,7 +97,7 @@ public class DhtConcurrencyTests
 
                     // Build response packet
                     var dict = new BDict();
-                    dict.Dict["t"] = new BString(new byte[] { 0, 0 }); // transaction id
+                    dict.Dict["t"] = new BString([0, 0]); // transaction id
                     dict.Dict["y"] = new BString("r"u8.ToArray()); // response
                     dict.Dict["r"] = new BDict();
                     ((BDict)dict.Dict["r"]).Dict["id"] = new BString(id);

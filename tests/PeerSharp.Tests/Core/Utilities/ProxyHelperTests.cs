@@ -85,7 +85,7 @@ public class ProxyHelperTests
     [Fact]
     public void Socks5Udp_RoundTrip_IPv4()
     {
-        byte[] payload = new byte[] { 1, 2, 3, 4 };
+        byte[] payload = [1, 2, 3, 4];
         var ep = new IPEndPoint(IPAddress.Parse("1.2.3.4"), 1234);
 
         byte[] packet = ProxyHelper.GetSocks5UdpPacket(payload, ep);
@@ -98,7 +98,7 @@ public class ProxyHelperTests
     [Fact]
     public void Socks5Udp_RoundTrip_IPv6()
     {
-        byte[] payload = new byte[] { 1, 2, 3, 4 };
+        byte[] payload = [1, 2, 3, 4];
         var ep = new IPEndPoint(IPAddress.Parse("2001:db8::1"), 1234);
 
         byte[] packet = ProxyHelper.GetSocks5UdpPacket(payload, ep);
@@ -111,7 +111,7 @@ public class ProxyHelperTests
     [Fact]
     public void WriteSocks5UdpPacket_IPv4_WritesPacketWithoutAllocation()
     {
-        byte[] payload = new byte[] { 9, 8, 7 };
+        byte[] payload = [9, 8, 7];
         var ep = new IPEndPoint(IPAddress.Parse("5.6.7.8"), 65000);
         Span<byte> destination = stackalloc byte[13];
 
@@ -124,7 +124,7 @@ public class ProxyHelperTests
     [Fact]
     public void WriteSocks5UdpPacket_IPv6_WritesPacketWithoutAllocation()
     {
-        byte[] payload = new byte[] { 4, 5 };
+        byte[] payload = [4, 5];
         var ep = new IPEndPoint(IPAddress.Parse("2001:db8::2"), 6881);
         Span<byte> destination = stackalloc byte[24];
 
@@ -145,7 +145,7 @@ public class ProxyHelperTests
         Assert.Throws<ArgumentException>(() =>
         {
             Span<byte> destination = stackalloc byte[9];
-            ProxyHelper.WriteSocks5UdpPacket(new byte[] { 1 }, ep, destination);
+            ProxyHelper.WriteSocks5UdpPacket([1], ep, destination);
         });
     }
 
@@ -153,13 +153,13 @@ public class ProxyHelperTests
     public void UnwrapSocks5UdpPacket_DomainAddress_ReturnsPayloadWithAnyEndpoint()
     {
         byte[] packet =
-        {
+        [
             0, 0, 0, 3,
             11,
             (byte)'e', (byte)'x', (byte)'a', (byte)'m', (byte)'p', (byte)'l', (byte)'e', (byte)'.', (byte)'c', (byte)'o', (byte)'m',
             0x1a, 0xe1,
             1, 2, 3
-        };
+        ];
 
         var (payload, endpoint) = ProxyHelper.UnwrapSocks5UdpPacket(packet);
 
@@ -324,12 +324,12 @@ public class ProxyHelperTests
 
     private static TcpClient MakeDummyTcpClient() => new TcpClient();
 
-    private static byte[] Socks5NoAuthResponse() => new byte[] { 0x05, 0x00 };
-    private static byte[] Socks5UserPassMethodResponse() => new byte[] { 0x05, 0x02 };
-    private static byte[] Socks5AuthSuccessResponse() => new byte[] { 0x01, 0x00 };
-    private static byte[] Socks5AuthFailureResponse() => new byte[] { 0x01, 0x01 };
-    private static byte[] Socks5ConnectSuccessHeaderIPv4() => new byte[] { 0x05, 0x00, 0x00, 0x01 };
-    private static byte[] Socks5IPv4BoundAddrAndPort() => new byte[] { 127, 0, 0, 1, 0x04, 0x38 }; // 127.0.0.1:1080
+    private static byte[] Socks5NoAuthResponse() => [0x05, 0x00];
+    private static byte[] Socks5UserPassMethodResponse() => [0x05, 0x02];
+    private static byte[] Socks5AuthSuccessResponse() => [0x01, 0x00];
+    private static byte[] Socks5AuthFailureResponse() => [0x01, 0x01];
+    private static byte[] Socks5ConnectSuccessHeaderIPv4() => [0x05, 0x00, 0x00, 0x01];
+    private static byte[] Socks5IPv4BoundAddrAndPort() => [127, 0, 0, 1, 0x04, 0x38]; // 127.0.0.1:1080
 
     // --- SOCKS5 TCP (NegotiateSocks5Async) ---
 
@@ -453,7 +453,7 @@ public class ProxyHelperTests
     [Fact]
     public async Task NegotiateSocks5_WrongVersion_ThrowsIOException()
     {
-        var stream = new FakeStream(new byte[] { 0x04, 0x00 }); // version 4 instead of 5
+        var stream = new FakeStream([0x04, 0x00]); // version 4 instead of 5
 
         using var client = MakeDummyTcpClient();
         await Assert.ThrowsAsync<IOException>(() =>
@@ -463,7 +463,7 @@ public class ProxyHelperTests
     [Fact]
     public async Task NegotiateSocks5_UnsupportedAuthMethod_ThrowsIOException()
     {
-        var stream = new FakeStream(new byte[] { 0x05, 0xFF }); // 0xFF = no acceptable methods
+        var stream = new FakeStream([0x05, 0xFF]); // 0xFF = no acceptable methods
 
         using var client = MakeDummyTcpClient();
         await Assert.ThrowsAsync<IOException>(() =>
@@ -881,7 +881,7 @@ public class ProxyHelperTests
 
                 if (_mode == Socks5Mode.NoAuthConnect)
                 {
-                    byte[] response = { 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+                    byte[] response = [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
                     await stream.WriteAsync(response, _cts.Token).ConfigureAwait(false);
                     return;
                 }
@@ -890,18 +890,18 @@ public class ProxyHelperTests
                 {
                     int port = UdpPort;
                     byte[] response =
-                    {
+                    [
                         0x05, 0x00, 0x00, 0x01,
                         0, 0, 0, 0,
                         (byte)(port >> 8), (byte)(port & 0xFF)
-                    };
+                    ];
                     await stream.WriteAsync(response, _cts.Token).ConfigureAwait(false);
                 }
 
                 if (_mode == Socks5Mode.UdpAssociateErrorCode)
                 {
                     // REP=0x02: connection not allowed by ruleset
-                    byte[] response = { 0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+                    byte[] response = [0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
                     await stream.WriteAsync(response, _cts.Token).ConfigureAwait(false);
                 }
 

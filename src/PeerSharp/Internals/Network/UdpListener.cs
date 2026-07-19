@@ -270,14 +270,14 @@ internal class UdpListener : IUdpListener
 
                 if (_proxyUdpEndPoint != null)
                 {
-                    var unwrapped = ProxyHelper.UnwrapSocks5UdpPacket(data);
-                    if (unwrapped.Payload.IsEmpty)
+                    var (Payload, RemoteEndPoint) = ProxyHelper.UnwrapSocks5UdpPacket(data);
+                    if (Payload.IsEmpty)
                     {
                         continue;
                     }
 
-                    data = unwrapped.Payload.ToArray();
-                    remoteEndPoint = unwrapped.RemoteEndPoint;
+                    data = Payload.ToArray();
+                    remoteEndPoint = RemoteEndPoint;
                 }
 
                 if (_receiveChannel != null)

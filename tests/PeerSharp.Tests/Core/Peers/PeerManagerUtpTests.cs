@@ -116,7 +116,7 @@ public class PeerManagerUtpTests
     {
         var method = typeof(PeerManager).GetMethod("BuildTransportPlan", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         Assert.NotNull(method);
-        var plan = (System.Collections.IEnumerable)method!.Invoke(manager, new object?[] { settings, history, false })!;
+        var plan = (System.Collections.IEnumerable)method!.Invoke(manager, [settings, history, false])!;
         return plan.Cast<object>().Select(p => p.ToString() ?? string.Empty).ToList();
     }
 
@@ -244,7 +244,7 @@ public class PeerManagerUtpTests
         var method = typeof(PeerManager).GetMethod("ApplyPexFlags", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
         Assert.NotNull(method);
 
-        method!.Invoke(null, new object?[] { history, (byte)(UtPex.Peer.Seed | UtPex.Peer.Utp) });
+        method!.Invoke(null, [history, (byte)(UtPex.Peer.Seed | UtPex.Peer.Utp)]);
 
         Assert.True(history.IsSeed);
         Assert.True(history.UtpSupported);

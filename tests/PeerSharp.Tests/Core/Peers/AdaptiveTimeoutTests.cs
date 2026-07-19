@@ -154,7 +154,7 @@ public class AdaptiveTimeoutTests
         for (int i = 0; i < 1001; i++)
         {
             // Valid IP: 1.1.X.Y where i = X*256 + Y
-            adaptive.RecordSuccess(200, new IPEndPoint(new IPAddress(new byte[] { 1, 1, (byte)(i >> 8), (byte)(i & 0xFF) }), 80));
+            adaptive.RecordSuccess(200, new IPEndPoint(new IPAddress([1, 1, (byte)(i >> 8), (byte)(i & 0xFF)]), 80));
         }
 
         // Advance time by 31 minutes

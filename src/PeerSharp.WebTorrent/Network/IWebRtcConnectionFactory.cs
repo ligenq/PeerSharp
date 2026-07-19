@@ -27,7 +27,7 @@ internal sealed class DefaultWebRtcConnectionFactory : IWebRtcConnectionFactory
         {
             _rtcOptions.IceServers.Add(new RTCIceServer
             {
-                Urls = new List<string>(s.Urls),
+                Urls = [.. s.Urls],
                 Username = s.Username,
                 Credential = s.Credential
             });

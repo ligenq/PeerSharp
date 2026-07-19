@@ -334,12 +334,12 @@ public sealed class DhtSettings
     /// <summary>
     /// DHT bootstrap nodes for initial network discovery.
     /// </summary>
-    public IReadOnlyList<DhtBootstrapNode> BootstrapNodes { get; set; } = new List<DhtBootstrapNode>
-    {
+    public IReadOnlyList<DhtBootstrapNode> BootstrapNodes { get; set; } =
+    [
         new("router.bittorrent.com", 6881),
         new("dht.transmissionbt.com", 6881),
         new("router.utorrent.com", 6881)
-    };
+    ];
 
     /// <summary>Whether DHT is enabled for peer discovery.</summary>
     public bool Enabled { get; set; } = true;

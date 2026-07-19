@@ -188,12 +188,12 @@ public class MetadataDownloadTests
         var requestsField = typeof(MetadataDownload).GetField("_pendingRequests", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         var requests = requestsField?.GetValue(download) as System.Collections.IDictionary;
         Assert.NotNull(requests);
-        Assert.Equal(1, requests.Count);
+        Assert.Single(requests);
 
         download.PeerDisconnected(mockPeer);
 
         // Ensure requests are cleared
-        Assert.Equal(0, requests.Count);
+        Assert.Empty(requests);
     }
 
     [Fact]
@@ -218,7 +218,7 @@ public class MetadataDownloadTests
         var requestsField = typeof(MetadataDownload).GetField("_pendingRequests", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         var requests = requestsField?.GetValue(download) as System.Collections.IDictionary;
         Assert.NotNull(requests);
-        Assert.Equal(0, requests.Count);
+        Assert.Empty(requests);
 
         var activeProp = typeof(MetadataDownload).GetProperty("Active");
         bool isActive = (bool)activeProp?.GetValue(download)!;

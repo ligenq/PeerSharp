@@ -82,7 +82,7 @@ public class TorrentFileSerializerTests
 
         byte[] hash = new byte[32]; // SHA256 for V2
         hash[0] = 0xAA;
-        metadata.PieceLayers[hash] = new byte[32] { 0xBB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        metadata.PieceLayers[hash] = [0xBB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
         var bytes = TorrentFileSerializer.BuildTorrentBytes(metadata);
         var root = BencodeParser.Parse(bytes!) as BDict;

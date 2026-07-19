@@ -37,10 +37,9 @@ internal static class MagnetTrackerMerger
             }
         }
 
-        metadata.AnnounceList = tier
+        metadata.AnnounceList = [.. tier
             .Concat(metadata.AnnounceList)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            .Distinct(StringComparer.OrdinalIgnoreCase)];
 
         if (string.IsNullOrWhiteSpace(metadata.Announce) && metadata.AnnounceList.Count > 0)
         {

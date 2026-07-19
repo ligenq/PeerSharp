@@ -12,7 +12,7 @@ public class PeerProtocolTests
     public void TryDecodeMessage_KeepAlive_ReturnsTrueAndNullMessage()
     {
         // Arrange
-        byte[] data = new byte[] { 0, 0, 0, 0 };
+        byte[] data = [0, 0, 0, 0];
         var buffer = new ReadOnlySequence<byte>(data);
 
         // Act
@@ -50,7 +50,7 @@ public class PeerProtocolTests
     public void TryDecodeMessage_IncompleteBuffer_ReturnsFalse()
     {
         // Arrange
-        byte[] data = new byte[] { 0, 0, 0, 5, (byte)MessageId.Have }; // Missing 4 bytes of payload
+        byte[] data = [0, 0, 0, 5, (byte)MessageId.Have]; // Missing 4 bytes of payload
         var buffer = new ReadOnlySequence<byte>(data);
 
         // Act
@@ -135,7 +135,7 @@ public class PeerProtocolTests
     public void WriteMessage_Bitfield_EncodesCorrectly()
     {
         // Arrange
-        byte[] bitfield = new byte[] { 0xFF, 0x00, 0xAA };
+        byte[] bitfield = [0xFF, 0x00, 0xAA];
         var msg = new PeerMessage(MessageId.Bitfield) { Data = bitfield };
         byte[] destination = new byte[PeerProtocol.GetMessageLength(msg)];
 

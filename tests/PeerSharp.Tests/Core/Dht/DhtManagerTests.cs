@@ -332,7 +332,7 @@ public class DhtManagerTests
         {
             // Force a high-byte scenario by manually creating a response
             // with a transaction ID that has bytes > 127
-            tid = new byte[] { 0x80, 0xFF, 0x90, 0xAB }; // All > 127
+            tid = [0x80, 0xFF, 0x90, 0xAB]; // All > 127
         }
 
         _listener.SentPackets.Clear();
@@ -598,12 +598,12 @@ public class DhtManagerTests
         var recentField = typeof(DhtManager).GetField("_recentGetPeersQueries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
         var recent = recentField.GetValue(dht)!;
         var recentType = recent.GetType();
-        var addMethod = recentType.GetMethod("TryAdd", new[] { typeof(string), typeof(DateTimeOffset) })!;
+        var addMethod = recentType.GetMethod("TryAdd", [typeof(string), typeof(DateTimeOffset)])!;
 
         // Inject an old entry (3 minutes ago = beyond the 2-minute threshold)
-        addMethod.Invoke(recent, new object[] { "old-key-1", _timeProvider.GetUtcNow().AddMinutes(-3) });
+        addMethod.Invoke(recent, ["old-key-1", _timeProvider.GetUtcNow().AddMinutes(-3)]);
         // Inject a fresh entry
-        addMethod.Invoke(recent, new object[] { "fresh-key-1", _timeProvider.GetUtcNow() });
+        addMethod.Invoke(recent, ["fresh-key-1", _timeProvider.GetUtcNow()]);
 
         // Trigger maintenance
         _timeProvider.Advance(TimeSpan.FromSeconds(16));
@@ -625,13 +625,13 @@ public class DhtManagerTests
         var recentField = typeof(DhtManager).GetField("_recentGetPeersQueries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
         var recent = recentField.GetValue(dht)!;
         var recentType = recent.GetType();
-        var addMethod = recentType.GetMethod("TryAdd", new[] { typeof(string), typeof(DateTimeOffset) })!;
+        var addMethod = recentType.GetMethod("TryAdd", [typeof(string), typeof(DateTimeOffset)])!;
 
         // Inject 10001 entries that are 2 minutes old (older than the hard-cap cutoff of 1 min)
         var oldTime = _timeProvider.GetUtcNow().AddMinutes(-2);
         for (int i = 0; i < 10001; i++)
         {
-            addMethod.Invoke(recent, new object[] { $"key-{i}", oldTime });
+            addMethod.Invoke(recent, [$"key-{i}", oldTime]);
         }
 
         var countBefore = (int)recentType.GetProperty("Count")!.GetValue(recent)!;

@@ -114,9 +114,9 @@ public class TrackerManagerConcurrencyTests
             var manager = new TrackerManager(torrent, new MockTrackerFactory(), timeProvider);
 
             // Tier 0 (Fails)
-            manager.AddTrackers(new[] { new[] { "http://fail1.com/announce", "http://fail2.com/announce" } });
+            manager.AddTrackers([new[] { "http://fail1.com/announce", "http://fail2.com/announce" }]);
             // Tier 1 (Works)
-            manager.AddTrackers(new[] { new[] { "http://work1.com/announce" } });
+            manager.AddTrackers([new[] { "http://work1.com/announce" }]);
 
             // We need our MockTracker to fail based on URL
             // MockTrackerFactory creates new instances.

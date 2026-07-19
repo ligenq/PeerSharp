@@ -54,7 +54,7 @@ internal class UtpStream : Stream
     private readonly ILogger<UtpStream> _logger = TorrentLoggerFactory.CreateLogger<UtpStream>();
     private readonly IUtpManager _manager;
 
-    private readonly Pipe _pipe = new Pipe();
+    private readonly Pipe _pipe = new();
 
     // Bounded channel to prevent unbounded memory growth from pipe writes
     // Using a limit of 1000 items (each typically < 1.5KB) = ~1.5MB max
@@ -77,7 +77,7 @@ internal class UtpStream : Stream
 
     private readonly Queue<ushort> _sentSeqQueue = new();
     private readonly TimeProvider _timeProvider;
-    private readonly SemaphoreSlim _writeSemaphore = new SemaphoreSlim(0);
+    private readonly SemaphoreSlim _writeSemaphore = new(0);
     private ushort _ackNr;
 
     // Track seqs to prevent duplicates

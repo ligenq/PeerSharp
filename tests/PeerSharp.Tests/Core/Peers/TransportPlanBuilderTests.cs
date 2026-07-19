@@ -48,7 +48,7 @@ public class TransportPlanBuilderTests
     public void Build_ForceUtpAndUtpAllowed_ReturnsOnlyUtp()
     {
         var plan = TransportPlanBuilder.Build(MakeInputs(DefaultSettings(), forceUtp: true));
-        Assert.Equal(new[] { TransportPreference.Utp }, plan);
+        Assert.Equal([TransportPreference.Utp], plan);
     }
 
     [Fact]
@@ -69,21 +69,21 @@ public class TransportPlanBuilderTests
     public void Build_TcpOnly_ReturnsTcpOnly()
     {
         var plan = TransportPlanBuilder.Build(MakeInputs(DefaultSettings(utp: false)));
-        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Tcp], plan);
     }
 
     [Fact]
     public void Build_UtpUnavailable_ReturnsTcpOnly()
     {
         var plan = TransportPlanBuilder.Build(MakeInputs(DefaultSettings(), utpAvailable: false));
-        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Tcp], plan);
     }
 
     [Fact]
     public void Build_UnknownPeer_PrefersTcpFirstThenUtp()
     {
         var plan = TransportPlanBuilder.Build(MakeInputs(DefaultSettings(), utpHinted: false));
-        Assert.Equal(new[] { TransportPreference.Tcp, TransportPreference.Utp }, plan);
+        Assert.Equal([TransportPreference.Tcp, TransportPreference.Utp], plan);
     }
 
     [Fact]
@@ -93,7 +93,7 @@ public class TransportPlanBuilderTests
             DefaultSettings(preferUtpRatio: 70),
             utpHinted: true,
             currentUtpRatio: 30));
-        Assert.Equal(new[] { TransportPreference.Utp, TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Utp, TransportPreference.Tcp], plan);
     }
 
     [Fact]
@@ -103,7 +103,7 @@ public class TransportPlanBuilderTests
             DefaultSettings(preferUtpRatio: 70),
             utpHinted: true,
             currentUtpRatio: 90));
-        Assert.Equal(new[] { TransportPreference.Tcp, TransportPreference.Utp }, plan);
+        Assert.Equal([TransportPreference.Tcp, TransportPreference.Utp], plan);
     }
 
     [Fact]
@@ -113,7 +113,7 @@ public class TransportPlanBuilderTests
             DefaultSettings(),
             utpHinted: false,
             inWarmup: true));
-        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Tcp], plan);
     }
 
     [Fact]
@@ -124,14 +124,14 @@ public class TransportPlanBuilderTests
             utpHinted: true,
             inWarmup: true,
             currentUtpRatio: 0));
-        Assert.Equal(new[] { TransportPreference.Utp, TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Utp, TransportPreference.Tcp], plan);
     }
 
     [Fact]
     public void Build_PreferUtpFalse_TcpFirstThenUtp()
     {
         var plan = TransportPlanBuilder.Build(MakeInputs(DefaultSettings(preferUtp: false), utpHinted: true));
-        Assert.Equal(new[] { TransportPreference.Tcp, TransportPreference.Utp }, plan);
+        Assert.Equal([TransportPreference.Tcp, TransportPreference.Utp], plan);
     }
 
     [Fact]
@@ -142,7 +142,7 @@ public class TransportPlanBuilderTests
             DefaultSettings(preferUtpRatio: 200),
             utpHinted: true,
             currentUtpRatio: 99));
-        Assert.Equal(new[] { TransportPreference.Utp, TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Utp, TransportPreference.Tcp], plan);
     }
 
     [Fact]
@@ -153,7 +153,7 @@ public class TransportPlanBuilderTests
             DefaultSettings(preferUtpRatio: -50),
             utpHinted: true,
             currentUtpRatio: 0));
-        Assert.Equal(new[] { TransportPreference.Tcp, TransportPreference.Utp }, plan);
+        Assert.Equal([TransportPreference.Tcp, TransportPreference.Utp], plan);
     }
 
     [Fact]
@@ -165,7 +165,7 @@ public class TransportPlanBuilderTests
             forceUtp: true,
             currentUtpRatioFn: () => { calls++; return 0; }));
 
-        Assert.Equal(new[] { TransportPreference.Utp }, plan);
+        Assert.Equal([TransportPreference.Utp], plan);
         Assert.Equal(0, calls);
     }
 
@@ -190,7 +190,7 @@ public class TransportPlanBuilderTests
             utpHinted: false,
             currentUtpRatioFn: () => { calls++; return 0; }));
 
-        Assert.Equal(new[] { TransportPreference.Tcp, TransportPreference.Utp }, plan);
+        Assert.Equal([TransportPreference.Tcp, TransportPreference.Utp], plan);
         Assert.Equal(0, calls);
     }
 
@@ -204,7 +204,7 @@ public class TransportPlanBuilderTests
             inWarmup: true,
             currentUtpRatioFn: () => { calls++; return 0; }));
 
-        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Tcp], plan);
         Assert.Equal(0, calls);
     }
 
@@ -218,7 +218,7 @@ public class TransportPlanBuilderTests
             utpHinted: true,
             currentUtpRatioFn: () => { calls++; return 0; }));
 
-        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Tcp], plan);
         Assert.Equal(0, calls);
     }
 
@@ -231,7 +231,7 @@ public class TransportPlanBuilderTests
             utpHinted: true,
             currentUtpRatioFn: () => { calls++; return 30; }));
 
-        Assert.Equal(new[] { TransportPreference.Utp, TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Utp, TransportPreference.Tcp], plan);
         Assert.Equal(1, calls);
     }
 }

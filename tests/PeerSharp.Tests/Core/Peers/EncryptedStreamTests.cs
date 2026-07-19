@@ -13,7 +13,7 @@ public class EncryptedStreamTests
     [Fact]
     public async Task ReadAsync_DecryptsAndReturnsReservedBandwidth()
     {
-        byte[] key = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        byte[] key = [1, 2, 3, 4, 5, 6, 7, 8];
         byte[] plain = new byte[100];
         for (int i = 0; i < plain.Length; i++)
         {
@@ -37,8 +37,8 @@ public class EncryptedStreamTests
             pe,
             user,
             manager,
-            new[] { DownloadChannel },
-            new[] { UploadChannel },
+            [DownloadChannel],
+            [UploadChannel],
             leaveInnerOpen: true);
 
         byte[] buffer = new byte[plain.Length];
@@ -57,7 +57,7 @@ public class EncryptedStreamTests
     [Fact]
     public async Task WriteAsync_EncryptsAndReturnsReservedBandwidth()
     {
-        byte[] key = { 9, 8, 7, 6, 5, 4, 3, 2 };
+        byte[] key = [9, 8, 7, 6, 5, 4, 3, 2];
         byte[] plain = new byte[100];
         Random.Shared.NextBytes(plain);
 
@@ -73,8 +73,8 @@ public class EncryptedStreamTests
             pe,
             user,
             manager,
-            new[] { DownloadChannel },
-            new[] { UploadChannel },
+            [DownloadChannel],
+            [UploadChannel],
             leaveInnerOpen: true);
 
         await stream.WriteAsync(plain, 0, plain.Length, CancellationToken.None);
@@ -98,7 +98,7 @@ public class EncryptedStreamTests
     [Fact]
     public async Task ReadAsync_ByteArrayOverload_DecryptsData()
     {
-        byte[] key = { 3, 1, 4, 1, 5, 9, 2, 6 };
+        byte[] key = [3, 1, 4, 1, 5, 9, 2, 6];
         byte[] plain = new byte[32];
         Random.Shared.NextBytes(plain);
 
@@ -116,7 +116,7 @@ public class EncryptedStreamTests
 
         await using var stream = new EncryptedStream(
             inner, pe, user, manager,
-            new[] { DownloadChannel }, new[] { UploadChannel },
+            [DownloadChannel], [UploadChannel],
             leaveInnerOpen: true);
 
         byte[] buffer = new byte[plain.Length];
@@ -136,7 +136,7 @@ public class EncryptedStreamTests
 
         var stream = new EncryptedStream(
             inner, pe, user, manager,
-            new[] { DownloadChannel }, new[] { UploadChannel },
+            [DownloadChannel], [UploadChannel],
             leaveInnerOpen: false);
 
         stream.Dispose();
@@ -155,7 +155,7 @@ public class EncryptedStreamTests
 
         using var stream = new EncryptedStream(
             inner, pe, user, manager,
-            new[] { DownloadChannel }, new[] { UploadChannel },
+            [DownloadChannel], [UploadChannel],
             leaveInnerOpen: true);
 
         Assert.True(stream.CanRead);
@@ -175,7 +175,7 @@ public class EncryptedStreamTests
 
         using var stream = new EncryptedStream(
             inner, pe, user, manager,
-            new[] { DownloadChannel }, new[] { UploadChannel },
+            [DownloadChannel], [UploadChannel],
             leaveInnerOpen: true);
 
         Assert.Throws<NotSupportedException>(() => { stream.Position = 0; });
@@ -191,7 +191,7 @@ public class EncryptedStreamTests
 
         using var stream = new EncryptedStream(
             inner, pe, user, manager,
-            new[] { DownloadChannel }, new[] { UploadChannel },
+            [DownloadChannel], [UploadChannel],
             leaveInnerOpen: true);
 
         stream.Flush(); // must not throw
@@ -200,7 +200,7 @@ public class EncryptedStreamTests
     [Fact]
     public void Read_Sync_DecryptsData()
     {
-        byte[] key = { 5, 6, 7, 8, 1, 2, 3, 4 };
+        byte[] key = [5, 6, 7, 8, 1, 2, 3, 4];
         byte[] plain = new byte[64];
         Random.Shared.NextBytes(plain);
 
@@ -218,7 +218,7 @@ public class EncryptedStreamTests
 
         using var stream = new EncryptedStream(
             inner, pe, user, manager,
-            new[] { DownloadChannel }, new[] { UploadChannel },
+            [DownloadChannel], [UploadChannel],
             leaveInnerOpen: true);
 
         byte[] buffer = new byte[plain.Length];
@@ -231,7 +231,7 @@ public class EncryptedStreamTests
     [Fact]
     public void Write_Sync_EncryptsData()
     {
-        byte[] key = { 11, 22, 33, 44, 55, 66, 77, 88 };
+        byte[] key = [11, 22, 33, 44, 55, 66, 77, 88];
         byte[] plain = new byte[64];
         Random.Shared.NextBytes(plain);
 
@@ -244,7 +244,7 @@ public class EncryptedStreamTests
 
         using var stream = new EncryptedStream(
             inner, pe, user, manager,
-            new[] { DownloadChannel }, new[] { UploadChannel },
+            [DownloadChannel], [UploadChannel],
             leaveInnerOpen: true);
 
         stream.Write(plain, 0, plain.Length);

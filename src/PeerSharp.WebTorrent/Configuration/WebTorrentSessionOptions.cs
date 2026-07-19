@@ -12,7 +12,7 @@ public sealed class WebTorrentSessionOptions
     public int OffersPerTracker { get; init; } = 10;
 
     /// <summary>Additional WebSocket tracker URLs to announce to. The library does not include public trackers by default.</summary>
-    public IReadOnlyList<string> AdditionalTrackers { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> AdditionalTrackers { get; init; } = [];
 
     /// <summary>Maximum accepted WebSocket tracker message size in bytes.</summary>
     public int MaxTrackerMessageBytes { get; init; } = 256 * 1024;
@@ -36,9 +36,9 @@ public sealed class WebTorrentSessionOptions
     /// TURN credentials here to relay those peers. There is no auto-provisioned TURN server;
     /// callers must bring their own.
     /// </summary>
-    public IReadOnlyList<WebTorrentIceServer> IceServers { get; init; } = new List<WebTorrentIceServer>
-    {
+    public IReadOnlyList<WebTorrentIceServer> IceServers { get; init; } =
+    [
         new() { Urls = { "stun:stun.l.google.com:19302" } },
         new() { Urls = { "stun:stun1.l.google.com:19302" } }
-    };
+    ];
 }

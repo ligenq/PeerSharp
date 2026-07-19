@@ -11,7 +11,7 @@ internal static class PaddingFileHelper
             return false;
         }
 
-        var parts = path.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+        var parts = path.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
         for (int i = 0; i < parts.Length; i++)
         {
             if (string.Equals(parts[i], PaddingDirectoryName, StringComparison.Ordinal))

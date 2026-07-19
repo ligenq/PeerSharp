@@ -153,9 +153,9 @@ public class UtPexTests
 
         var dict = new BDict();
         dict.Dict["added"] = new BString(addedBytes.ToArray());
-        dict.Dict["added.f"] = new BString(new byte[] { 0x05 });
+        dict.Dict["added.f"] = new BString([0x05]);
         dict.Dict["added6"] = new BString(added6Bytes.ToArray());
-        dict.Dict["added6.f"] = new BString(new byte[] { 0x02 });
+        dict.Dict["added6.f"] = new BString([0x02]);
 
         var payload = BencodeWriter.Write(dict);
         await utPex.HandleMessageAsync(payload);
@@ -336,7 +336,7 @@ public class UtPexTests
 
         var dict = new BDict();
         dict.Dict["added"] = new BString(addedBytes);
-        dict.Dict["added.f"] = new BString(new byte[] { 0x01 });
+        dict.Dict["added.f"] = new BString([0x01]);
 
         var payload = BencodeWriter.Write(dict);
         await utPex.HandleMessageAsync(payload);

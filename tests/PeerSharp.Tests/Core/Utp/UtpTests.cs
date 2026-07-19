@@ -43,7 +43,7 @@ public class UtpTests
         Assert.True(serverSideStream != null, "Server did not receive connection");
 
         // Send Data 1 -> 2
-        byte[] data = new byte[] { 1, 2, 3, 4, 5 };
+        byte[] data = [1, 2, 3, 4, 5];
         await clientStream.WriteAsync(data);
 
         // Read Data 2

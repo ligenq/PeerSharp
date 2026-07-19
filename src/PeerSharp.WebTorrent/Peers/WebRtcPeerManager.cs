@@ -328,7 +328,7 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
                 return;
             }
 
-            buffered = new List<WebRtcIceCandidateDescription>(pending.BufferedLocalCandidates);
+            buffered = [.. pending.BufferedLocalCandidates];
             pending.BufferedLocalCandidates.Clear();
         }
 

@@ -103,7 +103,7 @@ public class UtpExhaustiveTests
     {
         var stream = await ConnectStream();
 
-        byte[] data = { 1, 2, 3, 4 };
+        byte[] data = [1, 2, 3, 4];
         await stream.WriteAsync(data);
 
         Assert.True(_listener.SentPackets.TryDequeue(out var dataPacket));
@@ -165,7 +165,7 @@ public class UtpExhaustiveTests
         ushort ackNr = GetLastSentSeq(stream);
 
         // Send Seq+2 (Seq+1 missing)
-        byte[] payload = { 0xBB };
+        byte[] payload = [0xBB];
         var packet2 = CreatePacket(0, 0, GetRecvId(stream), (ushort)(startSeq + 2), ackNr, payload);
         _listener.SimulateReceive(packet2, _remoteParams);
 
@@ -176,7 +176,7 @@ public class UtpExhaustiveTests
         Assert.False(readTask.IsCompleted);
 
         // Send Seq+1
-        byte[] payload1 = { 0xAA };
+        byte[] payload1 = [0xAA];
         var packet1 = CreatePacket(0, 0, GetRecvId(stream), (ushort)(startSeq + 1), ackNr, payload1);
         _listener.SimulateReceive(packet1, _remoteParams);
 
@@ -208,12 +208,12 @@ public class UtpExhaustiveTests
         ushort connId = GetRecvId(stream);
         ushort ackNr = GetLastSentSeq(stream);
 
-        var pkt1 = CreatePacket(0, 0, connId, (ushort)(startSeq + 1), ackNr, new byte[] { 1 });
+        var pkt1 = CreatePacket(0, 0, connId, (ushort)(startSeq + 1), ackNr, [1]);
         _listener.SimulateReceive(pkt1, _remoteParams);
 
         _listener.SentPackets.Clear();
 
-        var pkt3 = CreatePacket(0, 0, connId, (ushort)(startSeq + 3), ackNr, new byte[] { 3 });
+        var pkt3 = CreatePacket(0, 0, connId, (ushort)(startSeq + 3), ackNr, [3]);
         _listener.SimulateReceive(pkt3, _remoteParams);
 
         Assert.True(_listener.SentPackets.TryDequeue(out var sackAck));
@@ -234,7 +234,7 @@ public class UtpExhaustiveTests
         ushort ackNr = GetLastSentSeq(stream);
         const ushort seq = 1;
 
-        byte[] extBits = new byte[] { 0x01, 0x02, 0x10, 0x20, 0x40, 0x80, 0xAA, 0x55 };
+        byte[] extBits = [0x01, 0x02, 0x10, 0x20, 0x40, 0x80, 0xAA, 0x55];
         var packet = CreatePacketWithExtensionBits(2, connId, seq, ackNr, extBits);
         _listener.SimulateReceive(packet, _remoteParams);
 
@@ -252,7 +252,7 @@ public class UtpExhaustiveTests
         ushort connId = GetRecvId(stream);
         ushort ackNr = GetLastSentSeq(stream);
 
-        byte[] payload = { 0xAA };
+        byte[] payload = [0xAA];
         var packet = CreatePacket(0, 0, connId, (ushort)(startSeq + 1), ackNr, payload);
 
         _listener.SimulateReceive(packet, _remoteParams);
@@ -683,9 +683,9 @@ public class UtpExhaustiveTests
         ushort ackNr = GetLastSentSeq(stream);
 
         // Deliver seq+3, seq+4, seq+2 before seq+1
-        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 3), ackNr, new byte[] { 3 }), _remoteParams);
-        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 4), ackNr, new byte[] { 4 }), _remoteParams);
-        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 2), ackNr, new byte[] { 2 }), _remoteParams);
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 3), ackNr, [3]), _remoteParams);
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 4), ackNr, [4]), _remoteParams);
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 2), ackNr, [2]), _remoteParams);
 
         byte[] buffer = new byte[10];
         var readTask = stream.ReadAsync(buffer).AsTask();
@@ -693,7 +693,7 @@ public class UtpExhaustiveTests
         Assert.False(readTask.IsCompleted); // still waiting for seq+1
 
         // Fill the gap — should flush the entire reorder buffer
-        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 1), ackNr, new byte[] { 1 }), _remoteParams);
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 1), ackNr, [1]), _remoteParams);
 
         int total = await readTask.WaitAsync(TimeSpan.FromSeconds(5));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -721,7 +721,7 @@ public class UtpExhaustiveTests
         ushort ackNr = GetLastSentSeq(stream);
 
         // Put seq+2 in the reorder buffer (seq+1 is still missing)
-        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 2), ackNr, new byte[] { 2 }), _remoteParams);
+        _listener.SimulateReceive(CreatePacket(0, 0, connId, (ushort)(startSeq + 2), ackNr, [2]), _remoteParams);
 
         var ex = await Record.ExceptionAsync(() => stream.DisposeAsync().AsTask());
         Assert.Null(ex);
@@ -827,8 +827,8 @@ public class UtpExhaustiveTests
         sentPacketType.GetProperty("Resent")!.SetValue(pkt, false);
         sentPacketType.GetProperty("RttSampled")!.SetValue(pkt, false);
         sentPacketType.GetProperty("Pooled")!.SetValue(pkt, false);
-        var addMethod = sentPackets.GetType().GetMethod("Add", new[] { typeof(ushort), sentPacketType })!;
-        addMethod.Invoke(sentPackets, new object[] { seq, pkt });
+        var addMethod = sentPackets.GetType().GetMethod("Add", [typeof(ushort), sentPacketType])!;
+        addMethod.Invoke(sentPackets, [seq, pkt]);
     }
 
     private static byte[] CreatePacketWithExtensionBits(byte type, ushort connId, ushort seq, ushort ack, byte[] extensionBits)

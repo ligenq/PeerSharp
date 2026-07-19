@@ -22,7 +22,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private int MaxMetadataSizeBytes => Math.Max(1, _torrent.Settings.Transfer.MaxMetadataSizeBytes);
 
     // Initialized to empty BitArray to avoid null reference; resized in InitializeMetadataBuffer
-    private BitArray _receivedPieces = new BitArray(0);
+    private BitArray _receivedPieces = new(0);
     private int _nextPieceCursor = 0;
 
     public MetadataDownload(Torrent torrent)
@@ -181,7 +181,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 }
                 if (newMetadata.AnnounceTiers.Count == 0 && newMetadata.AnnounceList.Count > 0)
                 {
-                    newMetadata.AnnounceTiers.Add(new List<string>(newMetadata.AnnounceList));
+                    newMetadata.AnnounceTiers.Add([.. newMetadata.AnnounceList]);
                 }
 
                 // Update Torrent's InfoFile

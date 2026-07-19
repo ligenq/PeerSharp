@@ -37,6 +37,6 @@ internal static class Base32
             }
         }
 
-        return bytes.ToArray();
+        return [.. bytes];
     }
 }

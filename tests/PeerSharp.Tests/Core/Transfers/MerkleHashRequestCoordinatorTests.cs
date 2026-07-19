@@ -34,7 +34,7 @@ public class MerkleHashRequestCoordinatorTests
 
         var selection = coordinator.SelectV2Peer<Candidate>(
             request: null,
-            peers: new[] { new Candidate("a", true) },
+            peers: [new Candidate("a", true)],
             canRequest: peer => peer.CanRequest,
             now: DateTimeOffset.UnixEpoch);
 
@@ -99,8 +99,8 @@ public class MerkleHashRequestCoordinatorTests
         var request = Request(index: 10);
         var now = DateTimeOffset.UnixEpoch;
 
-        var noPeer = coordinator.SelectV2Peer(request, new[] { new Candidate("a", false) }, peer => peer.CanRequest, now);
-        var selected = coordinator.SelectV2Peer(request, new[] { new Candidate("b", true) }, peer => peer.CanRequest, now.AddSeconds(1));
+        var noPeer = coordinator.SelectV2Peer(request, [new Candidate("a", false)], peer => peer.CanRequest, now);
+        var selected = coordinator.SelectV2Peer(request, [new Candidate("b", true)], peer => peer.CanRequest, now.AddSeconds(1));
 
         Assert.Equal(MerkleHashRequestSelectionStatus.NoPeer, noPeer.Status);
         Assert.Equal(MerkleHashRequestSelectionStatus.Selected, selected.Status);
@@ -109,7 +109,7 @@ public class MerkleHashRequestCoordinatorTests
 
     private static V2HashRequest Request(int index)
     {
-        return new V2HashRequest(new byte[] { 1, 2, 3 }, BaseLayer: 2, Index: index, Length: 4, ProofLayers: 5);
+        return new V2HashRequest([1, 2, 3], BaseLayer: 2, Index: index, Length: 4, ProofLayers: 5);
     }
 
     private sealed record Candidate(string Name, bool CanRequest);

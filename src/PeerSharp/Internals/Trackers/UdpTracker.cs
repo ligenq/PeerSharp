@@ -38,11 +38,11 @@ internal class UdpTracker : TrackerBase, IDisposable
 
     private static readonly TimeSpan ConnectionIdLifetime = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(15);
-    private static readonly int[] RetryDelaysMs = { 1000, 2000, 4000 };
+    private static readonly int[] RetryDelaysMs = [1000, 2000, 4000];
     private readonly ILogger<UdpTracker> _logger = TorrentLoggerFactory.CreateLogger<UdpTracker>();
     private readonly IUdpSocketFactory _socketFactory;
 
-    private readonly SemaphoreSlim _syncLock = new SemaphoreSlim(1, 1);
+    private readonly SemaphoreSlim _syncLock = new(1, 1);
 
     private readonly TimeProvider _timeProvider;
     private IUdpSocket? _client;
@@ -550,13 +550,13 @@ internal class UdpTracker : TrackerBase, IDisposable
                 var buffer = res.Buffer;
                 if (_proxyUdpEndPoint != null)
                 {
-                    var unwrapped = ProxyHelper.UnwrapSocks5UdpPacket(buffer);
-                    if (unwrapped.Payload.IsEmpty)
+                    var (Payload, _) = ProxyHelper.UnwrapSocks5UdpPacket(buffer);
+                    if (Payload.IsEmpty)
                     {
                         continue;
                     }
 
-                    buffer = unwrapped.Payload.ToArray();
+                    buffer = Payload.ToArray();
                     // Use the unwrapped remote endpoint if needed, but for tracker response
                     // we usually just care about the transaction ID in the payload.
                 }

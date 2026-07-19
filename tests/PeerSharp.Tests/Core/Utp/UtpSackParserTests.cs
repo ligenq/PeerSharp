@@ -7,7 +7,7 @@ public class UtpSackParserTests
     [Fact]
     public void Parse_NoReceivedPackets_ReturnsNull()
     {
-        var result = UtpSackParser.Parse(new byte[] { 0x00, 0x00 }, 0, 2, ackNr: 100);
+        var result = UtpSackParser.Parse([0x00, 0x00], 0, 2, ackNr: 100);
 
         Assert.Null(result);
     }
@@ -16,7 +16,7 @@ public class UtpSackParserTests
     public void Parse_SingleByteBitmask_ReturnsContiguousRanges()
     {
         // Bits 0, 1 and 3 set. With ack_nr 10, those map to seq 12, 13 and 15.
-        var result = UtpSackParser.Parse(new byte[] { 0b0000_1011 }, 0, 1, ackNr: 10);
+        var result = UtpSackParser.Parse([0b0000_1011], 0, 1, ackNr: 10);
 
         Assert.NotNull(result);
         Assert.Collection(
@@ -29,7 +29,7 @@ public class UtpSackParserTests
     public void Parse_MultipleBytes_ContinuesSequenceAcrossByteBoundary()
     {
         // First byte: seq 2..9. Second byte bit 0: seq 10. All are contiguous.
-        var result = UtpSackParser.Parse(new byte[] { 0xFF, 0x01 }, 0, 2, ackNr: 0);
+        var result = UtpSackParser.Parse([0xFF, 0x01], 0, 2, ackNr: 0);
 
         Assert.NotNull(result);
         var range = Assert.Single(result);
@@ -39,7 +39,7 @@ public class UtpSackParserTests
     [Fact]
     public void Parse_UsesOffsetAndLength()
     {
-        var result = UtpSackParser.Parse(new byte[] { 0xFF, 0b0000_0101, 0xFF }, 1, 1, ackNr: 20);
+        var result = UtpSackParser.Parse([0xFF, 0b0000_0101, 0xFF], 1, 1, ackNr: 20);
 
         Assert.NotNull(result);
         Assert.Collection(
@@ -51,7 +51,7 @@ public class UtpSackParserTests
     [Fact]
     public void Parse_SequenceNumbersWrapAtUShortBoundary()
     {
-        var result = UtpSackParser.Parse(new byte[] { 0b0000_0011 }, 0, 1, ackNr: 65534);
+        var result = UtpSackParser.Parse([0b0000_0011], 0, 1, ackNr: 65534);
 
         Assert.NotNull(result);
         var range = Assert.Single(result);
@@ -62,6 +62,6 @@ public class UtpSackParserTests
     public void Parse_InvalidRange_Throws()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            UtpSackParser.Parse(new byte[] { 0x01 }, 1, 1, ackNr: 0));
+            UtpSackParser.Parse([0x01], 1, 1, ackNr: 0));
     }
 }

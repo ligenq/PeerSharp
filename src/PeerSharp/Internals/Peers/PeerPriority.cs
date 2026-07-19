@@ -131,7 +131,7 @@ internal static class PeerPriority
         if (ip.AddressFamily == AddressFamily.InterNetwork)
         {
             // IPv4: /16 mask - keep first 2 bytes, zero the rest
-            return new byte[] { bytes[0], bytes[1], 0, 0 };
+            return [bytes[0], bytes[1], 0, 0];
         }
         else if (ip.AddressFamily == AddressFamily.InterNetworkV6)
         {

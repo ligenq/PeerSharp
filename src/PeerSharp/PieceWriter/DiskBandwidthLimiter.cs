@@ -16,8 +16,8 @@ internal sealed class DiskBandwidthLimiter : IBandwidthUser
         _bandwidth = bandwidth;
         _torrentReadChannel = $"{torrentHash}_DR";
         _torrentWriteChannel = $"{torrentHash}_DW";
-        _readChannels = new[] { BandwidthManager.GlobalDiskRead, _torrentReadChannel };
-        _writeChannels = new[] { BandwidthManager.GlobalDiskWrite, _torrentWriteChannel };
+        _readChannels = [BandwidthManager.GlobalDiskRead, _torrentReadChannel];
+        _writeChannels = [BandwidthManager.GlobalDiskWrite, _torrentWriteChannel];
     }
 
     public string Name => "DiskBandwidthLimiter";

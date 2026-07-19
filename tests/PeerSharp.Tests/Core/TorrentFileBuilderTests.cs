@@ -64,7 +64,7 @@ public class TorrentFileBuilderTests
     [Fact]
     public void AddTrackerTier_AllWhitespace_ThrowsArgumentException()
     {
-        Assert.Throws<ArgumentException>(() => new CoreBuilder().AddTrackerTier(new[] { "  ", "\t" }));
+        Assert.Throws<ArgumentException>(() => new CoreBuilder().AddTrackerTier(["  ", "\t"]));
     }
 
     [Fact]
@@ -266,7 +266,7 @@ public class TorrentFileBuilderTests
     {
         var torrent = new CoreBuilder()
             .AddFile("file.bin", MakeData(100))
-            .AddTrackerTier(new[] { "udp://t1.example.com:6969/announce", "udp://t2.example.com:6969/announce" })
+            .AddTrackerTier(["udp://t1.example.com:6969/announce", "udp://t2.example.com:6969/announce"])
             .Build();
 
         Assert.Contains("udp://t1.example.com:6969/announce", torrent.Trackers);
@@ -523,7 +523,7 @@ public class TorrentFileBuilderTests
             .WithPaddingFiles(false)
             .WithAnnounce("udp://t.example.com:6969/announce")
             .AddTracker("udp://t2.example.com:6969/announce")
-            .AddTrackerTier(new[] { "udp://t3.example.com:6969/announce" })
+            .AddTrackerTier(["udp://t3.example.com:6969/announce"])
             .AddWebSeed("http://seed.example.com/")
             .AddFile("file.bin", MakeData(100));
 

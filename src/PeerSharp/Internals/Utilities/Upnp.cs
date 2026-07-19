@@ -357,15 +357,15 @@ internal class UpnpPortMapping : IPortMapper
         List<(int Port, string Protocol, string Description)> toUnmap;
         lock (_mappings)
         {
-            toUnmap = _mappings.ToList();
+            toUnmap = [.. _mappings];
             _mappings.Clear();
         }
 
-        foreach (var mapping in toUnmap)
+        foreach (var (Port, Protocol, _) in toUnmap)
         {
             foreach (var gateway in _gateways)
             {
-                await UnmapOnGatewayAsync(gateway, mapping.Port, mapping.Protocol, ct).ConfigureAwait(false);
+                await UnmapOnGatewayAsync(gateway, Port, Protocol, ct).ConfigureAwait(false);
             }
         }
     }

@@ -215,7 +215,7 @@ internal class FastIpToCountry
                     byte b = buffer[offset++];
                     if (b == (byte)'\n')
                     {
-                        string line = Encoding.UTF8.GetString(countryBuffer.ToArray()).Trim();
+                        string line = Encoding.UTF8.GetString([.. countryBuffer]).Trim();
                         countryBuffer.Clear();
                         if (string.IsNullOrEmpty(line))
                         {

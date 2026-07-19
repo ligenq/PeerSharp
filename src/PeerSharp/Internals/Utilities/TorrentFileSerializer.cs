@@ -27,13 +27,13 @@ internal static class TorrentFileSerializer
             {
                 if (tier.Count > 0)
                 {
-                    tiers.Add(new List<string>(tier));
+                    tiers.Add([.. tier]);
                 }
             }
         }
         else if (metadata.AnnounceList.Count > 0)
         {
-            tiers.Add(new List<string>(metadata.AnnounceList));
+            tiers.Add([.. metadata.AnnounceList]);
         }
 
         if (string.IsNullOrWhiteSpace(announce))

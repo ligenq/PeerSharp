@@ -12,7 +12,7 @@ public class WebTorrentDataChannelStreamTests
         var channel = new FakeWebRtcDataChannel("bittorrent");
         await using var stream = new WebTorrentDataChannelStream(channel);
         stream.Start();
-        channel.EmitMessage(new byte[] { 1, 2, 3, 4, 5 });
+        channel.EmitMessage([1, 2, 3, 4, 5]);
 
         byte[] first = new byte[2];
         byte[] second = new byte[3];
@@ -44,7 +44,7 @@ public class WebTorrentDataChannelStreamTests
         await using var stream = new WebTorrentDataChannelStream(channel);
 
         await stream.WriteAsync(new byte[] { 9, 8, 7 }, TestContext.Current.CancellationToken);
-        await stream.WriteAsync(new byte[] { 1, 2, 3, 4 }, 1, 2, TestContext.Current.CancellationToken);
+        await stream.WriteAsync([1, 2, 3, 4], 1, 2, TestContext.Current.CancellationToken);
 
         Assert.Collection(
             channel.SentPayloads,
@@ -82,7 +82,7 @@ public class WebTorrentDataChannelStreamTests
         Assert.False(stream.CanWrite);
         Assert.True(channel.Disposed);
         await Assert.ThrowsAsync<ObjectDisposedException>(async () =>
-            await stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken));
+            await stream.ReadExactlyAsync(new byte[1], TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ObjectDisposedException>(async () =>
             await stream.WriteAsync(new byte[1], TestContext.Current.CancellationToken));
     }

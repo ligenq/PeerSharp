@@ -10,7 +10,7 @@ public class DhtCompactNodeCodecTests
     {
         var node = new NodeInfo(NodeId(1), new IPEndPoint(IPAddress.Parse("203.0.113.10"), 6881));
 
-        byte[] encoded = DhtCompactNodeCodec.Encode(new[] { node }, ipv6: false);
+        byte[] encoded = DhtCompactNodeCodec.Encode([node], ipv6: false);
         var parsed = DhtCompactNodeCodec.Parse(encoded, ipv6: false);
 
         Assert.Equal(26, encoded.Length);
@@ -24,7 +24,7 @@ public class DhtCompactNodeCodecTests
     {
         var node = new NodeInfo(NodeId(2), new IPEndPoint(IPAddress.Parse("2001:db8::1"), 51413));
 
-        byte[] encoded = DhtCompactNodeCodec.Encode(new[] { node }, ipv6: true);
+        byte[] encoded = DhtCompactNodeCodec.Encode([node], ipv6: true);
         var parsed = DhtCompactNodeCodec.Parse(encoded, ipv6: true);
 
         Assert.Equal(38, encoded.Length);
@@ -39,8 +39,8 @@ public class DhtCompactNodeCodecTests
         var ipv4 = new NodeInfo(NodeId(1), new IPEndPoint(IPAddress.Parse("198.51.100.1"), 1));
         var ipv6 = new NodeInfo(NodeId(2), new IPEndPoint(IPAddress.Parse("2001:db8::2"), 2));
 
-        byte[] encodedV4 = DhtCompactNodeCodec.Encode(new[] { ipv4, ipv6 }, ipv6: false);
-        byte[] encodedV6 = DhtCompactNodeCodec.Encode(new[] { ipv4, ipv6 }, ipv6: true);
+        byte[] encodedV4 = DhtCompactNodeCodec.Encode([ipv4, ipv6], ipv6: false);
+        byte[] encodedV6 = DhtCompactNodeCodec.Encode([ipv4, ipv6], ipv6: true);
 
         Assert.Equal(26, encodedV4.Length);
         Assert.Equal(38, encodedV6.Length);
@@ -52,7 +52,7 @@ public class DhtCompactNodeCodecTests
     public void Parse_IgnoresTrailingPartialNode()
     {
         var node = new NodeInfo(NodeId(1), new IPEndPoint(IPAddress.Parse("203.0.113.10"), 6881));
-        byte[] encoded = DhtCompactNodeCodec.Encode(new[] { node }, ipv6: false)
+        byte[] encoded = DhtCompactNodeCodec.Encode([node], ipv6: false)
             .Concat(new byte[] { 1, 2, 3 })
             .ToArray();
 
@@ -66,7 +66,7 @@ public class DhtCompactNodeCodecTests
     {
         var node = new NodeInfo(new byte[19], new IPEndPoint(IPAddress.Parse("203.0.113.10"), 6881));
 
-        byte[] encoded = DhtCompactNodeCodec.Encode(new[] { node }, ipv6: false);
+        byte[] encoded = DhtCompactNodeCodec.Encode([node], ipv6: false);
 
         Assert.Empty(encoded);
     }
@@ -79,7 +79,7 @@ public class DhtCompactNodeCodecTests
         var ipv6 = new NodeInfo(NodeId(1), new IPEndPoint(IPAddress.Parse("2001:db8::1"), 1));
         var ipv4 = new NodeInfo(NodeId(2), new IPEndPoint(IPAddress.Parse("203.0.113.10"), 6881));
 
-        byte[] encoded = DhtCompactNodeCodec.Encode(new[] { ipv6, ipv4 }, ipv6: false);
+        byte[] encoded = DhtCompactNodeCodec.Encode([ipv6, ipv4], ipv6: false);
 
         Assert.Equal(26, encoded.Length);
         var parsed = DhtCompactNodeCodec.Parse(encoded, ipv6: false);

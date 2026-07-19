@@ -25,7 +25,7 @@ public class UdpTrackerScrapeCodecTests
     public void BuildRequest_RejectsNonV1HashLength()
     {
         Assert.Throws<ArgumentException>(() =>
-            UdpTrackerScrapeCodec.BuildRequest(1, 2, new[] { new byte[32] }));
+            UdpTrackerScrapeCodec.BuildRequest(1, 2, [new byte[32]]));
     }
 
     [Fact]
@@ -35,7 +35,7 @@ public class UdpTrackerScrapeCodecTests
         byte[] hash2 = Hash(2);
         byte[] response = Response(transactionId: 123, action: 2, (10, 20, 30), (1, 2, 3));
 
-        var parsed = UdpTrackerScrapeCodec.ParseResponse(response, 123, new[] { hash1, hash2 });
+        var parsed = UdpTrackerScrapeCodec.ParseResponse(response, 123, [hash1, hash2]);
 
         Assert.Equal(2, parsed.Results.Count);
         Assert.Equal(10u, parsed.Results[Convert.ToHexString(hash1)].SeedCount);
@@ -52,7 +52,7 @@ public class UdpTrackerScrapeCodecTests
         byte[] response = Response(transactionId: 999, action: 2, (10, 20, 30));
 
         var ex = Assert.Throws<UdpTrackerException>(() =>
-            UdpTrackerScrapeCodec.ParseResponse(response, 123, new[] { Hash(1) }));
+            UdpTrackerScrapeCodec.ParseResponse(response, 123, [Hash(1)]));
 
         Assert.True(ex.IsTransient);
         Assert.Contains("Transaction ID mismatch", ex.Message);
@@ -67,7 +67,7 @@ public class UdpTrackerScrapeCodecTests
         Encoding.ASCII.GetBytes("bad").CopyTo(error.AsSpan(8));
 
         var ex = Assert.Throws<UdpTrackerException>(() =>
-            UdpTrackerScrapeCodec.ParseResponse(error, 123, new[] { Hash(1) }));
+            UdpTrackerScrapeCodec.ParseResponse(error, 123, [Hash(1)]));
 
         Assert.False(ex.IsTransient);
         Assert.Contains("bad", ex.Message);
@@ -79,7 +79,7 @@ public class UdpTrackerScrapeCodecTests
         byte[] response = Response(transactionId: 123, action: 1, (10, 20, 30));
 
         var ex = Assert.Throws<InvalidDataException>(() =>
-            UdpTrackerScrapeCodec.ParseResponse(response, 123, new[] { Hash(1) }));
+            UdpTrackerScrapeCodec.ParseResponse(response, 123, [Hash(1)]));
 
         Assert.Contains("Invalid scrape action", ex.Message);
     }
@@ -92,7 +92,7 @@ public class UdpTrackerScrapeCodecTests
         BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(4), 123);
 
         var ex = Assert.Throws<InvalidDataException>(() =>
-            UdpTrackerScrapeCodec.ParseResponse(response, 123, new[] { Hash(1) }));
+            UdpTrackerScrapeCodec.ParseResponse(response, 123, [Hash(1)]));
 
         Assert.Contains("Scrape response too short", ex.Message);
     }
@@ -101,7 +101,7 @@ public class UdpTrackerScrapeCodecTests
     public void ParseResponse_HeaderUnderEightBytes_ThrowsInvalidDataBeforeReadingAction()
     {
         var ex = Assert.Throws<InvalidDataException>(() =>
-            UdpTrackerScrapeCodec.ParseResponse(new byte[7], 123, new[] { Hash(1) }));
+            UdpTrackerScrapeCodec.ParseResponse(new byte[7], 123, [Hash(1)]));
 
         Assert.Contains("Scrape response too short", ex.Message);
     }
@@ -115,7 +115,7 @@ public class UdpTrackerScrapeCodecTests
         BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(4), 123);
 
         var ex = Assert.Throws<UdpTrackerException>(() =>
-            UdpTrackerScrapeCodec.ParseResponse(response, 123, new[] { Hash(1) }));
+            UdpTrackerScrapeCodec.ParseResponse(response, 123, [Hash(1)]));
 
         Assert.False(ex.IsTransient);
         Assert.Contains("(no error message)", ex.Message);
@@ -132,7 +132,7 @@ public class UdpTrackerScrapeCodecTests
         // The error path now consumes the buffer as ReadOnlySpan<byte>; passing a
         // sliced span exercises that overload directly without ToArray() copying.
         var ex = Assert.Throws<UdpTrackerException>(() =>
-            UdpTrackerScrapeCodec.ParseResponse(error.AsSpan(), 123, new[] { Hash(1) }));
+            UdpTrackerScrapeCodec.ParseResponse(error.AsSpan(), 123, [Hash(1)]));
 
         Assert.Contains("oops!", ex.Message);
     }
