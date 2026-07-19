@@ -190,7 +190,7 @@ internal sealed class HttpStreamRequestHandler
 
         _logger.LogDebug("Serving GET request for {File} range {Start}-{End} (Partial: {IsPartial})", fileInfo.Path, range.Start, range.End, range.IsPartial);
 
-        await using var stream = await _torrent.OpenStreamAsync(_fileIndex).ConfigureAwait(false);
+        await using var stream = await _torrent.OpenStreamAsync(_fileIndex, cancellationToken).ConfigureAwait(false);
         stream.Seek(range.Start, SeekOrigin.Begin);
 
         byte[] buffer = ArrayPool<byte>.Shared.Rent(BufferSize);

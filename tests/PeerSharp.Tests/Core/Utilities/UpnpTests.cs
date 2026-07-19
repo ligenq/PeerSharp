@@ -135,7 +135,7 @@ public sealed class UpnpTests
                 $"LOCATION: {location}\r\n" +
                 "\r\n";
             var bytes = Encoding.ASCII.GetBytes(response);
-            await server.SendAsync(bytes, res.RemoteEndPoint).ConfigureAwait(false);
+            await server.SendAsync(bytes, res.RemoteEndPoint, ct).ConfigureAwait(false);
         }
     }
 

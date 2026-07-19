@@ -15,7 +15,7 @@ internal interface IPeerCommunicationFactory
 
 internal class PeerCommunicationFactory : IPeerCommunicationFactory
 {
-    private static readonly ILogger _logger = TorrentLoggerFactory.CreateLogger<PeerCommunicationFactory>();
+    private static readonly ILogger Logger = TorrentLoggerFactory.CreateLogger<PeerCommunicationFactory>();
 
     public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
     {
@@ -39,7 +39,7 @@ internal class PeerCommunicationFactory : IPeerCommunicationFactory
 
     public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, System.Net.Sockets.TcpClient client)
     {
-        PeerCommunication.ConfigureTcpClient(client, torrent.Settings, _logger);
+        PeerCommunication.ConfigureTcpClient(client, torrent.Settings, Logger);
         var peer = new PeerCommunication(torrent, listener, timeProvider)
         {
             Client = client,
