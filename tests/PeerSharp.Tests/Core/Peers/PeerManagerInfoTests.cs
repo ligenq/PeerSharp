@@ -70,7 +70,7 @@ public class PeerManagerInfoTests
         string path = CreateTempPath();
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
 
-        var manager = new PeerManager(torrent, new FakeGeoIpService(), new FakePeerFactory(), TimeProvider.System, new FakeConnectionGovernor());
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new FakePeerFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
         return new PeerManagerContext(torrent, manager, path);
     }
 
@@ -86,10 +86,7 @@ public class PeerManagerInfoTests
 
     private static void AddConnectedPeer(PeerManager manager, PeerCommunication peer)
     {
-        var field = typeof(PeerManager).GetField("_connectedPeers", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        Assert.NotNull(field);
-        var dict = (ConcurrentDictionary<PeerCommunication, byte>)field!.GetValue(manager)!;
-        dict.TryAdd(peer, 0);
+        manager.AddConnectedPeerForTesting(peer);
     }
 
     private static Stream CreateEncryptedStream()
@@ -124,19 +121,6 @@ public class PeerManagerInfoTests
 
     private sealed record PeerManagerContext(Torrent Torrent, PeerManager Manager, string Path);
 
-    private sealed class FakeGeoIpService : IGeoIpService
-    {
-        public bool Enabled { get; set; }
-        public string GetCountry(IPAddress ip) => "US";
-        public void Load(Stream stream) { Enabled = true; }
-        public Task LoadAsync(Stream stream, CancellationToken cancellationToken = default)
-        {
-            Enabled = true;
-            return Task.CompletedTask;
-        }
-        public void Clear() { Enabled = false; }
-    }
-
     private sealed class FakePeerFactory : IPeerCommunicationFactory
     {
         public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
@@ -153,16 +137,6 @@ public class PeerManagerInfoTests
         {
             return new PeerCommunication(torrent, listener, timeProvider);
         }
-    }
-
-    private sealed class FakeConnectionGovernor : IConnectionGovernor
-    {
-        public int ActiveConnections => 0;
-        public int PendingConnections => 0;
-        public bool TryAcquireConnectionSlot() => true;
-        public bool TryAcquirePendingSlot() => true;
-        public void ReleaseConnectionSlot() { }
-        public void ReleasePendingSlot() { }
     }
 
     private sealed class FakeUtpManager : IUtpManager

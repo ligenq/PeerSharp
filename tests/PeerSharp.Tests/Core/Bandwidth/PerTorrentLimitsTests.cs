@@ -176,23 +176,6 @@ public class PerTorrentLimitsTests
         }
     }
 
-    private sealed class MockGeoIpService : IGeoIpService
-    {
-        public bool Enabled { get; set; }
-        public string GetCountry(System.Net.IPAddress ip)
-        {
-            return "US";
-        }
-
-        public void Load(Stream stream) { Enabled = true; }
-        public Task LoadAsync(Stream stream, CancellationToken cancellationToken = default)
-        {
-            Enabled = true;
-            return Task.CompletedTask;
-        }
-        public void Clear() { Enabled = false; }
-    }
-
     private sealed class MockFileHandleLease : IFileHandleLease
     {
         public Microsoft.Win32.SafeHandles.SafeFileHandle Handle { get; }
@@ -281,7 +264,7 @@ public class PerTorrentLimitsTests
             new MockFileSelectionManager(),
             new MockPeerCommunicationFactory(),
             new MockTrackerFactory(),
-            new MockGeoIpService(),
+            new TorrentTestUtility.MockGeoIpService(),
             new MockFileHandleCache(),
             new MockConnectionGovernor(),
             TimeProvider.System);

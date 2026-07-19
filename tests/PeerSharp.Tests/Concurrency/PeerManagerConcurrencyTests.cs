@@ -86,25 +86,6 @@ public class PeerManagerConcurrencyTests
         }
     }
 
-    private class MockGovernor : IConnectionGovernor
-    {
-        public bool TryAcquireConnectionSlot() => true;
-        public bool TryAcquirePendingSlot() => true;
-        public void ReleaseConnectionSlot() { }
-        public void ReleasePendingSlot() { }
-        public int ActiveConnections => 0;
-        public int PendingConnections => 0;
-    }
-
-    private class MockGeoIp : IGeoIpService
-    {
-        public bool Enabled { get; set; }
-        public string GetCountry(IPAddress ip) => "XX";
-        public void Load(Stream stream) { }
-        public Task LoadAsync(Stream stream, CancellationToken ct) => Task.CompletedTask;
-        public void Clear() { }
-    }
-
     [Fact]
     public void PeerManager_ConcurrentConnect_SamePeer_OnlyOneConnects()
     {
@@ -112,7 +93,7 @@ public class PeerManagerConcurrencyTests
         {
             var torrent = TorrentTestUtility.CreateMinimal();
             var factory = new MockFactory();
-            var manager = new PeerManager(torrent, new MockGeoIp(), factory, TimeProvider.System, new MockGovernor());
+            var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), factory, TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
 
             var ep = new IPEndPoint(IPAddress.Loopback, 12345);
             var ipStr = ep.Address.ToString();
@@ -142,7 +123,7 @@ public class PeerManagerConcurrencyTests
         {
             var torrent = TorrentTestUtility.CreateMinimal();
             var factory = new MockFactory();
-            var manager = new PeerManager(torrent, new MockGeoIp(), factory, TimeProvider.System, new MockGovernor());
+            var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), factory, TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
 
             var ep = new IPEndPoint(IPAddress.Loopback, 12345);
             var ipStr = ep.Address.ToString();

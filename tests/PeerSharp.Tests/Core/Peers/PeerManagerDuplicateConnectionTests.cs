@@ -322,12 +322,11 @@ public class PeerManagerDuplicateConnectionTests
         return id;
     }
 
-    private static async Task WaitForPeerIdClaimsAsync(PeerManager manager, int expectedCount)
+    private static Task WaitForPeerIdClaimsAsync(PeerManager manager, int expectedCount)
     {
-        var field = typeof(PeerManager).GetField("_connectedPeerIds", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        Assert.NotNull(field);
-        var dict = (System.Collections.Concurrent.ConcurrentDictionary<string, PeerCommunication>)field!.GetValue(manager)!;
-        await WaitForAsync(() => dict.Count == expectedCount ? (object)dict : null);
+        return TorrentTestUtility.WaitUntilAsync(
+            () => manager.ConnectedPeerIdCountForTesting == expectedCount,
+            because: $"peer id registrations to reach {expectedCount}");
     }
 
     private static byte[] BuildHandshake(byte[]? peerId = null)

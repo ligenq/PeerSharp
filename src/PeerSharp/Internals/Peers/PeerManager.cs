@@ -1169,7 +1169,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    private void BroadcastPex()
+    internal void BroadcastPex()
     {
         // BEP 27: Don't broadcast PEX for private torrents
         if (_torrent.InfoFile.Info.IsPrivate)
@@ -2005,6 +2005,41 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
+    // --- Test hooks (used via InternalsVisibleTo; not called from production code) ---
+
+    /// <summary>
+    /// Test hook: registers an already-constructed peer as connected, bypassing the
+    /// connection pipeline while preserving the endpoint/count invariants.
+    /// </summary>
+    internal void AddConnectedPeerForTesting(PeerCommunication peer)
+    {
+        if (peer.RemoteEndPoint != null)
+        {
+            _connectedEndpoints.TryAdd(peer.RemoteEndPoint, peer);
+        }
+
+        if (_connectedPeers.TryAdd(peer, 0))
+        {
+            Interlocked.Increment(ref _connectedPeersCount);
+        }
+    }
+
+    /// <summary>Test hook: number of peer-id registrations currently held.</summary>
+    internal int ConnectedPeerIdCountForTesting => _connectedPeerIds.Count;
+
+    /// <summary>Test hook: pins the optimistic-unchoke slot to make rechoke tests deterministic.</summary>
+    internal void SetOptimisticPeerForTesting(PeerCommunication? peer, DateTimeOffset changedAt)
+    {
+        _optimisticPeer = peer;
+        _lastOptimisticChange = changedAt;
+    }
+
+    /// <summary>Test hook: sets the global uTP penalty window.</summary>
+    internal void SetGlobalUtpPenaltyForTesting(DateTimeOffset until)
+    {
+        _globalUtpPenaltyUntil = until;
+    }
+
     private PeerHistory GetOrAddKnownPeerHistory(IPEndPoint endpoint)
     {
         if (_knownPeersCache.TryGetValue(endpoint, out var history))
@@ -2104,7 +2139,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    private void UnchokePeers()
+    internal void UnchokePeers()
     {
         // libtransmission optimization: don't rechoke/reconnect if we are seeding
         // and everyone we know is also seeding (and we aren't doing PEX)

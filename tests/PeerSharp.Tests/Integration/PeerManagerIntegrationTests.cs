@@ -18,7 +18,7 @@ public class PeerManagerIntegrationTests
         torrent.Settings.Connection.Encryption = Encryption.Refuse;
 
         var timeProvider = new FakeTimeProvider();
-        var manager = new PeerManager(torrent, new FakeGeoIpService(), new PeerCommunicationFactory(), timeProvider, new FakeConnectionGovernor());
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new PeerCommunicationFactory(), timeProvider, new TorrentTestUtility.MockConnectionGovernor());
 
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -54,8 +54,8 @@ public class PeerManagerIntegrationTests
         rightTorrent.Settings.Connection.Encryption = Encryption.Refuse;
 
         var timeProvider = new FakeTimeProvider();
-        var leftManager = new PeerManager(leftTorrent, new FakeGeoIpService(), new PeerCommunicationFactory(), timeProvider, new FakeConnectionGovernor());
-        var rightManager = new PeerManager(rightTorrent, new FakeGeoIpService(), new PeerCommunicationFactory(), timeProvider, new FakeConnectionGovernor());
+        var leftManager = new PeerManager(leftTorrent, new TorrentTestUtility.MockGeoIpService(), new PeerCommunicationFactory(), timeProvider, new TorrentTestUtility.MockConnectionGovernor());
+        var rightManager = new PeerManager(rightTorrent, new TorrentTestUtility.MockGeoIpService(), new PeerCommunicationFactory(), timeProvider, new TorrentTestUtility.MockConnectionGovernor());
 
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -137,28 +137,6 @@ public class PeerManagerIntegrationTests
         Assert.True(predicate());
     }
 
-    private sealed class FakeGeoIpService : IGeoIpService
-    {
-        public bool Enabled { get; set; }
-        public string GetCountry(IPAddress ip) => "US";
-        public void Load(Stream stream) { Enabled = true; }
-        public Task LoadAsync(Stream stream, CancellationToken cancellationToken = default)
-        {
-            Enabled = true;
-            return Task.CompletedTask;
-        }
-        public void Clear() { Enabled = false; }
-    }
-
-    private sealed class FakeConnectionGovernor : IConnectionGovernor
-    {
-        public int ActiveConnections => 0;
-        public int PendingConnections => 0;
-        public bool TryAcquireConnectionSlot() => true;
-        public bool TryAcquirePendingSlot() => true;
-        public void ReleaseConnectionSlot() { }
-        public void ReleasePendingSlot() { }
-    }
 }
 
 

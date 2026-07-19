@@ -10,6 +10,18 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private readonly Lock _lock = new();
     private readonly ILogger<MetadataDownload> _logger = TorrentLoggerFactory.CreateLogger<MetadataDownload>();
     private readonly Dictionary<int, PendingMetadataRequest> _pendingRequests = [];
+
+    /// <summary>Test hook: number of in-flight metadata piece requests.</summary>
+    internal int PendingRequestCountForTesting
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _pendingRequests.Count;
+            }
+        }
+    }
     private readonly Torrent _torrent;
     private AtomicDisposal _disposal = new();
 

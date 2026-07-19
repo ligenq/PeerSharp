@@ -40,25 +40,6 @@ public class PeerManagerIPv6Tests
             => throw new NotImplementedException();
     }
 
-    private class MockGovernor : IConnectionGovernor
-    {
-        public int ActiveConnections => 0;
-        public int PendingConnections => 0;
-        public bool TryAcquireConnectionSlot() => true;
-        public bool TryAcquirePendingSlot() => true;
-        public void ReleaseConnectionSlot() { }
-        public void ReleasePendingSlot() { }
-    }
-
-    private class MockGeoIp : IGeoIpService
-    {
-        public bool Enabled { get; set; }
-        public string GetCountry(IPAddress ip) => "US";
-        public void Load(Stream stream) { }
-        public Task LoadAsync(Stream stream, CancellationToken cancellationToken) => Task.CompletedTask;
-        public void Clear() { }
-    }
-
     [Fact]
     public async Task ConnectTo_IPv6Literal_ParsesAndConnects()
     {
@@ -69,7 +50,7 @@ public class PeerManagerIPv6Tests
 
         var timeProvider = new FakeTimeProvider();
         var factory = new MockPeerFactory();
-        var manager = new PeerManager(torrent, new MockGeoIp(), factory, timeProvider, new MockGovernor());
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), factory, timeProvider, new TorrentTestUtility.MockConnectionGovernor());
         await manager.StartAsync();
 
         // Act
@@ -111,7 +92,7 @@ public class PeerManagerIPv6Tests
         var torrent = TorrentTestUtility.CreateMinimal();
         var timeProvider = new FakeTimeProvider();
         var factory = new MockPeerFactory();
-        var manager = new PeerManager(torrent, new MockGeoIp(), factory, timeProvider, new MockGovernor());
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), factory, timeProvider, new TorrentTestUtility.MockConnectionGovernor());
         await manager.StartAsync();
 
         const string ipv6 = "[2001:db8::1]";
