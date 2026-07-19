@@ -2,6 +2,7 @@ using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Peers;
+using PeerSharp.Exceptions;
 using PeerSharp.Messages;
 using System.Collections.Concurrent;
 using System.Net;
@@ -738,6 +739,74 @@ public class PeerManagerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task HandshakeFinishedAsync_InternalFailure_ClosesIncompletePeerAndTracksFailure()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Pieces.SetHaveAll();
+        var peer = new FailingHandshakePeer(ctx.Torrent, ctx.Manager);
+
+        await ctx.Manager.HandshakeFinishedAsync(peer);
+
+        Assert.Equal(1, peer.CloseCalls);
+        Assert.Equal(1, ctx.Manager.InternalFailureCountForTesting);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task InternalPeerManagerFailures_EscalateAfterThreshold()
+    {
+        var ctx = CreateContext();
+
+        ctx.Manager.RecordInternalFailureForTesting("test-1", new InvalidOperationException("one"));
+        ctx.Manager.RecordInternalFailureForTesting("test-2", new InvalidOperationException("two"));
+        Assert.Null(ctx.Torrent.LastException);
+
+        ctx.Manager.RecordInternalFailureForTesting("test-3", new InvalidOperationException("three"));
+
+        Assert.Equal(3, ctx.Manager.InternalFailureCountForTesting);
+        var error = Assert.IsType<TorrentException>(ctx.Torrent.LastException);
+        Assert.Contains("3 internal failures", error.Message);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task FireAndForget_FaultedTasksAreTrackedAndEscalated()
+    {
+        var ctx = CreateContext();
+
+        for (int i = 1; i <= 3; i++)
+        {
+            ctx.Manager.FireAndForgetForTesting(Task.FromException(new InvalidOperationException($"failure {i}")), $"test-{i}");
+            int expected = i;
+            await TorrentTestUtility.WaitUntilAsync(
+                () => ctx.Manager.InternalFailureCountForTesting == expected,
+                because: $"faulted fire-and-forget task {i} to be recorded");
+        }
+
+        Assert.IsType<TorrentException>(ctx.Torrent.LastException);
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task InternalPeerManagerFailure_ContainsThrowingErrorSubscriber()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Events = new TorrentEventsBuilder()
+            .OnError((_, _) => throw new InvalidOperationException("subscriber failed"))
+            .Build();
+
+        ctx.Manager.RecordInternalFailureForTesting("test-1", new InvalidOperationException());
+        ctx.Manager.RecordInternalFailureForTesting("test-2", new InvalidOperationException());
+        ctx.Manager.RecordInternalFailureForTesting("test-3", new InvalidOperationException());
+
+        Assert.Equal(3, ctx.Manager.InternalFailureCountForTesting);
+        Assert.IsType<TorrentException>(ctx.Torrent.LastException);
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task ExtendedMessageReceivedAsync_UnknownExtensionId_DoesNotThrow()
     {
         var ctx = CreateContext();
@@ -956,6 +1025,24 @@ public class PeerManagerTests
         public Task PortReceivedAsync(IPeerCommunication peer, ushort dhtPort) => Task.CompletedTask;
     }
 
+    private sealed class FailingHandshakePeer : PeerCommunication
+    {
+        public FailingHandshakePeer(Torrent torrent, IPeerListener listener)
+            : base(torrent, listener, TimeProvider.System)
+        {
+        }
+
+        public int CloseCalls { get; private set; }
+
+        public override Task SendMessageAsync(PeerMessage msg) => Task.FromException(new InvalidOperationException("send failed"));
+
+        public override Task CloseAsync()
+        {
+            CloseCalls++;
+            return Task.CompletedTask;
+        }
+    }
+
     private sealed class RealPeerFactory : IPeerCommunicationFactory
     {
         public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
@@ -992,4 +1079,3 @@ public class PeerManagerTests
         public void ReleasePendingSlot() { }
     }
 }
-
