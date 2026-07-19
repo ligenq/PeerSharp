@@ -500,6 +500,15 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// <summary>Test hook: overrides the remote peer's interested state.</summary>
     internal void SetPeerInterestedForTesting(bool interested) => Volatile.Write(ref _peerInterested, interested ? 1 : 0);
 
+    /// <summary>Test hook: overrides the local interested state used by peer-health policy.</summary>
+    internal void SetAmInterestedForTesting(bool interested) => Volatile.Write(ref _amInterested, interested ? 1 : 0);
+
+    /// <summary>Test hook: overrides whether the remote peer is currently choking us.</summary>
+    internal void SetPeerChokingForTesting(bool choking) => Volatile.Write(ref _peerChoking, choking ? 1 : 0);
+
+    /// <summary>Test hook: overrides the activity timestamp used by idle-timeout policy.</summary>
+    internal void SetLastActivityTicksForTesting(long ticks) => Interlocked.Exchange(ref _lastActivityTicksValue, ticks);
+
     /// <summary>
     /// True if the local side initiated this connection (outgoing dial). Used by PeerManager
     /// for the duplicate-peer-id tie-break on crossed (simultaneous-open) connections.
@@ -2448,4 +2457,3 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
     }
 }
-

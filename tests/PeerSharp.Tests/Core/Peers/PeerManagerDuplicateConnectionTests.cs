@@ -1,5 +1,4 @@
 using PeerSharp.Internals;
-using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
 using System.Net;

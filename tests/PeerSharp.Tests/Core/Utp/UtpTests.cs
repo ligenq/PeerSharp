@@ -102,6 +102,7 @@ public class UtpTests
         Assert.Equal(delayTask, completedFirst); // Delay should complete first, meaning WriteAsync is blocked
 
         clientStream.Dispose();
+        await Assert.ThrowsAnyAsync<Exception>(() => writeTask);
         serverSideStream!.Close();
         mgr1.Stop();
         mgr2.Stop();

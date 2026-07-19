@@ -18,7 +18,7 @@ public class StorageConcurrencyTests
             .WithTestingIterations(iterations)
             .WithMaxSchedulingSteps(1000);
 
-        var engine = TestingEngine.Create(config, test);
+        using var engine = TestingEngine.Create(config, test);
         engine.Run();
 
         var report = engine.TestReport;
