@@ -1799,20 +1799,27 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     /// <summary>
     /// Tie-break between two live connections that turned out to belong to the same peer id.
-    /// Same-direction duplicates keep the existing connection (this also prevents a peer that
-    /// spoofs another's id from evicting an established connection). Crossed connections
-    /// (simultaneous open) deterministically keep the one initiated by the side with the
-    /// lexicographically smaller peer id, so both ends converge on the same connection.
+    /// Same-direction duplicates keep active existing connections (this also prevents a peer
+    /// that spoofs another's id from evicting an established connection). If the existing
+    /// same-direction connection is already idle past the watchdog timeout, replace it with
+    /// the fresh candidate immediately instead of wasting a slot until the next health sweep.
+    /// Crossed connections (simultaneous open) deterministically keep the one initiated by the
+    /// side with the lexicographically smaller peer id, so both ends converge on the same connection.
     /// </summary>
     private bool ShouldReplaceExistingConnection(PeerCommunication existing, PeerCommunication candidate)
     {
         if (existing.IsOutgoing == candidate.IsOutgoing)
         {
-            return false;
+            return IsIdlePastWatchdogTimeout(existing);
         }
 
         bool keepOutgoing = _settings.PeerId.AsSpan().SequenceCompareTo(candidate.PeerId) < 0;
         return keepOutgoing == candidate.IsOutgoing;
+    }
+
+    private static bool IsIdlePastWatchdogTimeout(PeerCommunication peer)
+    {
+        return Environment.TickCount64 - peer.LastActivityTicks > ProtocolConstants.IdleTimeoutMs;
     }
 
     /// <summary>

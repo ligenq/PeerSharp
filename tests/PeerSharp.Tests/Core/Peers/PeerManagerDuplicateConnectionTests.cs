@@ -233,6 +233,89 @@ public class PeerManagerDuplicateConnectionTests
     }
 
     [Fact]
+    public async Task AddIncomingPeer_SamePeerIdAtDifferentEndpoint_ReplacesIdleExistingConnection()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            byte[] peerId = MakePeerId(0x42);
+            var endpoint1 = new IPEndPoint(IPAddress.Parse("1.2.3.4"), 50001);
+            var endpoint2 = new IPEndPoint(IPAddress.Parse("1.2.3.4"), 50002);
+            var stream1 = new HangingStream();
+
+            await ctx.Manager.AddIncomingPeerAsync(stream1, BuildHandshake(peerId), endpoint1);
+            await WaitForPeerIdClaimsAsync(ctx.Manager, 1);
+
+            var existing = Assert.Single(ctx.Manager.GetConnectedPeersInternal());
+            existing.SetLastActivityTicksForTesting(Environment.TickCount64 - ProtocolConstants.IdleTimeoutMs - 1);
+
+            var stream2 = new HangingStream();
+            await ctx.Manager.AddIncomingPeerAsync(stream2, BuildHandshake(peerId), endpoint2);
+
+            await WaitForAsync(() =>
+            {
+                var peer = ctx.Manager.GetConnectedPeers().SingleOrDefault();
+                return peer != null &&
+                    ctx.Manager.ConnectedCount == 1 &&
+                    stream1.Disposed &&
+                    !stream2.Disposed &&
+                    endpoint2.Equals(peer.EndPoint)
+                        ? (object)this
+                        : null;
+            });
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
+    [Fact]
+    public async Task OutgoingConnection_SamePeerIdAtDifferentEndpoint_ReplacesIdleExistingConnection()
+    {
+        var factory = new RacingPeerFactory();
+        var ctx = CreateContext(factory);
+        try
+        {
+            byte[] peerId = MakePeerId(0x42);
+            var endpoint1 = new IPEndPoint(IPAddress.Parse("1.2.3.4"), 50001);
+            var endpoint2 = new IPEndPoint(IPAddress.Parse("1.2.3.4"), 50002);
+
+            await ctx.Manager.StartAsync();
+
+            ctx.Manager.ConnectTo(endpoint1.Address.ToString(), endpoint1.Port);
+            var outgoing1 = await WaitForAsync(() => factory.LastOutgoing is { ConnectStarted: true } p ? p : null);
+            outgoing1.HandshakePeerId = peerId;
+            outgoing1.ConnectGate.SetResult(true);
+
+            await WaitForAsync(() =>
+                ctx.Manager.ConnectedCount == 1 &&
+                ReferenceEquals(ctx.Manager.GetConnectedPeersInternal().SingleOrDefault(), outgoing1)
+                    ? (object)this
+                    : null);
+            outgoing1.SetLastActivityTicksForTesting(Environment.TickCount64 - ProtocolConstants.IdleTimeoutMs - 1);
+
+            ctx.Manager.ConnectTo(endpoint2.Address.ToString(), endpoint2.Port);
+            var outgoing2 = await WaitForAsync(() =>
+                factory.LastOutgoing is { ConnectStarted: true } p && !ReferenceEquals(p, outgoing1) ? p : null);
+            outgoing2.HandshakePeerId = peerId;
+            outgoing2.ConnectGate.SetResult(true);
+
+            await WaitForAsync(() =>
+                outgoing1.CloseCalls > 0 &&
+                ctx.Manager.ConnectedCount == 1 &&
+                ReferenceEquals(ctx.Manager.GetConnectedPeersInternal().SingleOrDefault(), outgoing2)
+                    ? (object)this
+                    : null);
+            Assert.Equal(endpoint2, Assert.Single(ctx.Manager.GetConnectedPeers()).EndPoint);
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
+    [Fact]
     public async Task CrossedConnections_LocalIdSmaller_OutgoingConnectionWins()
     {
         await RunCrossedConnectionTestAsync(localIdByte: 0x01, remoteIdByte: 0x7F, expectOutgoingWins: true);
@@ -508,7 +591,13 @@ public class PeerManagerDuplicateConnectionTests
         public override Task CloseAsync()
         {
             Interlocked.Increment(ref _closeCalls);
+            bool wasConnected = Connected == 1;
             Connected = 0;
+            if (wasConnected)
+            {
+                return Listener.ConnectionClosedAsync(this, 0);
+            }
+
             return Task.CompletedTask;
         }
     }
