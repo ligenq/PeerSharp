@@ -595,6 +595,16 @@ public sealed class TransferSettings
 /// <summary>
 /// Configuration settings for the BitTorrent client.
 /// </summary>
+/// <remarks>
+/// <para><b>Thread safety:</b> the engine re-reads these settings from its internal loops at
+/// runtime, so individual property writes take effect without a restart, typically within a
+/// few seconds. Writes of a single property are safe at any time.</para>
+/// <para>There is no atomicity <i>across</i> properties: the engine may briefly observe a mix
+/// of old and new values while several properties are being changed, so related settings
+/// (e.g. a speed limit and its slot count) should be treated as eventually consistent rather
+/// than as one transaction. Replacing whole sub-setting objects (such as
+/// <see cref="Connection"/>) at runtime is not supported; mutate their properties instead.</para>
+/// </remarks>
 public sealed class Settings
 {
     /// <summary>Settings for peer-to-peer network connections.</summary>
