@@ -245,7 +245,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
     public IReadOnlyList<PortMappingStatus> GetPortMappingStatus()
     {
         _disposal.ThrowIfDisposed(this);
-        return _networkManager?.GetPortMappingStatus() ?? Array.Empty<PortMappingStatus>();
+        return _networkManager?.GetPortMappingStatus() ?? [];
     }
 
     public EngineStats GetStats()
@@ -497,7 +497,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         if (magnetLink.Trackers.Count > 0)
         {
             metadata.AnnounceList.AddRange(magnetLink.Trackers);
-            metadata.AnnounceTiers.Add(new List<string>(magnetLink.Trackers));
+            metadata.AnnounceTiers.Add([.. magnetLink.Trackers]);
             metadata.Announce = metadata.AnnounceList[0];
         }
 

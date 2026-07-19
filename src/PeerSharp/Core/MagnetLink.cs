@@ -282,7 +282,7 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
 
         if (values == null || values.Length == 0)
         {
-            return Array.Empty<int>();
+            return [];
         }
 
         var indices = new SortedSet<int>();

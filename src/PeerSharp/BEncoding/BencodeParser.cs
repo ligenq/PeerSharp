@@ -16,14 +16,14 @@ internal static class BencodeParser
     // SECURITY: Maximum total elements across entire structure to prevent DoS
     private const int MaxTotalElements = 500000;
 
-    private static readonly KeyValuePair<byte[], string>[] CommonKeys = new string[]
+    private static readonly KeyValuePair<byte[], string>[] CommonKeys = [.. new string[]
     {
         "length", "path", "name", "piece length", "pieces", "files", "info",
         "announce", "announce-list", "creation date", "comment", "created by", "encoding",
         "ed2k", "filehash", "attr", "sha1", "md5sum", "mtime", "symlink path",
         "url-list", "httpseeds", "publisher", "publisher-url",
         "nodes", "nodes6", "id", "q", "t", "y", "v", "e", "a", "r", "ip", "port", "token", "values", "want"
-    }.Select(x => new KeyValuePair<byte[], string>(Encoding.Latin1.GetBytes(x), x)).ToArray();
+    }.Select(x => new KeyValuePair<byte[], string>(Encoding.Latin1.GetBytes(x), x))];
 
     private static string GetDictionaryKey(ReadOnlySpan<byte> span)
     {

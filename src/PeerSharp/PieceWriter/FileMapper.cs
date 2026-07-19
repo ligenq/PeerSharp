@@ -11,7 +11,7 @@ internal class FileMapper
 
     public FileMapper(IReadOnlyList<long> fileSizes)
     {
-        _fileSizes = fileSizes.ToArray();
+        _fileSizes = [.. fileSizes];
         _cumulativeOffsets = new long[_fileSizes.Length + 1];
 
         long offset = 0;

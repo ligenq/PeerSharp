@@ -602,7 +602,7 @@ public class UdpTrackerTests
         var tracker = new UdpTracker(_timeProvider, _socketFactory);
         tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
 
-        await tracker.MultiScrapeAsync(new[] { InfoHash.CreateRandomV2() }, CancellationToken.None);
+        await tracker.MultiScrapeAsync([InfoHash.CreateRandomV2()], CancellationToken.None);
 
         Assert.Null(_callback.MultiScrapeResponse);
         Assert.Empty(_socketFactory.LastSocket.SentPackets);
@@ -987,7 +987,7 @@ public class UdpTrackerTests
 
         var announceTask = tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
 
-        int[] retryDelaysMs = { 1000, 2000, 4000 };
+        int[] retryDelaysMs = [1000, 2000, 4000];
 
         // 4 attempts (initial + 3 retries), all timing out on the Connect packet.
         for (int attempt = 0; attempt < 4; attempt++)
@@ -1141,7 +1141,7 @@ public class UdpTrackerTests
 
         var scrapeTask = tracker.ScrapeAsync(CancellationToken.None);
 
-        int[] retryDelaysMs = { 1000, 2000, 4000 };
+        int[] retryDelaysMs = [1000, 2000, 4000];
         for (int attempt = 0; attempt < 4; attempt++)
         {
             await _socketFactory.LastSocket.WaitForPacketAsync(attempt, TimeSpan.FromSeconds(5));
@@ -1207,7 +1207,7 @@ public class UdpTrackerTests
         byte[] hash = InfoHash.CreateRandom().ToArray();
         var scrapeTask = tracker.ScrapeMultipleAsync([hash], CancellationToken.None);
 
-        int[] retryDelaysMs = { 1000, 2000, 4000 };
+        int[] retryDelaysMs = [1000, 2000, 4000];
         for (int attempt = 0; attempt < 4; attempt++)
         {
             await _socketFactory.LastSocket.WaitForPacketAsync(attempt, TimeSpan.FromSeconds(5));
@@ -1273,7 +1273,7 @@ public class UdpTrackerTests
         var hashes = new[] { InfoHash.CreateRandom() };
         var scrapeTask = tracker.MultiScrapeAsync(hashes, CancellationToken.None);
 
-        int[] retryDelaysMs = { 1000, 2000, 4000 };
+        int[] retryDelaysMs = [1000, 2000, 4000];
         for (int attempt = 0; attempt < 4; attempt++)
         {
             await _socketFactory.LastSocket.WaitForPacketAsync(attempt, TimeSpan.FromSeconds(5));

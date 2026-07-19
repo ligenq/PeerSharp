@@ -337,9 +337,9 @@ internal sealed class Storage : IStorage
         {
             if (_fileMapper != null)
             {
-                foreach (var op in _fileMapper.MapRange(offset, buffer.Length))
+                foreach (var (FileIndex, FileOffset, Length, BufferOffset) in _fileMapper.MapRange(offset, buffer.Length))
                 {
-                    fileOperations.Add((op.FileIndex, op.FileOffset, op.Length, op.BufferOffset));
+                    fileOperations.Add((FileIndex, FileOffset, Length, BufferOffset));
                 }
             }
         }
@@ -351,12 +351,12 @@ internal sealed class Storage : IStorage
         var lockedFiles = new List<int>();
         try
         {
-            foreach (var op in fileOperations)
+            foreach (var (FileIdx, _, _, _) in fileOperations)
             {
-                if (!lockedFiles.Contains(op.FileIdx))
+                if (!lockedFiles.Contains(FileIdx))
                 {
-                    await _fileLocks[op.FileIdx].WaitAsync(ct).ConfigureAwait(false);
-                    lockedFiles.Add(op.FileIdx);
+                    await _fileLocks[FileIdx].WaitAsync(ct).ConfigureAwait(false);
+                    lockedFiles.Add(FileIdx);
                 }
             }
 
@@ -528,9 +528,9 @@ internal sealed class Storage : IStorage
         {
             if (_fileMapper != null)
             {
-                foreach (var op in _fileMapper.MapRange(offset, data.Length))
+                foreach (var (FileIndex, FileOffset, Length, BufferOffset) in _fileMapper.MapRange(offset, data.Length))
                 {
-                    fileOperations.Add((op.FileIndex, op.FileOffset, op.Length, op.BufferOffset));
+                    fileOperations.Add((FileIndex, FileOffset, Length, BufferOffset));
                 }
             }
         }
@@ -543,9 +543,9 @@ internal sealed class Storage : IStorage
         var acquiredLocks = new List<SemaphoreSlim>();
         try
         {
-            foreach (var op in fileOperations)
+            foreach (var (FileIdx, _, _, _) in fileOperations)
             {
-                if (!lockedFiles.Contains(op.FileIdx))
+                if (!lockedFiles.Contains(FileIdx))
                 {
                     // Check shutdown before accessing array which might be cleared
                     if (Interlocked.CompareExchange(ref _shutdownRequested, 0, 0) == 1)
@@ -553,9 +553,9 @@ internal sealed class Storage : IStorage
                         throw new ObjectDisposedException(nameof(Storage));
                     }
 
-                    var lockObj = _fileLocks[op.FileIdx];
+                    var lockObj = _fileLocks[FileIdx];
                     await lockObj.WaitAsync(ct).ConfigureAwait(false);
-                    lockedFiles.Add(op.FileIdx);
+                    lockedFiles.Add(FileIdx);
                     acquiredLocks.Add(lockObj);
                 }
             }

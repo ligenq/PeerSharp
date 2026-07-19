@@ -92,7 +92,7 @@ public class PiecesProgressTests
     public void FromBitfield_FullBitfield_MarksAll()
     {
         var progress = new PiecesProgress(10);
-        byte[] full = new byte[] { 0xFF, 0xC0 }; // 11111111 11000000
+        byte[] full = [0xFF, 0xC0]; // 11111111 11000000
         progress.FromBitfield(full);
         Assert.True(progress.IsFull);
         Assert.Equal(10, progress.ReceivedCount);
@@ -102,7 +102,7 @@ public class PiecesProgressTests
     public void FromBitfield_PartialBytes()
     {
         var progress = new PiecesProgress(4);
-        byte[] data = new byte[] { 0xA0 }; // 1010 0000
+        byte[] data = [0xA0]; // 1010 0000
         progress.FromBitfield(data);
         Assert.True(progress.HasPiece(0));
         Assert.False(progress.HasPiece(1));
@@ -145,7 +145,7 @@ public class PiecesProgressTests
     public void FromBitfield_IgnoresSpareBitsInLastByte()
     {
         var progress = new PiecesProgress(10);
-        byte[] data = new byte[] { 0xFF, 0xFF }; // extra bits set beyond 10 pieces
+        byte[] data = [0xFF, 0xFF]; // extra bits set beyond 10 pieces
         progress.FromBitfield(data);
         Assert.True(progress.IsFull);
         Assert.Equal(10, progress.ReceivedCount);

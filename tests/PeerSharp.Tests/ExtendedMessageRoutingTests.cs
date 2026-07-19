@@ -66,7 +66,7 @@ public sealed class ExtendedMessageRoutingTests
         var handleMethod = typeof(PeerCommunication).GetMethod("HandleExtendedMessageAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(handleMethod);
 
-        var task = (Task)handleMethod.Invoke(peer, new object[] { new ReadOnlyMemory<byte>(new byte[] { 7 }) })!;
+        var task = (Task)handleMethod.Invoke(peer, [new ReadOnlyMemory<byte>([7])])!;
         await task;
 
         Assert.True(listener.ExtendedMessageReceivedCalled);

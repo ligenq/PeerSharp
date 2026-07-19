@@ -42,7 +42,7 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
         {
             Hash = hash,
             Timestamp = DateTimeOffset.UtcNow,
-            Data = new byte[] { 1, 2, 3, 4 }
+            Data = [1, 2, 3, 4]
         };
         var options = new SavedTorrentOptions(
             DownloadPath: "C:\\Downloads",
@@ -87,7 +87,7 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
         var entryDir = Path.Combine(_tempDir, "torrents", hash.ToHexStringUpper());
         Directory.CreateDirectory(entryDir);
 
-        await File.WriteAllBytesAsync(Path.Combine(entryDir, "torrent.torrent"), new byte[] { 9, 8, 7 });
+        await File.WriteAllBytesAsync(Path.Combine(entryDir, "torrent.torrent"), [9, 8, 7]);
         await File.WriteAllTextAsync(Path.Combine(entryDir, "options.json"), "{not valid json");
 
         var entries = await persistence.LoadAllAsync();
@@ -116,7 +116,7 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
         var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
         var hash = new InfoHash(Enumerable.Repeat((byte)0x22, 20).ToArray());
 
-        var entry = new SavedTorrentEntry(hash, new byte[] { 1, 2, 3 });
+        var entry = new SavedTorrentEntry(hash, [1, 2, 3]);
         await persistence.SaveAsync(entry);
 
         var entryDir = Path.Combine(_tempDir, "torrents", hash.ToHexStringUpper());
@@ -137,9 +137,9 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
 
         var entries = new[]
         {
-            new SavedTorrentEntry(hash1, new byte[] { 1, 2, 3 }, "magnet:?xt=urn:btih:HASH1"),
-            new SavedTorrentEntry(hash2, new byte[] { 4, 5, 6 }, "magnet:?xt=urn:btih:HASH2"),
-            new SavedTorrentEntry(hash3, new byte[] { 7, 8, 9 }, "magnet:?xt=urn:btih:HASH3")
+            new SavedTorrentEntry(hash1, [1, 2, 3], "magnet:?xt=urn:btih:HASH1"),
+            new SavedTorrentEntry(hash2, [4, 5, 6], "magnet:?xt=urn:btih:HASH2"),
+            new SavedTorrentEntry(hash3, [7, 8, 9], "magnet:?xt=urn:btih:HASH3")
         };
 
         await persistence.SaveAllAsync(entries);
@@ -179,7 +179,7 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
         var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
 
         var hash = new InfoHash(Enumerable.Repeat((byte)0xAA, 20).ToArray());
-        var entries = new[] { new SavedTorrentEntry(hash, new byte[] { 1, 2, 3 }) };
+        var entries = new[] { new SavedTorrentEntry(hash, [1, 2, 3]) };
 
         using var cts = new CancellationTokenSource();
         cts.Cancel();

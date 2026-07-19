@@ -124,13 +124,13 @@ internal class UtPex : IUtPex, IDisposable
 
             if (addedBytes.Count > 0)
             {
-                dict.Dict["added"] = new BString(addedBytes.ToArray());
-                dict.Dict["added.f"] = new BString(flagsBytes.ToArray());
+                dict.Dict["added"] = new BString([.. addedBytes]);
+                dict.Dict["added.f"] = new BString([.. flagsBytes]);
             }
             if (added6Bytes.Count > 0)
             {
-                dict.Dict["added6"] = new BString(added6Bytes.ToArray());
-                dict.Dict["added6.f"] = new BString(flags6Bytes.ToArray());
+                dict.Dict["added6"] = new BString([.. added6Bytes]);
+                dict.Dict["added6.f"] = new BString([.. flags6Bytes]);
             }
         }
 
@@ -157,12 +157,12 @@ internal class UtPex : IUtPex, IDisposable
 
             if (droppedBytes.Count > 0)
             {
-                dict.Dict["dropped"] = new BString(droppedBytes.ToArray());
+                dict.Dict["dropped"] = new BString([.. droppedBytes]);
             }
 
             if (dropped6Bytes.Count > 0)
             {
-                dict.Dict["dropped6"] = new BString(dropped6Bytes.ToArray());
+                dict.Dict["dropped6"] = new BString([.. dropped6Bytes]);
             }
         }
 
@@ -195,14 +195,14 @@ internal class UtPex : IUtPex, IDisposable
 
         // Build current set and detect new peers in single pass
         var currentSet = new HashSet<IPEndPoint>();
-        foreach (var p in peers)
+        foreach (var (Ep, Flags) in peers)
         {
-            currentSet.Add(p.Ep);
-            if (_sentPeers.Add(p.Ep))
+            currentSet.Add(Ep);
+            if (_sentPeers.Add(Ep))
             {
                 // Was newly added to _sentPeers, so it's a new peer
-                added.Add(p.Ep);
-                addedFlags.Add(p.Flags);
+                added.Add(Ep);
+                addedFlags.Add(Flags);
             }
         }
 

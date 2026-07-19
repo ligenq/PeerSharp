@@ -97,7 +97,7 @@ public class PeerManagerInfoTests
         var pe = new ProtocolEncryption();
         var manager = new TestBandwidthManager();
         return new EncryptedStream(new MemoryStream(), pe, new TestBandwidthUser(), manager,
-            new[] { BandwidthManager.GlobalDownload }, new[] { BandwidthManager.GlobalUpload }, leaveInnerOpen: true);
+            [BandwidthManager.GlobalDownload], [BandwidthManager.GlobalUpload], leaveInnerOpen: true);
     }
 
     private static string CreateTempPath()

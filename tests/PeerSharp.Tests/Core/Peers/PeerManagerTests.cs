@@ -180,7 +180,7 @@ public class PeerManagerTests
             System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(method);
 
-        method!.Invoke(null, new object[] { history, (byte)(UtPex.Peer.Seed | UtPex.Peer.Utp) });
+        method!.Invoke(null, [history, (byte)(UtPex.Peer.Seed | UtPex.Peer.Utp)]);
 
         Assert.True(history.IsSeed);
         Assert.True(history.UtpHinted);
@@ -197,7 +197,7 @@ public class PeerManagerTests
 
         var method = typeof(PeerManager).GetMethod("ApplyPexFlags",
             System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
-        method!.Invoke(null, new object[] { history, (byte)0 });
+        method!.Invoke(null, [history, (byte)0]);
 
         Assert.False(history.IsSeed);
         Assert.False(history.UtpHinted);
@@ -437,7 +437,7 @@ public class PeerManagerTests
         SetUtpManagerStub(ctx.Torrent);
 
         var plan = InvokeBuildTransportPlan(ctx.Manager, settings, history: null, forceUtp: false);
-        Assert.Equal(new[] { TransportPreference.Utp }, plan);
+        Assert.Equal([TransportPreference.Utp], plan);
 
         await CleanupAsync(ctx);
     }
@@ -452,7 +452,7 @@ public class PeerManagerTests
         SetUtpManagerStub(ctx.Torrent);
 
         var plan = InvokeBuildTransportPlan(ctx.Manager, settings, history: null, forceUtp: false);
-        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Tcp], plan);
 
         await CleanupAsync(ctx);
     }
@@ -466,7 +466,7 @@ public class PeerManagerTests
         settings.EnableUtpOut = true;
         // Don't set UtpManager - should remove utp from plan
         var plan = InvokeBuildTransportPlan(ctx.Manager, settings, history: null, forceUtp: false);
-        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Tcp], plan);
 
         await CleanupAsync(ctx);
     }
@@ -483,7 +483,7 @@ public class PeerManagerTests
         SetPrivateField(ctx.Manager, "_globalUtpPenaltyUntil", DateTimeOffset.UtcNow.AddMinutes(5));
 
         var plan = InvokeBuildTransportPlan(ctx.Manager, settings, history: null, forceUtp: false);
-        Assert.Equal(new[] { TransportPreference.Tcp }, plan);
+        Assert.Equal([TransportPreference.Tcp], plan);
 
         await CleanupAsync(ctx);
     }
@@ -498,7 +498,7 @@ public class PeerManagerTests
             "BuildTransportPlan",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(method);
-        return (IReadOnlyList<TransportPreference>)method!.Invoke(manager, new object?[] { settings, history, forceUtp })!;
+        return (IReadOnlyList<TransportPreference>)method!.Invoke(manager, [settings, history, forceUtp])!;
     }
 
     [Fact(Timeout = 30000)]

@@ -40,7 +40,7 @@ internal static class TransportPlanBuilder
 
         if (!utpAllowed && !tcpAllowed)
         {
-            return Array.Empty<TransportPreference>();
+            return [];
         }
 
         bool utpPreferred = settings.PreferUtp && utpAllowed;

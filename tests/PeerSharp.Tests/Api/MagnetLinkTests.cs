@@ -97,7 +97,7 @@ public class MagnetLinkTests
 
         var link = MagnetLink.Parse(magnet);
 
-        Assert.Equal(new[] { 0, 2, 4, 5, 6 }, link.SelectOnlyFileIndices);
+        Assert.Equal([0, 2, 4, 5, 6], link.SelectOnlyFileIndices);
     }
 
     [Fact]
@@ -108,7 +108,7 @@ public class MagnetLinkTests
 
         var link = MagnetLink.Parse(magnet);
 
-        Assert.Equal(new[] { 1, 2, 3 }, link.SelectOnlyFileIndices);
+        Assert.Equal([1, 2, 3], link.SelectOnlyFileIndices);
     }
 
     [Fact]
@@ -120,7 +120,7 @@ public class MagnetLinkTests
 
         var link = MagnetLink.Parse(magnet);
 
-        Assert.Equal(new[] { 1, 2 }, link.SelectOnlyFileIndices);
+        Assert.Equal([1, 2], link.SelectOnlyFileIndices);
     }
 
     [Fact]

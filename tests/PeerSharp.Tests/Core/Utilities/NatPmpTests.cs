@@ -10,7 +10,7 @@ public sealed class NatPmpTests
     public async Task MapPortAsync_SucceedsWithValidResponse()
     {
         await using var server = new NatPmpTestServer(success: true, externalPort: 5555);
-        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+        var mapper = new NatPmpPortMapping(() => [IPAddress.Loopback], server.Port);
 
         await mapper.StartAsync(CancellationToken.None);
 
@@ -27,7 +27,7 @@ public sealed class NatPmpTests
     public async Task MapPortAsync_FailsOnErrorResponse()
     {
         await using var server = new NatPmpTestServer(success: false, externalPort: null);
-        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+        var mapper = new NatPmpPortMapping(() => [IPAddress.Loopback], server.Port);
 
         await mapper.StartAsync(CancellationToken.None);
 
@@ -56,7 +56,7 @@ public sealed class NatPmpTests
     {
         var received = new List<byte[]>();
         await using var server = new NatPmpTestServer(success: true, externalPort: 7777, captureRequests: received);
-        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+        var mapper = new NatPmpPortMapping(() => [IPAddress.Loopback], server.Port);
 
         await mapper.StartAsync(CancellationToken.None);
         bool result = await mapper.MapPortAsync(9000, "TCP", "test", CancellationToken.None);
@@ -71,7 +71,7 @@ public sealed class NatPmpTests
     {
         var received = new List<byte[]>();
         await using var server = new NatPmpTestServer(success: true, externalPort: 4444, captureRequests: received);
-        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+        var mapper = new NatPmpPortMapping(() => [IPAddress.Loopback], server.Port);
 
         await mapper.StartAsync(CancellationToken.None);
         await mapper.MapPortAsync(1234, "UDP", "test", CancellationToken.None);
@@ -95,7 +95,7 @@ public sealed class NatPmpTests
     public async Task UnmapAllAsync_NoMappings_CompletesWithoutSendingPackets()
     {
         await using var server = new NatPmpTestServer(success: true, externalPort: 4444);
-        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+        var mapper = new NatPmpPortMapping(() => [IPAddress.Loopback], server.Port);
         await mapper.StartAsync(CancellationToken.None);
 
         // No mappings registered — should complete silently.
@@ -107,7 +107,7 @@ public sealed class NatPmpTests
     {
         var received = new List<byte[]>();
         await using var server = new NatPmpTestServer(success: true, externalPort: 5000, captureRequests: received);
-        var mapper = new NatPmpPortMapping(() => new[] { IPAddress.Loopback }, server.Port);
+        var mapper = new NatPmpPortMapping(() => [IPAddress.Loopback], server.Port);
 
         await mapper.StartAsync(CancellationToken.None);
         await mapper.MapPortAsync(1234, "UDP", "test", CancellationToken.None);

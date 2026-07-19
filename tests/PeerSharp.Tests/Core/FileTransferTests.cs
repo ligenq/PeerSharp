@@ -63,7 +63,7 @@ public class FileTransferTests
             new()
             {
                 Index = 0,
-                Blocks = new[] { true, false },
+                Blocks = [true, false],
                 Data = new byte[32768]
             }
         };
@@ -118,7 +118,7 @@ public class FileTransferTests
         Assert.Single(torrent.PeersInternal.GetConnectedPeersInternal()); // Ensure connected peers contains the peer
 
         var requestMerkleHashes = typeof(FileTransfer).GetMethod("RequestMerkleHashes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        requestMerkleHashes?.Invoke(fileTransfer, new object[] { 0 });
+        requestMerkleHashes?.Invoke(fileTransfer, [0]);
 
         // Ensure a message was queued for the peer
         var queue = peer.GetType().GetField("_sendQueue", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(peer) as MessageQueue;

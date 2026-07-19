@@ -53,7 +53,7 @@ internal static class WebTorrentTrackerUrls
             }
         }
 
-        return urls.ToList();
+        return [.. urls];
     }
 
     public static IReadOnlyList<string> Collect(ITorrent torrent, WebTorrentSessionOptions options)

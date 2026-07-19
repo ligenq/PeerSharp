@@ -27,7 +27,7 @@ public sealed class UpnpTests
         var responderTask = RespondToSsdpAsync(udpServer, httpServer.BaseUri + "desc.xml", cts.Token);
 
         var gateways = await UpnpDiscovery.DiscoverAsync(
-            () => new[] { IPAddress.Loopback },
+            () => [IPAddress.Loopback],
             ssdpEndpoint,
             UpnpDiscovery.ParseDescriptionAsync,
             TimeProvider.System,

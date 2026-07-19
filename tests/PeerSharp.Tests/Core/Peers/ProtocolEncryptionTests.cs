@@ -98,7 +98,7 @@ public class ProtocolEncryptionTests
         var initiator = new ProtocolEncryptionHandshake(infoHash, true);
         var responder = new ProtocolEncryptionHandshake(infoHash, false);
 
-        byte[] initiatorHandshake = new byte[] { 1, 2, 3, 4, 5 };
+        byte[] initiatorHandshake = [1, 2, 3, 4, 5];
         initiator.InitialPayload = initiatorHandshake;
 
         // Act
@@ -175,7 +175,7 @@ public class ProtocolEncryptionTests
         var initiator = new ProtocolEncryptionHandshake(infoHash, true);
         var responder = new ProtocolEncryptionHandshake(resolver);
 
-        byte[] initiatorHandshake = new byte[] { 1, 2, 3, 4, 5 };
+        byte[] initiatorHandshake = [1, 2, 3, 4, 5];
         initiator.InitialPayload = initiatorHandshake;
 
         // Act

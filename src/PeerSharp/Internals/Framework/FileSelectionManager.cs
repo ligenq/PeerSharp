@@ -131,7 +131,7 @@ internal class FileSelectionManager : IFileSelectionManager
         {
             if (savedSelection?.Count > 0)
             {
-                _fileSelection = new List<FileSelection>(savedSelection);
+                _fileSelection = [.. savedSelection];
             }
             else
             {

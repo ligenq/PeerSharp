@@ -17,6 +17,7 @@ internal class LsdManager : ILsdManager
     private const string MulticastIpV4 = "239.192.152.143";
     private const string MulticastIpV6 = "ff15::efc0:988f";
     private static readonly TimeSpan AnnounceInterval = TimeSpan.FromMinutes(5);
+    private static readonly string[] LineSeparators = ["\r\n", "\n"];
     private readonly string _cookie;
     private readonly ILogger<LsdManager> _logger = TorrentLoggerFactory.CreateLogger<LsdManager>();
     private readonly ITorrentResolver _resolver;
@@ -181,7 +182,7 @@ internal class LsdManager : ILsdManager
             return;
         }
 
-        var lines = message.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+        var lines = message.Split(LineSeparators, StringSplitOptions.RemoveEmptyEntries);
         int port = 0;
         string? hashStr = null;
         string? cookie = null;
@@ -190,7 +191,7 @@ internal class LsdManager : ILsdManager
         {
             if (line.StartsWith("Port:", StringComparison.OrdinalIgnoreCase))
             {
-                int.TryParse(line[5..].Trim(), out port);
+                _ = int.TryParse(line[5..].Trim(), out port);
             }
             else if (line.StartsWith("Infohash:", StringComparison.OrdinalIgnoreCase))
             {
@@ -215,7 +216,7 @@ internal class LsdManager : ILsdManager
             {
                 var peerEp = new IPEndPoint(sender.Address, port);
                 _logger.LogInformation("LSD found peer {Peer} for {Torrent}", peerEp, t.Name);
-                t.PeersInternal.AddPeers(new[] { peerEp }, PeerSourceKind.Lpd, null);
+                t.PeersInternal.AddPeers([peerEp], PeerSourceKind.Lpd, null);
             }
         }
     }
@@ -234,7 +235,7 @@ internal class LsdManager : ILsdManager
 
     private void OnAnnounceTick(object? state)
     {
-        var torrents = _resolver is ClientEngine engine ? engine.GetTorrents() : new List<ITorrent>();
+        var torrents = _resolver is ClientEngine engine ? engine.GetTorrents() : [];
         // Use manager lifetime token when running; otherwise do not cancel.
         var token = _cts?.Token ?? CancellationToken.None;
 

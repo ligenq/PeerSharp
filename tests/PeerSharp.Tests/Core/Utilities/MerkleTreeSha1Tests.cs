@@ -10,8 +10,8 @@ public class MerkleTreeSha1Tests
         var pieces = new[]
         {
             new byte[] { 1, 2, 3 },
-            new byte[] { 4, 5, 6, 7 },
-            new byte[] { 8, 9 }
+            [4, 5, 6, 7],
+            [8, 9]
         };
 
         var hashes = pieces.Select(p => MerkleTreeSha1.ComputePieceHash(p.AsSpan())).ToList();
@@ -40,7 +40,7 @@ public class MerkleTreeSha1Tests
         var data = new[]
         {
             new byte[] { 10, 11, 12 },
-            new byte[] { 20, 21, 22 }
+            [20, 21, 22]
         };
 
         var hashes = data.Select(p => MerkleTreeSha1.ComputePieceHash(p.AsSpan())).ToList();

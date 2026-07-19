@@ -10,7 +10,7 @@ internal class Program
 {
     private static async Task<int> Main(string[] args)
     {
-        args = args.Length == 0 ? new[] { @"C:\Users\jlign\Downloads\sintel (1).torrent" } : args;
+        args = args.Length == 0 ? [@"C:\Users\jlign\Downloads\sintel (1).torrent"] : args;
 
         if (args.Length < 1)
         {
@@ -91,14 +91,14 @@ internal class Program
             OffersPerTracker = 5,
             IceTransportPolicy = options.IceTransportPolicy,
             IceServers = iceServers,
-            AdditionalTrackers = new[]
-            {
+            AdditionalTrackers =
+            [
                 "wss://tracker.openwebtorrent.com",
                 "wss://tracker.openwebtorrent.com:443/announce",
                 "wss://tracker.webtorrent.dev",
                 "wss://tracker.webtorrent.dev:443/announce",
                 "ws://tracker.files.fm:7072/announce"
-            }
+            ]
         };
 
         var engineOptions = new TorrentClientOptions

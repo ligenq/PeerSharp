@@ -30,7 +30,7 @@ public class ExtensionHandshakeTests
         {
             Client = "MtTorrent 1.0",
             MetadataSize = 12345,
-            YourIp = new byte[] { 127, 0, 0, 1 }
+            YourIp = [127, 0, 0, 1]
         };
         handshake.MessageIds["ut_metadata"] = 1;
         handshake.MessageIds["ut_pex"] = 2;
@@ -59,7 +59,7 @@ public class ExtensionHandshakeTests
         dict.Dict["m"] = m;
         dict.Dict["v"] = new BString(Encoding.UTF8.GetBytes("MtTorrent 1.0"));
         dict.Dict["metadata_size"] = new BNumber(12345);
-        dict.Dict["yourip"] = new BString(new byte[] { 127, 0, 0, 1 });
+        dict.Dict["yourip"] = new BString([127, 0, 0, 1]);
 
         // Act
         var handshake = ExtensionHandshake.Parse(dict);

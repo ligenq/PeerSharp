@@ -7,7 +7,7 @@ public class FileMapperTests
     [Fact]
     public void MapOffset_SingleFile_ReturnsCorrectOffsets()
     {
-        var mapper = new FileMapper(new[] { 1000L });
+        var mapper = new FileMapper([1000L]);
 
         var (idx, offset) = mapper.MapOffset(0);
         Assert.Equal(0, idx);
@@ -28,7 +28,7 @@ public class FileMapperTests
         // File 0: 0-99
         // File 1: 100-299
         // File 2: 300-399
-        var mapper = new FileMapper(new[] { 100L, 200L, 100L });
+        var mapper = new FileMapper([100L, 200L, 100L]);
 
         var (idx, offset) = mapper.MapOffset(50);
         Assert.Equal(0, idx);
@@ -54,7 +54,7 @@ public class FileMapperTests
     [Fact]
     public void MapRange_SingleFile_ReturnsOneChunk()
     {
-        var mapper = new FileMapper(new[] { 1000L });
+        var mapper = new FileMapper([1000L]);
         var ops = mapper.MapRange(100, 500).ToList();
 
         Assert.Single(ops);
@@ -68,7 +68,7 @@ public class FileMapperTests
     public void MapRange_SpanningFiles_ReturnsMultipleChunks()
     {
         // File 0: 100, File 1: 200, File 2: 100
-        var mapper = new FileMapper(new[] { 100L, 200L, 100L });
+        var mapper = new FileMapper([100L, 200L, 100L]);
 
         // Range 50 to 350 (length 300)
         // File 0: 50-99 (length 50)

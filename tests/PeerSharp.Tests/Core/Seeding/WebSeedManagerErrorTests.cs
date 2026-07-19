@@ -102,7 +102,7 @@ public class WebSeedManagerErrorTests
     {
         var timeProvider = new FakeTimeProvider();
         var torrent = CreateTorrentWithPieces();
-        var manager = new WebSeedManager(torrent, new[] { "http://seed.com/file.bin" }, timeProvider);
+        var manager = new WebSeedManager(torrent, ["http://seed.com/file.bin"], timeProvider);
         var mockHttp = new MockHttpClient();
         manager.SetTestClient(mockHttp);
 
@@ -136,7 +136,7 @@ public class WebSeedManagerErrorTests
     {
         var timeProvider = new FakeTimeProvider();
         var torrent = CreateTorrentWithPieces();
-        var manager = new WebSeedManager(torrent, new[] { "http://seed.com/file.bin" }, timeProvider);
+        var manager = new WebSeedManager(torrent, ["http://seed.com/file.bin"], timeProvider);
         var mockHttp = new MockHttpClient();
         manager.SetTestClient(mockHttp);
 
@@ -165,7 +165,7 @@ public class WebSeedManagerErrorTests
         var timeProvider = new FakeTimeProvider();
         var torrent = CreateTorrentWithPieces();
         // Two seeds — first will be exhausted after MaxRetries (3) failures
-        var manager = new WebSeedManager(torrent, new[] { "http://seed1.com/file.bin", "http://seed2.com/file.bin" }, timeProvider);
+        var manager = new WebSeedManager(torrent, ["http://seed1.com/file.bin", "http://seed2.com/file.bin"], timeProvider);
         var mockHttp = new MockHttpClient();
         manager.SetTestClient(mockHttp);
 

@@ -10,7 +10,7 @@ public class DhtExternalIpVoteTrackerTests
     {
         var tracker = new DhtExternalIpVoteTracker(requiredVotes: 3);
 
-        var result = tracker.ProcessReport(new byte[] { 1, 2, 3 });
+        var result = tracker.ProcessReport([1, 2, 3]);
 
         Assert.Equal(DhtExternalIpVoteStatus.Ignored, result.Status);
     }

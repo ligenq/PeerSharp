@@ -64,7 +64,7 @@ public class DhtBloomFilterTests
     public void GetBytes_ReturnsClone()
     {
         var filter = new DhtBloomFilter();
-        filter.AddBytes(new byte[] { 1, 2, 3 });
+        filter.AddBytes([1, 2, 3]);
 
         byte[] data = filter.GetBytes();
         Assert.Equal(DhtBloomFilter.FilterSizeBytes, data.Length);
@@ -77,7 +77,7 @@ public class DhtBloomFilterTests
     public void Clear_ResetsFilter()
     {
         var filter = new DhtBloomFilter();
-        filter.AddBytes(new byte[] { 1, 2, 3 });
+        filter.AddBytes([1, 2, 3]);
         Assert.NotEqual(0, filter.EstimateCount());
 
         filter.Clear();
@@ -88,7 +88,7 @@ public class DhtBloomFilterTests
     public void Constructor_WithData_InitializesCorrectly()
     {
         var filter1 = new DhtBloomFilter();
-        filter1.AddBytes(new byte[] { 4, 5, 6 });
+        filter1.AddBytes([4, 5, 6]);
         byte[] data = filter1.GetBytes();
 
         var filter2 = new DhtBloomFilter(data);

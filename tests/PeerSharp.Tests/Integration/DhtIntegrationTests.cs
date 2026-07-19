@@ -84,14 +84,14 @@ public class DhtIntegrationTests
 
         public void Add(string host, IPAddress ip)
         {
-            _entries[host] = new[] { ip };
+            _entries[host] = [ip];
         }
 
         public IPAddress[] GetHostAddresses(string hostNameOrAddress)
         {
             if (IPAddress.TryParse(hostNameOrAddress, out var ip))
             {
-                return new[] { ip };
+                return [ip];
             }
             return _entries.TryGetValue(hostNameOrAddress, out var ips) ? ips : [];
         }
@@ -172,9 +172,9 @@ public class DhtIntegrationTests
         var epB = new IPEndPoint(IPAddress.Loopback, 6002);
         var epC = new IPEndPoint(IPAddress.Loopback, 6003);
 
-        var nodeA = CreateNode(epA, new[] { epB });
+        var nodeA = CreateNode(epA, [epB]);
         var nodeB = CreateNode(epB, Array.Empty<IPEndPoint>());
-        var nodeC = CreateNode(epC, new[] { epB });
+        var nodeC = CreateNode(epC, [epB]);
 
         await nodeB.StartAsync();
         await nodeA.StartAsync();

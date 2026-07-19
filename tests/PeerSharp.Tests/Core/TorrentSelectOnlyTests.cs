@@ -15,7 +15,7 @@ public class TorrentSelectOnlyTests
         var torrent = CreateTorrent(CreateMultiFileMetadata());
         try
         {
-            torrent.PendingSelectOnlyFileIndices = new[] { 0, 2 };
+            torrent.PendingSelectOnlyFileIndices = [0, 2];
 
             await torrent.ApplyPendingSelectOnlyFileIndicesAsync();
 
@@ -43,7 +43,7 @@ public class TorrentSelectOnlyTests
         var torrent = CreateTorrent(metadata);
         try
         {
-            torrent.PendingSelectOnlyFileIndices = new[] { 0 };
+            torrent.PendingSelectOnlyFileIndices = [0];
 
             await torrent.ApplyPendingSelectOnlyFileIndicesAsync();
 
@@ -64,7 +64,7 @@ public class TorrentSelectOnlyTests
         {
             // A restored session already carries an explicit user file selection
             torrent.LocalState.Selection = [new FileSelection(), new FileSelection(), new FileSelection()];
-            torrent.PendingSelectOnlyFileIndices = new[] { 0 };
+            torrent.PendingSelectOnlyFileIndices = [0];
 
             await torrent.ApplyPendingSelectOnlyFileIndicesAsync();
 
@@ -85,7 +85,7 @@ public class TorrentSelectOnlyTests
         var torrent = CreateTorrent(CreateMultiFileMetadata());
         try
         {
-            torrent.PendingSelectOnlyFileIndices = new[] { 1, 99 };
+            torrent.PendingSelectOnlyFileIndices = [1, 99];
 
             await torrent.ApplyPendingSelectOnlyFileIndicesAsync();
 
@@ -119,7 +119,7 @@ public class TorrentSelectOnlyTests
         var torrent = CreateTorrent(metadata);
         try
         {
-            torrent.PendingSelectOnlyFileIndices = new[] { 1 };
+            torrent.PendingSelectOnlyFileIndices = [1];
 
             await torrent.ApplyPendingSelectOnlyFileIndicesAsync();
 

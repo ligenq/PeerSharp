@@ -102,8 +102,8 @@ internal static class ProxyHelper
     {
         // 1. Version identifier/method selection message
         byte[] authMethods = string.IsNullOrEmpty(username)
-            ? new byte[] { 0x05, 0x01, 0x00 }
-            : new byte[] { 0x05, 0x02, 0x00, 0x02 };
+            ? [0x05, 0x01, 0x00]
+            : [0x05, 0x02, 0x00, 0x02];
 
         await stream.WriteAsync(authMethods, cancellationToken).ConfigureAwait(false);
 
@@ -241,8 +241,8 @@ internal static class ProxyHelper
     {
         // 1. Handshake (Method Selection)
         byte[] authMethods = string.IsNullOrEmpty(username)
-            ? new byte[] { 0x05, 0x01, 0x00 }
-            : new byte[] { 0x05, 0x02, 0x00, 0x02 };
+            ? [0x05, 0x01, 0x00]
+            : [0x05, 0x02, 0x00, 0x02];
         await stream.WriteAsync(authMethods, cancellationToken).ConfigureAwait(false);
 
         byte[] methodResponse = new byte[2];
@@ -277,7 +277,7 @@ internal static class ProxyHelper
         }
 
         // 2. UDP ASSOCIATE Request
-        byte[] request = new byte[] { 0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0 };
+        byte[] request = [0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
         await stream.WriteAsync(request, cancellationToken).ConfigureAwait(false);
 
         // 3. UDP ASSOCIATE Response

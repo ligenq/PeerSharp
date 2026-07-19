@@ -387,7 +387,7 @@ public class TorrentCreationTests
     public void ZeroStream_Read_PastEnd_ReturnsZero()
     {
         using var s = CreateZeroStream(5);
-        s.Read(new byte[5], 0, 5);
+        s.ReadExactly(new byte[5], 0, 5);
         int read = s.Read(new byte[1], 0, 1);
         Assert.Equal(0, read);
     }
@@ -396,7 +396,7 @@ public class TorrentCreationTests
     public void ZeroStream_Seek_Begin_SetsPosition()
     {
         using var s = CreateZeroStream(100);
-        s.Read(new byte[50], 0, 50);
+        s.ReadExactly(new byte[50], 0, 50);
         long pos = s.Seek(10, SeekOrigin.Begin);
         Assert.Equal(10, pos);
         Assert.Equal(10, s.Position);
@@ -406,7 +406,7 @@ public class TorrentCreationTests
     public void ZeroStream_Seek_Current_OffsetsFromCurrentPosition()
     {
         using var s = CreateZeroStream(100);
-        s.Read(new byte[30], 0, 30);
+        s.ReadExactly(new byte[30], 0, 30);
         long pos = s.Seek(20, SeekOrigin.Current);
         Assert.Equal(50, pos);
         Assert.Equal(50, s.Position);
@@ -464,8 +464,8 @@ public class TorrentCreationTests
         var torrent = new ApiTorrentFileBuilder()
             .WithName("tiers")
             .WithPieceLength(16_384)
-            .AddTrackerTier(new[] { "http://t1a.com/announce", "http://t1b.com/announce" })
-            .AddTrackerTier(new[] { "http://t2.com/announce" })
+            .AddTrackerTier(["http://t1a.com/announce", "http://t1b.com/announce"])
+            .AddTrackerTier(["http://t2.com/announce"])
             .AddFile("f.bin", new byte[1024])
             .Build();
 
@@ -473,7 +473,7 @@ public class TorrentCreationTests
         var announceList = Assert.IsType<BList>(root.Get("announce-list"));
         Assert.Equal(2, announceList.List.Count);
         Assert.Equal(2, Assert.IsType<BList>(announceList.List[0]).List.Count);
-        Assert.Equal(1, Assert.IsType<BList>(announceList.List[1]).List.Count);
+        Assert.Single(Assert.IsType<BList>(announceList.List[1]).List);
     }
 
     [Fact]
@@ -482,7 +482,7 @@ public class TorrentCreationTests
         var torrent = new ApiTorrentFileBuilder()
             .WithName("tier-only")
             .WithPieceLength(16_384)
-            .AddTrackerTier(new[] { "http://tracker.com/announce" })
+            .AddTrackerTier(["http://tracker.com/announce"])
             .AddFile("f.bin", new byte[1024])
             .Build();
 
@@ -681,7 +681,7 @@ public class TorrentCreationTests
     public void Parse_V1AttrPadding_WithoutPadPath_DetectedAsPadding()
     {
         // A padding entry marked only by BEP 47 "attr":"p", not by the .pad/ path convention
-        var metadata = TorrentFileParser.Parse(BuildV1TorrentBytes(padAttr: "p", padPath: new[] { "filler.bin" }));
+        var metadata = TorrentFileParser.Parse(BuildV1TorrentBytes(padAttr: "p", padPath: ["filler.bin"]));
 
         Assert.Equal(3, metadata.Info.Files.Count);
         Assert.False(metadata.Info.Files[0].IsPadding);
@@ -693,7 +693,7 @@ public class TorrentCreationTests
     public void Parse_V1AttrWithoutPaddingFlag_NotDetectedAsPadding()
     {
         // BEP 47 attr "x" (executable) must not mark the file as padding
-        var metadata = TorrentFileParser.Parse(BuildV1TorrentBytes(padAttr: "x", padPath: new[] { "filler.bin" }));
+        var metadata = TorrentFileParser.Parse(BuildV1TorrentBytes(padAttr: "x", padPath: ["filler.bin"]));
 
         Assert.All(metadata.Info.Files, f => Assert.False(f.IsPadding));
     }
@@ -944,7 +944,7 @@ public class TorrentCreationTests
     [Fact]
     public void Parse_InvalidSha1Length_Ignored()
     {
-        var metadata = TorrentFileParser.Parse(BuildV1TorrentBytes(padAttr: "p", padPath: new[] { "filler.bin" }, padSha1: new byte[7]));
+        var metadata = TorrentFileParser.Parse(BuildV1TorrentBytes(padAttr: "p", padPath: ["filler.bin"], padSha1: new byte[7]));
 
         Assert.All(metadata.Info.Files, f => Assert.Null(f.Sha1));
     }
@@ -973,9 +973,9 @@ public class TorrentCreationTests
         }
 
         var files = new BList();
-        files.List.Add(MakeFileEntry(100, new[] { "a.bin" }, attr: null));
+        files.List.Add(MakeFileEntry(100, ["a.bin"], attr: null));
         files.List.Add(MakeFileEntry(156, padPath, padAttr, padSha1));
-        files.List.Add(MakeFileEntry(100, new[] { "b.bin" }, attr: null));
+        files.List.Add(MakeFileEntry(100, ["b.bin"], attr: null));
 
         var info = new BDict();
         info.Dict["name"] = new BString("attr-parse"u8.ToArray());

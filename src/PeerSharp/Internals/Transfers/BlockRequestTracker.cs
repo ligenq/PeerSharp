@@ -89,9 +89,9 @@ internal sealed class BlockRequestTracker
     {
         if (_peerRequests.TryRemove(peer, out var list))
         {
-            foreach (var req in list.Keys)
+            foreach (var (Piece, Offset) in list.Keys)
             {
-                RemoveBlockRequest(req.Piece, req.Offset, peer);
+                RemoveBlockRequest(Piece, Offset, peer);
             }
         }
     }

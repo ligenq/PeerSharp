@@ -243,11 +243,11 @@ public class TrackerManagerTests
     public async Task StartAsync_WithTrackerTiers_AnnouncesOnlyActiveTier()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        manager.AddTrackers(new[]
-        {
+        manager.AddTrackers(
+        [
             new[] { "http://tier0.example/announce" },
-            new[] { "http://tier1.example/announce" }
-        });
+            ["http://tier1.example/announce"]
+        ]);
 
         await manager.StartAsync();
 
@@ -264,11 +264,11 @@ public class TrackerManagerTests
     public async Task ActiveTierExhausted_AnnouncesNextTier()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
-        manager.AddTrackers(new[]
-        {
+        manager.AddTrackers(
+        [
             new[] { "http://tier0.example/announce" },
-            new[] { "http://tier1.example/announce" }
-        });
+            ["http://tier1.example/announce"]
+        ]);
 
         await manager.StartAsync();
         var failingTracker = _factory.Trackers["http://tier0.example/announce"];

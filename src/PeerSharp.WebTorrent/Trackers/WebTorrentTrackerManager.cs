@@ -45,7 +45,7 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
     {
         lock (_clients)
         {
-            return _clients.Select(c => c.Runtime).ToList();
+            return [.. _clients.Select(c => c.Runtime)];
         }
     }
 
@@ -224,7 +224,7 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
         List<WebTorrentTrackerClient> snapshot;
         lock (_clients)
         {
-            snapshot = new List<WebTorrentTrackerClient>(_clients);
+            snapshot = [.. _clients];
             _clients.Clear();
         }
 

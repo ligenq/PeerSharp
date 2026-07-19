@@ -54,7 +54,7 @@ public class WebSeedManagerTests
     [Fact]
     public void GetNeededPieces_ReturnsMissingPieces()
     {
-        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
 
         var needed = manager.GetNeededPieces();
 
@@ -72,7 +72,7 @@ public class WebSeedManagerTests
     [Fact(Timeout = 30000)]
     public async Task DownloadSingleFilePieceAsync_SendsCorrectRange()
     {
-        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
         manager.SetTestClient(_mockHttp);
         _mockHttp.ResponseBytes = new byte[16384];
 
@@ -94,7 +94,7 @@ public class WebSeedManagerTests
     {
         // A server that ignores the Range header replies 200 with the whole file;
         // like libtorrent, the requested range is sliced out of the full body.
-        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
         manager.SetTestClient(_mockHttp);
         _mockHttp.StatusCode = HttpStatusCode.OK;
         var fullContent = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
@@ -111,7 +111,7 @@ public class WebSeedManagerTests
     [Fact]
     public async Task DownloadSingleFilePieceAsync_OkResponseTooShort_ReturnsNull()
     {
-        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
         manager.SetTestClient(_mockHttp);
         _mockHttp.StatusCode = HttpStatusCode.OK;
         _mockHttp.ResponseBytes = new byte[8]; // shorter than the requested range
@@ -154,7 +154,7 @@ public class WebSeedManagerTests
             };
         };
 
-        var manager = new WebSeedManager(torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(torrent, ["http://seed.com"], _timeProvider);
         manager.SetTestClient(handler);
 
         var source = new WebSeedManager.WebSeedSource("http://seed.com", true);
@@ -182,7 +182,7 @@ public class WebSeedManagerTests
             ResponseBytes = [1, 2, 3, 4]
         };
 
-        var manager = new WebSeedManager(torrent, new[] { "http://seed.com/root" }, _timeProvider);
+        var manager = new WebSeedManager(torrent, ["http://seed.com/root"], _timeProvider);
         manager.SetTestClient(handler);
 
         var source = new WebSeedManager.WebSeedSource("http://seed.com/root", true);
@@ -209,7 +209,7 @@ public class WebSeedManagerTests
             ResponseBytes = [1, 2, 3, 4]
         };
 
-        var manager = new WebSeedManager(torrent, new[] { "https://webtorrent.io/torrents/" }, _timeProvider);
+        var manager = new WebSeedManager(torrent, ["https://webtorrent.io/torrents/"], _timeProvider);
         manager.SetTestClient(handler);
 
         var source = new WebSeedManager.WebSeedSource("https://webtorrent.io/torrents/", true);
@@ -224,7 +224,7 @@ public class WebSeedManagerTests
     [Fact]
     public void GetStats_ReflectsAvailableSources()
     {
-        var manager = new WebSeedManager(_torrent, new[] { "http://seed1.com", "http://seed2.com" }, _timeProvider);
+        var manager = new WebSeedManager(_torrent, ["http://seed1.com", "http://seed2.com"], _timeProvider);
 
         var stats = manager.GetStats();
         Assert.Equal(2, stats.TotalSources);
@@ -235,7 +235,7 @@ public class WebSeedManagerTests
     [Fact]
     public async Task DownloadSingleFilePieceAsync_416_ReturnsNull()
     {
-        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
         manager.SetTestClient(_mockHttp);
         _mockHttp.StatusCode = HttpStatusCode.RequestedRangeNotSatisfiable;
 
@@ -248,7 +248,7 @@ public class WebSeedManagerTests
     [Fact]
     public async Task DownloadSingleFilePieceAsync_UnexpectedStatus_ReturnsNull()
     {
-        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
         manager.SetTestClient(_mockHttp);
         _mockHttp.StatusCode = HttpStatusCode.ServiceUnavailable;
 
@@ -290,7 +290,7 @@ public class WebSeedManagerTests
             }
         };
 
-        var manager = new WebSeedManager(torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(torrent, ["http://seed.com"], _timeProvider);
         manager.SetTestClient(handler);
 
         var source = new WebSeedManager.WebSeedSource("http://seed.com", false);
@@ -309,7 +309,7 @@ public class WebSeedManagerTests
     [Fact(Timeout = 30000)]
     public async Task DisposeAsync_CompletesSuccessfully()
     {
-        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
         manager.Start();
 
         await manager.DisposeAsync();
@@ -318,7 +318,7 @@ public class WebSeedManagerTests
     [Fact(Timeout = 30000)]
     public async Task DisposeAsync_IsIdempotent()
     {
-        var manager = new WebSeedManager(_torrent, new[] { "http://seed.com" }, _timeProvider);
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
         manager.Start();
 
         await manager.DisposeAsync();

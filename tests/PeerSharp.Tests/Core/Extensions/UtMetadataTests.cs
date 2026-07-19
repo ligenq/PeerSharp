@@ -142,7 +142,7 @@ public class UtMetadataTests
         // Note: Init is NOT called
 
         // Act
-        utMetadata.SendData(5, new byte[] { 0xAA }, 100);
+        utMetadata.SendData(5, [0xAA], 100);
 
         // Assert - should not send anything
         Assert.Empty(mockPeer.SentMessages);

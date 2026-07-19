@@ -25,7 +25,7 @@ public class UrlEncodingTests
         // Space (0x20) -> %20
         // Null (0x00) -> %00
         // 0xFF -> %FF
-        byte[] data = new byte[] { 0x20, 0x00, 0xFF };
+        byte[] data = [0x20, 0x00, 0xFF];
         string result = UrlEncoding.Encode(data);
         Assert.Equal("%20%00%FF", result);
     }

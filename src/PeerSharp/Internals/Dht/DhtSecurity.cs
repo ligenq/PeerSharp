@@ -10,10 +10,10 @@ internal static class DhtSecurity
     private static readonly uint[] Crc32CTable = GenerateCrc32CTable();
 
     // IPv4 mask: 0x030f3fff (network byte order)
-    private static readonly byte[] IPv4Mask = { 0x03, 0x0f, 0x3f, 0xff };
+    private static readonly byte[] IPv4Mask = [0x03, 0x0f, 0x3f, 0xff];
 
     // IPv6 mask: 0x0103070f1f3f7fff (first 8 bytes)
-    private static readonly byte[] IPv6Mask = { 0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff };
+    private static readonly byte[] IPv6Mask = [0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff];
 
     /// <summary>
     /// Generate a random node ID (non-BEP 42 compliant).

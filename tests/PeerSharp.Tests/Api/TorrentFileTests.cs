@@ -5,7 +5,7 @@ public class TorrentFileTests
     [Fact]
     public void TryParse_InvalidData_ReturnsFalseWithError()
     {
-        byte[] invalid = { 0x01, 0x02, 0x03 };
+        byte[] invalid = [0x01, 0x02, 0x03];
 
         bool ok = TorrentFile.TryParse(invalid, out var result, out var error);
 

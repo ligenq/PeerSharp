@@ -3,6 +3,44 @@
 # S3267: Loops should be simplified with "LINQ" expressions
 dotnet_diagnostic.S3267.severity = none
 
+# CA1873: "argument may be evaluated even when logging is disabled" - would require wrapping
+# ~60 log calls in IsEnabled guards or migrating to LoggerMessage source generators for a
+# micro-optimization; most flagged args are cheap and on Debug-level paths. Revisit if
+# profiling ever shows logging overhead.
+dotnet_diagnostic.CA1873.severity = none
+
+# CA1859: "use concrete types for better performance" - interface-typed fields and returns
+# are deliberate here for dependency injection and testability.
+dotnet_diagnostic.CA1859.severity = none
+
+# IDE0290: the codebase uses classic constructors, not primary constructors.
+csharp_style_prefer_primary_constructors = false
+
+# S4790: "Use a stronger hashing algorithm" - SHA-1 is mandated by the BitTorrent v1 wire
+# protocol: info hashes and piece hashes (BEP 3), DHT announce tokens (BEP 5), the
+# allowed-fast set (BEP 6), Merkle torrents (BEP 30), and the scrape bloom filter (BEP 33).
+# It never protects sensitive data here; SHA-256 is used where v2 (BEP 52) specifies it.
+dotnet_diagnostic.S4790.severity = none
+
+# xUnit1051: "use TestContext.Current.CancellationToken" - responsiveness-to-cancellation
+# nicety for xUnit v3; not worth the churn across the existing suites.
+[tests/**.cs]
+dotnet_diagnostic.xUnit1051.severity = none
+
+# S1313: "Do not hardcode IP addresses" - these are protocol constants, not infrastructure:
+# the BEP 14 LSD multicast groups (239.192.152.143 / [ff15::efc0:988f]) and the SSDP
+# discovery multicast address (239.255.255.250) from the UPnP standard.
+[src/PeerSharp/Internals/{Network/LsdManager.cs,Utilities/Upnp.cs}]
+dotnet_diagnostic.S1313.severity = none
+
+# S5332: "Using http protocol is insecure" - the flagged lines build the URI of a
+# user-configured HTTP CONNECT proxy, which is addressed with the http:// scheme by
+# definition; HTTPS requests remain TLS end-to-end through the tunnel.
+[src/PeerSharp/Internals/{ClientEngine.cs,Network/HttpClientFactory.cs}]
+dotnet_diagnostic.S5332.severity = none
+
+[*.cs]
+
 # Naming: private static fields - CamelCase, no prefix
 dotnet_naming_rule.private_static_fields_should_be_camel_case.symbols = private_static_fields
 dotnet_naming_rule.private_static_fields_should_be_camel_case.style = camel_case_style

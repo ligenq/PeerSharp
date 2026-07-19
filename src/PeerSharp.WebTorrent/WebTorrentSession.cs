@@ -124,7 +124,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     public IReadOnlyList<TrackerHealth> GetTrackerHealth()
     {
-        return _trackerManager.GetRuntimes().Select(runtime =>
+        return [.. _trackerManager.GetRuntimes().Select(runtime =>
         {
             lock (runtime.SyncRoot)
             {
@@ -135,7 +135,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
                     runtime.LastError,
                     runtime.NextReconnectAt);
             }
-        }).ToList();
+        })];
     }
 
     public SessionDiagnostics GetDiagnostics()
@@ -481,7 +481,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
         Task[] pendingTasks;
         lock (_backgroundTasksLock)
         {
-            pendingTasks = _backgroundTasks.ToArray();
+            pendingTasks = [.. _backgroundTasks];
             _backgroundTasks.Clear();
         }
         try

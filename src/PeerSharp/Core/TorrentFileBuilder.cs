@@ -336,9 +336,11 @@ public sealed class TorrentFileBuilder
         return value != 0 && (value & (value - 1)) == 0;
     }
 
+    private static readonly char[] PathSeparators = ['/', '\\'];
+
     private static string[] SplitPath(string path)
     {
-        return path.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+        return path.Split(PathSeparators, StringSplitOptions.RemoveEmptyEntries);
     }
 
     private static BList BuildPathList(string path)
@@ -1078,7 +1080,6 @@ public sealed class TorrentFileBuilder
         /// <summary>BEP 47 "sha1" digest, computed on demand when enabled.</summary>
         public byte[]? Sha1 { get; set; }
 
-        public bool IsPadding => (Attributes & TorrentFileAttributes.Padding) != 0;
         public bool IsSymlink => (Attributes & TorrentFileAttributes.Symlink) != 0;
         public Stream OpenRead() => OpenReadFactory();
         public Stream OpenReadWithAsyncIO() => OpenReadWithAsyncIOFactory();

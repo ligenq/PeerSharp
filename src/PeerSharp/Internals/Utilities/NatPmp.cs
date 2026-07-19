@@ -74,13 +74,13 @@ internal class NatPmpPortMapping : IPortMapper
         bool anySuccess = false;
         foreach (var gateway in _gateways)
         {
-            var result = await MapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _timeProvider, ct).ConfigureAwait(false);
-            if (result.Success)
+            var (Success, ExternalPort) = await MapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _timeProvider, ct).ConfigureAwait(false);
+            if (Success)
             {
                 anySuccess = true;
                 lock (_status)
                 {
-                    _status[gateway] = (PortMappingResult.Success, null, result.ExternalPort);
+                    _status[gateway] = (PortMappingResult.Success, null, ExternalPort);
                 }
             }
             else
@@ -146,7 +146,7 @@ internal class NatPmpPortMapping : IPortMapper
         List<(int Port, string Protocol)> toRemove;
         lock (_mappings)
         {
-            toRemove = _mappings.ToList();
+            toRemove = [.. _mappings];
             _mappings.Clear();
         }
 

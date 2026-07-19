@@ -171,7 +171,7 @@ public class PeerCommunicationTests
         InvokePrivate<object?>(peer, "AddSuggestedPiece", 5);
 
         var snapshot = peer.GetSuggestedPieces();
-        Assert.Equal(new[] { 4, 5 }, snapshot);
+        Assert.Equal([4, 5], snapshot);
 
         // Snapshot reuse until cache invalidates
         Assert.Same(snapshot, peer.GetSuggestedPieces());
@@ -491,7 +491,7 @@ public class PeerCommunicationTests
         var configure = typeof(PeerCommunication)
             .GetMethod("ConfigureTcpClient", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(configure);
-        configure!.Invoke(null, new object?[] { client, settings, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance });
+        configure!.Invoke(null, [client, settings, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance]);
 
         Assert.True(client.NoDelay);
     }

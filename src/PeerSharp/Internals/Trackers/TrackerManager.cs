@@ -413,7 +413,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         lock (_lock)
         {
             _started = false;
-            toStop = new List<TrackerInfo>(_trackers);
+            toStop = [.. _trackers];
             foreach (var info in toStop)
             {
                 info.Timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);

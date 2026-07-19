@@ -15,29 +15,29 @@ public class ArchitectureTests
     private static readonly string RootNamespace = ArchitectureHelper.RootNamespace;
 
     private static readonly string[] ForbiddenNamespacesInCore =
-    {
+    [
         "System.Windows",
         "Microsoft.Win32",
         "System.Drawing",
         "Avalonia",
         "WinForms"
-    };
+    ];
     // --------------------------------
 
     private static readonly IEnumerable<Type> AllTypes = ArchitectureHelper.AllTypes;
 
     private static readonly string[] PiecePickingForbiddenNamespaces =
-    {
+    [
         ".Internals.Trackers",
         ".Internals.Dht",
         ".Internals.Network",
         ".Internals.Utp",
         ".Internals.Seeding",
         ".Internals.Streaming"
-    };
+    ];
 
     private static readonly string[] PieceWriterForbiddenNamespaces =
-    {
+    [
         ".Internals.Trackers",
         ".Internals.Dht",
         ".Internals.Network",
@@ -45,7 +45,7 @@ public class ArchitectureTests
         ".Internals.Seeding",
         ".Internals.Streaming",
         ".Internals.Peers"
-    };
+    ];
 
     /// <summary>
     /// Enforces the use of AtomicDisposal for thread-safe disposal
@@ -645,7 +645,7 @@ public class ArchitectureTests
 
         foreach (var type in AllTypes.Where(t => (t.IsClass || t.IsValueType) && !t.IsEnum && (t.Namespace?.StartsWith(RootNamespace) ?? false)))
         {
-            var equalsMethod = type.GetMethod("Equals", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly, null, new[] { typeof(object) }, null);
+            var equalsMethod = type.GetMethod("Equals", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly, null, [typeof(object)], null);
             var getHashCodeMethod = type.GetMethod("GetHashCode", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly, null, Type.EmptyTypes, null);
 
             if (equalsMethod != null && getHashCodeMethod == null)
@@ -1086,7 +1086,7 @@ public class ArchitectureTests
 
         foreach (var type in AllTypes.Where(t => t.IsClass && !t.IsSealed && !t.IsAbstract && (t.Namespace?.StartsWith(RootNamespace) ?? false)))
         {
-            var equalsMethod = type.GetMethod("Equals", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly, null, new[] { typeof(object) }, null);
+            var equalsMethod = type.GetMethod("Equals", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly, null, [typeof(object)], null);
 
             if (equalsMethod?.IsFinal == false)
             {

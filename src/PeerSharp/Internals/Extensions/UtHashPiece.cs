@@ -80,8 +80,8 @@ internal class UtHashPiece : IUtHashPiece
 
         try
         {
-            var result = BencodeParser.ParseWithConsumed(data);
-            if (result.Node is not BDict dict)
+            var (Node, _) = BencodeParser.ParseWithConsumed(data);
+            if (Node is not BDict dict)
             {
                 return;
             }

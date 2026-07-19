@@ -51,7 +51,7 @@ public sealed class NullDefaultParameterAnalyzer
     /// Patterns that indicate null-checking behavior.
     /// </summary>
     private static readonly string[] NullCheckPatterns =
-    {
+    [
         "== null",
         "!= null",
         "is null",
@@ -59,7 +59,7 @@ public sealed class NullDefaultParameterAnalyzer
         "??",
         "IsNullOrEmpty",
         "IsNullOrWhiteSpace"
-    };
+    ];
 
     /// <summary>
     /// Analyzes all C# source files in a directory for the null-checked default parameter pattern.

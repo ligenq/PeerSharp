@@ -60,7 +60,7 @@ public class SessionManagerTests
         torrent.DownloadLimitBytesPerSecond = 1024;
 
         // Register some raw data
-        byte[] rawData = new byte[] { 1, 2, 3 };
+        byte[] rawData = [1, 2, 3];
         _sessionManager.RegisterTorrentData(torrent.Hash, rawData, null);
 
         await _sessionManager.SaveTorrentEntryAsync(torrent);

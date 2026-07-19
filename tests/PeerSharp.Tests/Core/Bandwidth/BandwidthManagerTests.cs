@@ -30,7 +30,7 @@ public class BandwidthManagerTests
         var user = new MockBandwidthUser();
 
         // No limits -> infinite bandwidth
-        int result = await manager.RequestBandwidthAsync(user, 1000, 0, new[] { BandwidthManager.GlobalDownload });
+        int result = await manager.RequestBandwidthAsync(user, 1000, 0, [BandwidthManager.GlobalDownload]);
 
         Assert.Equal(1000, result);
     }
@@ -44,7 +44,7 @@ public class BandwidthManagerTests
         var user = new MockBandwidthUser();
 
         // Initial quota is 0. Request 500.
-        var task = manager.RequestBandwidthAsync(user, 500, 0, new[] { BandwidthManager.GlobalDownload });
+        var task = manager.RequestBandwidthAsync(user, 500, 0, [BandwidthManager.GlobalDownload]);
 
         Assert.False(task.IsCompleted);
 
@@ -65,8 +65,8 @@ public class BandwidthManagerTests
         var user1 = new MockBandwidthUser { Name = "User1" };
         var user2 = new MockBandwidthUser { Name = "User2" };
 
-        var task1 = manager.RequestBandwidthAsync(user1, 100, 0, new[] { BandwidthManager.GlobalDownload });
-        var task2 = manager.RequestBandwidthAsync(user2, 100, 0, new[] { BandwidthManager.GlobalDownload });
+        var task1 = manager.RequestBandwidthAsync(user1, 100, 0, [BandwidthManager.GlobalDownload]);
+        var task2 = manager.RequestBandwidthAsync(user2, 100, 0, [BandwidthManager.GlobalDownload]);
 
         // Advance 1 second -> 100 bytes available.
         // Round-robin should satisfy the first request in the queue completely.
@@ -92,7 +92,7 @@ public class BandwidthManagerTests
         manager.SetGlobalLimits(100, 100);
 
         var user = new MockBandwidthUser();
-        var task = manager.RequestBandwidthAsync(user, 100, 0, new[] { BandwidthManager.GlobalDownload });
+        var task = manager.RequestBandwidthAsync(user, 100, 0, [BandwidthManager.GlobalDownload]);
 
         // Only 50ms passed -> 5 bytes available.
         _timeProvider.Advance(TimeSpan.FromMilliseconds(50));
@@ -113,7 +113,7 @@ public class BandwidthManagerTests
         ch.UpdateQuota(1000); // 1000 avail
         ch.UseQuota(500); // 500 avail
 
-        manager.ReturnBandwidth(200, new[] { BandwidthManager.GlobalDownload });
+        manager.ReturnBandwidth(200, [BandwidthManager.GlobalDownload]);
 
         Assert.Equal(700, ch.AvailableQuota);
     }
@@ -206,7 +206,7 @@ public class BandwidthManagerTests
         cts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => manager.RequestBandwidthAsync(new MockBandwidthUser(), 100, 0, new[] { BandwidthManager.GlobalDownload }, cts.Token));
+            () => manager.RequestBandwidthAsync(new MockBandwidthUser(), 100, 0, [BandwidthManager.GlobalDownload], cts.Token));
     }
 
     [Fact(Timeout = 30000)]
@@ -218,7 +218,7 @@ public class BandwidthManagerTests
         using var cts = new CancellationTokenSource();
         var user = new MockBandwidthUser();
 
-        var task = manager.RequestBandwidthAsync(user, 100, 0, new[] { BandwidthManager.GlobalDownload }, cts.Token);
+        var task = manager.RequestBandwidthAsync(user, 100, 0, [BandwidthManager.GlobalDownload], cts.Token);
         Assert.False(task.IsCompleted);
 
         cts.Cancel();

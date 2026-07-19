@@ -229,7 +229,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
-    public DateTimeOffset StateTimestamp => new DateTimeOffset(Interlocked.Read(ref _activityTimeTicks), TimeSpan.Zero);
+    public DateTimeOffset StateTimestamp => new(Interlocked.Read(ref _activityTimeTicks), TimeSpan.Zero);
     public IReadOnlyList<int> StreamableFileIndices => Streaming.StreamableFileIndices;
     public SuperSeedManager SuperSeedManager { get; private set; } = null!;
     public DateTimeOffset TimeAdded { get; set; }
@@ -271,8 +271,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     {
         var factories = new TorrentFactories(peerFactory, trackerFactory);
         var services = new TorrentServices(bandwidth, alerts, fileHandleCache, connectionGovernor, geoIpService, factories, timeProvider ?? TimeProvider.System);
-        var torrent = new Torrent(infoFile, settings, services, fileSelectionManager);
-        torrent.Events = events;
+        var torrent = new Torrent(infoFile, settings, services, fileSelectionManager)
+        {
+            Events = events
+        };
         if (resumeData != null)
         {
             torrent.ApplyResumeData(resumeData);
@@ -405,7 +407,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             LastStateTime = Services.TimeProvider.GetUtcNow().ToUnixTimeSeconds(),
             AddedTime = TimeAdded.ToUnixTimeSeconds(),
             DownloadPath = FilesInternal?.DownloadPath ?? Settings.Files.DefaultDownloadPath,
-            Selection = new List<FileSelection>(_fileSelectionManager.GetAllFileSelections()),
+            Selection = [.. _fileSelectionManager.GetAllFileSelections()],
             Info =
             {
                 Name = Name,
@@ -675,7 +677,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         IPeerTransport[] snapshot;
         lock (_peerTransportsLock)
         {
-            snapshot = _peerTransports.ToArray();
+            snapshot = [.. _peerTransports];
         }
 
         foreach (var transport in snapshot)
@@ -689,7 +691,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         IPeerTransport[] snapshot;
         lock (_peerTransportsLock)
         {
-            snapshot = _peerTransports.ToArray();
+            snapshot = [.. _peerTransports];
             if (disposing)
             {
                 _peerTransports.Clear();

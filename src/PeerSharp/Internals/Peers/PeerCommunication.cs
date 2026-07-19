@@ -1214,8 +1214,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 encryption,
                 this,
                 _torrent.Bandwidth,
-                new[] { BandwidthManager.GlobalDownload, $"{_torrent.Hash.ToHexStringUpper()}_DL" },
-                new[] { BandwidthManager.GlobalUpload, $"{_torrent.Hash.ToHexStringUpper()}_UL" },
+                [BandwidthManager.GlobalDownload, $"{_torrent.Hash.ToHexStringUpper()}_DL"],
+                [BandwidthManager.GlobalUpload, $"{_torrent.Hash.ToHexStringUpper()}_UL"],
                 leaveInnerOpen: true
             );
             _encryptionHandshakeComplete = true;
@@ -1668,8 +1668,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     pe.Encryption ?? new ProtocolEncryption(),
                     this,
                     _torrent.Bandwidth,
-                    new[] { BandwidthManager.GlobalDownload, $"{_torrent.Hash.ToHexStringUpper()}_DL" },
-                    new[] { BandwidthManager.GlobalUpload, $"{_torrent.Hash.ToHexStringUpper()}_UL" },
+                    [BandwidthManager.GlobalDownload, $"{_torrent.Hash.ToHexStringUpper()}_DL"],
+                    [BandwidthManager.GlobalUpload, $"{_torrent.Hash.ToHexStringUpper()}_UL"],
                     leaveInnerOpen: true // Inner stream is closed via _client or _utpStream in Close()
                     );
 

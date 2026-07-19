@@ -67,7 +67,7 @@ public class MetadataDownloadUpdateTests
         var pendingType = typeof(MetadataDownload)
             .GetNestedType("PendingMetadataRequest", BindingFlags.NonPublic)!;
         var pending = pendingType.GetConstructors()[0]
-            .Invoke(new object[] { peer, timestamp, attempts });
+            .Invoke([peer, timestamp, attempts]);
 
         var field = typeof(MetadataDownload)
             .GetField("_pendingRequests", BindingFlags.NonPublic | BindingFlags.Instance)!;

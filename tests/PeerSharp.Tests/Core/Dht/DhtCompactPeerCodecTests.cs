@@ -10,7 +10,7 @@ public class DhtCompactPeerCodecTests
     {
         var peer = new IPEndPoint(IPAddress.Parse("203.0.113.10"), 6881);
 
-        var encoded = DhtCompactPeerCodec.Encode(new[] { peer }, ipv6: false);
+        var encoded = DhtCompactPeerCodec.Encode([peer], ipv6: false);
         var parsed = DhtCompactPeerCodec.Parse(encoded.Select(value => (ReadOnlyMemory<byte>)value), ipv6: false);
 
         byte[] value = Assert.Single(encoded);
@@ -24,7 +24,7 @@ public class DhtCompactPeerCodecTests
     {
         var peer = new IPEndPoint(IPAddress.Parse("2001:db8::1"), 51413);
 
-        var encoded = DhtCompactPeerCodec.Encode(new[] { peer }, ipv6: true);
+        var encoded = DhtCompactPeerCodec.Encode([peer], ipv6: true);
         var parsed = DhtCompactPeerCodec.Parse(encoded.Select(value => (ReadOnlyMemory<byte>)value), ipv6: true);
 
         Assert.Equal(18, Assert.Single(encoded).Length);
@@ -37,8 +37,8 @@ public class DhtCompactPeerCodecTests
         var ipv4 = new IPEndPoint(IPAddress.Parse("198.51.100.1"), 1000);
         var ipv6 = new IPEndPoint(IPAddress.Parse("2001:db8::2"), 2000);
 
-        var encodedV4 = DhtCompactPeerCodec.Encode(new[] { ipv4, ipv6 }, ipv6: false);
-        var encodedV6 = DhtCompactPeerCodec.Encode(new[] { ipv4, ipv6 }, ipv6: true);
+        var encodedV4 = DhtCompactPeerCodec.Encode([ipv4, ipv6], ipv6: false);
+        var encodedV6 = DhtCompactPeerCodec.Encode([ipv4, ipv6], ipv6: true);
 
         Assert.Equal(ipv4, Assert.Single(DhtCompactPeerCodec.Parse(encodedV4.Select(value => (ReadOnlyMemory<byte>)value), ipv6: false)));
         Assert.Equal(ipv6, Assert.Single(DhtCompactPeerCodec.Parse(encodedV6.Select(value => (ReadOnlyMemory<byte>)value), ipv6: true)));
@@ -62,10 +62,10 @@ public class DhtCompactPeerCodecTests
     public void Parse_IgnoresInvalidLengthValues()
     {
         var peer = new IPEndPoint(IPAddress.Parse("203.0.113.10"), 6881);
-        var valid = DhtCompactPeerCodec.Encode(new[] { peer }, ipv6: false).Single();
+        var valid = DhtCompactPeerCodec.Encode([peer], ipv6: false).Single();
 
         var parsed = DhtCompactPeerCodec.Parse(
-            new ReadOnlyMemory<byte>[] { new byte[5], valid, new byte[7] },
+            [new byte[5], valid, new byte[7]],
             ipv6: false);
 
         Assert.Equal(peer, Assert.Single(parsed));

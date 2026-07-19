@@ -93,7 +93,7 @@ public class HttpTrackerTests
         // peers = "AAAAAA" (6 bytes) -> 65.65.65.65:16705
         var dict = new BDict();
         dict.Dict["interval"] = new BNumber(1800);
-        dict.Dict["peers"] = new BString(new byte[] { 65, 65, 65, 65, 65, 65 });
+        dict.Dict["peers"] = new BString([65, 65, 65, 65, 65, 65]);
         _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
 
         // Act
@@ -315,7 +315,7 @@ public class HttpTrackerTests
         root.Dict["files"] = files;
         _mockHttp.ResponseBytes = BencodeWriter.Write(root);
 
-        await tracker.MultiScrapeAsync(new[] { new InfoHash(firstHashBytes), new InfoHash(secondHashBytes) }, CancellationToken.None);
+        await tracker.MultiScrapeAsync([new InfoHash(firstHashBytes), new InfoHash(secondHashBytes)], CancellationToken.None);
 
         Assert.True(_callback.Success);
         Assert.NotNull(_callback.MultiScrapeResponse);
@@ -340,7 +340,7 @@ public class HttpTrackerTests
         var v1Hash = new InfoHash(Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray());
         var v2Hash = new InfoHash(Enumerable.Range(0, InfoHash.V2Length).Select(i => (byte)(i + 1)).ToArray());
 
-        await tracker.MultiScrapeAsync(new[] { v1Hash, v2Hash }, CancellationToken.None);
+        await tracker.MultiScrapeAsync([v1Hash, v2Hash], CancellationToken.None);
 
         Assert.True(_callback.Success);
         Assert.NotNull(_mockHttp.LastUrl);
@@ -369,7 +369,7 @@ public class HttpTrackerTests
         tracker.SetTestClient(_mockHttp);
 
         var hash = new InfoHash(Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray());
-        await tracker.MultiScrapeAsync(new[] { hash }, CancellationToken.None);
+        await tracker.MultiScrapeAsync([hash], CancellationToken.None);
 
         Assert.Null(_callback.MultiScrapeResponse);
     }
@@ -383,7 +383,7 @@ public class HttpTrackerTests
         _mockHttp.Exception = new HttpRequestException("503 Service Unavailable");
 
         var hash = new InfoHash(Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray());
-        await tracker.MultiScrapeAsync(new[] { hash }, CancellationToken.None);
+        await tracker.MultiScrapeAsync([hash], CancellationToken.None);
 
         Assert.False(_callback.Success);
         Assert.NotNull(_callback.MultiScrapeResponse);
@@ -410,7 +410,7 @@ public class HttpTrackerTests
         _mockHttp.ResponseBytes = BencodeWriter.Write(root);
 
         await tracker.MultiScrapeAsync(
-            new[] { new InfoHash(hashA), new InfoHash(hashB), new InfoHash(hashC) },
+            [new InfoHash(hashA), new InfoHash(hashB), new InfoHash(hashC)],
             CancellationToken.None);
 
         Assert.True(_callback.Success);
@@ -439,7 +439,7 @@ public class HttpTrackerTests
         root.Dict["files"] = files;
         _mockHttp.ResponseBytes = BencodeWriter.Write(root);
 
-        await tracker.MultiScrapeAsync(new[] { new InfoHash(requested) }, CancellationToken.None);
+        await tracker.MultiScrapeAsync([new InfoHash(requested)], CancellationToken.None);
 
         Assert.True(_callback.Success);
         Assert.NotNull(_callback.MultiScrapeResponse);
@@ -461,7 +461,7 @@ public class HttpTrackerTests
         _mockHttp.ResponseBytes = BencodeWriter.Write(root);
 
         var hash = new InfoHash(Enumerable.Range(0, InfoHash.V1Length).Select(i => (byte)(i + 1)).ToArray());
-        await tracker.MultiScrapeAsync(new[] { hash }, CancellationToken.None);
+        await tracker.MultiScrapeAsync([hash], CancellationToken.None);
 
         Assert.False(_callback.Success);
         Assert.NotNull(_callback.MultiScrapeResponse);

@@ -575,9 +575,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             if (p.UtMetadata.LocalMessageId == type)
             {
-                var res = BencodeParser.ParseWithConsumed(data);
-                var node = res.Node;
-                int consumed = res.Consumed;
+                var (Node, Consumed) = BencodeParser.ParseWithConsumed(data);
+                var node = Node;
+                int consumed = Consumed;
                 if (node is BDict dict)
                 {
                     var msgType = dict.GetLong("msg_type") ?? 0;
@@ -615,8 +615,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             else if (_torrent.MetadataDownloadInternal?.Active == true)
             {
                 // Fallback: some peers may respond with mismatched ext IDs. Detect ut_metadata by payload shape.
-                var res = BencodeParser.ParseWithConsumed(data);
-                if (res.Node is BDict dict && dict.GetLong("msg_type") is long msgTypeVal)
+                var (Node, Consumed) = BencodeParser.ParseWithConsumed(data);
+                if (Node is BDict dict && dict.GetLong("msg_type") is long msgTypeVal)
                 {
                     var msgType = (int)msgTypeVal;
                     var piece = (int)(dict.GetLong("piece") ?? 0);
@@ -640,7 +640,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
                     if (msgType == (int)UtMetadata.MessageType.Data)
                     {
-                        byte[] payload = data.Length > res.Consumed ? data[res.Consumed..] : [];
+                        byte[] payload = data.Length > Consumed ? data[Consumed..] : [];
                         if (_torrent.MetadataDownloadInternal != null)
                         {
                             await _torrent.MetadataDownloadInternal.MetadataPieceReceivedAsync(p, piece, payload).ConfigureAwait(false);
@@ -1036,7 +1036,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             if (!_activeConnectionTasks.IsEmpty)
             {
-                await Task.WhenAll(_activeConnectionTasks.Keys.ToArray()).WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
+                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
             }
         }
         catch (TimeoutException) { /* Ignore timeout */ }

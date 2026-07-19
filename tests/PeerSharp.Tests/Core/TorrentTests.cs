@@ -180,9 +180,9 @@ public class TorrentTests
             Assert.Equal(TorrentState.Stopped, torrent.State);
             Assert.False(torrent.Started);
             Assert.Equal(1, torrent.FileCount);
-            Assert.Equal(1, torrent.GetAllFileInfo().Count);
+            Assert.Single(torrent.GetAllFileInfo());
             Assert.Equal("file.bin", torrent.GetFileInfo(0).Path);
-            Assert.Equal(1, torrent.GetAllFileSelections().Count);
+            Assert.Single(torrent.GetAllFileSelections());
             Assert.NotNull(torrent.GetFileSelection(0));
             Assert.NotEmpty(torrent.GetPieceBitfield());
             Assert.Equal(torrent.Hash, torrent.GetResumeData().Hash);

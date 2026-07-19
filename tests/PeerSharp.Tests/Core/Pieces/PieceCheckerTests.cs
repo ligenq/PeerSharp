@@ -262,8 +262,8 @@ public class PieceCheckerTests
             IsMerkle = true
         };
         ctx.MerkleValidPieces.Add(1);
-        files.Data[0] = new byte[] { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-        files.Data[10] = new byte[] { 2, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        files.Data[0] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        files.Data[10] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
         var checker = new PieceChecker(files, ctx);
 
@@ -271,7 +271,7 @@ public class PieceCheckerTests
 
         Assert.Equal(1, valid);
         Assert.Equal(new[] { 1 }, ctx.VerifiedPieces);
-        Assert.Equal(new[] { 0, 1 }, ctx.VerifyPieceCalls.Select(call => call.PieceIndex));
+        Assert.Equal([0, 1], ctx.VerifyPieceCalls.Select(call => call.PieceIndex));
     }
 
     [Fact(Timeout = 30000)]
@@ -416,8 +416,8 @@ public class PieceCheckerTests
             IsV2 = true
         };
         ctx.MerkleValidPieces.Add(0);
-        files.Data[0] = new byte[] { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-        files.Data[10] = new byte[] { 2, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        files.Data[0] = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        files.Data[10] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
         var checker = new PieceChecker(files, ctx);
         int valid = await checker.CheckAllPiecesAsync();

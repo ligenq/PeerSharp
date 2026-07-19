@@ -58,7 +58,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
 
     private const int MaxPaddingLength = 512;
 
-    private readonly DiffieHellman _dh = new DiffieHellman();
+    private readonly DiffieHellman _dh = new();
 
     private readonly byte[]? _infoHash;
 

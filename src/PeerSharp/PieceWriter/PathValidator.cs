@@ -138,7 +138,7 @@ internal sealed class PathValidator : IPathValidator
         }
 
         // Reconstruct the safe relative path
-        string safePath = Path.Combine(safeParts.ToArray());
+        string safePath = Path.Combine([.. safeParts]);
 
         // Combine with root and get full path
         string fullPath = Path.GetFullPath(Path.Combine(_rootPath, safePath));

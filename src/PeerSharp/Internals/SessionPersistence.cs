@@ -217,12 +217,12 @@ internal sealed class SessionPersistence : ISessionPersistence
         var dto = new DhtStateDto
         {
             NodeId = state.NodeId != null ? Convert.ToHexString(state.NodeId) : null,
-            Nodes = state.Nodes.Select(n => new DhtNodeDto
+            Nodes = [.. state.Nodes.Select(n => new DhtNodeDto
             {
                 Id = Convert.ToHexString(n.Id),
                 Ip = n.EndPoint.Address.ToString(),
                 Port = n.EndPoint.Port
-            }).ToList()
+            })]
         };
 
         var json = JsonSerializer.Serialize(dto, PeerSharpJsonContext.Default.DhtStateDto);
