@@ -245,7 +245,7 @@ internal class UpnpGateway
 
 internal class UpnpPortMapping : IPortMapper
 {
-    private static readonly HttpClient _soapClient = new() { Timeout = TimeSpan.FromSeconds(10) };
+    private static readonly HttpClient SoapClient = new() { Timeout = TimeSpan.FromSeconds(10) };
     private readonly Func<CancellationToken, Task<List<UpnpGateway>>> _discoverGatewaysAsync;
     private readonly ILogger<UpnpPortMapping> _logger = TorrentLoggerFactory.CreateLogger<UpnpPortMapping>();
     private readonly List<(int Port, string Protocol, string Description)> _mappings = [];
@@ -411,7 +411,7 @@ internal class UpnpPortMapping : IPortMapper
             var content = new StringContent(body, Encoding.UTF8, "text/xml");
             content.Headers.Add("SOAPACTION", $"\"{gateway.ServiceType}#{action}\"");
 
-            var response = await _soapClient.PostAsync(gateway.ControlUrl, content, ct).ConfigureAwait(false);
+            var response = await SoapClient.PostAsync(gateway.ControlUrl, content, ct).ConfigureAwait(false);
             return response.IsSuccessStatusCode;
         }
         catch (Exception ex)

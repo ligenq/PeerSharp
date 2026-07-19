@@ -17,6 +17,7 @@ public class UdpTrackerTests
         public bool Closed { get; private set; }
         private TaskCompletionSource<UdpReceiveResult>? _receiveTcs;
         private readonly Queue<UdpReceiveResult> _queuedResponses = new();
+        private readonly Lock _receiveLock = new();
         private readonly List<TaskCompletionSource<byte[]>> _sentPacketWaiters = [];
 
         public Socket Client => throw new NotImplementedException();
@@ -24,28 +25,44 @@ public class UdpTrackerTests
         public void TriggerResponse(byte[] data)
         {
             var response = new UdpReceiveResult(data, new IPEndPoint(IPAddress.Loopback, 0));
-            var tcs = Interlocked.Exchange(ref _receiveTcs, null);
-            if (tcs != null)
+            TaskCompletionSource<UdpReceiveResult>? tcs;
+            lock (_receiveLock)
             {
-                tcs.TrySetResult(response);
-                return;
+                tcs = _receiveTcs;
+                if (tcs != null)
+                {
+                    _receiveTcs = null;
+                }
+                else
+                {
+                    _queuedResponses.Enqueue(response);
+                }
             }
 
-            lock (_queuedResponses)
-            {
-                _queuedResponses.Enqueue(response);
-            }
+            tcs?.TrySetResult(response);
         }
 
         public void TriggerTimeout()
         {
-            var tcs = Interlocked.Exchange(ref _receiveTcs, null);
+            TaskCompletionSource<UdpReceiveResult>? tcs;
+            lock (_receiveLock)
+            {
+                tcs = _receiveTcs;
+                _receiveTcs = null;
+            }
+
             tcs?.TrySetException(new TimeoutException());
         }
 
         public void TriggerSocketException(SocketError error = SocketError.ConnectionReset)
         {
-            var tcs = Interlocked.Exchange(ref _receiveTcs, null);
+            TaskCompletionSource<UdpReceiveResult>? tcs;
+            lock (_receiveLock)
+            {
+                tcs = _receiveTcs;
+                _receiveTcs = null;
+            }
+
             tcs?.TrySetException(new SocketException((int)error));
         }
 
@@ -80,17 +97,30 @@ public class UdpTrackerTests
 
         public Task<UdpReceiveResult> ReceiveAsync(CancellationToken cancellationToken)
         {
-            lock (_queuedResponses)
+            TaskCompletionSource<UdpReceiveResult> tcs;
+            lock (_receiveLock)
             {
                 if (_queuedResponses.TryDequeue(out var response))
                 {
                     return Task.FromResult(response);
                 }
+
+                tcs = new TaskCompletionSource<UdpReceiveResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _receiveTcs = tcs;
             }
 
-            var tcs = new TaskCompletionSource<UdpReceiveResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-            Interlocked.Exchange(ref _receiveTcs, tcs);
-            cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
+            cancellationToken.Register(() =>
+            {
+                lock (_receiveLock)
+                {
+                    if (ReferenceEquals(_receiveTcs, tcs))
+                    {
+                        _receiveTcs = null;
+                    }
+                }
+
+                tcs.TrySetCanceled(cancellationToken);
+            });
             return tcs.Task;
         }
 
@@ -1329,7 +1359,7 @@ public class UdpTrackerTests
         tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
 
         // Empty list short-circuits before the lock; this hits the early-return path.
-        await tracker.MultiScrapeAsync(Array.Empty<InfoHash>(), CancellationToken.None);
+        await tracker.MultiScrapeAsync([], CancellationToken.None);
 
         Assert.Empty(_socketFactory.LastSocket.SentPackets);
         Assert.Null(_callback.MultiScrapeResponse);
