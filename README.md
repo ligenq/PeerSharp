@@ -143,7 +143,7 @@ var stream = await torrent.OpenStreamAsync(fileIndex: 0);
 PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
 
 ```bash
-dotnet add package PeerSharp.WebTorrent --version 2.0.0
+dotnet add package PeerSharp.WebTorrent --version 2.1.0
 ```
 
 ```csharp
