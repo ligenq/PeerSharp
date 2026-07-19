@@ -15,7 +15,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>Fix false-positive "Error attaching data channel" log entries that fired whenever a pending peer was disposed before its data channel opened. Pending peers now have a lifetime cancellation source that is signaled on teardown so background waits classify the cancellation as expected instead of error.</PackageReleaseNotes>
+		<PackageReleaseNotes>Compatibility release: rebuilt against PeerSharp 2.1.0 to pick up the core library's new magnet-preview APIs, BEP 47/53 support, and storage/reliability hardening. No WebTorrent-specific behavior changes; includes minor warning cleanup and dependency updates.</PackageReleaseNotes>
 		<IsTrimmable>true</IsTrimmable>
 		<RootNamespace>PeerSharp.WebTorrent</RootNamespace>
 		<AssemblyName>PeerSharp.WebTorrent</AssemblyName>
