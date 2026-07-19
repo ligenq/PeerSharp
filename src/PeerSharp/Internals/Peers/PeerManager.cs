@@ -101,7 +101,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private int _connectingPeersCount = 0;
     private Task? _connectionQueueTask;
     private AtomicDisposal _disposal = new();
-    private DateTimeOffset _globalUtpPenaltyUntil = DateTimeOffset.MinValue;
+    // Stored as UTC ticks so cross-thread access is a single 64-bit read/write via Volatile:
+    // the main loop writes the penalty window while connection tasks read it concurrently,
+    // and a raw 16-byte DateTimeOffset field could tear.
+    private long _globalUtpPenaltyUntilUtcTicks = DateTimeOffset.MinValue.UtcTicks;
 
     private int _holepunchCount = 0;
 
@@ -1143,7 +1146,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         bool hasUtpManager = _torrent.UtpManager != null;
         var now = _timeProvider.GetUtcNow();
         bool utpAvailable = hasUtpManager
-            && now >= _globalUtpPenaltyUntil
+            && now.UtcTicks >= Volatile.Read(ref _globalUtpPenaltyUntilUtcTicks)
             && (history?.IsUtpAllowed(now) ?? true);
         bool inWarmup = (now - _startTime) < TimeSpan.FromSeconds(settings.UtpWarmupSeconds);
 
@@ -1893,7 +1896,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// <summary>Test hook: sets the global uTP penalty window.</summary>
     internal void SetGlobalUtpPenaltyForTesting(DateTimeOffset until)
     {
-        _globalUtpPenaltyUntil = until;
+        Volatile.Write(ref _globalUtpPenaltyUntilUtcTicks, until.UtcTicks);
     }
 
     private PeerHistory GetOrAddKnownPeerHistory(IPEndPoint endpoint)
@@ -2088,10 +2091,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (isSpeedDrop && utpConnectedCount > 0)
         {
             var penaltySeconds = Math.Max(10, _settings.Connection.UtpSlowPenaltySeconds / 2);
-            var until = now.AddSeconds(penaltySeconds);
-            if (until > _globalUtpPenaltyUntil)
+            long untilUtcTicks = now.AddSeconds(penaltySeconds).UtcTicks;
+            // Single writer (main loop), so read-compare-write does not need a CAS loop
+            if (untilUtcTicks > Volatile.Read(ref _globalUtpPenaltyUntilUtcTicks))
             {
-                _globalUtpPenaltyUntil = until;
+                Volatile.Write(ref _globalUtpPenaltyUntilUtcTicks, untilUtcTicks);
             }
         }
     }

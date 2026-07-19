@@ -478,7 +478,7 @@ public class PeerManagerTests
         settings.EnableUtpOut = true;
         SetUtpManagerStub(ctx.Torrent);
 
-        SetPrivateField(ctx.Manager, "_globalUtpPenaltyUntil", DateTimeOffset.UtcNow.AddMinutes(5));
+        ctx.Manager.SetGlobalUtpPenaltyForTesting(DateTimeOffset.UtcNow.AddMinutes(5));
 
         var plan = InvokeBuildTransportPlan(ctx.Manager, settings, history: null, forceUtp: false);
         Assert.Equal([TransportPreference.Tcp], plan);
