@@ -46,6 +46,13 @@ public class UtpSecurityTests
         byte[] warmup = new byte[16];
         await clientStream.WriteAsync(warmup);
 
+        // The client's ConnectAsync only guarantees the *client* is Connected (it received the
+        // server's SYN-ACK). The server transitions SynRecv -> Connected only once it processes
+        // the client's follow-up (the warmup DATA above). Wait for that before injecting the RST,
+        // otherwise the assertion can race the handshake and observe SynRecv on a loaded host.
+        var stateField = typeof(UtpStream).GetField("_state", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        await WaitForStateAsync(serverStream, stateField, "Connected", TimeSpan.FromSeconds(5));
+
         // RST is matched on send id per libutp.
         var prop = typeof(UtpStream).GetProperty("ConnectionIdSend", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
         ushort serverSendId = (ushort)prop!.GetValue(serverStream)!;
@@ -64,9 +71,24 @@ public class UtpSecurityTests
 
         // Server stream must remain Connected: a RST from a spoofed source endpoint must not
         // tear down the legitimate connection.
-        var stateField = typeof(UtpStream).GetField("_state", BindingFlags.NonPublic | BindingFlags.Instance);
-        var state = stateField!.GetValue(serverStream);
+        var state = stateField.GetValue(serverStream);
         Assert.Equal("Connected", state!.ToString());
+    }
+
+    private static async Task WaitForStateAsync(UtpStream stream, FieldInfo stateField, string expected, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (stateField.GetValue(stream)!.ToString() == expected)
+            {
+                return;
+            }
+
+            await Task.Delay(20);
+        }
+
+        Assert.Equal(expected, stateField.GetValue(stream)!.ToString());
     }
 }
 
