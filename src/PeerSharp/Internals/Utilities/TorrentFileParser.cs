@@ -6,7 +6,7 @@ namespace PeerSharp.Internals.Utilities;
 
 internal static class TorrentFileParser
 {
-    private static readonly ILogger _logger = TorrentLoggerFactory.CreateLogger(nameof(TorrentFileParser));
+    private static readonly ILogger Logger = TorrentLoggerFactory.CreateLogger(nameof(TorrentFileParser));
 
     public static TorrentFileMetadata Parse(byte[] data)
     {
@@ -333,7 +333,7 @@ internal static class TorrentFileParser
         if (rootHash?.Length == 20)
         {
             metadata.Info.MerkleRootHash = rootHash.Value.ToArray();
-            _logger.LogInformation("BEP 30: Merkle hash torrent detected, root hash: {RootHash}", Convert.ToHexString(metadata.Info.MerkleRootHash));
+            Logger.LogInformation("BEP 30: Merkle hash torrent detected, root hash: {RootHash}", Convert.ToHexString(metadata.Info.MerkleRootHash));
         }
 
         // Parse V1 piece hashes (not present in BEP 30 Merkle torrents)

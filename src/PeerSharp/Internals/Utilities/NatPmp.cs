@@ -13,7 +13,7 @@ namespace PeerSharp.Internals.Utilities;
 internal class NatPmpPortMapping : IPortMapper
 {
     private const int NatPmpPort = 5351;
-    private static readonly ILogger _logger = TorrentLoggerFactory.CreateLogger<NatPmpPortMapping>();
+    private static readonly ILogger Logger = TorrentLoggerFactory.CreateLogger<NatPmpPortMapping>();
     private readonly Func<IEnumerable<IPAddress>> _gatewayProvider;
     private readonly List<IPAddress> _gateways = [];
     private readonly List<(int Port, string Protocol)> _mappings = [];
@@ -123,16 +123,16 @@ internal class NatPmpPortMapping : IPortMapper
                 _status[g] = (PortMappingResult.Pending, null, null);
             }
 
-            _logger.LogInformation("NAT-PMP: Found gateway at {GatewayAddress}", g);
+            Logger.LogInformation("NAT-PMP: Found gateway at {GatewayAddress}", g);
         }
 
         if (_gateways.Count == 0)
         {
-            _logger.LogInformation("NAT-PMP: No default gateways found");
+            Logger.LogInformation("NAT-PMP: No default gateways found");
         }
         else if (_gateways.Count > 1)
         {
-            _logger.LogWarning("NAT-PMP: Multiple gateways detected ({Count}). This may indicate a VPN or double-NAT configuration which can cause connectivity issues", _gateways.Count);
+            Logger.LogWarning("NAT-PMP: Multiple gateways detected ({Count}). This may indicate a VPN or double-NAT configuration which can cause connectivity issues", _gateways.Count);
         }
     }
 
@@ -205,10 +205,10 @@ internal class NatPmpPortMapping : IPortMapper
                     if (resultCode == 0)
                     {
                         int extPort = (response.Buffer[8] << 8) | response.Buffer[9];
-                        _logger.LogInformation("NAT-PMP: Mapped {Protocol} port {Internal}->{External} on {Gateway}", protocol, port, extPort, gateway);
+                        Logger.LogInformation("NAT-PMP: Mapped {Protocol} port {Internal}->{External} on {Gateway}", protocol, port, extPort, gateway);
                         return (true, extPort);
                     }
-                    _logger.LogWarning("NAT-PMP: Gateway {Gateway} returned error code {Result}", gateway, resultCode);
+                    Logger.LogWarning("NAT-PMP: Gateway {Gateway} returned error code {Result}", gateway, resultCode);
                 }
             }
         }
@@ -216,7 +216,7 @@ internal class NatPmpPortMapping : IPortMapper
         {
             if (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
-                _logger.LogDebug(ex, "NAT-PMP: Error mapping on {Gateway}", gateway);
+                Logger.LogDebug(ex, "NAT-PMP: Error mapping on {Gateway}", gateway);
             }
         }
         return (false, null);
@@ -238,7 +238,7 @@ internal class NatPmpPortMapping : IPortMapper
             // External port 0 and Lifetime 0
 
             await client.SendAsync(request, new IPEndPoint(gateway, natPmpPort), ct).ConfigureAwait(false);
-            _logger.LogInformation("NAT-PMP: Unmapped {Protocol} port {Port} on {Gateway}", protocol, port, gateway);
+            Logger.LogInformation("NAT-PMP: Unmapped {Protocol} port {Port} on {Gateway}", protocol, port, gateway);
         }
         catch { /* Best effort on shutdown */ }
     }

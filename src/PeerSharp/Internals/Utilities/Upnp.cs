@@ -20,8 +20,8 @@ internal static class UpnpDiscovery
         "MX: 3\r\n\r\n";
 
     private const int SsdpPort = 1900;
-    private static readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(2) };
-    private static readonly ILogger _logger = TorrentLoggerFactory.CreateLogger(nameof(UpnpDiscovery));
+    private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(2) };
+    private static readonly ILogger Logger = TorrentLoggerFactory.CreateLogger(nameof(UpnpDiscovery));
 
     public static Task<List<UpnpGateway>> DiscoverAsync(CancellationToken ct = default)
     {
@@ -64,7 +64,7 @@ internal static class UpnpDiscovery
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Bind error on {Ip}", ip);
+                    Logger.LogError(ex, "Bind error on {Ip}", ip);
                 }
             }
 
@@ -86,7 +86,7 @@ internal static class UpnpDiscovery
     {
         try
         {
-            var xml = await _httpClient.GetStringAsync(location, ct).ConfigureAwait(false);
+            var xml = await HttpClient.GetStringAsync(location, ct).ConfigureAwait(false);
             var doc = XDocument.Parse(xml);
             var ns = doc.Root?.GetDefaultNamespace() ?? XNamespace.None;
 
@@ -136,20 +136,20 @@ internal static class UpnpDiscovery
         }
         catch (HttpRequestException ex)
         {
-            _logger.LogWarning(ex, "UPnP HTTP error fetching {Location}", location);
+            Logger.LogWarning(ex, "UPnP HTTP error fetching {Location}", location);
         }
         catch (TaskCanceledException ex)
         {
             // Timeout - common for UPnP discovery
-            _logger.LogDebug(ex, "UPnP timeout fetching {Location}", location);
+            Logger.LogDebug(ex, "UPnP timeout fetching {Location}", location);
         }
         catch (System.Xml.XmlException ex)
         {
-            _logger.LogWarning(ex, "UPnP XML parse error for {Location}", location);
+            Logger.LogWarning(ex, "UPnP XML parse error for {Location}", location);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "UPnP error parsing {Location}", location);
+            Logger.LogError(ex, "UPnP error parsing {Location}", location);
         }
         return null;
     }
@@ -228,7 +228,7 @@ internal static class UpnpDiscovery
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "UPnP receive error");
+                Logger.LogError(ex, "UPnP receive error");
                 break;
             }
         }
