@@ -241,8 +241,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
 
         RestoreInitialState();
 
-        // DNS resolution in Bootstrap can block, so run in background
-        _bootstrapTask = Task.Run(Bootstrap, ct);
+        _bootstrapTask = BootstrapAsync(_cts.Token);
 
         _maintenanceTask = RunMaintenanceAsync(_cts.Token);
 
@@ -253,28 +252,64 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     {
         _running = false;
 
-        if (_cts != null)
+        var cts = _cts;
+        if (cts != null)
         {
-            await _cts.CancelAsync().ConfigureAwait(false);
+            await cts.CancelAsync().ConfigureAwait(false);
         }
 
-        if (_bootstrapTask is { } bootstrapTask)
-        {
-            await bootstrapTask.ConfigureAwait(false);
-        }
+        Task[] tasks = [_bootstrapTask ?? Task.CompletedTask, _maintenanceTask ?? Task.CompletedTask, _rebootstrapTask ?? Task.CompletedTask];
 
-        if (_maintenanceTask is { } maintenanceTask)
-        {
-            await maintenanceTask.ConfigureAwait(false);
-        }
-
-        if (_rebootstrapTask is { } rebootstrapTask)
-        {
-            await rebootstrapTask.ConfigureAwait(false);
-        }
-
-        _cts?.Dispose();
+        // Detach state up front so no new background work observes a live token.
         _cts = null;
+        _bootstrapTask = null;
+        _maintenanceTask = null;
+        _rebootstrapTask = null;
+
+        var completion = Task.WhenAll(tasks);
+        if (completion.IsCompleted)
+        {
+            try
+            {
+                await completion.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cts?.IsCancellationRequested == true)
+            {
+                // Expected when all background work honours the component cancellation token.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogTrace(ex, "DHT background task failed during shutdown");
+            }
+
+            cts?.Dispose();
+        }
+        else
+        {
+            // A platform DNS resolver may ignore cancellation. DHT is already inactive, and
+            // its remaining work cannot mutate application state, so observe it without
+            // delaying process shutdown. Dispose the cancellation source only once that work
+            // finishes, so it is never disposed out from under an in-flight operation.
+            _logger.LogDebug("DHT background work is still completing after cancellation");
+            ObserveLateCompletion(completion, cts);
+        }
+    }
+
+    private void ObserveLateCompletion(Task completion, CancellationTokenSource? cts)
+    {
+        _ = completion.ContinueWith(
+            completed =>
+            {
+                if (completed.Exception is { } ex)
+                {
+                    _logger.LogTrace(ex.GetBaseException(), "Late DHT background task failed after shutdown");
+                }
+
+                cts?.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private static byte[] CalculateToken(IPAddress addr, ReadOnlySpan<byte> secret, ReadOnlySpan<byte> infoHash)
@@ -373,18 +408,25 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         }
     }
 
-    private void Bootstrap()
+    private async Task BootstrapAsync(CancellationToken cancellationToken)
     {
         var nodes = _settings.Dht.BootstrapNodes;
         foreach (var node in nodes)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var ips = _dnsResolver.GetHostAddresses(node.Host);
+                var ips = await _dnsResolver
+                    .GetHostAddressesAsync(node.Host, cancellationToken)
+                    .ConfigureAwait(false);
                 if (ips.Length > 0)
                 {
                     Ping(new IPEndPoint(ips[0], node.Port));
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -746,8 +788,14 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         _table = new RoutingTable(NodeId.ToArray(), _timeProvider);
         MarkStateDirty();
 
-        // Re-bootstrap to populate the new routing table
-        _rebootstrapTask = Task.Run(Bootstrap);
+        // Re-bootstrap to populate the new routing table. Skip once stopped so we
+        // never spawn an uncancellable straggler after the token has been detached.
+        if (!_running)
+        {
+            return;
+        }
+
+        _rebootstrapTask = BootstrapAsync(DhtToken);
     }
 
     private void RegisterTransaction(ReadOnlySpan<byte> tid, string type, InfoHash infoHash, bool announce = false, int port = 0, bool scrape = false)

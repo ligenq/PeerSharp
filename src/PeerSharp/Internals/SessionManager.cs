@@ -54,7 +54,15 @@ internal sealed class SessionManager : IAsyncDisposable
             {
                 try
                 {
-                    await _autoSaveTask.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                    // Resume data is persisted explicitly before this point, so the wait
+                    // only drains the already-cancelled auto-save loop. Bound it so a
+                    // stalled in-flight save (e.g. on hung storage) cannot block shutdown
+                    // indefinitely.
+                    await _autoSaveTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                }
+                catch (TimeoutException ex)
+                {
+                    _logger.LogWarning(ex, "Auto-save loop did not drain within the shutdown grace period");
                 }
                 catch (OperationCanceledException)
                 {

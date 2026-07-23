@@ -25,7 +25,7 @@ internal class MockUdpListener : IUdpListener, IDisposable
 
     public void Stop() { }
 
-    public Task StopAsync()
+    public Task StopAsync(CancellationToken cancellationToken = default)
     {
         return Task.CompletedTask;
     }
@@ -877,7 +877,6 @@ public class UtpExhaustiveTests
 
     #endregion
 }
-
 
 
 

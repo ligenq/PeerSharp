@@ -31,7 +31,7 @@ public class StorageFailureTests
         public Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct) => Task.FromResult(new byte[length]);
         public Task ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct) => Task.CompletedTask;
         public Task StartAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct) => Task.CompletedTask;
-        public Task StopAsync() => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task UpdateFileSelectionAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct) => Task.CompletedTask;
 
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct)

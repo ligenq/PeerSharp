@@ -83,7 +83,7 @@ public class NetworkManagerTests
 
         public Task StartAsync(CancellationToken cancellationToken = default) { Started = true; return Task.CompletedTask; }
         public void Stop() { }
-        public Task StopAsync() => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
@@ -198,7 +198,6 @@ public class NetworkManagerTests
         Assert.False(lsd.Started);
     }
 }
-
 
 
 

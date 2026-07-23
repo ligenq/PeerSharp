@@ -173,41 +173,31 @@ internal class UdpListener : IUdpListener
         CleanupResources();
     }
 
-    public async Task StopAsync()
+    public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         StopInternal();
 
-        // Wait for processing task to complete asynchronously
-        if (_processTask != null)
+        Task[] tasks = [_processTask ?? Task.CompletedTask, _receiveTask ?? Task.CompletedTask];
+        try
         {
-            try
-            {
-                await _processTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-            }
-            catch (TimeoutException ex)
-            {
-                _logger.LogTrace(ex, "UdpListener process task timed out during async stop");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogTrace(ex, "UdpListener process task exception during async stop");
-            }
+            // Cancellation plus closing the socket normally completes both loops immediately.
+            // Keep a small shared grace period for faulty/non-cooperative socket adapters, rather
+            // than spending up to two seconds on each task during application shutdown.
+            await Task.WhenAll(tasks)
+                .WaitAsync(TimeSpan.FromMilliseconds(200), cancellationToken)
+                .ConfigureAwait(false);
         }
-
-        if (_receiveTask != null)
+        catch (TimeoutException ex)
         {
-            try
-            {
-                await _receiveTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-            }
-            catch (TimeoutException ex)
-            {
-                _logger.LogTrace(ex, "UdpListener receive task timed out during async stop");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogTrace(ex, "UdpListener receive task exception during async stop");
-            }
+            _logger.LogWarning(ex, "UDP listener tasks did not finish within the shutdown grace period");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogTrace(ex, "UDP listener task exception during async stop");
         }
 
         CleanupResources();

@@ -81,6 +81,53 @@ public class PortMappingTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task NetworkManager_StopAndDispose_UnmapsPortsOnlyOnce()
+    {
+        var settings = new Settings { Connection = { UpnpPortMapping = true } };
+        var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
+        await manager.StartAsync();
+        await Task.Delay(50);
+
+        await manager.StopAsync();
+        await manager.DisposeAsync();
+
+        Assert.Equal(1, _upnpMapper.UnmapCallCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task NetworkManager_CancelledStopCanBeRetried()
+    {
+        _upnpMapper.BlockUnmapUntilCancelled = true;
+        var settings = new Settings { Connection = { UpnpPortMapping = true } };
+        var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
+        await manager.StartAsync();
+        await Task.Delay(50);
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => manager.StopAsync(cancellation.Token));
+        _upnpMapper.BlockUnmapUntilCancelled = false;
+        await manager.StopAsync();
+
+        Assert.Equal(2, _upnpMapper.UnmapCallCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task NetworkManager_UnresponsivePortMapperDoesNotDelayShutdown()
+    {
+        _upnpMapper.BlockUnmapUntilCancelled = true;
+        var settings = new Settings { Connection = { UpnpPortMapping = true } };
+        var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
+        await manager.StartAsync();
+        await Task.Delay(50);
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        await manager.StopAsync();
+
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"Shutdown took {stopwatch.Elapsed}.");
+        Assert.Equal(1, _upnpMapper.UnmapCallCount);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task NetworkManager_HandlesMappingFailure_Gracefully()
     {
         // Arrange
@@ -148,8 +195,10 @@ public class PortMappingTests
         public bool StartCalled { get; private set; }
         public bool MapCalled { get; private set; }
         public bool UnmapCalled { get; private set; }
+        public int UnmapCallCount { get; private set; }
         public int MappedPort { get; private set; }
         public bool ShouldThrow { get; set; }
+        public bool BlockUnmapUntilCancelled { get; set; }
 
         public MockPortMapper(string name) => Name = name;
 
@@ -176,10 +225,14 @@ public class PortMappingTests
             return Task.FromResult(true);
         }
 
-        public Task UnmapAllAsync(CancellationToken ct = default)
+        public async Task UnmapAllAsync(CancellationToken ct = default)
         {
             UnmapCalled = true;
-            return Task.CompletedTask;
+            UnmapCallCount++;
+            if (BlockUnmapUntilCancelled)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            }
         }
 
         public IReadOnlyList<PortMappingStatus> GetStatus()
@@ -239,7 +292,7 @@ public class PortMappingTests
 
         public Task StartAsync(CancellationToken token) { Port = 6881; return Task.CompletedTask; }
         public void Stop() { }
-        public Task StopAsync() => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
@@ -254,8 +307,3 @@ public class PortMappingTests
         }
     }
 }
-
-
-
-
-
