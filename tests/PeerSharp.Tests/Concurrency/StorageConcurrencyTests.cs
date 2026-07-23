@@ -3,6 +3,7 @@ using Microsoft.Coyote.SystematicTesting;
 
 namespace PeerSharp.Tests.Concurrency;
 
+[Collection("Coyote")]
 public class StorageConcurrencyTests
 {
     private readonly ITestOutputHelper _output;

@@ -9,6 +9,7 @@ using System.Collections.Concurrent;
 
 namespace PeerSharp.Tests.Concurrency;
 
+[Collection("Coyote")]
 public class PeerManagerConcurrencyTests
 {
     private readonly ITestOutputHelper _output;

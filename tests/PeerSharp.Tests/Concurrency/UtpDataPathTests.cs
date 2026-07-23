@@ -9,6 +9,7 @@ using System.Reflection;
 
 namespace PeerSharp.Tests.Concurrency;
 
+[Collection("Coyote")]
 public class UtpDataPathTests
 {
     private readonly ITestOutputHelper _output;

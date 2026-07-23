@@ -15,6 +15,7 @@ namespace PeerSharp.Tests.Concurrency;
 /// These tests use Microsoft Coyote's systematic testing to explore different
 /// thread interleavings and find concurrency bugs.
 /// </summary>
+[Collection("Coyote")]
 public class CoyoteTests
 {
     private readonly ITestOutputHelper _output;

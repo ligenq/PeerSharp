@@ -4,6 +4,7 @@ using Microsoft.Coyote.SystematicTesting;
 
 namespace PeerSharp.Tests.Concurrency;
 
+[Collection("Coyote")]
 public class FileTransferConcurrencyTests
 {
     private readonly ITestOutputHelper _output;
