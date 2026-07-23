@@ -9,6 +9,7 @@ public class UdpListenerTests
 {
     private class MockUdpSocket : IUdpSocket
     {
+        public bool IgnoreCancellation { get; init; }
         public List<byte[]> SentPackets { get; } = [];
         private readonly System.Threading.Channels.Channel<UdpReceiveResult> _receiveChannel =
             System.Threading.Channels.Channel.CreateUnbounded<UdpReceiveResult>();
@@ -29,7 +30,7 @@ public class UdpListenerTests
 
         public async Task<UdpReceiveResult> ReceiveAsync(CancellationToken cancellationToken)
         {
-            return await _receiveChannel.Reader.ReadAsync(cancellationToken);
+            return await _receiveChannel.Reader.ReadAsync(IgnoreCancellation ? CancellationToken.None : cancellationToken);
         }
 
         public ValueTask<int> SendAsync(ReadOnlyMemory<byte> datagram, IPEndPoint endPoint, CancellationToken ct)
@@ -41,7 +42,12 @@ public class UdpListenerTests
 
     private class MockUdpSocketFactory : IUdpSocketFactory
     {
-        public MockUdpSocket LastSocket { get; } = new();
+        public MockUdpSocket LastSocket { get; }
+
+        public MockUdpSocketFactory(bool ignoreCancellation = false)
+        {
+            LastSocket = new MockUdpSocket { IgnoreCancellation = ignoreCancellation };
+        }
         public IUdpSocket Create(int port)
         {
             return LastSocket;
@@ -90,8 +96,24 @@ public class UdpListenerTests
 
         await listener.DisposeAsync();
     }
-}
 
+    [Fact(Timeout = 30000)]
+    public async Task StopAsync_DoesNotWaitForNonCooperativeReceiveTask()
+    {
+        var factory = new MockUdpSocketFactory(ignoreCancellation: true);
+        var listener = new UdpListener(5000, factory, new Settings());
+        await listener.StartAsync();
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        await listener.StopAsync();
+
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1), $"Stop took {stopwatch.Elapsed}");
+
+        // Release the deliberately non-cooperative receive task so the test leaves no work behind.
+        factory.LastSocket.EnqueueReceive([], new IPEndPoint(IPAddress.Loopback, 1));
+        await listener.DisposeAsync();
+    }
+}
 
 
 

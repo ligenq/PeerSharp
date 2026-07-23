@@ -20,6 +20,8 @@ public class ClientEngineTests
 
         public bool Started { get; private set; }
         public bool Stopped { get; private set; }
+        public int StopCallCount { get; private set; }
+        public int DisposeCallCount { get; private set; }
 
         public Task StartAsync(CancellationToken cancellationToken = default)
         {
@@ -30,6 +32,7 @@ public class ClientEngineTests
         public Task StopAsync(CancellationToken ct = default)
         {
             Stopped = true;
+            StopCallCount++;
             return Task.CompletedTask;
         }
 
@@ -42,6 +45,7 @@ public class ClientEngineTests
 
         public ValueTask DisposeAsync()
         {
+            DisposeCallCount++;
             return ValueTask.CompletedTask;
         }
     }
@@ -175,6 +179,18 @@ public class ClientEngineTests
         await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.RemoveTorrentAsync(torrent));
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task DisposeAsync_DelegatesNetworkShutdownToNetworkDisposeOnly()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        await engine.DisposeAsync();
+
+        Assert.Equal(0, _networkManager.StopCallCount);
+        Assert.Equal(1, _networkManager.DisposeCallCount);
+    }
+
     private static TorrentFile CreateTestTorrentFile()
     {
         var info = new TorrentFileMetadata();
@@ -186,7 +202,6 @@ public class ClientEngineTests
         return new TorrentFile(info);
     }
 }
-
 
 
 

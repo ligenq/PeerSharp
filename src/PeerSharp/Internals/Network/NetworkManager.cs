@@ -18,9 +18,13 @@ internal sealed record NetworkServices(
 
 internal class NetworkManager : INetworkManager
 {
+    private static readonly TimeSpan PortUnmapTimeout = TimeSpan.FromMilliseconds(500);
+
     private readonly ILogger<NetworkManager> _logger;
     private readonly Action<UtpStream> _onUtpConnection;
     private readonly List<IPortMapper> _portMappers = [];
+    private readonly SemaphoreSlim _stopLock = new(1, 1);
+    private bool _stopped;
     private readonly NetworkServices _services;
     private readonly Settings _settings;
     private AtomicDisposal _disposal = new();
@@ -139,12 +143,42 @@ internal class NetworkManager : INetworkManager
 
     public async Task StopAsync(CancellationToken ct = default)
     {
-        PortListener.Stop();
-        await Dht.StopAsync(ct).ConfigureAwait(false);
-        Lsd.Stop();
-        Utp.Stop();
-        await UdpListener.StopAsync().ConfigureAwait(false);
+        await _stopLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_stopped)
+            {
+                return;
+            }
 
+            await StopCoreAsync(ct).ConfigureAwait(false);
+            _stopped = true;
+        }
+        finally
+        {
+            _stopLock.Release();
+        }
+    }
+
+    private async Task StopCoreAsync(CancellationToken ct)
+    {
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        PortListener.Stop();
+        _logger.LogDebug("TCP listener shutdown completed in {ElapsedMs} ms", stopwatch.ElapsedMilliseconds);
+        stopwatch.Restart();
+        await Dht.StopAsync(ct).ConfigureAwait(false);
+        _logger.LogDebug("DHT shutdown completed in {ElapsedMs} ms", stopwatch.ElapsedMilliseconds);
+        stopwatch.Restart();
+        Lsd.Stop();
+        _logger.LogDebug("LSD shutdown completed in {ElapsedMs} ms", stopwatch.ElapsedMilliseconds);
+        stopwatch.Restart();
+        Utp.Stop();
+        _logger.LogDebug("uTP shutdown completed in {ElapsedMs} ms", stopwatch.ElapsedMilliseconds);
+        stopwatch.Restart();
+        await UdpListener.StopAsync(ct).ConfigureAwait(false);
+        _logger.LogDebug("UDP listener shutdown completed in {ElapsedMs} ms", stopwatch.ElapsedMilliseconds);
+
+        stopwatch.Restart();
         if (_portMappingCts != null)
         {
             await _portMappingCts.CancelAsync().ConfigureAwait(false);
@@ -171,19 +205,29 @@ internal class NetworkManager : INetworkManager
         _portMappingCts?.Dispose();
         _portMappingCts = null;
         _portMappingTask = null;
+        _logger.LogDebug("Network shutdown mapping task completed in {ElapsedMs} ms", stopwatch.ElapsedMilliseconds);
 
+        stopwatch.Restart();
         if (_portMappers.Count > 0)
         {
-            using var unmapCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            // Router cleanup is best-effort. A NAT-PMP/UPnP gateway that does not
+            // answer must not hold desktop application shutdown for several seconds.
+            using var timeoutCts = new CancellationTokenSource(PortUnmapTimeout);
+            using var unmapCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
             try
             {
                 await UnmapPortsSafeAsync(unmapCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "UnmapPortsSafeAsync failed");
             }
         }
+        _logger.LogDebug("Network shutdown port unmapping completed in {ElapsedMs} ms", stopwatch.ElapsedMilliseconds);
     }
 
     private async Task StartPortMappingSafeAsync(int tcpPort, int udpPort, CancellationToken ct)
@@ -222,6 +266,10 @@ internal class NetworkManager : INetworkManager
             try
             {
                 await mapper.UnmapAllAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch
             {

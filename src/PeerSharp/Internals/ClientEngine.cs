@@ -177,6 +177,8 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
     {
         if (_disposal.MarkDisposed())
         {
+            var shutdownStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var phaseStopwatch = System.Diagnostics.Stopwatch.StartNew();
             if (_queueCts != null)
             {
                 await _queueCts.CancelAsync().ConfigureAwait(false);
@@ -188,8 +190,10 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             }
 
             _queueCts?.Dispose();
+            _logger.LogDebug("Shutdown phase queue completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
 
             // Save all resume data before shutting down
+            phaseStopwatch.Restart();
             if (_sessionManager != null)
             {
                 try
@@ -204,8 +208,10 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
                 }
                 await _sessionManager.DisposeAsync().ConfigureAwait(false);
             }
+            _logger.LogDebug("Shutdown phase session completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
 
             // Dispose all torrents to ensure they stop and release file handles
+            phaseStopwatch.Restart();
             var torrents = _registry.GetAll();
             var disposeTasks = new List<Task>(torrents.Count);
             foreach (var torrent in torrents)
@@ -226,18 +232,25 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
                     _logger.LogWarning(ex, "Timed out or error waiting for torrents to dispose");
                 }
             }
+            _logger.LogDebug("Shutdown phase torrents completed in {ElapsedMs} ms for {TorrentCount} torrents", phaseStopwatch.ElapsedMilliseconds, disposeTasks.Count);
 
             // Stop and dispose network manager
+            phaseStopwatch.Restart();
             if (_ownsNetworkManager && _networkManager != null)
             {
-                await _networkManager.StopAsync().ConfigureAwait(false);
+                // NetworkManager.DisposeAsync performs the stop. Calling both would
+                // repeat slow best-effort cleanup such as NAT-PMP/UPnP unmapping.
                 await _networkManager.DisposeAsync().ConfigureAwait(false);
             }
+            _logger.LogDebug("Shutdown phase network completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
 
+            phaseStopwatch.Restart();
             _fileHandleCache.Dispose();
 
             // Dispose bandwidth manager
             await _bandwidth.DisposeAsync().ConfigureAwait(false);
+            _logger.LogDebug("Shutdown phase final resources completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
+            _logger.LogDebug("ClientEngine shutdown completed in {ElapsedMs} ms", shutdownStopwatch.ElapsedMilliseconds);
         }
     }
 

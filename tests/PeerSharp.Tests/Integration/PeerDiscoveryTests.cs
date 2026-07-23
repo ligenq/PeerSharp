@@ -233,7 +233,7 @@ public class PeerDiscoveryTests : IDisposable
 
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public void Stop() { }
-        public Task StopAsync() => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
         public ValueTask DisposeAsync()
         {
@@ -285,7 +285,6 @@ public class PeerDiscoveryTests : IDisposable
         catch { }
     }
 }
-
 
 
 

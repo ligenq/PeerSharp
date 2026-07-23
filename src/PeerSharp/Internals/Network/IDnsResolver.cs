@@ -7,13 +7,13 @@ namespace PeerSharp.Internals.Network;
 /// </summary>
 internal interface IDnsResolver
 {
-    IPAddress[] GetHostAddresses(string hostNameOrAddress);
+    Task<IPAddress[]> GetHostAddressesAsync(string hostNameOrAddress, CancellationToken cancellationToken = default);
 }
 
 internal class SystemDnsResolver : IDnsResolver
 {
-    public IPAddress[] GetHostAddresses(string hostNameOrAddress)
+    public async Task<IPAddress[]> GetHostAddressesAsync(string hostNameOrAddress, CancellationToken cancellationToken = default)
     {
-        return Dns.GetHostAddresses(hostNameOrAddress);
+        return await Dns.GetHostAddressesAsync(hostNameOrAddress, cancellationToken).ConfigureAwait(false);
     }
 }

@@ -65,7 +65,7 @@ public class DhtIntegrationTests
         }
 
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task StopAsync() => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public void Stop() { } // Synchronous stop
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
@@ -87,13 +87,13 @@ public class DhtIntegrationTests
             _entries[host] = [ip];
         }
 
-        public IPAddress[] GetHostAddresses(string hostNameOrAddress)
+        public Task<IPAddress[]> GetHostAddressesAsync(string hostNameOrAddress, CancellationToken cancellationToken = default)
         {
             if (IPAddress.TryParse(hostNameOrAddress, out var ip))
             {
-                return [ip];
+                return Task.FromResult<IPAddress[]>([ip]);
             }
-            return _entries.TryGetValue(hostNameOrAddress, out var ips) ? ips : [];
+            return Task.FromResult(_entries.TryGetValue(hostNameOrAddress, out var ips) ? ips : []);
         }
     }
 

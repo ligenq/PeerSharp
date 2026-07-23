@@ -14,5 +14,5 @@ internal interface IUdpListener : IAsyncDisposable
 
     void Stop();
 
-    Task StopAsync();
+    Task StopAsync(CancellationToken cancellationToken = default);
 }

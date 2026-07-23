@@ -8,6 +8,25 @@ namespace PeerSharp.Tests.Core.Dht;
 
 public class DhtManagerTests
 {
+    private sealed class BlockingDnsResolver : IDnsResolver
+    {
+        public async Task<IPAddress[]> GetHostAddressesAsync(string hostNameOrAddress, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return [];
+        }
+    }
+
+    private sealed class NonCooperativeDnsResolver : IDnsResolver
+    {
+        private readonly TaskCompletionSource<IPAddress[]> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<IPAddress[]> GetHostAddressesAsync(string hostNameOrAddress, CancellationToken cancellationToken = default)
+            => _completion.Task;
+
+        public void Complete() => _completion.TrySetResult([]);
+    }
+
     private class MockUdpListener : IUdpListener
     {
         public int Port => 0;
@@ -30,7 +49,7 @@ public class DhtManagerTests
         }
 
         public void Stop() { }
-        public Task StopAsync() => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public static void Dispose() { }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
@@ -66,6 +85,34 @@ public class DhtManagerTests
         await dht.StartAsync();
 
         Assert.Equal(dht, _listener.Receiver);
+    }
+
+    [Fact]
+    public async Task StopAsync_CancelsBlockedBootstrapDnsResolution()
+    {
+        _settings.Dht.BootstrapNodes = [new DhtBootstrapNode("blocked.invalid", 6881)];
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback, new BlockingDnsResolver());
+        await dht.StartAsync();
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        await dht.StopAsync();
+
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1), $"DHT stop took {stopwatch.Elapsed}.");
+    }
+
+    [Fact]
+    public async Task StopAsync_DoesNotWaitForDnsResolutionThatIgnoresCancellation()
+    {
+        _settings.Dht.BootstrapNodes = [new DhtBootstrapNode("blocked.invalid", 6881)];
+        var resolver = new NonCooperativeDnsResolver();
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback, resolver);
+        await dht.StartAsync();
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        await dht.StopAsync();
+
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1), $"DHT stop took {stopwatch.Elapsed}.");
+        resolver.Complete();
     }
 
     [Fact]
@@ -647,8 +694,5 @@ public class DhtManagerTests
         await dht.StopAsync();
     }
 }
-
-
-
 
 
