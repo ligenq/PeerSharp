@@ -5,6 +5,7 @@ using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class LifecycleTests : IDisposable
 {
     private readonly string _testRoot;

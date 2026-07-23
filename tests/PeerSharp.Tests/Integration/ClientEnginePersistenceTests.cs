@@ -2,6 +2,7 @@ using PeerSharp.Internals;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class ClientEnginePersistenceTests
 {
     private readonly ITestOutputHelper _output;

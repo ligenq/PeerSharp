@@ -5,6 +5,7 @@ using PeerSharp.Internals.Utp;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class PortMappingTests
 {
     private readonly MockPortMapperFactory _mapperFactory;

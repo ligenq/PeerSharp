@@ -6,6 +6,7 @@ using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class DhtIntegrationTests
 {
     // Simulates a network of DHT nodes

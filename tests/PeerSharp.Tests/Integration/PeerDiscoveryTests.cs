@@ -7,6 +7,7 @@ using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class PeerDiscoveryTests : IDisposable
 {
     private readonly string _testRoot;

@@ -7,6 +7,7 @@ using PeerSharp.Messages;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class PeerCommunicationIntegrationTests
 {
     [Fact(Timeout = 30000)]
