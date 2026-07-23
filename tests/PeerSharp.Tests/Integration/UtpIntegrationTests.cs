@@ -8,6 +8,7 @@ using PeerSharp.Internals.Utp;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public sealed class UtpIntegrationTests
 {
     private readonly Settings _settings = new Settings();

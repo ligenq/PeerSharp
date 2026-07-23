@@ -6,6 +6,7 @@ using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class LocalSwarmTests : IDisposable
 {
     private static readonly TimeSpan DownloadTimeout = TimeSpan.FromSeconds(20);

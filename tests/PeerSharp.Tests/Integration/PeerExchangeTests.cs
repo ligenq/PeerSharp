@@ -5,6 +5,7 @@ using PeerSharp.Internals;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class PeerExchangeTests : IDisposable
 {
     private readonly string _testRoot;

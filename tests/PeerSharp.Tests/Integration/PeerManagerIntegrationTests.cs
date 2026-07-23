@@ -6,6 +6,7 @@ using System.Net.Sockets;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class PeerManagerIntegrationTests
 {
     [Fact(Timeout = 30000)]

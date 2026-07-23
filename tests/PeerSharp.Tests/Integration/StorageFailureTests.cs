@@ -2,6 +2,7 @@ using PeerSharp.PieceWriter;
 
 namespace PeerSharp.Tests.Integration;
 
+[Collection("Integration")]
 public class StorageFailureTests
 {
     [Fact]
