@@ -6,6 +6,7 @@ using PeerSharp.Internals;
 
 namespace PeerSharp.Tests.Concurrency;
 
+[Collection("Coyote")]
 public class TrackerManagerConcurrencyTests
 {
     private readonly ITestOutputHelper _output;

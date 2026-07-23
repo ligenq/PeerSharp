@@ -18,6 +18,7 @@ namespace PeerSharp.Tests.Robustness;
 /// Robustness tests designed to hammer out remaining bugs through stress testing,
 /// edge cases, and concurrency exploration.
 /// </summary>
+[Collection("Coyote")]
 public class RobustnessTests
 {
     private readonly ITestOutputHelper _output;

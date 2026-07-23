@@ -6,6 +6,7 @@ using Microsoft.Extensions.Time.Testing;
 
 namespace PeerSharp.Tests.Concurrency;
 
+[Collection("Coyote")]
 public class DiskBandwidthLimiterTests
 {
     private readonly ITestOutputHelper _output;
