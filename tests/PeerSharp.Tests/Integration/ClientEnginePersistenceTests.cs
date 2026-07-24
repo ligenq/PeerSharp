@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 
 namespace PeerSharp.Tests.Integration;
@@ -88,5 +89,119 @@ public class ClientEnginePersistenceTests
                 Directory.Delete(sessionPath, true);
             }
         }
+    }
+
+    [Fact]
+    public async Task Restore_LoadsAllTorrents_WithoutRedundantWriteBack()
+    {
+        string sessionPath = Path.Combine(Path.GetTempPath(), "PeerSharpTests", Guid.NewGuid().ToString());
+        Directory.CreateDirectory(sessionPath);
+
+        try
+        {
+            const int torrentCount = 6;
+
+            Settings BuildSettings()
+            {
+                var s = new Settings();
+                s.Session.Enabled = true;
+                s.Session.SessionPath = sessionPath;
+                s.Session.AutoSaveIntervalSeconds = 3600; // Keep auto-save from firing during the test.
+                s.Files.DefaultDownloadPath = sessionPath;
+
+                // Keep the test hermetic: no sockets are bound, so restore logic is exercised
+                // without depending on network port availability.
+                s.Dht.Enabled = false;
+                s.Connection.EnableUtpIn = false;
+                s.Connection.EnableUtpOut = false;
+                s.Connection.EnableLsd = false;
+                s.Connection.EnableTcpIn = false;
+                return s;
+            }
+
+            // 1. Persist several torrents so restore exercises the concurrent load path.
+            var engine1 = ClientEngine.Create(new TorrentClientOptions { Settings = BuildSettings() });
+            await engine1.InitializeAsync();
+
+            var expectedHashes = new HashSet<InfoHash>();
+            for (int i = 0; i < torrentCount; i++)
+            {
+                var torrentFile = new TorrentFileBuilder()
+                    .WithName($"Persisted-{i}")
+                    .WithPieceLength(16384)
+                    .AddFile($"test-{i}.dat", new byte[16384])
+                    .Build();
+                expectedHashes.Add(torrentFile.InfoHash);
+                await engine1.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
+            }
+
+            await engine1.StopAsync();
+            await engine1.DisposeAsync();
+
+            // 2. Restore through a spy that counts persistence traffic during InitializeAsync.
+            var spy = new CountingPersistence(new SessionPersistence(sessionPath, NullLogger<SessionPersistence>.Instance));
+
+            var engine2 = ClientEngine.Create(new TorrentClientOptions
+            {
+                Settings = BuildSettings(),
+                SessionPersistence = spy
+            });
+            await engine2.InitializeAsync(); // Performs the full restore.
+
+            // 3. All torrents restored (verifies the parallel load produced no lost/duplicated entries).
+            var restored = engine2.GetTorrents();
+            Assert.Equal(torrentCount, restored.Count);
+            Assert.Equal(expectedHashes, restored.Select(t => t.Hash).ToHashSet());
+
+            // 4. Restore must not re-write entries it just read from disk.
+            Assert.Equal(1, spy.LoadAllCount);
+            Assert.Equal(0, spy.SaveCount);
+
+            await engine2.DisposeAsync();
+        }
+        finally
+        {
+            if (Directory.Exists(sessionPath))
+            {
+                Directory.Delete(sessionPath, true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Wraps a real <see cref="ISessionPersistence"/> and counts calls so tests can assert
+    /// that session restore does not trigger redundant write-backs.
+    /// </summary>
+    private sealed class CountingPersistence(ISessionPersistence inner) : ISessionPersistence
+    {
+        private int _saveCount;
+        private int _loadAllCount;
+
+        public int SaveCount => Volatile.Read(ref _saveCount);
+        public int LoadAllCount => Volatile.Read(ref _loadAllCount);
+
+        public Task DeleteAsync(InfoHash hash, CancellationToken cancellationToken = default)
+            => inner.DeleteAsync(hash, cancellationToken);
+
+        public Task<IReadOnlyList<SavedTorrentEntry>> LoadAllAsync(CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _loadAllCount);
+            return inner.LoadAllAsync(cancellationToken);
+        }
+
+        public Task SaveAllAsync(IEnumerable<SavedTorrentEntry> entries, CancellationToken cancellationToken = default)
+            => inner.SaveAllAsync(entries, cancellationToken);
+
+        public Task SaveAsync(SavedTorrentEntry entry, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _saveCount);
+            return inner.SaveAsync(entry, cancellationToken);
+        }
+
+        public Task SaveDhtStateAsync(DhtState state, CancellationToken cancellationToken = default)
+            => inner.SaveDhtStateAsync(state, cancellationToken);
+
+        public Task<DhtState?> LoadDhtStateAsync(CancellationToken cancellationToken = default)
+            => inner.LoadDhtStateAsync(cancellationToken);
     }
 }
