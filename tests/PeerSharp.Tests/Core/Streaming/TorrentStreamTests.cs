@@ -255,19 +255,37 @@ public class TorrentStreamTests
     }
 
     [Fact(Timeout = 30000)]
-    public async Task ReadAsync_ReturnsZero_WhenCancelled()
+    public async Task ReadAsync_Throws_WhenCancelledWhileWaiting()
     {
+        // A zero-byte read means end-of-file to every Stream consumer, so a cancelled read must
+        // throw instead. Returning 0 here would make CopyToAsync and the HTTP stream server
+        // silently truncate the file.
         await using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
         using var cts = new CancellationTokenSource();
 
         var buffer = new byte[100];
         var readTask = stream.ReadAsync(buffer, 0, 100, cts.Token);
 
-        // Cancel immediately
-        cts.Cancel();
+        // Cancel while the read is parked waiting for piece 0.
+        await cts.CancelAsync();
 
-        int read = await readTask;
-        Assert.Equal(0, read);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => readTask);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ReadAsync_Throws_WhenCancelledBeforeStarting()
+    {
+        await using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        var buffer = new byte[100];
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            int read = await stream.ReadAsync(buffer.AsMemory(0, 100), cts.Token);
+            Assert.Fail($"Expected cancellation, but the read returned {read}.");
+        });
     }
 
     [Fact(Timeout = 30000)]
@@ -299,8 +317,10 @@ public class TorrentStreamTests
         // Advance time past the 60 second timeout
         _timeProvider.Advance(TimeSpan.FromSeconds(61));
 
-        int read = await readTask.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal(0, read);
+        // A stalled swarm must not be reported as end-of-file: returning 0 here would make
+        // CopyToAsync and the HTTP stream server silently truncate the file. The waiter notices
+        // on its next poll, which runs on the real clock at a 1s cadence.
+        await Assert.ThrowsAsync<TimeoutException>(() => readTask.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     #endregion

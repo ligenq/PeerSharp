@@ -280,6 +280,14 @@ public interface ITorrent
     /// <param name="fileIndex">The index of the file to open.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A Stream object for the file.</returns>
+    /// <remarks>
+    /// Reads block until the pieces covering the requested range have been downloaded and
+    /// verified. A zero-byte read means end-of-file and nothing else: a cancelled read throws
+    /// <see cref="OperationCanceledException"/>, and a read that waits more than 60 seconds
+    /// without receiving the piece it needs throws <see cref="TimeoutException"/>. Callers can
+    /// therefore treat the stream like any other <see cref="Stream"/>, including with
+    /// <see cref="Stream.CopyToAsync(Stream, CancellationToken)"/>.
+    /// </remarks>
     Task<Stream> OpenStreamAsync(int fileIndex, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -295,7 +303,11 @@ public interface ITorrent
     /// Must be stopped before calling this method.
     /// </summary>
     /// <param name="path">The new download path.</param>
-    Task SetDownloadPathAsync(string path);
+    /// <param name="cancellationToken">
+    /// Cancellation token. Bounds the wait for other state transitions (start, stop, recheck)
+    /// to finish; once the path change itself begins it runs to completion.
+    /// </param>
+    Task SetDownloadPathAsync(string path, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sets the download priority for a specific file.
@@ -327,8 +339,16 @@ public interface ITorrent
     /// <summary>
     /// Stops the torrent, disconnecting from peers and halting transfers.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="cancellationToken">
+    /// Bounds the wait for a concurrent state transition (start, stop, recheck, download-path
+    /// change) to release the torrent. Once the stop itself begins it runs to completion, so
+    /// the torrent is never left half-stopped: shutting down peers, trackers and the piece
+    /// writer has to finish for on-disk state to stay consistent.
+    /// </param>
     /// <returns>A task that completes when the torrent has stopped.</returns>
+    /// <exception cref="OperationCanceledException">
+    /// Thrown when the token is cancelled before the stop begins; the torrent is left running.
+    /// </exception>
     Task StopAsync(CancellationToken cancellationToken = default);
 
     /// <summary>

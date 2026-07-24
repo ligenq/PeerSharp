@@ -15,8 +15,12 @@ public interface ITrackers
     /// Manually triggers an announce to all trackers or a specific one.
     /// </summary>
     /// <param name="url">Optional URL of the specific tracker to announce to. If null, announces to all.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="cancellationToken">
+    /// Cancels the scheduling of the announces. It does not cancel announces already in flight -
+    /// each runs under its own tracker timeout and is aborted when the torrent stops.
+    /// </param>
     /// <returns>A task that completes when the announce requests have been initiated.</returns>
+    /// <exception cref="OperationCanceledException">Thrown when the token is already cancelled.</exception>
     Task AnnounceAsync(string? url = null, CancellationToken cancellationToken = default);
 
     /// <summary>

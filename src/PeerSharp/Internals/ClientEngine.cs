@@ -38,6 +38,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
     private readonly TimeProvider _timeProvider;
     private readonly ITrackerFactory _trackerFactory;
     private AtomicDisposal _disposal = new();
+    private int _bandwidthStarted;
     private int _initialized;
     private INetworkManager? _networkManager;
     private CancellationTokenSource? _dhtSaveCts;
@@ -114,6 +115,33 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
     internal IpBlocklist? Blocklist => _networkManager?.Blocklist;
 
     /// <summary>
+    /// Token that ties queue rebalancing to the engine's own lifetime. Reading
+    /// <see cref="CancellationTokenSource.Token"/> throws once the source is disposed, and a
+    /// concurrent shutdown can dispose it right after the caller's disposal check, so the
+    /// already-shutting-down case is treated as "cancelled".
+    /// </summary>
+    private CancellationToken QueueToken
+    {
+        get
+        {
+            var cts = _queueCts;
+            if (cts == null)
+            {
+                return CancellationToken.None;
+            }
+
+            try
+            {
+                return cts.Token;
+            }
+            catch (ObjectDisposedException)
+            {
+                return new CancellationToken(canceled: true);
+            }
+        }
+    }
+
+    /// <summary>
     /// Creates a new ClientEngine with default settings and dependencies.
     /// </summary>
     public static ClientEngine Create()
@@ -179,9 +207,16 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         {
             var shutdownStopwatch = System.Diagnostics.Stopwatch.StartNew();
             var phaseStopwatch = System.Diagnostics.Stopwatch.StartNew();
+            // Cancel both background loops, wait for them to drain, and only then dispose their
+            // token sources - a source must outlive every token still in flight.
             if (_queueCts != null)
             {
                 await _queueCts.CancelAsync().ConfigureAwait(false);
+            }
+
+            if (_dhtSaveCts != null)
+            {
+                await _dhtSaveCts.CancelAsync().ConfigureAwait(false);
             }
 
             if (_queueTask is { } queueTask)
@@ -189,7 +224,15 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
                 try { await queueTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
             }
 
+            if (_dhtSaveTask is { } dhtSaveTask)
+            {
+                try { await dhtSaveTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
+            }
+
             _queueCts?.Dispose();
+            _queueCts = null;
+            _dhtSaveCts?.Dispose();
+            _dhtSaveCts = null;
             _logger.LogDebug("Shutdown phase queue completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
 
             // Save all resume data before shutting down
@@ -384,31 +427,36 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             stopTasks.Add(torrent.StopAsync(ct));
         }
 
-        if (_queueCts != null)
+        // Cancel the background loops here but dispose their token sources only after the loops
+        // have actually drained (below). Disposing a source whose token is still in use can make
+        // the loop fault with ObjectDisposedException on its way out.
+        var queueCts = _queueCts;
+        var dhtSaveCts = _dhtSaveCts;
+        _queueCts = null;
+        _dhtSaveCts = null;
+
+        if (queueCts != null)
         {
-            await _queueCts.CancelAsync().ConfigureAwait(false);
+            await queueCts.CancelAsync().ConfigureAwait(false);
         }
 
+        var backgroundLoops = new List<Task>();
         if (_queueTask is { } queueTask)
         {
-            stopTasks.Add(queueTask);
+            backgroundLoops.Add(queueTask);
         }
 
-        _queueCts?.Dispose();
-        _queueCts = null;
-
-        if (_dhtSaveCts != null)
+        if (dhtSaveCts != null)
         {
-            await _dhtSaveCts.CancelAsync().ConfigureAwait(false);
+            await dhtSaveCts.CancelAsync().ConfigureAwait(false);
         }
 
         if (_dhtSaveTask is { } dhtSaveTask)
         {
-            stopTasks.Add(dhtSaveTask);
+            backgroundLoops.Add(dhtSaveTask);
         }
 
-        _dhtSaveCts?.Dispose();
-        _dhtSaveCts = null;
+        stopTasks.AddRange(backgroundLoops);
 
         // Save all resume data before shutting down
         if (_sessionManager != null)
@@ -440,9 +488,38 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             {
                 _logger.LogDebug(ex, "ClientEngine stop encountered errors");
             }
+            finally
+            {
+                // Safe now: either the loops completed, or the caller's own token fired and we
+                // are abandoning them - in which case they are already cancelled and will not
+                // register anything new on these sources.
+                DisposeDrainedLoop(queueCts, backgroundLoops);
+                DisposeDrainedLoop(dhtSaveCts, backgroundLoops);
+            }
+        }
+        else
+        {
+            queueCts?.Dispose();
+            dhtSaveCts?.Dispose();
         }
 
         _logger.LogInformation("ClientEngine stopped");
+    }
+
+    private static void DisposeDrainedLoop(CancellationTokenSource? cts, List<Task> loops)
+    {
+        if (cts == null)
+        {
+            return;
+        }
+
+        // Only dispose once every loop that could still be holding this token has finished.
+        // If one is still running (the caller's token cut the wait short), leaking the source
+        // is the lesser evil - it is cancelled, so the loop will exit on its own.
+        if (loops.TrueForAll(static t => t.IsCompleted))
+        {
+            cts.Dispose();
+        }
     }
 
     /// <summary>
@@ -634,9 +711,13 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
             byte[] buffer = new byte[68];
             int read = 0;
+
+            // One deadline for the whole 68-byte handshake. Creating it per read would restart
+            // the clock on every chunk, letting a peer that drips a byte every few seconds hold
+            // the connection open indefinitely.
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             while (read < 68)
             {
-                using var timeoutCts = new CancellationTokenSource(10000);
                 int r = await stream.ReadAsync(buffer.AsMemory(read, 68 - read), timeoutCts.Token).ConfigureAwait(false);
                 if (r == 0)
                 {
@@ -734,6 +815,10 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
                     Settings.Dht.InitialState = dhtState;
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to load initial DHT state");
@@ -781,19 +866,26 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             Settings.Connection.UdpPort = (ushort)_networkManager.BoundUdpPort;
         }
 
-        // THROUGHPUT OPTIMIZATION: Configure bandwidth update interval
-        // Lower interval = lower latency, higher throughput (10ms default for gigabit+)
-        _bandwidth.Configure(Settings.Transfer.BandwidthUpdateIntervalMs);
+        // BandwidthManager is intentionally kept alive across a failed initialization because it
+        // has no restart operation. Configure and start it only once; subsequent initialization
+        // attempts reuse the same timer and channels.
+        if (Interlocked.CompareExchange(ref _bandwidthStarted, 0, 0) == 0)
+        {
+            // THROUGHPUT OPTIMIZATION: Configure bandwidth update interval
+            // Lower interval = lower latency, higher throughput (10ms default for gigabit+)
+            _bandwidth.Configure(Settings.Transfer.BandwidthUpdateIntervalMs);
 
-        // Initialize Bandwidth Limits
-        _bandwidth.SetGlobalLimits(
-            (int)Settings.Transfer.MaxDownloadSpeed,
-            (int)Settings.Transfer.MaxUploadSpeed);
-        _bandwidth.SetGlobalDiskLimits(
-            (int)Settings.Files.MaxDiskReadSpeed,
-            (int)Settings.Files.MaxDiskWriteSpeed);
+            // Initialize Bandwidth Limits
+            _bandwidth.SetGlobalLimits(
+                (int)Settings.Transfer.MaxDownloadSpeed,
+                (int)Settings.Transfer.MaxUploadSpeed);
+            _bandwidth.SetGlobalDiskLimits(
+                (int)Settings.Files.MaxDiskReadSpeed,
+                (int)Settings.Files.MaxDiskWriteSpeed);
 
-        _bandwidth.Start();
+            _bandwidth.Start();
+            Interlocked.Exchange(ref _bandwidthStarted, 1);
+        }
 
         InitializeQueueManager();
 
@@ -995,7 +1087,14 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             }).ConfigureAwait(false);
 
             // Single rebalance pass once every torrent is registered.
-            await RebalanceQueueAsync(_queueCts?.Token ?? cancellationToken).ConfigureAwait(false);
+            await RebalanceQueueAsync(QueueToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // The caller cancelled InitializeAsync. Restoring a partial session and reporting
+            // success would hide that, so let cancellation reach the caller instead of being
+            // swallowed by the generic handler below.
+            throw;
         }
         catch (Exception ex)
         {
@@ -1104,60 +1203,72 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
         torrent ??= AddMagnetInternal(magnetLink, options?.Events, options?.ResumeData);
 
-        if (magnetLink.Peers.Count > 0)
+        // The torrent is registered above, so from here on any failure - most commonly the
+        // caller's token tripping during StartAsync - has to unregister it again. Leaving a
+        // half-configured torrent behind would make the add look like it did nothing while
+        // still failing the next add of the same hash with TorrentAlreadyExistsException.
+        try
         {
-            try
+            if (magnetLink.Peers.Count > 0)
             {
-                torrent.PeersInternal.AddPeers(magnetLink.Peers, PeerSourceKind.Resume, null);
+                try
+                {
+                    torrent.PeersInternal.AddPeers(magnetLink.Peers, PeerSourceKind.Resume, null);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to add magnet peers");
+                }
             }
-            catch (Exception ex)
+
+            // Add additional trackers from options
+            if (options?.AdditionalTrackers != null)
             {
-                _logger.LogDebug(ex, "Failed to add magnet peers");
+                foreach (var tracker in options.AdditionalTrackers)
+                {
+                    torrent.TrackerManager.AddTracker(tracker);
+                }
+            }
+
+            // Apply options
+            if (options != null)
+            {
+                if (options.DownloadPath != null)
+                {
+                    await torrent.SetDownloadPathAsync(options.DownloadPath, cancellationToken).ConfigureAwait(false);
+                }
+                torrent.DownloadStrategy = options.DownloadStrategy;
+                torrent.DownloadLimitBytesPerSecond = options.DownloadLimitBytesPerSecond ?? 0;
+                torrent.UploadLimitBytesPerSecond = options.UploadLimitBytesPerSecond ?? 0;
+                torrent.QueuePriority = options.QueuePriority;
+                torrent.RatioLimit = options.RatioLimit;
+                torrent.SeedTimeLimit = options.SeedTimeLimit;
+                torrent.QueueAutoStart = options.StartImmediately;
+            }
+
+            // BEP 53: Remember the magnet's select-only file indices. If metadata is already
+            // available (fetched via xs=), the selection applies immediately; otherwise it is
+            // applied when the metadata download completes.
+            if (magnetLink.SelectOnlyFileIndices.Count > 0)
+            {
+                torrent.PendingSelectOnlyFileIndices = magnetLink.SelectOnlyFileIndices;
+                await torrent.ApplyPendingSelectOnlyFileIndicesAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            // Preview mode: leave the torrent stopped once metadata has been downloaded so the
+            // application can inspect the file list and adjust selections before starting.
+            torrent.StopAfterMetadata = options?.StopAfterMetadata ?? false;
+
+            // Start if requested
+            if (options?.StartImmediately ?? true)
+            {
+                await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
             }
         }
-
-        // Add additional trackers from options
-        if (options?.AdditionalTrackers != null)
+        catch
         {
-            foreach (var tracker in options.AdditionalTrackers)
-            {
-                torrent.TrackerManager.AddTracker(tracker);
-            }
-        }
-
-        // Apply options
-        if (options != null)
-        {
-            if (options.DownloadPath != null)
-            {
-                await torrent.SetDownloadPathAsync(options.DownloadPath).ConfigureAwait(false);
-            }
-            torrent.DownloadStrategy = options.DownloadStrategy;
-            torrent.DownloadLimitBytesPerSecond = options.DownloadLimitBytesPerSecond ?? 0;
-            torrent.UploadLimitBytesPerSecond = options.UploadLimitBytesPerSecond ?? 0;
-            torrent.QueuePriority = options.QueuePriority;
-            torrent.RatioLimit = options.RatioLimit;
-            torrent.SeedTimeLimit = options.SeedTimeLimit;
-            torrent.QueueAutoStart = options.StartImmediately;
-        }
-
-        // BEP 53: Remember the magnet's select-only file indices. If metadata is already
-        // available (fetched via xs=), the selection applies immediately; otherwise it is
-        // applied when the metadata download completes.
-        if (magnetLink.SelectOnlyFileIndices.Count > 0)
-        {
-            torrent.PendingSelectOnlyFileIndices = magnetLink.SelectOnlyFileIndices;
-            await torrent.ApplyPendingSelectOnlyFileIndicesAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        // Preview mode: leave the torrent stopped once metadata has been downloaded so the
-        // application can inspect the file list and adjust selections before starting.
-        torrent.StopAfterMetadata = options?.StopAfterMetadata ?? false;
-
-        // Start if requested
-        if (options?.StartImmediately ?? true)
-        {
-            await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
+            await DiscardFailedAddAsync(torrent).ConfigureAwait(false);
+            throw;
         }
 
         // Save to session persistence if enabled.
@@ -1182,7 +1293,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
         if (rebalanceQueue)
         {
-            await RebalanceQueueAsync(_queueCts?.Token ?? default).ConfigureAwait(false);
+            await RebalanceQueueAsync(QueueToken).ConfigureAwait(false);
         }
 
         return torrent;
@@ -1219,6 +1330,25 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             {
                 _logger.LogWarning(ex, "Failed to remove transient metadata-fetch torrent {Hash}", torrent.Hash);
             }
+        }
+    }
+
+    /// <summary>
+    /// Removes and disposes a torrent whose add did not complete, so a failed or cancelled add
+    /// leaves the engine exactly as it found it. Runs uncancellably and never throws: the
+    /// original add failure is what the caller needs to see.
+    /// </summary>
+    private async Task DiscardFailedAddAsync(Torrent torrent)
+    {
+        try
+        {
+            _registry.Remove(torrent.Hash, out _);
+            _bandwidth.RemoveTorrentChannels(torrent);
+            await torrent.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to clean up torrent {Hash} after an unsuccessful add", torrent.Hash);
         }
     }
 
@@ -1350,26 +1480,36 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
         var torrent = AddTorrentInternal(torrentFile.Metadata, options?.Events, options?.ResumeData);
 
-        // Apply options
-        if (options != null)
+        // See AddMagnetCoreAsync: the torrent is already registered, so a failure or a tripped
+        // token from here on has to unregister it again.
+        try
         {
-            if (options.DownloadPath != null)
+            // Apply options
+            if (options != null)
             {
-                await torrent.SetDownloadPathAsync(options.DownloadPath).ConfigureAwait(false);
+                if (options.DownloadPath != null)
+                {
+                    await torrent.SetDownloadPathAsync(options.DownloadPath, cancellationToken).ConfigureAwait(false);
+                }
+                torrent.DownloadStrategy = options.DownloadStrategy;
+                torrent.DownloadLimitBytesPerSecond = options.DownloadLimitBytesPerSecond ?? 0;
+                torrent.UploadLimitBytesPerSecond = options.UploadLimitBytesPerSecond ?? 0;
+                torrent.QueuePriority = options.QueuePriority;
+                torrent.RatioLimit = options.RatioLimit;
+                torrent.SeedTimeLimit = options.SeedTimeLimit;
+                torrent.QueueAutoStart = options.StartImmediately;
             }
-            torrent.DownloadStrategy = options.DownloadStrategy;
-            torrent.DownloadLimitBytesPerSecond = options.DownloadLimitBytesPerSecond ?? 0;
-            torrent.UploadLimitBytesPerSecond = options.UploadLimitBytesPerSecond ?? 0;
-            torrent.QueuePriority = options.QueuePriority;
-            torrent.RatioLimit = options.RatioLimit;
-            torrent.SeedTimeLimit = options.SeedTimeLimit;
-            torrent.QueueAutoStart = options.StartImmediately;
-        }
 
-        // Start if requested
-        if (options?.StartImmediately ?? true)
+            // Start if requested
+            if (options?.StartImmediately ?? true)
+            {
+                await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch
         {
-            await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
+            await DiscardFailedAddAsync(torrent).ConfigureAwait(false);
+            throw;
         }
 
         // Save to session persistence if enabled.
@@ -1395,7 +1535,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
         if (rebalanceQueue)
         {
-            await RebalanceQueueAsync(_queueCts?.Token ?? default).ConfigureAwait(false);
+            await RebalanceQueueAsync(QueueToken).ConfigureAwait(false);
         }
 
         return torrent;
@@ -1404,13 +1544,14 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (Interlocked.Exchange(ref _initialized, 1) == 1)
         {
             throw new InvalidOperationException("Client engine is already initialized.");
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
+        var torrentsBeforeInitialization = _registry.GetAll().Select(static t => t.Hash).ToHashSet();
 
         try
         {
@@ -1418,9 +1559,74 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         }
         catch
         {
-            // Reset initialized flag on failure so initialization can be retried
+            await RollbackInitializationAsync(torrentsBeforeInitialization).ConfigureAwait(false);
             Interlocked.Exchange(ref _initialized, 0);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Returns the engine to its pre-initialization state after a failed or cancelled attempt.
+    /// Initialization starts the network and queue loop before restoring the session, so merely
+    /// resetting <see cref="_initialized"/> would leave live resources behind for the retry.
+    /// </summary>
+    private async Task RollbackInitializationAsync(HashSet<InfoHash> torrentsBeforeInitialization)
+    {
+        var queueCts = _queueCts;
+        var queueTask = _queueTask;
+        _queueCts = null;
+        _queueTask = null;
+        _queueManager = null;
+
+        if (queueCts != null)
+        {
+            try
+            {
+                await queueCts.CancelAsync().ConfigureAwait(false);
+                if (queueTask != null)
+                {
+                    await queueTask.ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to drain queue loop after unsuccessful initialization");
+            }
+            finally
+            {
+                queueCts.Dispose();
+            }
+        }
+
+        foreach (var torrent in _registry.GetAll())
+        {
+            if (torrentsBeforeInitialization.Contains(torrent.Hash))
+            {
+                continue;
+            }
+
+            _registry.Remove(torrent.Hash, out _);
+            _bandwidth.RemoveTorrentChannels(torrent);
+            try
+            {
+                await torrent.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to dispose restored torrent {Hash} after unsuccessful initialization", torrent.Hash);
+            }
+        }
+
+        if (_networkManager != null)
+        {
+            try
+            {
+                await _networkManager.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to stop network after unsuccessful initialization");
+            }
         }
     }
 
@@ -1454,18 +1660,23 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             throw new ArgumentException("Torrent must be a valid instance from this engine.", nameof(torrent));
         }
 
-        if (!_registry.Contains(t.Hash))
+        // Deregistering is the single point of no return: after it the torrent is gone from the
+        // engine's point of view, and it doubles as the atomic guard against two concurrent
+        // removals both running the teardown. Everything past it is uncancellable, so a tripped
+        // token can never leave a torrent that is stopped but still registered, or removed but
+        // still holding bandwidth channels and its session entry.
+        if (!_registry.Remove(t.Hash, out _))
         {
             throw new TorrentNotFoundException(t.Hash);
         }
 
-        await t.StopAsync(cancellationToken).ConfigureAwait(false);
+        await t.StopAsync(CancellationToken.None).ConfigureAwait(false);
 
         if (options.HasFlag(RemoveOptions.DeleteFiles))
         {
             try
             {
-                await t.FilesInternal.DeleteFilesAsync(cancellationToken).ConfigureAwait(false);
+                await t.FilesInternal.DeleteFilesAsync(CancellationToken.None).ConfigureAwait(false);
             }
             catch (IOException)
             {
@@ -1477,18 +1688,15 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             }
         }
 
-        if (_registry.Remove(t.Hash, out _))
-        {
-            _bandwidth.RemoveTorrentChannels(t);
-            _alerts.TorrentAlert(AlertId.TorrentRemoved, t);
-        }
+        _bandwidth.RemoveTorrentChannels(t);
+        _alerts.TorrentAlert(AlertId.TorrentRemoved, t);
 
         // Delete from session persistence if enabled
         if (_sessionManager != null)
         {
             try
             {
-                await _sessionManager.DeleteAsync(t.Hash, cancellationToken).ConfigureAwait(false);
+                await _sessionManager.DeleteAsync(t.Hash, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -1496,7 +1704,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             }
         }
 
-        await RebalanceQueueAsync(_queueCts?.Token ?? default).ConfigureAwait(false);
+        await RebalanceQueueAsync(QueueToken).ConfigureAwait(false);
 
         await t.DisposeAsync().ConfigureAwait(false);
     }

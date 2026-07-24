@@ -127,8 +127,13 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         }
     }
 
-    public async Task AnnounceAsync(string? url = null, CancellationToken cancellationToken = default)
+    public Task AnnounceAsync(string? url = null, CancellationToken cancellationToken = default)
     {
+        // This only schedules announces - each one then runs on the tracker's own timeout and is
+        // cancelled by StopAsync, not by this token. Honour the token for the scheduling step so
+        // an already-cancelled caller does not silently get work queued on its behalf.
+        cancellationToken.ThrowIfCancellationRequested();
+
         List<TrackerInfo> toAnnounce = [];
         lock (_lock)
         {
@@ -150,7 +155,8 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                 TrackedAnnounce(info, TrackerEvent.None);
             }
         }
-        await Task.CompletedTask.ConfigureAwait(false);
+
+        return Task.CompletedTask;
     }
 
     public void AnnounceCompleted()

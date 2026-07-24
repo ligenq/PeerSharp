@@ -37,8 +37,19 @@ public interface IPeerTransportHost
     /// <summary>
     /// Attaches an already-connected peer transport to the torrent.
     /// </summary>
-    /// <param name="stream">The connected duplex stream.</param>
+    /// <param name="stream">
+    /// The connected duplex stream. The torrent takes ownership of it: it is closed if the
+    /// connection is rejected (peer limits, blocklist, forced proxy) or if the attach is
+    /// cancelled.
+    /// </param>
     /// <param name="initiator">True when the local side should send the BitTorrent handshake first.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="cancellationToken">
+    /// Cancels the attach itself. Once the peer has been handed the stream its handshake is
+    /// governed by the peer connection's own lifetime, which ends when the torrent stops.
+    /// </param>
+    /// <exception cref="OperationCanceledException">
+    /// Thrown when the token is cancelled before the peer takes ownership of the stream. The
+    /// stream is closed in that case.
+    /// </exception>
     Task AttachPeerTransportAsync(Stream stream, bool initiator, CancellationToken cancellationToken = default);
 }

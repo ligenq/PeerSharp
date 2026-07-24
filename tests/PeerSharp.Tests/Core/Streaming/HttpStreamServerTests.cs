@@ -197,7 +197,54 @@ public class HttpStreamServerTests
         Assert.True(response.BodyBytes.Length < data.Length);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task Get_StalledSwarm_FailsInsteadOfTruncatingTheBody()
+    {
+        // Content-Length is announced up front, so a stalled read must surface as an error.
+        // Completing the response with a short body would look like a valid, complete file.
+        var data = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
+        var torrent = new FakeTorrent("clip.mp4", data, () => new StallingStream(data, stallAfter: 4));
+        var handler = new HttpStreamRequestHandler(torrent, 0);
+        var response = new FakeResponse();
+
+        await Assert.ThrowsAsync<TimeoutException>(() =>
+            handler.ProcessAsync(new FakeRequest("GET", "/stream"), response));
+
+        Assert.True(response.BodyBytes.Length < data.Length);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Get_ShortStream_FailsInsteadOfTruncatingTheBody()
+    {
+        // A genuine early EOF is equally untrustworthy once Content-Length has been sent.
+        var data = Enumerable.Range(0, 16).Select(i => (byte)i).ToArray();
+        var torrent = new FakeTorrent("clip.mp4", data, () => new MemoryStream(data[..4], writable: false));
+        var handler = new HttpStreamRequestHandler(torrent, 0);
+        var response = new FakeResponse();
+
+        await Assert.ThrowsAsync<EndOfStreamException>(() =>
+            handler.ProcessAsync(new FakeRequest("GET", "/stream"), response));
+    }
+
     private sealed record FakeRequest(string Method, string Path, string? RangeHeader = null) : IHttpStreamRequest;
+
+    /// <summary>
+    /// Serves <paramref name="stallAfter"/> bytes and then behaves like a torrent stream whose
+    /// pieces never arrive.
+    /// </summary>
+    private sealed class StallingStream(byte[] data, int stallAfter) : MemoryStream(data, writable: false)
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (Position >= stallAfter)
+            {
+                throw new TimeoutException("Timed out waiting for piece data.");
+            }
+
+            int toRead = (int)Math.Min(buffer.Length, stallAfter - Position);
+            return base.ReadAsync(buffer[..toRead], cancellationToken);
+        }
+    }
 
     private sealed class FakeResponse : IHttpStreamResponse
     {
@@ -221,10 +268,12 @@ public class HttpStreamServerTests
     {
         private readonly byte[] _data;
         private readonly IReadOnlyList<TorrentFileInfo> _files;
+        private readonly Func<Stream>? _streamFactory;
 
-        public FakeTorrent(string path, byte[] data)
+        public FakeTorrent(string path, byte[] data, Func<Stream>? streamFactory = null)
         {
             _data = data;
+            _streamFactory = streamFactory;
             _files = [new TorrentFileInfo(path, data.Length, 0, data.Length)];
         }
 
@@ -277,10 +326,10 @@ public class HttpStreamServerTests
         public byte[] GetPieceBitfield() => [0x80];
         public TorrentResumeData GetResumeData() => throw new NotImplementedException();
         public Task<Stream> OpenStreamAsync(int fileIndex, CancellationToken cancellationToken = default) =>
-            Task.FromResult<Stream>(new MemoryStream(_data, writable: false));
+            Task.FromResult(_streamFactory?.Invoke() ?? new MemoryStream(_data, writable: false));
 
         public Task SetAllFilesPriorityAsync(Priority priority, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task SetDownloadPathAsync(string path) => Task.CompletedTask;
+        public Task SetDownloadPathAsync(string path, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task SetFilePriorityAsync(int fileIndex, Priority priority, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task SetFileSelectionAsync(int fileIndex, FileSelection selection, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;

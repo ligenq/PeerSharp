@@ -18,6 +18,19 @@ internal class TorrentStream : Stream
     // 1MB at end for headers
     private const int PriorityUpdateIntervalBytes = 1024 * 1024;
 
+    /// <summary>
+    /// How long a read waits for the swarm to supply the pieces it needs before giving up.
+    /// Exceeding it throws <see cref="TimeoutException"/> rather than reporting end-of-stream,
+    /// so a stalled swarm can never be mistaken for a complete file.
+    /// </summary>
+    private static readonly TimeSpan DataWaitTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Fallback re-check interval, in case the piece-verified signal is missed (for example
+    /// when this stream is not the controller's active stream).
+    /// </summary>
+    private static readonly TimeSpan DataPollInterval = TimeSpan.FromSeconds(1);
+
     private readonly StreamingController _controller;
     private readonly SemaphoreSlim _dataSignal = new(0);
     private readonly long _fileSize;
@@ -133,6 +146,11 @@ internal class TorrentStream : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // A zero return is reserved for genuine end-of-file. Cancellation and stalled
+        // downloads throw instead, so callers such as Stream.CopyToAsync cannot mistake
+        // either one for a completely read file.
         if (_position >= _fileSize)
         {
             return 0;
@@ -146,10 +164,6 @@ internal class TorrentStream : Stream
 
         // Wait for at least some data to be available, get how much we can read
         int available = await WaitForDataAsync(_position, requested, cancellationToken).ConfigureAwait(false);
-        if (available <= 0)
-        {
-            return 0;
-        }
         long absoluteOffset = _fileStartOffset + _position;
         await _torrent.FilesInternal.ReadAsync(absoluteOffset, buffer[..available], cancellationToken).ConfigureAwait(false);
 
@@ -309,8 +323,13 @@ internal class TorrentStream : Stream
 
     /// <summary>
     /// Waits for data to be available and returns the number of bytes that can be read.
-    /// Returns 0 if cancelled or timed out with no data available.
+    /// Always returns a positive count: it throws rather than reporting "no data", because a
+    /// zero-byte read on a <see cref="Stream"/> means end-of-file to every caller.
     /// </summary>
+    /// <exception cref="OperationCanceledException">The caller cancelled the read.</exception>
+    /// <exception cref="TimeoutException">
+    /// No piece covering the requested offset arrived within <see cref="DataWaitTimeout"/>.
+    /// </exception>
     private async Task<int> WaitForDataAsync(long position, int requestedLength, CancellationToken ct)
     {
         long absoluteOffset = _fileStartOffset + position;
@@ -333,14 +352,10 @@ internal class TorrentStream : Stream
         try
         {
             var startTime = _timeProvider.GetUtcNow();
-            var timeout = TimeSpan.FromSeconds(60);
 
-            while (!ct.IsCancellationRequested)
+            while (true)
             {
-                if (_timeProvider.GetUtcNow() - startTime > timeout)
-                {
-                    return 0;
-                }
+                ct.ThrowIfCancellationRequested();
 
                 availableBytes = CalculateAvailableBytes(absoluteOffset, requestedLength, pieceSize);
                 if (availableBytes > 0)
@@ -348,18 +363,15 @@ internal class TorrentStream : Stream
                     return availableBytes;
                 }
 
-                // Wait for signal from OnPieceVerified, or re-check after 1 second
-                try
+                if (_timeProvider.GetUtcNow() - startTime > DataWaitTimeout)
                 {
-                    await _dataSignal.WaitAsync(1000, ct).ConfigureAwait(false);
+                    throw new TimeoutException(
+                        $"Timed out after {DataWaitTimeout.TotalSeconds:0}s waiting for piece data at offset {absoluteOffset} of torrent '{_torrent.Name}'.");
                 }
-                catch (OperationCanceledException)
-                {
-                    return 0;
-                }
-            }
 
-            return 0;
+                // Wait for signal from OnPieceVerified, or re-check after the poll interval
+                await _dataSignal.WaitAsync(DataPollInterval, ct).ConfigureAwait(false);
+            }
         }
         finally
         {

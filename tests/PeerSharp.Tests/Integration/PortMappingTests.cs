@@ -96,6 +96,23 @@ public class PortMappingTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task NetworkManager_CanBeStoppedAgainAfterRestart()
+    {
+        var settings = new Settings { Connection = { UpnpPortMapping = true } };
+        var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
+
+        await manager.StartAsync();
+        await Task.Delay(50);
+        await manager.StopAsync();
+
+        await manager.StartAsync();
+        await Task.Delay(50);
+        await manager.StopAsync();
+
+        Assert.Equal(2, _upnpMapper.UnmapCallCount);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task NetworkManager_CancelledStopCanBeRetried()
     {
         _upnpMapper.BlockUnmapUntilCancelled = true;

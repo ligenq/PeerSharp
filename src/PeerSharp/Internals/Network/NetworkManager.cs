@@ -82,6 +82,10 @@ internal class NetworkManager : INetworkManager
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        // StopAsync marks the manager stopped so repeated stops are cheap. Initialization can be
+        // retried after a later phase fails, so a new start must make the manager stoppable again.
+        _stopped = false;
+
         var settings = _settings;
         bool udpEnabled = settings.Connection.EnableUtpIn
             || settings.Connection.EnableUtpOut
@@ -117,7 +121,12 @@ internal class NetworkManager : INetworkManager
             PortListener.Start(settings.Connection.TcpPort);
         }
 
-        _portMappers.AddRange(_services.PortMapperFactory.CreateMappers(settings));
+        // Reuse the mapper instances after an initialization rollback. Adding another factory
+        // batch on every retry would duplicate every map and unmap request.
+        if (_portMappers.Count == 0)
+        {
+            _portMappers.AddRange(_services.PortMapperFactory.CreateMappers(settings));
+        }
 
         if (_portMappers.Count > 0)
         {

@@ -378,11 +378,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         AddPeersInternal(peers, sourceKind, source, flags: null);
     }
 
-    public Task AddConnectedPeerAsync(Stream stream, bool initiator, IPEndPoint? remote = null, PeerSourceKind sourceKind = PeerSourceKind.Unknown)
+    public Task AddConnectedPeerAsync(Stream stream, bool initiator, IPEndPoint? remote = null, PeerSourceKind sourceKind = PeerSourceKind.Unknown, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
-        return AddConnectedPeerCoreAsync(stream, initiator, remote, sourceKind);
+        return AddConnectedPeerCoreAsync(stream, initiator, remote, sourceKind, cancellationToken);
     }
 
     public async Task BroadcastHaveAsync(int pieceIndex)
@@ -2122,8 +2122,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    private async Task AddConnectedPeerCoreAsync(Stream stream, bool initiator, IPEndPoint? remote, PeerSourceKind sourceKind)
+    private async Task AddConnectedPeerCoreAsync(Stream stream, bool initiator, IPEndPoint? remote, PeerSourceKind sourceKind, CancellationToken cancellationToken)
     {
+        // Cancelling the attach means the caller no longer wants this connection, so the stream
+        // is closed on the way out - exactly as on the reject paths below, which also take
+        // ownership of the stream once it has been handed over.
+        if (cancellationToken.IsCancellationRequested)
+        {
+            stream.Close();
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
         remote = NetworkUtils.NormalizeEndPoint(remote);
 
         if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
@@ -2176,6 +2185,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
             var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
             history.UpdateSource(sourceKind);
+        }
+
+        // Last chance to bail out before the peer owns the stream and starts its own handshake,
+        // which from here on is governed by the peer's connection lifetime rather than by this
+        // token.
+        if (cancellationToken.IsCancellationRequested)
+        {
+            UnregisterConnectedEndpoint(peer);
+            _governor.ReleaseConnectionSlot();
+            stream.Close();
+            cancellationToken.ThrowIfCancellationRequested();
         }
 
         // The add always succeeds because peer is a freshly created instance (reference equality).
