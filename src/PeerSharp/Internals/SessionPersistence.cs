@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace PeerSharp.Internals;
@@ -126,33 +127,47 @@ internal sealed class SessionPersistence : ISessionPersistence
 
     public async Task<IReadOnlyList<SavedTorrentEntry>> LoadAllAsync(CancellationToken cancellationToken = default)
     {
-        var entries = new List<SavedTorrentEntry>();
         var torrentsPath = GetTorrentsPath();
 
         if (!Directory.Exists(torrentsPath))
         {
-            return entries;
+            return [];
         }
 
-        foreach (var torrentDir in Directory.GetDirectories(torrentsPath))
+        var torrentDirs = Directory.GetDirectories(torrentsPath);
+        if (torrentDirs.Length == 0)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            return [];
+        }
 
+        // Each entry lives in its own directory and reads a handful of small files, so the
+        // load is I/O-bound and independent per directory. Read them with a bounded fan-out
+        // instead of serially. A ConcurrentBag collects results since order is irrelevant.
+        var bag = new ConcurrentBag<SavedTorrentEntry>();
+        var options = new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 2, 8)
+        };
+
+        await Parallel.ForEachAsync(torrentDirs, options, async (torrentDir, ct) =>
+        {
             try
             {
-                var entry = await LoadEntryAsync(torrentDir, cancellationToken).ConfigureAwait(false);
+                var entry = await LoadEntryAsync(torrentDir, ct).ConfigureAwait(false);
                 if (entry != null)
                 {
-                    entries.Add(entry);
+                    bag.Add(entry);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "Failed to load torrent entry from {Path}", torrentDir);
             }
-        }
+        }).ConfigureAwait(false);
 
-        _logger.LogInformation("Loaded {Count} torrent entries from session", entries.Count);
+        var entries = bag.ToArray();
+        _logger.LogInformation("Loaded {Count} torrent entries from session", entries.Length);
         return entries;
     }
 

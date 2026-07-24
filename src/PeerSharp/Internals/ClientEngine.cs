@@ -925,11 +925,13 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             };
         }
 
+        // Restore path: suppress the redundant disk write-back (the entry was just read from
+        // disk) and defer queue rebalancing to a single pass after the whole batch loads.
         ITorrent torrent;
         if (entry.TorrentFileData is { Length: > 0 })
         {
             var torrentFile = TorrentFile.Parse(entry.TorrentFileData);
-            torrent = await AddTorrentAsync(torrentFile, options, cancellationToken).ConfigureAwait(false);
+            torrent = await AddTorrentCoreAsync(torrentFile, options, persistToDisk: false, rebalanceQueue: false, cancellationToken).ConfigureAwait(false);
 
             // Store raw data for future persistence
             _sessionManager?.RegisterTorrentData(torrent.Hash, entry.TorrentFileData, null);
@@ -937,7 +939,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         else if (!string.IsNullOrEmpty(entry.MagnetLink))
         {
             var magnet = MagnetLink.Parse(entry.MagnetLink);
-            torrent = await AddMagnetAsync(magnet, options, cancellationToken).ConfigureAwait(false);
+            torrent = await AddMagnetCoreAsync(magnet, options, persistToDisk: false, rebalanceQueue: false, cancellationToken).ConfigureAwait(false);
 
             // Store magnet for future persistence
             _sessionManager?.RegisterTorrentData(torrent.Hash, null, entry.MagnetLink);
@@ -961,22 +963,39 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         try
         {
             var entries = await _sessionManager.LoadAllAsync(cancellationToken).ConfigureAwait(false);
+            if (entries.Count == 0)
+            {
+                return;
+            }
 
-            foreach (var entry in entries)
+            // Load torrents concurrently. Each entry allocates files and spins up its
+            // per-torrent managers independently, so a bounded fan-out overlaps that work
+            // instead of paying for it serially. Queue rebalancing is deferred to a single
+            // pass below so bulk restore is O(n) rather than O(n^2).
+            var options = new ParallelOptions
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 2, 8)
+            };
+
+            await Parallel.ForEachAsync(entries, options, async (entry, ct) =>
             {
                 try
                 {
-                    await LoadPersistedEntryAsync(entry, cancellationToken).ConfigureAwait(false);
+                    await LoadPersistedEntryAsync(entry, ct).ConfigureAwait(false);
                 }
                 catch (TorrentAlreadyExistsException ex)
                 {
                     _logger.LogDebug(ex, "Skipping duplicate torrent {Hash}", entry.Hash);
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     _logger.LogWarning(ex, "Failed to load persisted torrent {Hash}", entry.Hash);
                 }
-            }
+            }).ConfigureAwait(false);
+
+            // Single rebalance pass once every torrent is registered.
+            await RebalanceQueueAsync(_queueCts?.Token ?? cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -1053,10 +1072,18 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
 
     #region New Async API
 
-    public async Task<ITorrent> AddMagnetAsync(
+    public Task<ITorrent> AddMagnetAsync(
         MagnetLink magnetLink,
         AddTorrentOptions? options = null,
         CancellationToken cancellationToken = default)
+        => AddMagnetCoreAsync(magnetLink, options, persistToDisk: true, rebalanceQueue: true, cancellationToken);
+
+    private async Task<ITorrent> AddMagnetCoreAsync(
+        MagnetLink magnetLink,
+        AddTorrentOptions? options,
+        bool persistToDisk,
+        bool rebalanceQueue,
+        CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(magnetLink);
@@ -1133,23 +1160,30 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        // Save to session persistence if enabled
+        // Save to session persistence if enabled.
+        // During restore, only re-register in memory and skip the redundant disk write-back.
         if (_sessionManager != null)
         {
             var magnetString = magnetLink.OriginalString;
             _sessionManager.RegisterTorrentData(torrent.Hash, torrentBytes, magnetString);
 
-            try
+            if (persistToDisk)
             {
-                await _sessionManager.SaveTorrentEntryAsync(torrent, torrentBytes, magnetString, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to persist magnet {Hash}", torrent.Hash);
+                try
+                {
+                    await _sessionManager.SaveTorrentEntryAsync(torrent, torrentBytes, magnetString, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to persist magnet {Hash}", torrent.Hash);
+                }
             }
         }
 
-        await RebalanceQueueAsync(_queueCts?.Token ?? default).ConfigureAwait(false);
+        if (rebalanceQueue)
+        {
+            await RebalanceQueueAsync(_queueCts?.Token ?? default).ConfigureAwait(false);
+        }
 
         return torrent;
     }
@@ -1297,10 +1331,18 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         };
     }
 
-    public async Task<ITorrent> AddTorrentAsync(
+    public Task<ITorrent> AddTorrentAsync(
         TorrentFile torrentFile,
         AddTorrentOptions? options = null,
         CancellationToken cancellationToken = default)
+        => AddTorrentCoreAsync(torrentFile, options, persistToDisk: true, rebalanceQueue: true, cancellationToken);
+
+    private async Task<ITorrent> AddTorrentCoreAsync(
+        TorrentFile torrentFile,
+        AddTorrentOptions? options,
+        bool persistToDisk,
+        bool rebalanceQueue,
+        CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(torrentFile);
@@ -1330,23 +1372,31 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
             await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        // Save to session persistence if enabled
+        // Save to session persistence if enabled.
+        // During session restore the entry was just read from disk, so we only re-register
+        // the raw data in memory (needed for later auto-saves) and skip the redundant write-back.
         if (_sessionManager != null)
         {
             var rawData = torrentFile.RawData.IsEmpty ? null : torrentFile.RawData.ToArray();
             _sessionManager.RegisterTorrentData(torrent.Hash, rawData, null);
 
-            try
+            if (persistToDisk)
             {
-                await _sessionManager.SaveTorrentEntryAsync(torrent, rawData, null, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to persist torrent {Name}", torrent.Name);
+                try
+                {
+                    await _sessionManager.SaveTorrentEntryAsync(torrent, rawData, null, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to persist torrent {Name}", torrent.Name);
+                }
             }
         }
 
-        await RebalanceQueueAsync(_queueCts?.Token ?? default).ConfigureAwait(false);
+        if (rebalanceQueue)
+        {
+            await RebalanceQueueAsync(_queueCts?.Token ?? default).ConfigureAwait(false);
+        }
 
         return torrent;
     }

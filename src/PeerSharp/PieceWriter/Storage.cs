@@ -260,6 +260,11 @@ internal sealed class Storage : IStorage
                 int skippedFiles = 0;
                 int notSelectedFiles = 0;
 
+                // First pass: classify every file and record the paths that still need
+                // physical allocation. Allocation itself is deferred so the (potentially
+                // many) SetLength calls can run concurrently rather than one at a time.
+                var toAllocate = new List<(string Path, long Size)>();
+
                 for (int i = 0; i < count; i++)
                 {
                     ct.ThrowIfCancellationRequested();
@@ -298,10 +303,23 @@ internal sealed class Storage : IStorage
                         continue;
                     }
 
-                    await EnsureFileAllocatedAsync(fullPath, file.Size, ct).ConfigureAwait(false);
-
                     _files[i] = new FileEntry(file.Size, fullPath);
                     _fileSkipped[i] = false;
+                    toAllocate.Add((fullPath, file.Size));
+                }
+
+                if (toAllocate.Count > 0)
+                {
+                    var allocationOptions = new ParallelOptions
+                    {
+                        CancellationToken = ct,
+                        MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 2, 8)
+                    };
+
+                    await Parallel.ForEachAsync(toAllocate, allocationOptions, async (alloc, token) =>
+                    {
+                        await EnsureFileAllocatedAsync(alloc.Path, alloc.Size, token).ConfigureAwait(false);
+                    }).ConfigureAwait(false);
                 }
 
                 if (skippedFiles > 0)
