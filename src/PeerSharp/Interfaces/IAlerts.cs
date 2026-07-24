@@ -65,6 +65,9 @@ public interface IAlerts
     /// This method polls the alert queue at the specified interval and yields
     /// alerts as they become available. Use this for continuous monitoring
     /// scenarios where you want to process alerts asynchronously.
+    /// The stream never ends on its own; cancelling the token always terminates the
+    /// enumeration with an <see cref="OperationCanceledException"/>, whether or not alerts
+    /// were queued at that moment.
     /// </remarks>
     /// <example>
     /// <code>

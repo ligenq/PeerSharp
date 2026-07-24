@@ -81,7 +81,16 @@ public sealed class HttpStreamServer : IDisposable
         }
         catch (OperationCanceledException)
         {
-            // Server is shutting down — abandon this request quietly.
+            // Server is shutting down — abandon this request quietly. The response is aborted
+            // rather than completed so a client cannot mistake a partial body for the whole file.
+            Abort(response);
+        }
+        catch (TimeoutException ex)
+        {
+            // The swarm stopped supplying the pieces this range needs. Content-Length has
+            // already been sent, so the only honest signal left is a broken connection.
+            _logger.LogWarning(ex, "Timed out waiting for torrent data while streaming");
+            Abort(response);
         }
         catch (Exception ex)
         {
@@ -97,6 +106,18 @@ public sealed class HttpStreamServer : IDisposable
             {
                 // Ignore errors setting status code if headers already sent
             }
+        }
+    }
+
+    private static void Abort(HttpListenerResponse response)
+    {
+        try
+        {
+            response.Abort();
+        }
+        catch
+        {
+            // Response may already be closed or the client already gone.
         }
     }
 
@@ -221,7 +242,11 @@ internal sealed class HttpStreamRequestHandler
                 int read = await stream.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken).ConfigureAwait(false);
                 if (read == 0)
                 {
-                    break;
+                    // Content-Length was already announced from the file size, so a short read
+                    // here means the file is not what the metadata claims. Fail loudly instead
+                    // of completing the response with a truncated body.
+                    throw new EndOfStreamException(
+                        $"Stream for '{fileInfo.Path}' ended {bytesRemaining} bytes short of the announced range.");
                 }
 
                 try

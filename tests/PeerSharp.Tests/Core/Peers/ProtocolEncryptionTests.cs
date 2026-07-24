@@ -51,7 +51,7 @@ public class ProtocolEncryptionTests
         public Task SetAllFilesPriorityAsync(Priority priority, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public IReadOnlyList<FileSelection> GetAllFileSelections() => Array.Empty<FileSelection>();
         public Task<int> ForceRecheckAsync(IProgress<PieceCheckProgress>? progress = null, CancellationToken cancellationToken = default) => throw new NotImplementedException();
-        public Task SetDownloadPathAsync(string path) => throw new NotImplementedException();
+        public Task SetDownloadPathAsync(string path, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<Stream> OpenStreamAsync(int fileIndex, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public bool HasStreamableFiles => false;
         public IReadOnlyList<int> StreamableFileIndices => Array.Empty<int>();

@@ -95,6 +95,12 @@ internal class AlertsManager : IAlertsManager
                 await Task.Delay(interval, _timeProvider, cancellationToken).ConfigureAwait(false);
             }
         }
+
+        // Cancellation is the only way out of the loop, and it always surfaces as
+        // OperationCanceledException. Completing the enumeration gracefully instead would make
+        // the outcome depend on whether the queue happened to be empty at the moment of
+        // cancellation - the same call ending two different ways.
+        cancellationToken.ThrowIfCancellationRequested();
     }
 
     public void MetadataAlert(AlertId id, ITorrent torrent)

@@ -48,6 +48,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private int _started;
 
+    private int _rollbackIncomplete;
+
     private int _stopping;
 
     private int _timerTickCount;
@@ -211,7 +213,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
             // Atomic reads for thread-safe state checks
             bool stopping = Interlocked.CompareExchange(ref _stopping, 0, 0) == 1;
-            if (stopping)
+            bool rollbackIncomplete = Interlocked.CompareExchange(ref _rollbackIncomplete, 0, 0) == 1;
+            if (stopping || rollbackIncomplete)
             {
                 return TorrentState.Stopping;
             }
@@ -458,8 +461,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     {
         _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(stream);
-        cancellationToken.ThrowIfCancellationRequested();
-        return PeersInternal.AddConnectedPeerAsync(stream, initiator, remote: null, sourceKind: PeerSourceKind.WebTorrent);
+        return PeersInternal.AddConnectedPeerAsync(stream, initiator, remote: null, sourceKind: PeerSourceKind.WebTorrent, cancellationToken);
     }
 
     /// <summary>
@@ -574,11 +576,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return _fileSelectionManager.SetAllFilesPriorityAsync(priority, cancellationToken);
     }
 
-    public async Task SetDownloadPathAsync(string path)
+    public async Task SetDownloadPathAsync(string path, CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
 
-        await _stateLock.WaitAsync().ConfigureAwait(false);
+        // The lock can be held by a long recheck or a stop that is flushing the block cache, so
+        // the wait has to be cancellable - otherwise callers have no way out of it at all.
+        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             _disposal.ThrowIfDisposed(this);
@@ -635,6 +639,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             {
                 throw new InvalidOperationException($"Torrent '{Name}' is already started.");
             }
+            if (Interlocked.CompareExchange(ref _rollbackIncomplete, 0, 0) == 1)
+            {
+                throw new InvalidOperationException(
+                    $"Torrent '{Name}' did not finish rolling back its previous start. Stop it before starting again.");
+            }
 
             LastException = null;
 
@@ -659,39 +668,51 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             _timerTickCount = 0;
             _timer.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
 
-            await PeersInternal.StartAsync().ConfigureAwait(false);
-            if (ShouldStartClassicTrackers())
+            // Past this point the torrent already reports Started, so any failure - including
+            // cancellation from a peer transport that honours the token - must roll the state
+            // back. Otherwise the caller sees a failed StartAsync on a torrent that claims to be
+            // active, and every retry throws "already started".
+            try
             {
-                await TrackerManager.StartAsync().ConfigureAwait(false);
-            }
-            else
-            {
-                _logger.LogInformation("Classic trackers disabled because TCP/uTP transports are disabled");
-            }
-            await StartPeerTransportsAsync(cancellationToken).ConfigureAwait(false);
+                await PeersInternal.StartAsync().ConfigureAwait(false);
+                if (ShouldStartClassicTrackers())
+                {
+                    await TrackerManager.StartAsync().ConfigureAwait(false);
+                }
+                else
+                {
+                    _logger.LogInformation("Classic trackers disabled because TCP/uTP transports are disabled");
+                }
+                await StartPeerTransportsAsync(cancellationToken).ConfigureAwait(false);
 
-            FireAndForgetLsdAnnounce();
+                FireAndForgetLsdAnnounce();
 
-            if (Network.Dht != null && !InfoFile.Info.IsPrivate)
-            {
-                var dhtHash = InfoFile.Info.GetTrackerInfoHash();
-                Network.Dht.FindPeers(dhtHash);
-                Network.Dht.Announce(dhtHash, Settings.Connection.TcpPort);
-            }
-            else if (InfoFile.Info.IsPrivate)
-            {
-                _logger.LogDebug("DHT disabled for private torrent {TorrentName}", Name);
-            }
+                if (Network.Dht != null && !InfoFile.Info.IsPrivate)
+                {
+                    var dhtHash = InfoFile.Info.GetTrackerInfoHash();
+                    Network.Dht.FindPeers(dhtHash);
+                    Network.Dht.Announce(dhtHash, Settings.Connection.TcpPort);
+                }
+                else if (InfoFile.Info.IsPrivate)
+                {
+                    _logger.LogDebug("DHT disabled for private torrent {TorrentName}", Name);
+                }
 
-            if (Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
-            {
-                WebSeedManager ??= new WebSeedManager(this, InfoFile.WebSeedUrls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
-                WebSeedManager.Start();
-                _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", InfoFile.WebSeedUrls.Count);
+                if (Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
+                {
+                    WebSeedManager ??= new WebSeedManager(this, InfoFile.WebSeedUrls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
+                    WebSeedManager.Start();
+                    _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", InfoFile.WebSeedUrls.Count);
+                }
+                else if (!Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
+                {
+                    _logger.LogInformation("Web seeds disabled; ignoring {UrlCount} URLs from torrent metadata", InfoFile.WebSeedUrls.Count);
+                }
             }
-            else if (!Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
+            catch
             {
-                _logger.LogInformation("Web seeds disabled; ignoring {UrlCount} URLs from torrent metadata", InfoFile.WebSeedUrls.Count);
+                await RollbackStartAsync().ConfigureAwait(false);
+                throw;
             }
 
             Alerts.TorrentAlert(AlertId.TorrentCheckStarted, this);
@@ -706,6 +727,59 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
 
         StartSeedingTimerIfNeeded();
+    }
+
+    /// <summary>
+    /// Undoes a partially completed <see cref="StartAsync"/>. Must be called with
+    /// <see cref="_stateLock"/> held. Runs uncancellably and swallows teardown failures so the
+    /// original start failure is what reaches the caller.
+    /// </summary>
+    private async Task RollbackStartAsync()
+    {
+        _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        Interlocked.Exchange(ref _started, 0);
+        Interlocked.Exchange(ref _activityTimeTicks, Services.TimeProvider.GetUtcNow().Ticks);
+
+        bool complete = true;
+        complete &= await TryTeardownAsync(
+            () => StopPeerTransportsAsync(
+                disposing: false,
+                throwOnFailure: true,
+                cancellationToken: CancellationToken.None),
+            "peer transports").ConfigureAwait(false);
+        complete &= await TryTeardownAsync(() => TrackerManager?.StopAsync() ?? Task.CompletedTask, "trackers").ConfigureAwait(false);
+        complete &= await TryTeardownAsync(() => PeersInternal?.StopAsync() ?? Task.CompletedTask, "peers").ConfigureAwait(false);
+
+        if (WebSeedManager is { } webSeeds)
+        {
+            // Cleared as well as disposed: StartAsync only creates one when the field is null,
+            // so leaving a disposed instance behind would break the next start.
+            WebSeedManager = null;
+            complete &= await TryTeardownAsync(() => webSeeds.DisposeAsync().AsTask(), "web seeds").ConfigureAwait(false);
+        }
+
+        Interlocked.Exchange(ref _rollbackIncomplete, complete ? 0 : 1);
+        TorrentState state = complete ? TorrentState.Stopped : TorrentState.Stopping;
+        FireStateChangedEvent(state);
+        _logger.LogWarning(
+            complete
+                ? "Torrent {TorrentName} failed to start; rolled back to stopped"
+                : "Torrent {TorrentName} failed to start and its rollback is incomplete",
+            Name);
+    }
+
+    private async Task<bool> TryTeardownAsync(Func<Task> teardown, string what)
+    {
+        try
+        {
+            await teardown().ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to roll back {Component} after a failed start of {TorrentName}", what, Name);
+            return false;
+        }
     }
 
     public void RegisterPeerTransport(IPeerTransport transport)
@@ -736,9 +810,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
-    private async Task StopPeerTransportsAsync(bool disposing, CancellationToken cancellationToken)
+    private async Task StopPeerTransportsAsync(
+        bool disposing,
+        bool throwOnFailure,
+        CancellationToken cancellationToken)
     {
         IPeerTransport[] snapshot;
+        List<Exception>? failures = throwOnFailure ? [] : null;
         lock (_peerTransportsLock)
         {
             snapshot = [.. _peerTransports];
@@ -756,6 +834,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             }
             catch (Exception ex)
             {
+                failures?.Add(ex);
                 if (disposing)
                 {
                     _logger.LogDebug(ex, "Peer transport StopAsync threw during dispose");
@@ -777,6 +856,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                     _logger.LogDebug(ex, "Peer transport DisposeAsync threw");
                 }
             }
+        }
+
+        if (failures is { Count: > 0 })
+        {
+            throw new AggregateException("One or more peer transports failed to stop.", failures);
         }
     }
 
@@ -1217,7 +1301,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         await _stateLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (Interlocked.CompareExchange(ref _started, 0, 0) == 0 && !disposing)
+            bool recoveringFailedStart = Interlocked.CompareExchange(ref _rollbackIncomplete, 0, 0) == 1;
+            if (Interlocked.CompareExchange(ref _started, 0, 0) == 0 && !recoveringFailedStart && !disposing)
             {
                 return;
             }
@@ -1240,7 +1325,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 {
                     await TrackerManager.StopAsync().ConfigureAwait(false);
                 }
-                await StopPeerTransportsAsync(disposing, ct).ConfigureAwait(false);
+                // Deliberately uncancellable, like the rest of this block: once the stop has
+                // begun, aborting it midway would leave some transports running while the
+                // torrent already reports itself stopped.
+                await StopPeerTransportsAsync(
+                    disposing,
+                    throwOnFailure: recoveringFailedStart && !disposing,
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
                 if (WebSeedManager != null)
                 {
                     await WebSeedManager.DisposeAsync().ConfigureAwait(false);
@@ -1253,6 +1344,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 {
                     await FilesInternal.StopAsync().ConfigureAwait(false);
                 }
+
+                Interlocked.Exchange(ref _rollbackIncomplete, 0);
             }
             finally
             {

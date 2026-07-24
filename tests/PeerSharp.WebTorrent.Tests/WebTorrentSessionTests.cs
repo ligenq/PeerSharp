@@ -1178,7 +1178,7 @@ public class WebTorrentSessionTests
         public TorrentResumeData GetResumeData() => throw new NotSupportedException();
         public Task<Stream> OpenStreamAsync(int fileIndex, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task SetAllFilesPriorityAsync(Priority priority, CancellationToken cancellationToken = default) => throw new NotSupportedException();
-        public Task SetDownloadPathAsync(string path) => throw new NotSupportedException();
+        public Task SetDownloadPathAsync(string path, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task SetFilePriorityAsync(int fileIndex, Priority priority, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task SetFileSelectionAsync(int fileIndex, FileSelection selection, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task StartAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();

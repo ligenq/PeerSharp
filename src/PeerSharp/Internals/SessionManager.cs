@@ -44,12 +44,13 @@ internal sealed class SessionManager : IAsyncDisposable
     {
         if (_disposal.MarkDisposed())
         {
-            if (_autoSaveCts != null)
+            var autoSaveCts = _autoSaveCts;
+            if (autoSaveCts != null)
             {
-                await _autoSaveCts.CancelAsync().ConfigureAwait(false);
-                _autoSaveCts.Dispose();
+                await autoSaveCts.CancelAsync().ConfigureAwait(false);
             }
 
+            bool drained = true;
             if (_autoSaveTask != null)
             {
                 try
@@ -62,12 +63,21 @@ internal sealed class SessionManager : IAsyncDisposable
                 }
                 catch (TimeoutException ex)
                 {
+                    drained = false;
                     _logger.LogWarning(ex, "Auto-save loop did not drain within the shutdown grace period");
                 }
                 catch (OperationCanceledException)
                 {
                     // Expected on disposal
                 }
+            }
+
+            // Dispose only once the loop can no longer touch the token. If it is still stuck on
+            // a hung save, the source is left to the finalizer rather than pulled out from under
+            // the running loop.
+            if (drained)
+            {
+                autoSaveCts?.Dispose();
             }
         }
         GC.SuppressFinalize(this);
@@ -80,16 +90,42 @@ internal sealed class SessionManager : IAsyncDisposable
             return;
         }
 
-        if (_autoSaveCts != null)
+        // Retire any previous loop completely before starting a new one: cancel, wait for it to
+        // exit, then dispose its source. Without the wait, two loops could briefly save
+        // concurrently, and the old one could be holding a token whose source we just disposed.
+        var previousCts = _autoSaveCts;
+        var previousTask = _autoSaveTask;
+        _autoSaveCts = null;
+        _autoSaveTask = null;
+
+        if (previousCts != null)
         {
-            await _autoSaveCts.CancelAsync().ConfigureAwait(false);
-            _autoSaveCts.Dispose();
+            await previousCts.CancelAsync().ConfigureAwait(false);
+        }
+
+        if (previousTask != null)
+        {
+            try
+            {
+                await previousTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                previousCts?.Dispose();
+            }
+            catch (TimeoutException ex)
+            {
+                _logger.LogWarning(ex, "Previous auto-save loop did not drain before restart");
+            }
+            catch (OperationCanceledException)
+            {
+                previousCts?.Dispose();
+            }
+        }
+        else
+        {
+            previousCts?.Dispose();
         }
 
         _autoSaveCts = new CancellationTokenSource();
-
         _autoSaveTask = AutoSaveLoopAsync(TimeSpan.FromSeconds(intervalSeconds), _autoSaveCts.Token);
-        await Task.CompletedTask.ConfigureAwait(false); // Keep async signature for future proofing
     }
 
     public Task<IReadOnlyList<SavedTorrentEntry>> LoadAllAsync(CancellationToken cancellationToken)

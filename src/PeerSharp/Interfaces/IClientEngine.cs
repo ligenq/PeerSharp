@@ -129,6 +129,13 @@ public interface IClientEngine : IAsyncDisposable
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="InvalidOperationException">Thrown if already initialized.</exception>
+    /// <exception cref="OperationCanceledException">Thrown when the token is cancelled during initialization.</exception>
+    /// <remarks>
+    /// If initialization fails or is cancelled the engine may be partially started (listeners
+    /// bound, some persisted torrents restored). It is left in a retryable state - calling
+    /// <see cref="InitializeAsync"/> again is allowed - but a caller that gives up must still
+    /// dispose the engine to release those resources.
+    /// </remarks>
     Task InitializeAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -187,7 +194,10 @@ public interface IClientEngine : IAsyncDisposable
     /// </summary>
     /// <param name="hash">The info hash of the torrent to remove.</param>
     /// <param name="options">Options specifying what to delete.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="cancellationToken">
+    /// Checked before the removal begins. Once the torrent has been deregistered the removal
+    /// runs to completion, so it can never be left half-removed.
+    /// </param>
     /// <exception cref="TorrentNotFoundException">Thrown when the torrent is not found.</exception>
     Task RemoveTorrentAsync(
         InfoHash hash,
@@ -199,7 +209,10 @@ public interface IClientEngine : IAsyncDisposable
     /// </summary>
     /// <param name="torrent">The torrent to remove.</param>
     /// <param name="options">Options specifying what to delete.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="cancellationToken">
+    /// Checked before the removal begins. Once the torrent has been deregistered the removal
+    /// runs to completion, so it can never be left half-removed.
+    /// </param>
     /// <exception cref="ArgumentNullException">Thrown when torrent is null.</exception>
     /// <exception cref="TorrentNotFoundException">Thrown when the torrent is not found.</exception>
     Task RemoveTorrentAsync(
