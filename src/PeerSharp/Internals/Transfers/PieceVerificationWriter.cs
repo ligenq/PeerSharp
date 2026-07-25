@@ -128,7 +128,10 @@ internal sealed class PieceVerificationWriter
             byte[] computed = System.Security.Cryptography.SHA1.HashData(fullData.AsSpan(0, pieceSize));
             hashMs = (_timeProvider.GetUtcNow() - hashCalcStart).TotalMilliseconds;
             var expected = _torrent.InfoFile.Info.Pieces[pieceToProcess.Index];
-            if (!computed.SequenceEqual(expected))
+            // AsSpan first: byte[].SequenceEqual(byte[]) binds to LINQ's Enumerable.SequenceEqual,
+            // which allocates two enumerators and compares element by element. The span overload
+            // is vectorised. This runs once per completed piece for the whole download.
+            if (!computed.AsSpan().SequenceEqual(expected))
             {
                 valid = false;
             }
