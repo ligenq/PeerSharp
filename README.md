@@ -26,7 +26,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 - **Proxy Support:** SOCKS5 and HTTP proxy support with authentication.
 - **IP Blocklist & GeoIP:** Block peers by IP range or country.
 - **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.
-- **Enterprise-Grade Testing:** Rigorous validation using **Microsoft Coyote** for concurrency testing, architecture tests for design integrity, and fuzzing for robustness.
+- **Enterprise-Grade Testing:** Rigorous validation using **Microsoft Coyote** for concurrency testing, architecture tests for design integrity, fuzzing for robustness, and [BenchmarkDotNet suites](benchmarks/PeerSharp.Benchmarks/README.md) covering the engine's hot paths.
 
 ## Getting Started
 
