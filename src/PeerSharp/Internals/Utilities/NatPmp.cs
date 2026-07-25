@@ -83,26 +83,18 @@ internal class NatPmpPortMapping : IPortMapper
             return false;
         }
 
-        bool anySuccess = false;
-        foreach (var gateway in _gateways)
+        var results = await Task.WhenAll(_gateways.Select(async gateway =>
         {
-            var (Success, ExternalPort) = await MapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _timeProvider, _logger, ct).ConfigureAwait(false);
-            if (Success)
+            var result = await MapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _timeProvider, _logger, ct).ConfigureAwait(false);
+            lock (_status)
             {
-                anySuccess = true;
-                lock (_status)
-                {
-                    _status[gateway] = (PortMappingResult.Success, null, ExternalPort);
-                }
+                _status[gateway] = result.Success
+                    ? (PortMappingResult.Success, null, result.ExternalPort)
+                    : (PortMappingResult.Failed, "Mapping failed", null);
             }
-            else
-            {
-                lock (_status)
-                {
-                    _status[gateway] = (PortMappingResult.Failed, "Mapping failed", null);
-                }
-            }
-        }
+            return result.Success;
+        })).ConfigureAwait(false);
+        bool anySuccess = results.Any(static success => success);
 
         if (anySuccess)
         {
@@ -115,9 +107,9 @@ internal class NatPmpPortMapping : IPortMapper
         return anySuccess;
     }
 
-    public async Task StartAsync(CancellationToken ct)
+    public Task StartAsync(CancellationToken ct)
     {
-        await Task.CompletedTask.ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
         _gateways.Clear();
         lock (_status)
         {
@@ -146,6 +138,8 @@ internal class NatPmpPortMapping : IPortMapper
         {
             _logger.LogWarning("NAT-PMP: Multiple gateways detected ({Count}). This may indicate a VPN or double-NAT configuration which can cause connectivity issues", _gateways.Count);
         }
+
+        return Task.CompletedTask;
     }
 
     public async Task UnmapAllAsync(CancellationToken ct)
@@ -162,13 +156,18 @@ internal class NatPmpPortMapping : IPortMapper
             _mappings.Clear();
         }
 
-        foreach (var (port, protocol) in toRemove)
+        // Fan out across gateways - they are independent devices - but keep the ports for a
+        // single gateway sequential. A flat mappings x gateways fan-out is exactly the burst
+        // that consumer routers rate-limit or silently drop, turning a slow-but-reliable
+        // teardown into a flaky one.
+        IPAddress[] gateways = [.. _gateways];
+        await Task.WhenAll(gateways.Select(async gateway =>
         {
-            foreach (var gateway in _gateways)
+            foreach (var (port, protocol) in toRemove)
             {
                 await UnmapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _logger, ct).ConfigureAwait(false);
             }
-        }
+        })).ConfigureAwait(false);
     }
 
     private static IEnumerable<IPAddress> GetDefaultGateways()

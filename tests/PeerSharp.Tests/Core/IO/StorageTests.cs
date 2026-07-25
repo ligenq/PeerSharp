@@ -1,3 +1,4 @@
+using Microsoft.Win32.SafeHandles;
 using PeerSharp.BEncoding;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Utilities;
@@ -84,6 +85,90 @@ public class StorageTests : IAsyncLifetime
         byte[] f2Data = File.ReadAllBytes(Path.Combine(_tempDir, "folder", "file2.txt"));
         Assert.Equal(data[200], f2Data[0]);
         Assert.Equal(data[499], f2Data[299]);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ConcurrentOverlappingWrites_AcrossFiles_AreNotTorn()
+    {
+        await _storage.InitAsync();
+
+        byte[] first = Enumerable.Repeat((byte)0x3c, 500).ToArray();
+        byte[] second = Enumerable.Repeat((byte)0xa7, 500).ToArray();
+
+        Task[] writes = Enumerable.Range(0, 32)
+            .Select(i => _storage.WriteAsync(800, i % 2 == 0 ? first : second).AsTask())
+            .ToArray();
+
+        await Task.WhenAll(writes);
+
+        byte[] final = await _storage.ReadAsync(800, 500);
+        Assert.True(final.SequenceEqual(first) || final.SequenceEqual(second));
+
+        byte[][] concurrentReads = await Task.WhenAll(
+            Enumerable.Range(0, 16).Select(_ => _storage.ReadAsync(800, 500)));
+        Assert.All(concurrentReads, read => Assert.Equal(final, read));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task DisposeAsync_WaitsForBlockedWrite_AndRejectsNewWrites()
+    {
+        string storageRoot = Path.Combine(_tempDir, "blocked-dispose");
+        using var handleCache = new BlockingHandleCache();
+        var storage = new Storage(
+            _metadata,
+            storageRoot,
+            new PathValidator(storageRoot),
+            handleCache,
+            enableSparseFiles: false);
+        await storage.InitAsync();
+
+        Task write = storage.WriteAsync(800, new byte[500]).AsTask();
+        await handleCache.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Task dispose = storage.DisposeAsync().AsTask();
+        Assert.False(dispose.IsCompleted);
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => storage.WriteAsync(0, new byte[1]).AsTask());
+
+        handleCache.Release.TrySetResult();
+        await write;
+        await dispose;
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task WriteAsync_FailingBeforeAnyIo_DoesNotStallLaterShutdown()
+    {
+        string storageRoot = Path.Combine(_tempDir, "cancelled-write");
+        using var handleCache = new FileHandleCache();
+        var storage = new Storage(
+            _metadata,
+            storageRoot,
+            new PathValidator(storageRoot),
+            handleCache,
+            enableSparseFiles: false);
+        await storage.InitAsync();
+
+        // Cancelled up front, so the write fails before the try/finally that used to be the only
+        // thing decrementing the in-flight count. Leaking it would leave the drain signal
+        // permanently uncompleted and make every later shutdown wait out its full timeout.
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        for (int i = 0; i < 5; i++)
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => storage.WriteAsync(0, new byte[64], cts.Token).AsTask());
+        }
+
+        // A healthy write still has to work afterwards.
+        await storage.WriteAsync(800, Enumerable.Repeat((byte)0x5e, 500).ToArray());
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        await storage.DisposeAsync();
+        stopwatch.Stop();
+
+        Assert.True(
+            stopwatch.Elapsed < TimeSpan.FromSeconds(2),
+            $"Shutdown took {stopwatch.Elapsed} - the in-flight write counter was leaked.");
     }
 
     [Fact(Timeout = 30000)]
@@ -186,6 +271,39 @@ public class StorageTests : IAsyncLifetime
         public ValueTask<IFileHandleLease> GetHandleAsync(string path, bool writable, CancellationToken cancellationToken = default)
             => throw ToThrow;
         public void Dispose() { }
+    }
+
+    private sealed class BlockingHandleCache : IFileHandleCache
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void CloseTorrentHandles(string rootPath) { }
+
+        public async ValueTask<IFileHandleLease> GetHandleAsync(
+            string path,
+            bool writable,
+            CancellationToken cancellationToken = default)
+        {
+            Entered.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            SafeFileHandle handle = File.OpenHandle(
+                path,
+                FileMode.OpenOrCreate,
+                writable ? FileAccess.ReadWrite : FileAccess.Read,
+                FileShare.ReadWrite,
+                FileOptions.Asynchronous | FileOptions.RandomAccess);
+            return new Lease(path, handle);
+        }
+
+        public void Dispose() => Release.TrySetResult();
+
+        private sealed class Lease(string path, SafeFileHandle handle) : IFileHandleLease
+        {
+            public SafeFileHandle Handle { get; } = handle;
+            public string Path { get; } = path;
+            public void Dispose() => Handle.Dispose();
+        }
     }
 
     [Fact]

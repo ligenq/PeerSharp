@@ -2122,7 +2122,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    private async Task AddConnectedPeerCoreAsync(Stream stream, bool initiator, IPEndPoint? remote, PeerSourceKind sourceKind, CancellationToken cancellationToken)
+    private Task AddConnectedPeerCoreAsync(Stream stream, bool initiator, IPEndPoint? remote, PeerSourceKind sourceKind, CancellationToken cancellationToken)
     {
         // Cancelling the attach means the caller no longer wants this connection, so the stream
         // is closed on the way out - exactly as on the reject paths below, which also take
@@ -2139,14 +2139,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             _logger.LogDebug("Rejecting connected stream peer - ForceProxy is enabled");
             stream.Close();
-            return;
+            return Task.CompletedTask;
         }
 
         if (_torrent.Blocklist?.IsBlocked(remote) == true)
         {
             _logger.LogDebug("Blocked connected stream peer from {Remote} (blocklist)", remote);
             stream.Close();
-            return;
+            return Task.CompletedTask;
         }
 
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
@@ -2154,14 +2154,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             _logger.LogDebug("Rejecting connected stream peer - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
             stream.Close();
-            return;
+            return Task.CompletedTask;
         }
 
         if (!_governor.TryAcquireConnectionSlot())
         {
             _logger.LogDebug("Rejecting connected stream peer - global limit reached ({MaxConnections})", _settings.Connection.MaxConnections);
             stream.Close();
-            return;
+            return Task.CompletedTask;
         }
 
         var peer = remote != null
@@ -2175,7 +2175,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _governor.ReleaseConnectionSlot();
             _logger.LogDebug("Rejecting duplicate connected stream peer from {RemoteEndPoint}", peer.RemoteEndPoint);
             stream.Close();
-            return;
+            return Task.CompletedTask;
         }
 
         if (peer.RemoteEndPoint != null)
@@ -2212,6 +2212,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             peer.Start(stream);
         }
 
-        await Task.CompletedTask.ConfigureAwait(false);
+        return Task.CompletedTask;
     }
 }

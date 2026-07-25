@@ -13,6 +13,7 @@ public class TrackerManagerTests
         public int AnnounceCount { get; private set; }
         public int DeinitCount { get; private set; }
         public TrackerEvent LastEvent { get; private set; }
+        public Func<TrackerEvent, CancellationToken, Task>? AnnounceHandler { get; set; }
         private readonly SemaphoreSlim _announceSemaphore = new(0);
         private readonly SemaphoreSlim _deinitSemaphore = new(0);
 
@@ -43,7 +44,7 @@ public class TrackerManagerTests
             AnnounceCount++;
             LastEvent = evt;
             _announceSemaphore.Release();
-            return Task.CompletedTask;
+            return AnnounceHandler?.Invoke(evt, ct) ?? Task.CompletedTask;
         }
 
         public Task ScrapeAsync(CancellationToken ct = default)
@@ -172,6 +173,231 @@ public class TrackerManagerTests
             Assert.Equal(1, tracker.AnnounceCount);
             Assert.Equal(TrackerEvent.Started, tracker.LastEvent);
         }
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task StopAsync_AwaitsStoppedAnnouncesAndRunsThemConcurrently()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        manager.AddTracker("http://t1.example/announce");
+        manager.AddTracker("http://t2.example/announce");
+        await manager.StartAsync();
+
+        var entered = _factory.Trackers.Values.ToDictionary(
+            tracker => tracker,
+            _ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        foreach (var tracker in _factory.Trackers.Values)
+        {
+            tracker.AnnounceHandler = async (evt, ct) =>
+            {
+                if (evt != TrackerEvent.Stopped)
+                {
+                    return;
+                }
+                entered[tracker].TrySetResult();
+                await release.Task.WaitAsync(ct);
+            };
+        }
+
+        Task stop = manager.StopAsync();
+        await Task.WhenAll(entered.Values.Select(static signal => signal.Task));
+        Assert.False(stop.IsCompleted);
+
+        release.TrySetResult();
+        await stop;
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task StopAsync_CancelsAndDrainsCurrentAnnounceBeforeSendingStopped()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://tracker.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        var currentEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var currentDrained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tracker.AnnounceHandler = async (evt, ct) =>
+        {
+            if (evt == TrackerEvent.None)
+            {
+                currentEntered.TrySetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                }
+                finally
+                {
+                    currentDrained.TrySetResult();
+                }
+            }
+            else if (evt == TrackerEvent.Stopped)
+            {
+                Assert.True(currentDrained.Task.IsCompleted);
+            }
+        };
+
+        await manager.AnnounceAsync(url);
+        await currentEntered.Task;
+        await manager.StopAsync();
+
+        Assert.True(currentDrained.Task.IsCompleted);
+        Assert.Equal(TrackerEvent.Stopped, tracker.LastEvent);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task TrackedAnnounce_DoesNotCaptureCallerSynchronizationContext()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://synccontext.example/announce";
+        manager.AddTracker(url);
+
+        // Tracker work must run on the thread pool, never on the caller's context. A UI host
+        // would otherwise get network continuations on its UI thread - and since StopAsync
+        // awaits these tasks, a UI thread blocked on shutdown would deadlock.
+        var context = new RecordingSynchronizationContext();
+        var previous = SynchronizationContext.Current;
+        Task started;
+        SynchronizationContext.SetSynchronizationContext(context);
+        try
+        {
+            // StartAsync is fully synchronous, so the announce is kicked off while the context
+            // is installed - exactly the moment an `await Task.Yield()` would capture it.
+            // Deliberately not awaited here: awaiting under the context would post the test's
+            // own continuation and mask what we are measuring.
+            started = manager.StartAsync();
+            Assert.True(started.IsCompleted);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previous);
+        }
+
+        await started;
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(5));
+        await manager.StopAsync();
+
+        Assert.Equal(0, context.PostCount);
+    }
+
+    private sealed class RecordingSynchronizationContext : SynchronizationContext
+    {
+        private int _postCount;
+
+        public int PostCount => Volatile.Read(ref _postCount);
+
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            Interlocked.Increment(ref _postCount);
+            // Still run the work, so a regression shows up as a non-zero count rather than a hang.
+            ThreadPool.QueueUserWorkItem(_ => d(state));
+        }
+
+        public override void Send(SendOrPostCallback d, object? state)
+        {
+            Interlocked.Increment(ref _postCount);
+            d(state);
+        }
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task StopAsync_TimesOutDrainingAnnounceThatIgnoresCancellation()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://stubborn.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        var currentEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCurrent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tracker.AnnounceHandler = async (evt, ct) =>
+        {
+            if (evt != TrackerEvent.None)
+            {
+                return;
+            }
+
+            currentEntered.TrySetResult();
+            // Deliberately ignores ct: a tracker implementation that never honours its token
+            // must not be able to block engine shutdown indefinitely.
+            await releaseCurrent.Task;
+        };
+
+        await manager.AnnounceAsync(url);
+        await currentEntered.Task;
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        await manager.StopAsync();
+        stopwatch.Stop();
+
+        try
+        {
+            Assert.True(
+                stopwatch.Elapsed < TimeSpan.FromSeconds(15),
+                $"StopAsync took {stopwatch.Elapsed} waiting on an announce that ignores cancellation.");
+            Assert.Equal(TrackerEvent.Stopped, tracker.LastEvent);
+        }
+        finally
+        {
+            releaseCurrent.TrySetResult();
+        }
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task StopAsync_AwaitsRemovedTrackersPendingStoppedAnnounce()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://removed.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        var stoppedEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tracker.AnnounceHandler = async (evt, ct) =>
+        {
+            if (evt == TrackerEvent.Stopped)
+            {
+                stoppedEntered.TrySetResult();
+                await releaseStopped.Task.WaitAsync(ct);
+            }
+        };
+
+        Assert.True(manager.RemoveTracker(url));
+        await stoppedEntered.Task;
+        Task stop = manager.StopAsync();
+        Assert.False(stop.IsCompleted);
+
+        releaseStopped.TrySetResult();
+        await stop;
+        Assert.Equal(1, tracker.DeinitCount);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task StopAsync_TimesOutUnresponsiveStoppedAnnounce()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://unresponsive.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+        tracker.AnnounceHandler = (evt, ct) => evt == TrackerEvent.Stopped
+            ? Task.Delay(Timeout.InfiniteTimeSpan, ct)
+            : Task.CompletedTask;
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        await manager.StopAsync();
+        stopwatch.Stop();
+
+        Assert.InRange(stopwatch.Elapsed, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(6));
     }
 
     [Fact(Timeout = 30000)]

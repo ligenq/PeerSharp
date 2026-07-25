@@ -154,6 +154,149 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SaveAsync_ConcurrentSameHash_PublishesOneCompleteEntryAndNoTemporaryFiles()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        var hash = new InfoHash(Enumerable.Repeat((byte)0x44, 20).ToArray());
+        byte[] first = Enumerable.Repeat((byte)0x11, 128 * 1024).ToArray();
+        byte[] second = Enumerable.Repeat((byte)0x22, 128 * 1024).ToArray();
+
+        Task[] saves = Enumerable.Range(0, 12).Select(i => persistence.SaveAsync(
+            i % 2 == 0
+                ? new SavedTorrentEntry(hash, first, "magnet:first")
+                : new SavedTorrentEntry(hash, second, "magnet:second"))).ToArray();
+        await Task.WhenAll(saves);
+
+        var loaded = Assert.Single(await persistence.LoadAllAsync());
+        bool isFirst = loaded.TorrentFileData!.SequenceEqual(first);
+        bool isSecond = loaded.TorrentFileData.SequenceEqual(second);
+        Assert.True(isFirst || isSecond);
+        Assert.Equal(isFirst ? "magnet:first" : "magnet:second", loaded.MagnetLink);
+        Assert.Empty(Directory.EnumerateFiles(_tempDir, "*.tmp", SearchOption.AllDirectories));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SaveAsync_CancelledBeforeAcquiringEntry_PreservesPublishedFile()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        var hash = new InfoHash(Enumerable.Repeat((byte)0x55, 20).ToArray());
+        byte[] published = Enumerable.Repeat((byte)0x19, 1024).ToArray();
+        await persistence.SaveAsync(new SavedTorrentEntry(hash, published));
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        byte[] replacement = Enumerable.Repeat((byte)0xe3, 1024).ToArray();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => persistence.SaveAsync(new SavedTorrentEntry(hash, replacement), cts.Token));
+
+        var loaded = Assert.Single(await persistence.LoadAllAsync());
+        Assert.Equal(published, loaded.TorrentFileData);
+        Assert.Empty(Directory.EnumerateFiles(_tempDir, "*.tmp", SearchOption.AllDirectories));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SaveAsync_CancelledMidWrite_NeverPublishesTornDataOrLeavesTemporaryFiles()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        var hash = new InfoHash(Enumerable.Repeat((byte)0x77, 20).ToArray());
+        byte[] published = Enumerable.Repeat((byte)0x19, 4 * 1024 * 1024).ToArray();
+        await persistence.SaveAsync(new SavedTorrentEntry(hash, published, "magnet:published"));
+
+        byte[] replacement = Enumerable.Repeat((byte)0xe3, 4 * 1024 * 1024).ToArray();
+        using var cts = new CancellationTokenSource();
+        Task save = persistence.SaveAsync(new SavedTorrentEntry(hash, replacement, "magnet:replacement"), cts.Token);
+        await cts.CancelAsync();
+
+        try
+        {
+            await save;
+        }
+        catch (OperationCanceledException)
+        {
+            // Either outcome is legal - the point is that neither leaves a torn entry behind.
+        }
+
+        // Whichever payload won, it must be complete: the temporary-file + rename dance exists
+        // precisely so a cancelled write can never publish a half-written file.
+        var loaded = Assert.Single(await persistence.LoadAllAsync());
+        byte[] stored = Assert.IsType<byte[]>(loaded.TorrentFileData);
+        Assert.True(
+            stored.SequenceEqual(published) || stored.SequenceEqual(replacement),
+            $"Published a torn entry of {stored.Length} bytes.");
+        Assert.Empty(Directory.EnumerateFiles(_tempDir, "*.tmp", SearchOption.AllDirectories));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task EntryGates_AreEvictedOnceIdle()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        byte[] payload = Enumerable.Repeat((byte)0x2a, 256).ToArray();
+
+        // Churn distinct hashes: an un-evicted gate map would retain one semaphore per hash
+        // this session has ever touched.
+        for (int i = 0; i < 50; i++)
+        {
+            var hash = new InfoHash(Enumerable.Repeat((byte)i, 20).ToArray());
+            await persistence.SaveAsync(new SavedTorrentEntry(hash, payload));
+            await persistence.DeleteAsync(hash);
+        }
+
+        var gatesField = typeof(SessionPersistence).GetField(
+            "_entryGates",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var gates = (System.Collections.ICollection)gatesField!.GetValue(persistence)!;
+        Assert.Empty(gates);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task EntryGates_AreEvictedAfterConcurrentSameHashOperations()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        var hash = new InfoHash(Enumerable.Repeat((byte)0x88, 20).ToArray());
+        byte[] payload = Enumerable.Repeat((byte)0x5b, 64 * 1024).ToArray();
+        var entry = new SavedTorrentEntry(hash, payload, "magnet:concurrent");
+
+        // Overlapping renters must hand the gate back exactly once each; an off-by-one in the
+        // reference count would either leak the gate forever or evict it while still in use.
+        await Task.WhenAll(Enumerable.Range(0, 24)
+            .SelectMany(_ => new[] { persistence.SaveAsync(entry), persistence.DeleteAsync(hash) }));
+
+        var gatesField = typeof(SessionPersistence).GetField(
+            "_entryGates",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var gates = (System.Collections.ICollection)gatesField!.GetValue(persistence)!;
+        Assert.Empty(gates);
+
+        // The gate still has to work after all that churn.
+        await persistence.SaveAsync(entry);
+        var loaded = Assert.Single(await persistence.LoadAllAsync());
+        Assert.Equal(payload, loaded.TorrentFileData);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SaveAsync_AndDeleteAsync_SameHash_NeverPublishPartialEntry()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        var hash = new InfoHash(Enumerable.Repeat((byte)0x66, 20).ToArray());
+        byte[] payload = Enumerable.Repeat((byte)0x4d, 512 * 1024).ToArray();
+        var entry = new SavedTorrentEntry(hash, payload, "magnet:complete");
+
+        Task[] operations = Enumerable.Range(0, 24)
+            .SelectMany(_ => new[] { persistence.SaveAsync(entry), persistence.DeleteAsync(hash) })
+            .ToArray();
+        await Task.WhenAll(operations);
+
+        IReadOnlyList<SavedTorrentEntry> loaded = await persistence.LoadAllAsync();
+        if (loaded.Count != 0)
+        {
+            var saved = Assert.Single(loaded);
+            Assert.Equal(payload, saved.TorrentFileData);
+            Assert.Equal("magnet:complete", saved.MagnetLink);
+        }
+        Assert.Empty(Directory.EnumerateFiles(_tempDir, "*.tmp", SearchOption.AllDirectories));
+    }
+
+    [Fact]
     public async Task SaveAllAsync_EmptyEnumerable_NoEntriesSaved()
     {
         var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);

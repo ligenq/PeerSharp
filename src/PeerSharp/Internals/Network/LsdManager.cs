@@ -91,14 +91,14 @@ internal class LsdManager : ILsdManager
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         if (_disposal.MarkDisposed())
         {
             Stop();
         }
-        await ValueTask.CompletedTask.ConfigureAwait(false);
         GC.SuppressFinalize(this);
+        return ValueTask.CompletedTask;
     }
 
     public void Start()

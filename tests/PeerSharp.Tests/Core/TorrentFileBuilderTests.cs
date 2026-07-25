@@ -463,6 +463,92 @@ public class TorrentFileBuilderTests
     }
 
     [Fact]
+    public async Task BuildAsync_HybridSinglePass_MatchesSyncBuild()
+    {
+        byte[] first = MakeData(37_000);
+        byte[] second = MakeData(21_000);
+
+        static CoreBuilder Configure(byte[] first, byte[] second) => new CoreBuilder()
+            .AddFile("root/first.bin", first)
+            .AddFile("root/second.bin", second)
+            .WithPieceLength(16_384)
+            .WithPerFileSha1()
+            .WithVersion(TorrentFileVersion.Hybrid);
+
+        var sync = Configure(first, second).Build();
+        var async = await Configure(first, second).BuildAsync();
+
+        Assert.Equal(sync.InfoHash, async.InfoHash);
+        Assert.Equal(sync.InfoHashV2, async.InfoHashV2);
+        Assert.Equal(sync.PieceCount, async.PieceCount);
+    }
+
+    [Fact]
+    public async Task BuildAsync_Hybrid_WithEmptyFileAndSymlink_MatchesSyncBuild()
+    {
+        static CoreBuilder Configure() => new CoreBuilder()
+            .AddFile("root/empty.bin", [])
+            .AddFile("root/data.bin", MakeData(20_000))
+            .AddSymlink("root/data-link.bin", "root/data.bin")
+            .WithPieceLength(16_384)
+            .WithPerFileSha1()
+            .WithVersion(TorrentFileVersion.Hybrid);
+
+        var sync = Configure().Build();
+        var async = await Configure().BuildAsync();
+
+        Assert.Equal(sync.InfoHash, async.InfoHash);
+        Assert.Equal(sync.InfoHashV2, async.InfoHashV2);
+        Assert.Equal(3, async.FileCount);
+        var symlink = GetRawV1Files(async).Single(file => GetPath(file).EndsWith("data-link.bin", StringComparison.Ordinal));
+        Assert.Equal("l", symlink.GetString("attr"));
+        Assert.Null(symlink.GetBytes("sha1"));
+    }
+
+    [Fact]
+    public async Task BuildAsync_Hybrid_FromDisk_EmitsCorrectPerFileSha1()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), "PeerSharpBuilder_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        byte[] first = MakeData(30_000);
+        byte[] second = MakeData(19_000);
+        string firstPath = Path.Combine(tempDir, "first.bin");
+        string secondPath = Path.Combine(tempDir, "second.bin");
+        try
+        {
+            await File.WriteAllBytesAsync(firstPath, first);
+            await File.WriteAllBytesAsync(secondPath, second);
+
+            var disk = await new CoreBuilder()
+                .AddFileFromPath(firstPath, "root/first.bin")
+                .AddFileFromPath(secondPath, "root/second.bin")
+                .WithPieceLength(16_384)
+                .WithPerFileSha1()
+                .WithVersion(TorrentFileVersion.Hybrid)
+                .BuildAsync();
+            var memory = new CoreBuilder()
+                .AddFile("root/first.bin", first)
+                .AddFile("root/second.bin", second)
+                .WithPieceLength(16_384)
+                .WithPerFileSha1()
+                .WithVersion(TorrentFileVersion.Hybrid)
+                .Build();
+
+            Assert.Equal(memory.InfoHash, disk.InfoHash);
+            Assert.Equal(memory.InfoHashV2, disk.InfoHashV2);
+            var files = GetRawV1Files(disk).Where(file => file.GetString("attr") != "p").ToArray();
+            var firstFile = files.Single(file => GetPath(file).EndsWith("first.bin", StringComparison.Ordinal));
+            var secondFile = files.Single(file => GetPath(file).EndsWith("second.bin", StringComparison.Ordinal));
+            Assert.Equal(SHA1.HashData(first), firstFile.GetBytes("sha1")!.Value.ToArray());
+            Assert.Equal(SHA1.HashData(second), secondFile.GetBytes("sha1")!.Value.ToArray());
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task BuildAsync_Cancelled_ThrowsOperationCancelled()
     {
         using var cts = new CancellationTokenSource();

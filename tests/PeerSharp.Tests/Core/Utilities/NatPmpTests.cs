@@ -125,6 +125,26 @@ public sealed class NatPmpTests
         Assert.Equal(countAfterFirst, server.CapturedCount);
     }
 
+    [Fact(Timeout = 10000)]
+    public async Task MultipleGateways_MapAndUnmapEveryGateway()
+    {
+        var received = new List<byte[]>();
+        await using var server = new NatPmpTestServer(success: true, externalPort: 6000, captureRequests: received);
+        var mapper = new NatPmpPortMapping(
+            () => [IPAddress.Loopback, IPAddress.Loopback],
+            server.Port);
+        await mapper.StartAsync(CancellationToken.None);
+
+        Assert.True(await mapper.MapPortAsync(3456, "UDP", "multi", CancellationToken.None));
+        await server.WaitForPacketCountAsync(2, TimeSpan.FromSeconds(5));
+
+        await mapper.UnmapAllAsync(CancellationToken.None);
+        await server.WaitForPacketCountAsync(4, TimeSpan.FromSeconds(5));
+
+        Assert.Equal(4, server.CapturedCount);
+        Assert.All(received.Skip(2), packet => Assert.Equal(new byte[] { 0, 0, 0, 0 }, packet[8..12]));
+    }
+
     private sealed class NatPmpTestServer : IAsyncDisposable
     {
         private readonly UdpClient _udp;

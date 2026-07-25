@@ -93,8 +93,23 @@ public sealed class WebTorrentSession : IAsyncDisposable
     public static async Task<WebTorrentSession> AttachAsync(ITorrent torrent, WebTorrentSessionOptions? options = null, ILoggerFactory? loggerFactory = null, CancellationToken cancellationToken = default)
     {
         var session = new WebTorrentSession(torrent, options, loggerFactory);
-        await session.StartAsync(cancellationToken).ConfigureAwait(false);
-        return session;
+        try
+        {
+            await session.StartAsync(cancellationToken).ConfigureAwait(false);
+            return session;
+        }
+        catch
+        {
+            try
+            {
+                await session.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                session._logger.LogDebug(ex, "Ignored cleanup error after WebTorrent session attachment failed");
+            }
+            throw;
+        }
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -106,20 +121,20 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
         await _trackerManager.StartAsync(cancellationToken).ConfigureAwait(false);
 
-        // Send initial "started" announce for all connected trackers
-        foreach (var runtime in _trackerManager.GetRuntimes())
-        {
-            if (runtime.IsConnected)
-            {
-                await SendOffersAsync(runtime, "started", cancellationToken).ConfigureAwait(false);
-                lock (runtime.SyncRoot)
-                {
-                    runtime.NextAnnounce = _options.TimeProvider.GetUtcNow() + runtime.ReannounceInterval;
-                }
-            }
-        }
+        // Trackers are independent; announce to all connected runtimes concurrently.
+        var connected = _trackerManager.GetRuntimes().Where(static runtime => runtime.IsConnected).ToArray();
+        await Task.WhenAll(connected.Select(runtime => SendInitialOffersAsync(runtime, cancellationToken))).ConfigureAwait(false);
 
         TrackBackgroundTask(RunBackgroundLoopAsync(_cts.Token));
+    }
+
+    private async Task SendInitialOffersAsync(TrackerRuntime runtime, CancellationToken cancellationToken)
+    {
+        await SendOffersAsync(runtime, "started", cancellationToken).ConfigureAwait(false);
+        lock (runtime.SyncRoot)
+        {
+            runtime.NextAnnounce = _options.TimeProvider.GetUtcNow() + runtime.ReannounceInterval;
+        }
     }
 
     public IReadOnlyList<TrackerHealth> GetTrackerHealth()
@@ -459,21 +474,9 @@ public sealed class WebTorrentSession : IAsyncDisposable
             await _cts.CancelAsync().ConfigureAwait(false);
         }
 
-        // Send "stopped" announce to all connected trackers
-        foreach (var runtime in _trackerManager.GetRuntimes())
-        {
-            if (runtime.IsConnected)
-            {
-                try
-                {
-                    await _trackerManager.ReannounceAsync(runtime, "stopped", null, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, "Ignored error while sending stopped announce to tracker {Url}", runtime.Url);
-                }
-            }
-        }
+        // Send "stopped" announces concurrently; one slow tracker must not delay every other one.
+        var connected = _trackerManager.GetRuntimes().Where(static runtime => runtime.IsConnected).ToArray();
+        await Task.WhenAll(connected.Select(SendStoppedAnnounceAsync)).ConfigureAwait(false);
 
         await _trackerManager.DisposeAsync().ConfigureAwait(false);
         await _peerManager.DisposeAsync().ConfigureAwait(false);
@@ -494,6 +497,18 @@ public sealed class WebTorrentSession : IAsyncDisposable
         }
 
         _cts.Dispose();
+    }
+
+    private async Task SendStoppedAnnounceAsync(TrackerRuntime runtime)
+    {
+        try
+        {
+            await _trackerManager.ReannounceAsync(runtime, "stopped", null, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Ignored error while sending stopped announce to tracker {Url}", runtime.Url);
+        }
     }
 
     private static IPeerTransportHost ResolveHost(ITorrent torrent)

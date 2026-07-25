@@ -380,29 +380,32 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             return true;
         }
 
-        // Fire and forget, but ensure Deinit happens AFTER announce
-        var task = Task.Run(async () =>
-        {
-            try
-            {
-                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                await removed.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                // Log but otherwise ignore errors during removal
-                _logger.LogTrace(ex, "Failed to send Stopped event for removed tracker {Url}", removed.Url);
-            }
-            finally
-            {
-                removed.Tracker.Deinit();
-            }
-        });
+        // Fire and forget, but ensure Deinit happens AFTER announce. Task.Run keeps the announce
+        // off this (synchronous) caller's thread and pins the continuations to TaskScheduler.Default
+        // rather than whatever SynchronizationContext the caller happens to have.
+        var task = Task.Run(() => RunRemovedTrackerStopAsync(removed), CancellationToken.None);
 
         _removalTasks.TryAdd(task, 0);
         _ = task.ContinueWith(t => _removalTasks.TryRemove(t, out _), TaskScheduler.Default);
 
         return true;
+    }
+
+    private async Task RunRemovedTrackerStopAsync(TrackerInfo removed)
+    {
+        try
+        {
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await removed.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogTrace(ex, "Failed to send Stopped event for removed tracker {Url}", removed.Url);
+        }
+        finally
+        {
+            removed.Tracker.Deinit();
+        }
     }
 
     public Task StartAsync()
@@ -422,6 +425,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     {
         List<TrackerInfo> toStop;
         List<CancellationTokenSource> ctsToCancel = [];
+        List<Task> announcesToDrain = [];
 
         lock (_lock)
         {
@@ -436,6 +440,10 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                     ctsToCancel.Add(info.CurrentAnnounceCts);
                     info.CurrentAnnounceCts = null;
                 }
+                if (info.CurrentAnnounceTask != null)
+                {
+                    announcesToDrain.Add(info.CurrentAnnounceTask);
+                }
                 info.CurrentAnnounceTask = null;
 
                 if (info.CurrentScrapeCts != null)
@@ -446,39 +454,77 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             }
         }
 
-        foreach (var cts in ctsToCancel)
+        if (ctsToCancel.Count > 0)
         {
-            try
-            {
-                await cts.CancelAsync().ConfigureAwait(false);
-                cts.Dispose();
-            }
-            catch (ObjectDisposedException) { /* Already disposed */ }
-        }
-
-        foreach (var info in toStop)
-        {
-            var timeoutCts = new CancellationTokenSource(StopAnnounceTimeout);
-            _ = Task.Run(async () =>
+            // Materialise every CancelAsync call before awaiting: a lazily enumerated Select
+            // would stop at the first source that throws synchronously, silently leaving the
+            // remaining announces running - and the drain below would then wait on them.
+            List<Task> cancellations = new(ctsToCancel.Count);
+            foreach (var cts in ctsToCancel)
             {
                 try
                 {
-                    await info.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token).ConfigureAwait(false);
+                    cancellations.Add(cts.CancelAsync());
                 }
-                catch (OperationCanceledException) { /* Expected on timeout */ }
-                catch (Exception)
+                catch (ObjectDisposedException) { /* Already disposed - nothing left to cancel */ }
+            }
+
+            try
+            {
+                await Task.WhenAll(cancellations).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // A registered cancellation callback threw; cancellation itself still happened.
+                _logger.LogTrace(ex, "Error while cancelling in-flight tracker operations during stop");
+            }
+            finally
+            {
+                foreach (var cts in ctsToCancel)
                 {
-                    // Ignore errors during stop announce
+                    cts.Dispose();
                 }
-                finally
-                {
-                    timeoutCts.Dispose();
-                }
-            });
+            }
         }
 
+        if (announcesToDrain.Count > 0)
+        {
+            // Bounded like every other wait in this method. The announces were just cancelled,
+            // but a tracker implementation that ignores its token must not be able to block
+            // engine shutdown indefinitely.
+            try
+            {
+                await Task.WhenAll(announcesToDrain).WaitAsync(StopAnnounceTimeout).ConfigureAwait(false);
+            }
+            catch (TimeoutException ex)
+            {
+                _logger.LogDebug(ex, "Timed out draining {Count} in-flight tracker announces during stop", announcesToDrain.Count);
+            }
+            catch (OperationCanceledException ex)
+            {
+                _logger.LogTrace(ex, "Current tracker announces were cancelled during stop");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogTrace(ex, "Current tracker announces ended with errors during stop");
+            }
+        }
+
+        Task[] stopAnnounces = [.. toStop.Select(SendStoppedAnnounceAsync)];
+        Task[] removals = [.. _removalTasks.Keys];
+        await Task.WhenAll(stopAnnounces.Concat(removals)).ConfigureAwait(false);
         _removalTasks.Clear();
-        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    private static async Task SendStoppedAnnounceAsync(TrackerInfo info)
+    {
+        using var timeoutCts = new CancellationTokenSource(StopAnnounceTimeout);
+        try
+        {
+            await info.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { /* Expected on timeout */ }
+        catch (Exception) { /* Stop announces are best effort. */ }
     }
 
     /// <summary>
@@ -631,18 +677,29 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             info.CurrentAnnounceCts = new CancellationTokenSource();
 
             var ct = info.CurrentAnnounceCts.Token;
-            info.CurrentAnnounceTask = Task.Run(async () =>
-            {
-                try
-                {
-                    await info.Tracker.AnnounceAsync(evt, ct).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) { /* Expected */ }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Unhandled exception in tracked announce for {Url}", info.Url);
-                }
-            }, ct);
+
+            // Task.Run, not Task.Yield: YieldAwaitable has no ConfigureAwait, so it resumes on
+            // SynchronizationContext.Current when the caller has one. In a UI host that would
+            // drag tracker network continuations onto the UI thread - and StopAsync awaits these
+            // tasks, so a UI thread blocked on shutdown would deadlock. TaskScheduler.Default
+            // also keeps tracker code off this lock.
+            info.CurrentAnnounceTask = Task.Run(() => RunTrackedAnnounceAsync(info, evt, ct), CancellationToken.None);
+        }
+    }
+
+    private async Task RunTrackedAnnounceAsync(TrackerInfo info, TrackerEvent evt, CancellationToken ct)
+    {
+        try
+        {
+            await info.Tracker.AnnounceAsync(evt, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex) when (ct.IsCancellationRequested)
+        {
+            _logger.LogTrace(ex, "Tracked announce for {Url} was cancelled", info.Url);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Unhandled exception in tracked announce for {Url}", info.Url);
         }
     }
 

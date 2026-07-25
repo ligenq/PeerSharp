@@ -100,14 +100,14 @@ internal class UtpManager : IUdpReceiver, IUtpManager
         throw new InvalidOperationException("Failed to allocate unique connection ID after maximum retries");
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         if (_disposal.MarkDisposed())
         {
             Stop();
         }
-        await ValueTask.CompletedTask.ConfigureAwait(false);
         GC.SuppressFinalize(this);
+        return ValueTask.CompletedTask;
     }
 
     public void Receive(byte[] data, IPEndPoint remote)

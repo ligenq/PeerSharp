@@ -116,44 +116,114 @@ public class SessionManagerTests
         Assert.Single(loaded.Nodes);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task SaveAllResumeDataAsync_Cancelled_PropagatesCancellation()
+    {
+        _registry.Add(TorrentTestUtility.CreateMinimal());
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        // Cancellation is not a per-torrent save failure and must not be swallowed as one -
+        // the caller (engine shutdown) needs to see that the save did not finish.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => _sessionManager.SaveAllResumeDataAsync(cts.Token));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SaveAllResumeDataAsync_OneTorrentFails_StillSavesTheOthers()
+    {
+        var failing = CreateDistinctTorrent();
+        _registry.Add(failing);
+        _persistence.FailSavesFor.Add(failing.Hash);
+
+        var healthy = new List<Torrent>();
+        for (int i = 0; i < 5; i++)
+        {
+            var torrent = CreateDistinctTorrent();
+            _registry.Add(torrent);
+            healthy.Add(torrent);
+        }
+
+        // A single bad entry is logged and skipped; it must not abort the whole sweep.
+        await _sessionManager.SaveAllResumeDataAsync(CancellationToken.None);
+
+        var savedHashes = _persistence.SavedEntries.Select(entry => entry.Hash).ToHashSet();
+        Assert.DoesNotContain(failing.Hash, savedHashes);
+        Assert.All(healthy, torrent => Assert.Contains(torrent.Hash, savedHashes));
+    }
+
+    private static Torrent CreateDistinctTorrent()
+    {
+        var metadata = new TorrentFileMetadata
+        {
+            Info = { Hash = new InfoHash([.. Guid.NewGuid().ToByteArray(), .. new byte[4]]) }
+        };
+        return TorrentTestUtility.CreateMinimal(metadata);
+    }
+
     // Mock for SessionPersistence
     private class MockSessionPersistence : ISessionPersistence
     {
-        public List<SavedTorrentEntry> SavedEntries { get; } = [];
+        // SessionManager.SaveAllResumeDataAsync saves torrents in parallel, so every mutation
+        // here has to be guarded or the double itself races.
+        private readonly Lock _sync = new();
+        private readonly List<SavedTorrentEntry> _savedEntries = [];
+
+        public IReadOnlyList<SavedTorrentEntry> SavedEntries
+        {
+            get { lock (_sync) { return [.. _savedEntries]; } }
+        }
+
         public bool DeleteCalled { get; private set; }
         public InfoHash? LastDeletedHash { get; private set; }
         public DhtState? SavedDhtState { get; private set; }
+
+        /// <summary>Hashes whose <see cref="SaveAsync"/> should fail, to exercise error handling.</summary>
+        public HashSet<InfoHash> FailSavesFor { get; } = [];
 
         public Task DeleteAsync(InfoHash hash, CancellationToken cancellationToken = default)
         {
             DeleteCalled = true;
             LastDeletedHash = hash;
-            SavedEntries.RemoveAll(e => e.Hash == hash);
+            lock (_sync)
+            {
+                _savedEntries.RemoveAll(e => e.Hash == hash);
+            }
             return Task.CompletedTask;
         }
 
         public Task<IReadOnlyList<SavedTorrentEntry>> LoadAllAsync(CancellationToken cancellationToken = default)
         {
-            return Task.FromResult<IReadOnlyList<SavedTorrentEntry>>(SavedEntries.AsReadOnly());
+            return Task.FromResult(SavedEntries);
         }
 
-        public Task SaveAllAsync(IEnumerable<SavedTorrentEntry> entries, CancellationToken cancellationToken = default)
+        public async Task SaveAllAsync(IEnumerable<SavedTorrentEntry> entries, CancellationToken cancellationToken = default)
         {
             foreach (var entry in entries)
             {
-                SaveAsync(entry, cancellationToken);
+                await SaveAsync(entry, cancellationToken).ConfigureAwait(false);
             }
-            return Task.CompletedTask;
         }
 
         public Task SaveAsync(SavedTorrentEntry entry, CancellationToken cancellationToken = default)
         {
-            var existing = SavedEntries.FirstOrDefault(e => e.Hash == entry.Hash);
-            if (existing != null)
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (FailSavesFor.Contains(entry.Hash))
             {
-                SavedEntries.Remove(existing);
+                return Task.FromException(new IOException($"Simulated save failure for {entry.Hash}"));
             }
-            SavedEntries.Add(entry);
+
+            lock (_sync)
+            {
+                var existing = _savedEntries.FirstOrDefault(e => e.Hash == entry.Hash);
+                if (existing != null)
+                {
+                    _savedEntries.Remove(existing);
+                }
+                _savedEntries.Add(entry);
+            }
             return Task.CompletedTask;
         }
 

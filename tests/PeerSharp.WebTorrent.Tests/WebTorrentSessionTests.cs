@@ -1087,6 +1087,77 @@ public class WebTorrentSessionTests
         Assert.Equal("stopped", stopped["event"]!.GetValue<string>());
     }
 
+    [Fact]
+    public async Task StartAsync_WhenOneTrackerFails_DisposesAllStartedTrackersAndPreservesStartupError()
+    {
+        var host = new FakePeerTransportHost("wss://tracker-one.example", "wss://tracker-two.example");
+        var rtcFactory = new FakeWebRtcConnectionFactory();
+        var firstSocket = new FakeWebSocketConnection
+        {
+            DisposeException = new IOException("cleanup failure")
+        };
+        var secondSocket = new FakeWebSocketConnection
+        {
+            ConnectException = new OperationCanceledException("startup cancelled")
+        };
+        var session = new WebTorrentSession(
+            host,
+            host,
+            new WebTorrentSessionOptions { OffersPerTracker = 1 },
+            rtcFactory,
+            new FakeWebSocketConnectionFactory(firstSocket, secondSocket));
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.StartAsync());
+
+        Assert.Equal("startup cancelled", exception.Message);
+        Assert.True(firstSocket.Disposed);
+        Assert.True(secondSocket.Disposed);
+        await session.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DisposeAsync_DisposesTrackersConcurrently_WhenOneDisposeFails()
+    {
+        var host = new FakePeerTransportHost("wss://tracker-one.example", "wss://tracker-two.example");
+        var rtcFactory = new FakeWebRtcConnectionFactory();
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstSocket = new FakeWebSocketConnection
+        {
+            DisposeStep = async () =>
+            {
+                firstEntered.TrySetResult();
+                await release.Task;
+                throw new IOException("simulated dispose failure");
+            }
+        };
+        var secondSocket = new FakeWebSocketConnection
+        {
+            DisposeStep = async () =>
+            {
+                secondEntered.TrySetResult();
+                await release.Task;
+            }
+        };
+        var session = new WebTorrentSession(
+            host,
+            host,
+            new WebTorrentSessionOptions { OffersPerTracker = 1 },
+            rtcFactory,
+            new FakeWebSocketConnectionFactory(firstSocket, secondSocket));
+        await session.StartAsync();
+
+        Task dispose = session.DisposeAsync().AsTask();
+        await Task.WhenAll(firstEntered.Task, secondEntered.Task);
+        Assert.False(dispose.IsCompleted);
+        release.TrySetResult();
+
+        await dispose;
+        Assert.True(firstSocket.Disposed);
+        Assert.True(secondSocket.Disposed);
+    }
+
     private static async Task AssertEventuallyAsync(Func<bool> predicate, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow.Add(timeout);
@@ -1411,6 +1482,9 @@ public class WebTorrentSessionTests
 
         public Exception? ConnectException { get; set; }
         public Func<CancellationToken, Task>? ConnectStep { get; set; }
+        public Exception? DisposeException { get; set; }
+        public Func<Task>? DisposeStep { get; set; }
+        public bool Disposed { get; private set; }
         public int ThrowOnSendCallNumber { get; set; }
 
         public List<string> SentMessages { get; } = [];
@@ -1475,10 +1549,18 @@ public class WebTorrentSessionTests
             _incoming.Writer.TryComplete();
         }
 
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
+            Disposed = true;
             _incoming.Writer.TryComplete();
-            return ValueTask.CompletedTask;
+            if (DisposeStep != null)
+            {
+                await DisposeStep();
+            }
+            if (DisposeException != null)
+            {
+                throw DisposeException;
+            }
         }
     }
 }

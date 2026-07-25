@@ -52,6 +52,7 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         var urls = WebTorrentTrackerUrls.Collect(_torrent, _options);
+        var clients = new List<WebTorrentTrackerClient>(urls.Count);
         foreach (var url in urls)
         {
             var client = new WebTorrentTrackerClient(
@@ -67,13 +68,37 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
                 signal => _onSignalReceived(signal, GetRuntimeForUrl(url)),
                 ex => HandleTrackerFailure(url, ex)
             );
+            clients.Add(client);
+        }
 
+        lock (_clients)
+        {
+            _clients.AddRange(clients);
+        }
+
+        try
+        {
+            await Task.WhenAll(clients.Select(client => client.StartAsync(cancellationToken))).ConfigureAwait(false);
+        }
+        catch
+        {
             lock (_clients)
             {
-                _clients.Add(client);
+                foreach (var client in clients)
+                {
+                    _clients.Remove(client);
+                }
             }
 
-            await client.StartAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await Task.WhenAll(clients.Select(static client => client.DisposeAsync().AsTask())).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Ignored tracker cleanup error after WebTorrent startup failed");
+            }
+            throw;
         }
     }
 
@@ -228,9 +253,6 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
             _clients.Clear();
         }
 
-        foreach (var client in snapshot)
-        {
-            await client.DisposeAsync().ConfigureAwait(false);
-        }
+        await Task.WhenAll(snapshot.Select(static client => client.DisposeAsync().AsTask())).ConfigureAwait(false);
     }
 }
