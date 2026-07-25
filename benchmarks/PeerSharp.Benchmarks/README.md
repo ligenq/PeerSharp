@@ -35,11 +35,33 @@ dotnet run -c Release --project benchmarks/PeerSharp.Benchmarks -- --filter '*' 
 | Suite | Covers | Why it matters |
 |---|---|---|
 | `StorageBenchmarks` | 16 KiB block read/write, single-file and spanning two files | Called once per block by `BlockCache` — the hottest disk path in the engine |
+| `BlockCacheBenchmarks` | Cache hit, miss, eviction, write-through | Sits above Storage, so its hit path runs at least as often |
+| `PieceVerificationBenchmarks` | v1 SHA-1, v2 Merkle, BEP 30 Merkle | The longest CPU-bound operation a user waits on; a full recheck is nothing else |
+| `ProtocolEncryptionBenchmarks` | RC4 raw, through the MSE lock, and 8 peers in parallel | Touches every byte on an encrypted connection |
 | `PeerProtocolBenchmarks` | Encode/decode of Have, Request and Piece messages | Runs at the same rate as Storage on a saturated swarm |
 | `BencodeBenchmarks` | Parse/write of torrents and tracker responses | Every tracker response and extension message; backs the "zero-copy" claim |
 | `MerkleTreeBenchmarks` | Leaves, root, piece layer, piece verification | BEP 52 hashing for v2/hybrid torrents |
 | `PiecePickerBenchmarks` | `PickNextPiece` across strategies and piece counts | Once per request slot per peer; scales with piece count |
+| `FileMapperBenchmarks` | `MapOffset` / `MapRange` from 2 to 10,000 files | Entered by every Storage read and write; scaling is hidden inside the Storage suite |
+| `IpBlocklistBenchmarks` | Lookup hit/miss and 8-thread contention, 1k–200k ranges | Once per inbound connection and per discovered peer; connect storms arrive in parallel |
+| `UtpBenchmarks` | 256-packet windows in order and reordered, SACK parsing | Per-packet path in the second-largest file in the library |
 | `TorrentFileBuilderBenchmarks` | V1/V2/Hybrid torrent creation | The clearest CPU-bound, user-visible operation |
+
+### Reading the concurrent benchmarks
+
+`IpBlocklistBenchmarks.ContendedLookup` and `ProtocolEncryptionBenchmarks.ParallelPeersEncrypt`
+report the cost of a whole **batch** of operations across threads, not single-operation latency.
+Divide by the op count before comparing them to the single-threaded rows.
+
+They also ask opposite questions, which is the point. The blocklist is one shared instance behind
+one lock, so its concurrent row measures genuine contention. Each peer gets its own
+`ProtocolEncryption`, with separate send and receive locks, so its concurrent row should show
+near-linear scaling — it exists to catch the day that stops being true, not because contention is
+expected.
+
+`UtpBenchmarks` uses `[IterationSetup]` to rebuild the stream between iterations, because packet
+processing advances sequence state and cannot be measured one call at a time. Its figures are per
+256-packet window.
 
 ## Comparing a change
 
