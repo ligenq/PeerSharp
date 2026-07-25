@@ -420,6 +420,9 @@ public sealed class ProxySettings
     /// <summary>Username for proxy authentication (optional).</summary>
     public string Username { get; set; } = string.Empty;
 
+    /// <summary>Determines whether <paramref name="obj"/> is an equivalent proxy configuration.</summary>
+    /// <param name="obj">The object to compare with.</param>
+    /// <returns><see langword="true"/> if every proxy setting matches.</returns>
     public override bool Equals(object? obj)
     {
         if (obj is not ProxySettings other)
@@ -437,6 +440,7 @@ public sealed class ProxySettings
                ForceProxy == other.ForceProxy;
     }
 
+    /// <summary>Returns a hash code derived from every proxy setting.</summary>
     public override int GetHashCode()
     {
         var hash = new HashCode();

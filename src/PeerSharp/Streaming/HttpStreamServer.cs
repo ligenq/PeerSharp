@@ -21,11 +21,24 @@ public sealed class HttpStreamServer : IDisposable
     private readonly string _baseUrl;
     private AtomicDisposal _disposal = new();
 
+    /// <summary>
+    /// Initializes a server that streams one file from <paramref name="torrent"/>, binding to an
+    /// available loopback port.
+    /// </summary>
+    /// <param name="torrent">The torrent to stream from.</param>
+    /// <param name="fileIndex">Index of the file within the torrent.</param>
     public HttpStreamServer(ITorrent torrent, int fileIndex)
         : this(torrent, fileIndex, NullLoggerFactory.Instance)
     {
     }
 
+    /// <summary>
+    /// Initializes a server that streams one file from <paramref name="torrent"/>, binding to an
+    /// available loopback port.
+    /// </summary>
+    /// <param name="torrent">The torrent to stream from.</param>
+    /// <param name="fileIndex">Index of the file within the torrent.</param>
+    /// <param name="loggerFactory">Factory used to create the server's logger.</param>
     public HttpStreamServer(ITorrent torrent, int fileIndex, ILoggerFactory loggerFactory)
     {
         ArgumentNullException.ThrowIfNull(loggerFactory);
@@ -40,8 +53,15 @@ public sealed class HttpStreamServer : IDisposable
         _listener.Prefixes.Add(_baseUrl);
     }
 
+    /// <summary>
+    /// Gets the loopback URL a media player should open. Available before <see cref="Start"/>.
+    /// </summary>
     public string Url => $"{_baseUrl}stream";
 
+    /// <summary>
+    /// Begins accepting requests. Returns as soon as the listener is bound; connections are
+    /// served in the background.
+    /// </summary>
     public void Start()
     {
         _listener.Start();
@@ -130,6 +150,7 @@ public sealed class HttpStreamServer : IDisposable
         return port;
     }
 
+    /// <summary>Stops the listener and releases its resources. Safe to call more than once.</summary>
     public void Dispose()
     {
         if (_disposal.MarkDisposed())

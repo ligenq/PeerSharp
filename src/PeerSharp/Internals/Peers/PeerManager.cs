@@ -1657,7 +1657,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _logger.LogDebug("Connection queue processor started (rate: {Rate}/sec, delay: {Delay}ms)", cps, delayMs);
         try
         {
-            await foreach (var request in _connectionQueue.Reader.ReadAllAsync(cancellationToken))
+            await foreach (var request in _connectionQueue.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
                 // Start connection attempt (fire-and-forget, the actual TCP handshake happens asynchronously)
                 ConnectToInternal(request.Ip, request.Port, request.ForceUtp);

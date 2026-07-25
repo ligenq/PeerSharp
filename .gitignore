@@ -417,3 +417,9 @@ FodyWeavers.xsd
 *.msm
 *.msp
 /.claude/settings.local.json
+
+# Transient output from the public API approval test; only the .approved.txt is committed.
+PublicApi.received.txt
+
+# Output of the trim smoke publish.
+trimout/

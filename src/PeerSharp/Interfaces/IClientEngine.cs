@@ -44,16 +44,6 @@ public interface IClientEngine : IAsyncDisposable
     Settings Settings { get; }
 
     /// <summary>
-    /// Adds a torrent from a magnet link.
-    /// </summary>
-    /// <param name="magnetLink">The parsed magnet link.</param>
-    /// <param name="options">Options for adding the torrent.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The added torrent.</returns>
-    /// <exception cref="ArgumentNullException">Thrown when magnetLink is null.</exception>
-    /// <exception cref="TorrentAlreadyExistsException">Thrown when a torrent with the same hash already exists.</exception>
-    /// <exception cref="TorrentException">Thrown when the operation fails.</exception>
-    /// <summary>
     /// Downloads only the metadata for a magnet link and returns it as a
     /// <see cref="TorrentFile"/>, without starting (or keeping) a download. Internally a
     /// transient torrent is added to fetch the metadata from the swarm and removed again
@@ -68,6 +58,18 @@ public interface IClientEngine : IAsyncDisposable
     /// <exception cref="OperationCanceledException">Thrown when the token is cancelled before metadata arrives.</exception>
     Task<TorrentFile> GetMagnetMetadataAsync(MagnetLink magnetLink, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Adds a torrent from a magnet link. Metadata is fetched from the swarm in the background,
+    /// so the returned torrent may not know its file list yet - await
+    /// <see cref="ITorrent.WaitForMetadataAsync"/>, or set
+    /// <see cref="AddTorrentOptions.StopAfterMetadata"/> to adjust file selection before the
+    /// download starts.
+    /// </summary>
+    /// <param name="magnetLink">The magnet link to add.</param>
+    /// <param name="options">Download path and other per-torrent options.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="ArgumentNullException">Thrown when magnetLink is null.</exception>
+    /// <exception cref="TorrentAlreadyExistsException">Thrown when a torrent with the same hash is already added.</exception>
     Task<ITorrent> AddMagnetAsync(
         MagnetLink magnetLink,
         AddTorrentOptions? options = null,

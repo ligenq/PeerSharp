@@ -21,24 +21,55 @@ public enum AlertCategory : uint
 [Flags]
 public enum AlertId : uint
 {
+    /// <summary>No alert. Used as an empty value when filtering.</summary>
     None = 0,
+
+    /// <summary>Every selected file has been downloaded and verified.</summary>
     TorrentFinished = 1,
+
+    /// <summary>A torrent was added to the engine.</summary>
     TorrentAdded = 1 << 1,
+
+    /// <summary>A torrent was removed from the engine.</summary>
     TorrentRemoved = 1 << 2,
+
+    /// <summary>A hash check of existing data on disk has begun.</summary>
     TorrentCheckStarted = 1 << 3,
+
+    /// <summary>A hash check has completed.</summary>
     TorrentCheckFinished = 1 << 4,
+
+    /// <summary>The torrent stopped unexpectedly, for example after an unrecoverable storage failure.</summary>
     TorrentInterrupted = 1 << 5,
+
+    /// <summary>The torrent began downloading or seeding.</summary>
     TorrentStarted = 1 << 6,
+
+    /// <summary>The torrent was stopped by the caller.</summary>
     TorrentStopped = 1 << 7,
+
+    /// <summary>The torrent moved between states, for example from downloading to seeding.</summary>
     TorrentStateChanged = 1 << 8,
+
+    /// <summary>A piece finished downloading and passed hash verification.</summary>
     PieceCompleted = 1 << 9,
+
+    /// <summary>Overall download progress changed.</summary>
     ProgressChanged = 1 << 10,
+
+    /// <summary>Transfer rate and volume counters were refreshed.</summary>
     TransferStatsUpdated = 1 << 11,
+
+    /// <summary>The torrent encountered an error.</summary>
     TorrentError = 1 << 12,
 
+    /// <summary>Metadata was fetched from the swarm, so the file list is now known.</summary>
     MetadataInitialized = 1 << 16,
+
+    /// <summary>Progress of an in-flight metadata download changed.</summary>
     MetadataProgressChanged = 1 << 17,
 
+    /// <summary>A configuration value was changed at runtime.</summary>
     ConfigChanged = 1 << 20,
 }
 

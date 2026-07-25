@@ -36,6 +36,13 @@ public sealed class WebTorrentSession : IAsyncDisposable
     private readonly WebRtcPeerManager _peerManager;
     private int _started;
 
+    /// <summary>
+    /// Creates a session for <paramref name="torrent"/> without starting it. Prefer
+    /// <see cref="AttachAsync"/>, which also starts the session and cleans up on failure.
+    /// </summary>
+    /// <param name="torrent">The torrent to exchange over WebRTC.</param>
+    /// <param name="options">Signaling and ICE options; defaults are STUN-only.</param>
+    /// <param name="loggerFactory">Factory used to create the session's loggers.</param>
     public WebTorrentSession(ITorrent torrent, WebTorrentSessionOptions? options = null, ILoggerFactory? loggerFactory = null)
         : this(CreateDefaultConstructorArgs(torrent, options, loggerFactory))
     {
@@ -90,6 +97,15 @@ public sealed class WebTorrentSession : IAsyncDisposable
         );
     }
 
+    /// <summary>
+    /// Creates and starts a session for <paramref name="torrent"/>. If startup fails the
+    /// partially built session is disposed before the error propagates.
+    /// </summary>
+    /// <param name="torrent">The torrent to exchange over WebRTC.</param>
+    /// <param name="options">Signaling and ICE options; defaults are STUN-only.</param>
+    /// <param name="loggerFactory">Factory used to create the session's loggers.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A started session.</returns>
     public static async Task<WebTorrentSession> AttachAsync(ITorrent torrent, WebTorrentSessionOptions? options = null, ILoggerFactory? loggerFactory = null, CancellationToken cancellationToken = default)
     {
         var session = new WebTorrentSession(torrent, options, loggerFactory);
@@ -112,6 +128,11 @@ public sealed class WebTorrentSession : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Connects to the WebSocket trackers and sends the initial offers. Subsequent calls are
+    /// ignored, so a session starts at most once.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         if (Interlocked.Exchange(ref _started, 1) == 1)
@@ -137,6 +158,10 @@ public sealed class WebTorrentSession : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Returns a point-in-time snapshot of every tracker's connection state, failure count and
+    /// next reconnect time.
+    /// </summary>
     public IReadOnlyList<TrackerHealth> GetTrackerHealth()
     {
         return [.. _trackerManager.GetRuntimes().Select(runtime =>
@@ -153,6 +178,9 @@ public sealed class WebTorrentSession : IAsyncDisposable
         })];
     }
 
+    /// <summary>
+    /// Returns a point-in-time snapshot of tracker and peer counts, for logging or a status UI.
+    /// </summary>
     public SessionDiagnostics GetDiagnostics()
     {
         return new SessionDiagnostics(
@@ -467,6 +495,10 @@ public sealed class WebTorrentSession : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Sends a stopped announce to every connected tracker, then tears down the trackers, peers
+    /// and background tasks.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
         if (!_cts.IsCancellationRequested)

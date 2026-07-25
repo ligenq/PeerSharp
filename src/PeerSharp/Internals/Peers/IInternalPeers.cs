@@ -32,6 +32,10 @@ internal interface IInternalPeers : IPeers
     /// <param name="initiator">True if the local side should initiate the BitTorrent handshake.</param>
     /// <param name="remote">Optional remote endpoint info.</param>
     /// <param name="sourceKind">The source of the peer connection.</param>
+    /// <param name="cancellationToken">
+    /// Cancellation token. Cancelling closes the stream, since the caller no longer wants the
+    /// connection and ownership has already transferred.
+    /// </param>
     Task AddConnectedPeerAsync(Stream stream, bool initiator, System.Net.IPEndPoint? remote = null, PeerSourceKind sourceKind = PeerSourceKind.Unknown, CancellationToken cancellationToken = default);
 
     /// <summary>

@@ -1057,6 +1057,61 @@ public class ArchitectureTests
     /// }
     /// private MyClass(string path) => _path = path;  // Just stores
     /// </code>
+    /// <summary>
+    /// Every await in library code must pin its continuation with ConfigureAwait(false).
+    /// Without it the continuation resumes on the caller's SynchronizationContext, so a UI host
+    /// that blocks on the returned task deadlocks. The test suite cannot catch this on its own -
+    /// xUnit runs without a SynchronizationContext, so every one of these paths looks fine here.
+    /// </summary>
+    [Fact]
+    public void Awaits_Must_Configure_Their_Continuation()
+    {
+        if (!Directory.Exists(ArchitectureHelper.SourceDirectory))
+        {
+            return;
+        }
+
+        var violations = new AsyncPatternAnalyzer().FindMissingConfigureAwait(ArchitectureHelper.SourceFiles);
+
+        if (violations.Count != 0)
+        {
+            var messages = violations.Select(v =>
+                $"{Path.GetFileName(v.FilePath)}:{v.Line} - await without ConfigureAwait: {v.Snippet}");
+
+            Assert.Fail(
+                $"Awaits missing ConfigureAwait(false):{Environment.NewLine}" +
+                string.Join(Environment.NewLine, messages));
+        }
+    }
+
+    /// <summary>
+    /// Task.Yield() is banned in library code. YieldAwaitable has no ConfigureAwait overload, so
+    /// it always posts the continuation to SynchronizationContext.Current - the same deadlock as
+    /// a missing ConfigureAwait, but invisible because there is no ConfigureAwait to be missing.
+    /// Use Task.Run when the goal is to get off the caller's stack; it schedules on
+    /// TaskScheduler.Default regardless of the ambient context.
+    /// </summary>
+    [Fact]
+    public void Library_Code_Must_Not_Use_Task_Yield()
+    {
+        if (!Directory.Exists(ArchitectureHelper.SourceDirectory))
+        {
+            return;
+        }
+
+        var violations = new AsyncPatternAnalyzer().FindTaskYield(ArchitectureHelper.SourceFiles);
+
+        if (violations.Count != 0)
+        {
+            var messages = violations.Select(v =>
+                $"{Path.GetFileName(v.FilePath)}:{v.Line} - {v.Snippet}");
+
+            Assert.Fail(
+                $"Task.Yield() captures the caller's SynchronizationContext; use Task.Run instead:{Environment.NewLine}" +
+                string.Join(Environment.NewLine, messages));
+        }
+    }
+
     /// </summary>
     [Fact]
     public void Nullable_Default_Parameters_Should_Not_Be_Null_Checked_In_Constructor()

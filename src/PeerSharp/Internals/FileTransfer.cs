@@ -247,10 +247,9 @@ internal sealed class PieceState : IDisposable
     }
 
     /// <summary>
-    /// Checks if the piece is fully received and marks it as writing.
-    /// <summary>
-    /// Atomically checks if piece is complete AND sets the writing flag.
-    /// Returns true only if the piece is complete AND this call successfully claimed write responsibility.
+    /// Atomically checks whether the piece is complete and claims write responsibility for it.
+    /// Returns true only when the piece is fully received and this call was the one that claimed
+    /// it, so exactly one caller ever writes a given piece.
     /// </summary>
     public bool TryCompleteAndSetWriting()
     {

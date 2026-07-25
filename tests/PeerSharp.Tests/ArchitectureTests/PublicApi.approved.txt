@@ -1,0 +1,807 @@
+static class PeerSharp.Clients.ClientEngineFactory
+    PeerSharp.Interfaces.IClientEngine Create()
+    PeerSharp.Interfaces.IClientEngine Create(PeerSharp.Config.TorrentClientOptions options)
+sealed class PeerSharp.Config.AddTorrentOptions
+    .ctor()
+    .ctor(String downloadPath)
+    Boolean StartImmediately { get; set; }
+    Boolean StopAfterMetadata { get; set; }
+    IReadOnlyList<PeerSharp.Core.FileSelection> FileSelections { get; set; }
+    IReadOnlyList<String> AdditionalTrackers { get; set; }
+    Int32 QueuePriority { get; set; }
+    Nullable<Int32> DownloadLimitBytesPerSecond { get; set; }
+    Nullable<Int32> UploadLimitBytesPerSecond { get; set; }
+    Nullable<Single> RatioLimit { get; set; }
+    Nullable<TimeSpan> SeedTimeLimit { get; set; }
+    PeerSharp.Config.AddTorrentOptions Default { get; }
+    PeerSharp.Core.DownloadStrategy DownloadStrategy { get; set; }
+    PeerSharp.Core.TorrentResumeData ResumeData { get; set; }
+    PeerSharp.Interfaces.ITorrentEvents Events { get; set; }
+    String DownloadPath { get; set; }
+sealed class PeerSharp.Config.ConnectionSettings
+    .ctor()
+    Boolean EnableAdaptiveTimeouts { get; set; }
+    Boolean EnableLsd { get; set; }
+    Boolean EnableTcpIn { get; set; }
+    Boolean EnableTcpOut { get; set; }
+    Boolean EnableUtpIn { get; set; }
+    Boolean EnableUtpOut { get; set; }
+    Boolean EnableWebSeeds { get; set; }
+    Boolean NatPmpPortMapping { get; set; }
+    Boolean PreferUtp { get; set; }
+    Boolean TcpNoDelay { get; set; }
+    Boolean UpnpPortMapping { get; set; }
+    Int32 ConnectionsPerSecond { get; set; }
+    Int32 InitialConnectionTimeoutMs { get; set; }
+    Int32 MaxConnectionQueueSize { get; set; }
+    Int32 MaxConnectionTimeoutMs { get; set; }
+    Int32 MaxHolepunchPerMinute { get; set; }
+    Int32 MaxPeersPerTorrent { get; set; }
+    Int32 MaxPendingConnections { get; set; }
+    Int32 MinConnectionTimeoutMs { get; set; }
+    Int32 OptimisticUnchokeIntervalSeconds { get; set; }
+    Int32 PeerReconnectBaseSeconds { get; set; }
+    Int32 PeerReconnectJitterMs { get; set; }
+    Int32 PeerReconnectMaxSeconds { get; set; }
+    Int32 PreferUtpRatioPercent { get; set; }
+    Int32 RechokeIntervalSeconds { get; set; }
+    Int32 SlowPeerGraceSeconds { get; set; }
+    Int32 SlowPeerMinConnectedPeers { get; set; }
+    Int32 SlowPeerMinDownloadSpeedBytesPerSec { get; set; }
+    Int32 SlowPeerMinUploadSpeedBytesPerSec { get; set; }
+    Int32 StableConnectionsPerSecond { get; set; }
+    Int32 StableSpeedSeconds { get; set; }
+    Int32 StableSpeedThresholdBytesPerSec { get; set; }
+    Int32 TargetUploadPerSlotBytesPerSec { get; set; }
+    Int32 TcpReceiveBufferBytes { get; set; }
+    Int32 TcpSendBufferBytes { get; set; }
+    Int32 UploadSlotsMax { get; set; }
+    Int32 UploadSlotsMin { get; set; }
+    Int32 UtpDegradeGraceSeconds { get; set; }
+    Int32 UtpDegradeMinDownloadSpeedBytesPerSec { get; set; }
+    Int32 UtpFailureHardLimit { get; set; }
+    Int32 UtpFallbackTimeoutMs { get; set; }
+    Int32 UtpPenaltyBaseSeconds { get; set; }
+    Int32 UtpPenaltyMaxSeconds { get; set; }
+    Int32 UtpSlowPenaltyCooldownSeconds { get; set; }
+    Int32 UtpSlowPenaltySeconds { get; set; }
+    Int32 UtpWarmupSeconds { get; set; }
+    PeerSharp.Config.Encryption Encryption { get; set; }
+    UInt16 TcpPort { get; set; }
+    UInt16 UdpPort { get; set; }
+    UInt32 MaxConnections { get; set; }
+sealed class PeerSharp.Config.DhtBootstrapNode
+    .ctor(String Host, UInt16 Port)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Config.DhtBootstrapNode other)
+    Int32 GetHashCode()
+    PeerSharp.Config.DhtBootstrapNode <Clone>$()
+    String Host { get; init; }
+    String ToString()
+    UInt16 Port { get; init; }
+    Void Deconstruct(out String Host, out UInt16 Port)
+sealed class PeerSharp.Config.DhtSettings
+    .ctor()
+    Boolean Enabled { get; set; }
+    IReadOnlyList<PeerSharp.Config.DhtBootstrapNode> BootstrapNodes { get; set; }
+    PeerSharp.Core.DhtState InitialState { get; set; }
+enum PeerSharp.Config.Encryption
+    Allow = 1
+    Refuse = 0
+    Require = 2
+sealed class PeerSharp.Config.FilesSettings
+    .ctor()
+    Boolean EnableReadAhead { get; set; }
+    Boolean EnableSparseFiles { get; set; }
+    Int32 BlockCacheSizeBytes { get; set; }
+    Int32 ReadAheadBlocks { get; set; }
+    String DefaultDownloadPath { get; set; }
+    UInt32 MaxDiskReadSpeed { get; set; }
+    UInt32 MaxDiskWriteSpeed { get; set; }
+sealed class PeerSharp.Config.ProxySettings
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean ForceProxy { get; set; }
+    Boolean ProxyPeers { get; set; }
+    Boolean ProxyTrackers { get; set; }
+    Int32 GetHashCode()
+    PeerSharp.Config.ProxyType Type { get; set; }
+    String Host { get; set; }
+    String Password { get; set; }
+    String Username { get; set; }
+    UInt16 Port { get; set; }
+enum PeerSharp.Config.ProxyType
+    Http = 2
+    None = 0
+    Socks5 = 1
+sealed class PeerSharp.Config.QueueSettings
+    .ctor()
+    Boolean Enabled { get; set; }
+    Boolean EnforceAutoStop { get; set; }
+    Int32 MaxActiveDownloads { get; set; }
+    Int32 MaxActiveSeeds { get; set; }
+    Int32 RecheckIntervalSeconds { get; set; }
+enum PeerSharp.Config.RemoveOptions
+    DeleteAll = 3
+    DeleteFiles = 1
+    DeleteTorrentFile = 2
+    None = 0
+sealed class PeerSharp.Config.SessionSettings
+    .ctor()
+    Boolean Enabled { get; set; }
+    Boolean SaveOnPieceCompletion { get; set; }
+    Int32 AutoSaveIntervalSeconds { get; set; }
+    Int32 MinSaveIntervalSeconds { get; set; }
+    String SessionPath { get; set; }
+sealed class PeerSharp.Config.Settings
+    .ctor()
+    Byte[] PeerId { get; set; }
+    Int32 MaxKnownPeersCache { get; set; }
+    PeerSharp.Config.ConnectionSettings Connection { get; set; }
+    PeerSharp.Config.DhtSettings Dht { get; set; }
+    PeerSharp.Config.FilesSettings Files { get; set; }
+    PeerSharp.Config.ProxySettings Proxy { get; set; }
+    PeerSharp.Config.QueueSettings Queue { get; set; }
+    PeerSharp.Config.SessionSettings Session { get; set; }
+    PeerSharp.Config.TransferSettings Transfer { get; set; }
+    UInt32 MaxPeersPerTrackerRequest { get; set; }
+sealed class PeerSharp.Config.TorrentClientOptions
+    .ctor()
+    Microsoft.Extensions.Logging.ILoggerFactory LoggerFactory { get; init; }
+    PeerSharp.Config.Settings Settings { get; init; }
+    PeerSharp.Interfaces.ISessionPersistence SessionPersistence { get; init; }
+sealed class PeerSharp.Config.TransferSettings
+    .ctor()
+    Int32 BandwidthUpdateIntervalMs { get; set; }
+    Int32 EstimatedBandwidthBytesPerSec { get; set; }
+    Int32 EstimatedRttMs { get; set; }
+    Int32 InitialPipelineDepth { get; set; }
+    Int32 MaxConcurrentPieceHashing { get; set; }
+    Int32 MaxConcurrentPieceProcessing { get; set; }
+    Int32 MaxConcurrentPieceWrites { get; set; }
+    Int32 MaxMetadataSizeBytes { get; set; }
+    Int32 MaxRequestsPerPeer { get; set; }
+    Int32 MetadataMaxRequestAttempts { get; set; }
+    Int32 MetadataRequestPipeline { get; set; }
+    Int32 MetadataRequestTimeoutSeconds { get; set; }
+    UInt32 MaxDownloadSpeed { get; set; }
+    UInt32 MaxUploadSpeed { get; set; }
+abstract class PeerSharp.Core.Alert
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.Alert other)
+    DateTimeOffset Timestamp { get; init; }
+    Int32 GetHashCode()
+    PeerSharp.Core.Alert <Clone>$()
+    PeerSharp.Core.AlertId Id { get; init; }
+    String ToString()
+enum PeerSharp.Core.AlertCategory
+    Config = 15728640
+    Metadata = 983040
+    Torrent = 65535
+enum PeerSharp.Core.AlertId
+    ConfigChanged = 1048576
+    MetadataInitialized = 65536
+    MetadataProgressChanged = 131072
+    None = 0
+    PieceCompleted = 512
+    ProgressChanged = 1024
+    TorrentAdded = 2
+    TorrentCheckFinished = 16
+    TorrentCheckStarted = 8
+    TorrentError = 4096
+    TorrentFinished = 1
+    TorrentInterrupted = 32
+    TorrentRemoved = 4
+    TorrentStarted = 64
+    TorrentStateChanged = 256
+    TorrentStopped = 128
+    TransferStatsUpdated = 2048
+sealed class PeerSharp.Core.ConfigAlert
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.Alert other)
+    Boolean Equals(PeerSharp.Core.ConfigAlert other)
+    Int32 GetHashCode()
+    PeerSharp.Core.ConfigAlert <Clone>$()
+    String ConfigType { get; init; }
+    String ToString()
+sealed class PeerSharp.Core.DhtNode
+    .ctor(Byte[] Id, Net.IPEndPoint EndPoint)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.DhtNode other)
+    Byte[] Id { get; init; }
+    Int32 GetHashCode()
+    Net.IPEndPoint EndPoint { get; init; }
+    PeerSharp.Core.DhtNode <Clone>$()
+    String ToString()
+    Void Deconstruct(out Byte[] Id, out Net.IPEndPoint EndPoint)
+sealed class PeerSharp.Core.DhtState
+    .ctor(Byte[] NodeId, IReadOnlyList<PeerSharp.Core.DhtNode> Nodes)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.DhtState other)
+    Byte[] NodeId { get; init; }
+    IReadOnlyList<PeerSharp.Core.DhtNode> Nodes { get; init; }
+    Int32 GetHashCode()
+    PeerSharp.Core.DhtState <Clone>$()
+    String ToString()
+    Void Deconstruct(out Byte[] NodeId, out IReadOnlyList<PeerSharp.Core.DhtNode> Nodes)
+enum PeerSharp.Core.DownloadStrategy
+    RarestFirst = 0
+    Sequential = 1
+    Streaming = 2
+sealed class PeerSharp.Core.EngineStats
+    .ctor(Int32 DownloadSpeed = default, Int32 UploadSpeed = default, Int64 TotalDownloaded = default, Int64 TotalUploaded = default, Int32 TorrentCount = default, Int32 ActiveTorrents = default, Int32 TotalPeers = default)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.EngineStats other)
+    Int32 ActiveTorrents { get; init; }
+    Int32 DownloadSpeed { get; init; }
+    Int32 GetHashCode()
+    Int32 TorrentCount { get; init; }
+    Int32 TotalPeers { get; init; }
+    Int32 UploadSpeed { get; init; }
+    Int64 TotalDownloaded { get; init; }
+    Int64 TotalUploaded { get; init; }
+    PeerSharp.Core.EngineStats <Clone>$()
+    String ToString()
+    Void Deconstruct(out Int32 DownloadSpeed, out Int32 UploadSpeed, out Int64 TotalDownloaded, out Int64 TotalUploaded, out Int32 TorrentCount, out Int32 ActiveTorrents, out Int32 TotalPeers)
+sealed class PeerSharp.Core.FileSelection
+    .ctor(Boolean Selected = default, PeerSharp.Core.Priority Priority = default)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.FileSelection other)
+    Boolean Selected { get; init; }
+    Int32 GetHashCode()
+    PeerSharp.Core.FileSelection <Clone>$()
+    PeerSharp.Core.Priority Priority { get; init; }
+    String ToString()
+    Void Deconstruct(out Boolean Selected, out PeerSharp.Core.Priority Priority)
+struct PeerSharp.Core.InfoHash
+    .ctor(Byte[] bytes)
+    .ctor(ReadOnlyMemory<Byte> bytes)
+    .ctor(ReadOnlySpan<Byte> bytes)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.InfoHash other)
+    Boolean IsEmpty { get; }
+    Boolean IsV1 { get; }
+    Boolean IsV2 { get; }
+    Boolean TryFromHex(String hex, out PeerSharp.Core.InfoHash result)
+    Byte[] ToArray()
+    Int32 GetHashCode()
+    Int32 Length { get; }
+    Int32 V1Length
+    Int32 V2Length
+    PeerSharp.Core.InfoHash CreateRandom()
+    PeerSharp.Core.InfoHash CreateRandomV2()
+    PeerSharp.Core.InfoHash Empty { get; }
+    PeerSharp.Core.InfoHash EmptyV2 { get; }
+    PeerSharp.Core.InfoHash FromHex(String hex)
+    PeerSharp.Core.InfoHash TruncateToV1()
+    ReadOnlyMemory<Byte> Memory { get; }
+    ReadOnlySpan<Byte> Span { get; }
+    String ToHexString()
+    String ToHexStringUpper()
+    String ToString()
+    Void CopyTo(Byte[] destination, Int32 destinationOffset)
+    Void CopyTo(Span<Byte> destination)
+sealed class PeerSharp.Core.MagnetLink
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.MagnetLink other)
+    Boolean IsHybrid { get; }
+    Boolean IsV1 { get; }
+    Boolean IsV2 { get; }
+    Boolean TryParse(String magnetUri, out PeerSharp.Core.MagnetLink result)
+    Boolean TryParse(String magnetUri, out PeerSharp.Core.MagnetLink result, out String error)
+    IReadOnlyList<Int32> SelectOnlyFileIndices { get; }
+    IReadOnlyList<Net.IPEndPoint> Peers { get; }
+    IReadOnlyList<String> ExactSources { get; }
+    IReadOnlyList<String> Trackers { get; }
+    Int32 GetHashCode()
+    PeerSharp.Core.InfoHash InfoHash { get; }
+    PeerSharp.Core.InfoHash InfoHashV2 { get; }
+    PeerSharp.Core.MagnetLink Parse(String magnetUri)
+    String DisplayName { get; }
+    String OriginalString { get; }
+    String ToString()
+abstract class PeerSharp.Core.MetadataAlert
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.Alert other)
+    Boolean Equals(PeerSharp.Core.MetadataAlert other)
+    Int32 GetHashCode()
+    PeerSharp.Core.MetadataAlert <Clone>$()
+    PeerSharp.Interfaces.ITorrent Torrent { get; init; }
+    String ToString()
+sealed class PeerSharp.Core.MetadataProgressAlert
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.MetadataAlert other)
+    Boolean Equals(PeerSharp.Core.MetadataProgressAlert other)
+    Int32 GetHashCode()
+    Int32 ReceivedPieces { get; init; }
+    Int32 TotalPieces { get; init; }
+    PeerSharp.Core.MetadataProgressAlert <Clone>$()
+    Single Progress { get; init; }
+    String ToString()
+sealed class PeerSharp.Core.PeerInfo
+    .ctor(Net.IPEndPoint EndPoint, String Country = default, String ClientName = default, Int32 DownloadSpeed = default, Int32 UploadSpeed = default, Int64 Downloaded = default, Int64 Uploaded = default, Boolean AmChoking = default, Boolean AmInterested = default, Boolean PeerChoking = default, Boolean PeerInterested = default, Boolean IsUtp = default, Boolean IsEncrypted = default, Single Progress = default, Int32 RttMs = default)
+    Boolean AmChoking { get; init; }
+    Boolean AmInterested { get; init; }
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.PeerInfo other)
+    Boolean IsEncrypted { get; init; }
+    Boolean IsUtp { get; init; }
+    Boolean PeerChoking { get; init; }
+    Boolean PeerInterested { get; init; }
+    Int32 DownloadSpeed { get; init; }
+    Int32 GetHashCode()
+    Int32 RttMs { get; init; }
+    Int32 UploadSpeed { get; init; }
+    Int64 Downloaded { get; init; }
+    Int64 Uploaded { get; init; }
+    Net.IPEndPoint EndPoint { get; init; }
+    PeerSharp.Core.PeerInfo <Clone>$()
+    Single Progress { get; init; }
+    String ClientName { get; init; }
+    String Country { get; init; }
+    String ToString()
+    Void Deconstruct(out Net.IPEndPoint EndPoint, out String Country, out String ClientName, out Int32 DownloadSpeed, out Int32 UploadSpeed, out Int64 Downloaded, out Int64 Uploaded, out Boolean AmChoking, out Boolean AmInterested, out Boolean PeerChoking, out Boolean PeerInterested, out Boolean IsUtp, out Boolean IsEncrypted, out Single Progress, out Int32 RttMs)
+sealed class PeerSharp.Core.PieceCheckProgress
+    .ctor()
+    Int32 CheckedPieces { get; init; }
+    Int32 CurrentPiece { get; init; }
+    Int32 TotalPieces { get; init; }
+    Int32 ValidPieces { get; init; }
+    Single Progress { get; init; }
+sealed class PeerSharp.Core.PieceCompletedAlert
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.PieceCompletedAlert other)
+    Boolean Equals(PeerSharp.Core.TorrentAlert other)
+    Int32 CompletedPieces { get; init; }
+    Int32 GetHashCode()
+    Int32 PieceIndex { get; init; }
+    Int32 TotalPieces { get; init; }
+    PeerSharp.Core.PieceCompletedAlert <Clone>$()
+    String ToString()
+enum PeerSharp.Core.PortMappingResult
+    Failed = 3
+    NotAttempted = 0
+    Pending = 1
+    Success = 2
+sealed class PeerSharp.Core.PortMappingStatus
+    .ctor(String Protocol, PeerSharp.Core.PortMappingResult Result = default, Nullable<Int32> ExternalPort = default, String ErrorMessage = default)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.PortMappingStatus other)
+    Int32 GetHashCode()
+    Nullable<Int32> ExternalPort { get; init; }
+    PeerSharp.Core.PortMappingResult Result { get; init; }
+    PeerSharp.Core.PortMappingStatus <Clone>$()
+    String ErrorMessage { get; init; }
+    String Protocol { get; init; }
+    String ToString()
+    Void Deconstruct(out String Protocol, out PeerSharp.Core.PortMappingResult Result, out Nullable<Int32> ExternalPort, out String ErrorMessage)
+enum PeerSharp.Core.Priority
+    DoNotDownload = 0
+    High = 3
+    Low = 1
+    Normal = 2
+sealed class PeerSharp.Core.ProgressChangedAlert
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.ProgressChangedAlert other)
+    Boolean Equals(PeerSharp.Core.TorrentAlert other)
+    Int32 CompletedPieces { get; init; }
+    Int32 GetHashCode()
+    Int32 TotalPieces { get; init; }
+    PeerSharp.Core.ProgressChangedAlert <Clone>$()
+    Single Progress { get; init; }
+    Single SelectionProgress { get; init; }
+    String ToString()
+    UInt64 FinishedBytes { get; init; }
+    UInt64 TotalBytes { get; init; }
+sealed class PeerSharp.Core.SimpleMetadataAlert
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.MetadataAlert other)
+    Boolean Equals(PeerSharp.Core.SimpleMetadataAlert other)
+    Int32 GetHashCode()
+    PeerSharp.Core.SimpleMetadataAlert <Clone>$()
+    String ToString()
+sealed class PeerSharp.Core.SimpleTorrentAlert
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.SimpleTorrentAlert other)
+    Boolean Equals(PeerSharp.Core.TorrentAlert other)
+    Int32 GetHashCode()
+    PeerSharp.Core.SimpleTorrentAlert <Clone>$()
+    String ToString()
+sealed class PeerSharp.Core.StateChangedAlert
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.StateChangedAlert other)
+    Boolean Equals(PeerSharp.Core.TorrentAlert other)
+    Int32 GetHashCode()
+    PeerSharp.Core.StateChangedAlert <Clone>$()
+    PeerSharp.Interfaces.TorrentState NewState { get; init; }
+    PeerSharp.Interfaces.TorrentState PreviousState { get; init; }
+    String ToString()
+abstract class PeerSharp.Core.TorrentAlert
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.Alert other)
+    Boolean Equals(PeerSharp.Core.TorrentAlert other)
+    Int32 GetHashCode()
+    PeerSharp.Core.TorrentAlert <Clone>$()
+    PeerSharp.Interfaces.ITorrent Torrent { get; init; }
+    String ToString()
+sealed class PeerSharp.Core.TorrentErrorAlert
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.TorrentAlert other)
+    Boolean Equals(PeerSharp.Core.TorrentErrorAlert other)
+    Exception Exception { get; init; }
+    Int32 GetHashCode()
+    PeerSharp.Core.TorrentErrorAlert <Clone>$()
+    String ToString()
+sealed class PeerSharp.Core.TorrentFile
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.TorrentFile other)
+    Boolean IsHybrid { get; }
+    Boolean IsMerkle { get; }
+    Boolean IsPrivate { get; }
+    Boolean IsV1 { get; }
+    Boolean IsV2 { get; }
+    Boolean TryParse(Byte[] data, out PeerSharp.Core.TorrentFile result)
+    Boolean TryParse(Byte[] data, out PeerSharp.Core.TorrentFile result, out String error)
+    IReadOnlyList<PeerSharp.Core.TorrentFileEntry> GetFiles()
+    IReadOnlyList<String> Trackers { get; }
+    IReadOnlyList<String> WebSeeds { get; }
+    Int32 FileCount { get; }
+    Int32 GetHashCode()
+    Int32 PieceCount { get; }
+    Int64 TotalSize { get; }
+    PeerSharp.Core.InfoHash InfoHash { get; }
+    PeerSharp.Core.InfoHash InfoHashV2 { get; }
+    PeerSharp.Core.TorrentFile Load(String path)
+    PeerSharp.Core.TorrentFile Parse(Byte[] data)
+    PeerSharp.Core.TorrentFile Parse(ReadOnlySpan<Byte> data)
+    PeerSharp.Core.TorrentFileEntry GetFile(Int32 fileIndex)
+    ReadOnlyMemory<Byte> RawData { get; }
+    String Announce { get; }
+    String Name { get; }
+    String ToString()
+    Task<PeerSharp.Core.TorrentFile> LoadAsync(String path, CancellationToken cancellationToken = default)
+    UInt32 PieceSize { get; }
+enum PeerSharp.Core.TorrentFileAttributes
+    Executable = 1
+    Hidden = 2
+    None = 0
+    Padding = 8
+    Symlink = 4
+sealed class PeerSharp.Core.TorrentFileBuilder
+    .ctor()
+    PeerSharp.Core.TorrentFile Build()
+    PeerSharp.Core.TorrentFileBuilder AddFile(String torrentPath, Byte[] data)
+    PeerSharp.Core.TorrentFileBuilder AddFile(String torrentPath, Byte[] data, PeerSharp.Core.TorrentFileAttributes attributes)
+    PeerSharp.Core.TorrentFileBuilder AddFileFromPath(String filePath, String torrentPath = default)
+    PeerSharp.Core.TorrentFileBuilder AddFileFromPath(String filePath, String torrentPath, PeerSharp.Core.TorrentFileAttributes attributes)
+    PeerSharp.Core.TorrentFileBuilder AddSymlink(String torrentPath, String targetPath)
+    PeerSharp.Core.TorrentFileBuilder AddTracker(String trackerUrl)
+    PeerSharp.Core.TorrentFileBuilder AddTrackerTier(IEnumerable<String> trackerUrls)
+    PeerSharp.Core.TorrentFileBuilder AddWebSeed(String webSeedUrl)
+    PeerSharp.Core.TorrentFileBuilder WithAnnounce(String announceUrl)
+    PeerSharp.Core.TorrentFileBuilder WithAsyncFileIO(Boolean enabled = default)
+    PeerSharp.Core.TorrentFileBuilder WithName(String name)
+    PeerSharp.Core.TorrentFileBuilder WithPaddingFiles(Boolean enabled = default)
+    PeerSharp.Core.TorrentFileBuilder WithPerFileSha1(Boolean enabled = default)
+    PeerSharp.Core.TorrentFileBuilder WithPieceLength(UInt32 length)
+    PeerSharp.Core.TorrentFileBuilder WithPrivate(Boolean isPrivate = default)
+    PeerSharp.Core.TorrentFileBuilder WithVersion(PeerSharp.Core.TorrentFileVersion version)
+    Task<PeerSharp.Core.TorrentFile> BuildAsync(CancellationToken cancellationToken = default)
+struct PeerSharp.Core.TorrentFileEntry
+    Boolean IsExecutable { get; }
+    Boolean IsHidden { get; }
+    Boolean IsSymlink { get; }
+    Int32 Index { get; }
+    Int64 Size { get; }
+    Nullable<ReadOnlyMemory<Byte>> Sha1 { get; }
+    PeerSharp.Core.TorrentFileAttributes Attributes { get; }
+    String Path { get; }
+    String SymlinkTarget { get; }
+    String ToString()
+sealed class PeerSharp.Core.TorrentFileInfo
+    .ctor(String Path, Int64 Size, Int32 Index, Int64 DownloadedBytes = default)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.TorrentFileInfo other)
+    Int32 GetHashCode()
+    Int32 Index { get; init; }
+    Int64 DownloadedBytes { get; init; }
+    Int64 Size { get; init; }
+    PeerSharp.Core.TorrentFileInfo <Clone>$()
+    Single Progress { get; }
+    String Path { get; init; }
+    String ToString()
+    Void Deconstruct(out String Path, out Int64 Size, out Int32 Index, out Int64 DownloadedBytes)
+enum PeerSharp.Core.TorrentFileVersion
+    Hybrid = 3
+    V1 = 1
+    V2 = 2
+sealed class PeerSharp.Core.TorrentResumeData
+    .ctor()
+    Byte[] Data { get; init; }
+    DateTimeOffset Timestamp { get; init; }
+    PeerSharp.Core.InfoHash Hash { get; init; }
+sealed class PeerSharp.Core.TrackerStatus
+    .ctor(String Url, PeerSharp.Core.TrackerStatusType Status = default, DateTimeOffset LastAnnounce = default, DateTimeOffset NextAnnounce = default, Int32 Interval = default, Int32 ConsecutiveFailures = default, String LastError = default, UInt32 SeedCount = default, UInt32 LeechCount = default)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.TrackerStatus other)
+    DateTimeOffset LastAnnounce { get; init; }
+    DateTimeOffset NextAnnounce { get; init; }
+    Int32 ConsecutiveFailures { get; init; }
+    Int32 GetHashCode()
+    Int32 Interval { get; init; }
+    PeerSharp.Core.TrackerStatus <Clone>$()
+    PeerSharp.Core.TrackerStatusType Status { get; init; }
+    String LastError { get; init; }
+    String ToString()
+    String Url { get; init; }
+    UInt32 LeechCount { get; init; }
+    UInt32 SeedCount { get; init; }
+    Void Deconstruct(out String Url, out PeerSharp.Core.TrackerStatusType Status, out DateTimeOffset LastAnnounce, out DateTimeOffset NextAnnounce, out Int32 Interval, out Int32 ConsecutiveFailures, out String LastError, out UInt32 SeedCount, out UInt32 LeechCount)
+enum PeerSharp.Core.TrackerStatusType
+    CircuitOpen = 2
+    NotWorking = 1
+    Unknown = 3
+    Working = 0
+sealed class PeerSharp.Core.TransferStatsAlert
+    .ctor()
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.TorrentAlert other)
+    Boolean Equals(PeerSharp.Core.TransferStatsAlert other)
+    Int32 ConnectedPeers { get; init; }
+    Int32 DownloadSpeed { get; init; }
+    Int32 GetHashCode()
+    Int32 UploadSpeed { get; init; }
+    Int64 Downloaded { get; init; }
+    Int64 Uploaded { get; init; }
+    PeerSharp.Core.TransferStatsAlert <Clone>$()
+    String ToString()
+class PeerSharp.Exceptions.TorrentAlreadyExistsException
+    .ctor(PeerSharp.Interfaces.ITorrent existingTorrent)
+    PeerSharp.Interfaces.ITorrent ExistingTorrent { get; }
+class PeerSharp.Exceptions.TorrentException
+    .ctor(String message)
+    .ctor(String message, Exception innerException)
+    .ctor(String message, PeerSharp.Core.InfoHash infoHash)
+    .ctor(String message, PeerSharp.Core.InfoHash infoHash, Exception innerException)
+    Nullable<PeerSharp.Core.InfoHash> InfoHash { get; }
+class PeerSharp.Exceptions.TorrentNotFoundException
+    .ctor(PeerSharp.Core.InfoHash infoHash)
+struct PeerSharp.Interfaces.DownloadProgress
+    Int32 CompletedPieces { get; init; }
+    Int32 TotalPieces { get; init; }
+    Int64 RemainingBytes { get; }
+    Single Progress { get; init; }
+    Single SelectionProgress { get; init; }
+    UInt64 FinishedBytes { get; init; }
+    UInt64 TotalBytes { get; init; }
+interface PeerSharp.Interfaces.IAlerts
+    IAsyncEnumerable<PeerSharp.Core.Alert> GetAlertsAsync(Nullable<TimeSpan> pollingInterval = default, CancellationToken cancellationToken = default)
+    List<PeerSharp.Core.Alert> PopAlerts()
+    Void RegisterAlerts(UInt32 alertMask)
+interface PeerSharp.Interfaces.IBandwidth
+    ValueTuple<Int32, Int32> GetTorrentDiskLimits(PeerSharp.Interfaces.ITorrent torrent)
+    ValueTuple<Int32, Int32> GetTorrentLimits(PeerSharp.Interfaces.ITorrent torrent)
+    Void SetGlobalDiskLimits(Int32 readLimit, Int32 writeLimit)
+    Void SetGlobalLimits(Int32 downloadLimit, Int32 uploadLimit)
+    Void SetTorrentDiskLimits(PeerSharp.Interfaces.ITorrent torrent, Int32 readLimit, Int32 writeLimit)
+    Void SetTorrentLimits(PeerSharp.Interfaces.ITorrent torrent, Int32 downloadLimit, Int32 uploadLimit)
+interface PeerSharp.Interfaces.IClientEngine
+    Boolean BlocklistEnabled { get; set; }
+    Boolean GeoIpEnabled { get; set; }
+    IReadOnlyList<PeerSharp.Core.PortMappingStatus> GetPortMappingStatus()
+    IReadOnlyList<PeerSharp.Interfaces.ITorrent> GetTorrents()
+    Int32 BoundTcpPort { get; }
+    Int32 BoundUdpPort { get; }
+    PeerSharp.Config.Settings Settings { get; }
+    PeerSharp.Core.EngineStats GetStats()
+    PeerSharp.Interfaces.IAlerts Alerts { get; }
+    PeerSharp.Interfaces.IBandwidth Bandwidth { get; }
+    PeerSharp.Interfaces.ITorrent GetTorrent(PeerSharp.Core.InfoHash hash)
+    Task InitializeAsync(CancellationToken cancellationToken = default)
+    Task LoadBlocklistAsync(IO.Stream stream, CancellationToken cancellationToken = default)
+    Task LoadGeoIpAsync(IO.Stream stream, CancellationToken cancellationToken = default)
+    Task RemoveTorrentAsync(PeerSharp.Core.InfoHash hash, PeerSharp.Config.RemoveOptions options = default, CancellationToken cancellationToken = default)
+    Task RemoveTorrentAsync(PeerSharp.Interfaces.ITorrent torrent, PeerSharp.Config.RemoveOptions options = default, CancellationToken cancellationToken = default)
+    Task SaveSessionAsync(CancellationToken cancellationToken = default)
+    Task<PeerSharp.Core.TorrentFile> GetMagnetMetadataAsync(PeerSharp.Core.MagnetLink magnetLink, CancellationToken cancellationToken = default)
+    Task<PeerSharp.Interfaces.ITorrent> AddMagnetAsync(PeerSharp.Core.MagnetLink magnetLink, PeerSharp.Config.AddTorrentOptions options = default, CancellationToken cancellationToken = default)
+    Task<PeerSharp.Interfaces.ITorrent> AddTorrentAsync(PeerSharp.Core.TorrentFile torrentFile, PeerSharp.Config.AddTorrentOptions options = default, CancellationToken cancellationToken = default)
+    Void ClearBlocklist()
+    Void ClearGeoIp()
+    Void LoadBlocklist(IO.Stream stream)
+    Void LoadGeoIp(IO.Stream stream)
+interface PeerSharp.Interfaces.IFileTransfer
+    Boolean EndGameMode { get; }
+    Int64 Downloaded { get; }
+    Int64 Uploaded { get; }
+interface PeerSharp.Interfaces.IFiles
+    Boolean Checking { get; }
+    String DownloadPath { get; }
+interface PeerSharp.Interfaces.IMetadataDownload
+    Boolean Finished { get; }
+    Single Progress { get; }
+    Void Start()
+    Void Stop()
+interface PeerSharp.Interfaces.IPeerTransport
+    Task StartAsync(CancellationToken cancellationToken = default)
+    Task StopAsync(CancellationToken cancellationToken = default)
+interface PeerSharp.Interfaces.IPeerTransportHost
+    Int64 DataDownloaded { get; }
+    Int64 DataLeft { get; }
+    Int64 DataUploaded { get; }
+    PeerSharp.Core.InfoHash Hash { get; }
+    ReadOnlyMemory<Byte> PeerId { get; }
+    Task AttachPeerTransportAsync(IO.Stream stream, Boolean initiator, CancellationToken cancellationToken = default)
+interface PeerSharp.Interfaces.IPeers
+    IReadOnlyList<PeerSharp.Core.PeerInfo> GetConnectedPeers()
+    Int32 ConnectedCount { get; }
+    Int32[] GetPieceAvailability()
+interface PeerSharp.Interfaces.ISessionPersistence
+    Task DeleteAsync(PeerSharp.Core.InfoHash hash, CancellationToken cancellationToken = default)
+    Task SaveAllAsync(IEnumerable<PeerSharp.Interfaces.SavedTorrentEntry> entries, CancellationToken cancellationToken = default)
+    Task SaveAsync(PeerSharp.Interfaces.SavedTorrentEntry entry, CancellationToken cancellationToken = default)
+    Task SaveDhtStateAsync(PeerSharp.Core.DhtState state, CancellationToken cancellationToken = default)
+    Task<IReadOnlyList<PeerSharp.Interfaces.SavedTorrentEntry>> LoadAllAsync(CancellationToken cancellationToken = default)
+    Task<PeerSharp.Core.DhtState> LoadDhtStateAsync(CancellationToken cancellationToken = default)
+interface PeerSharp.Interfaces.ITorrent
+    Boolean Finished { get; }
+    Boolean HasMetadata { get; }
+    Boolean HasStreamableFiles { get; }
+    Boolean QueueAutoStart { get; set; }
+    Boolean SelectionFinished { get; }
+    Boolean Started { get; }
+    Byte[] GetPieceBitfield()
+    DateTimeOffset StateTimestamp { get; }
+    DateTimeOffset TimeAdded { get; }
+    Exception LastException { get; }
+    IReadOnlyList<Int32> StreamableFileIndices { get; }
+    IReadOnlyList<PeerSharp.Core.FileSelection> GetAllFileSelections()
+    IReadOnlyList<PeerSharp.Core.TorrentFileInfo> GetAllFileInfo()
+    Int32 DiskReadLimitBytesPerSecond { get; set; }
+    Int32 DiskWriteLimitBytesPerSecond { get; set; }
+    Int32 DownloadLimitBytesPerSecond { get; set; }
+    Int32 FileCount { get; }
+    Int32 PieceCount { get; }
+    Int32 PiecesReceived { get; }
+    Int32 QueuePriority { get; set; }
+    Int32 UploadLimitBytesPerSecond { get; set; }
+    Int64 DataLeft { get; }
+    Int64 TotalSize { get; }
+    Nullable<Single> RatioLimit { get; set; }
+    Nullable<TimeSpan> SeedTimeLimit { get; set; }
+    PeerSharp.Core.DownloadStrategy DownloadStrategy { get; set; }
+    PeerSharp.Core.FileSelection GetFileSelection(Int32 fileIndex)
+    PeerSharp.Core.InfoHash Hash { get; }
+    PeerSharp.Core.InfoHash HashV2 { get; }
+    PeerSharp.Core.TorrentFile ExportTorrentFile()
+    PeerSharp.Core.TorrentFileInfo GetFileInfo(Int32 fileIndex)
+    PeerSharp.Core.TorrentResumeData GetResumeData()
+    PeerSharp.Interfaces.IFileTransfer FileTransfer { get; }
+    PeerSharp.Interfaces.IFiles Files { get; }
+    PeerSharp.Interfaces.IMetadataDownload MetadataDownload { get; }
+    PeerSharp.Interfaces.IPeers Peers { get; }
+    PeerSharp.Interfaces.ITorrentEvents Events { get; }
+    PeerSharp.Interfaces.ITrackers Trackers { get; }
+    PeerSharp.Interfaces.TorrentState State { get; }
+    Single Progress { get; }
+    Single SelectionProgress { get; }
+    String Name { get; }
+    Task SetAllFilesPriorityAsync(PeerSharp.Core.Priority priority, CancellationToken cancellationToken = default)
+    Task SetDownloadPathAsync(String path, CancellationToken cancellationToken = default)
+    Task SetFilePriorityAsync(Int32 fileIndex, PeerSharp.Core.Priority priority, CancellationToken cancellationToken = default)
+    Task SetFileSelectionAsync(Int32 fileIndex, PeerSharp.Core.FileSelection selection, CancellationToken cancellationToken = default)
+    Task StartAsync(CancellationToken cancellationToken = default)
+    Task StopAsync(CancellationToken cancellationToken = default)
+    Task WaitForMetadataAsync(CancellationToken cancellationToken = default)
+    Task<IO.Stream> OpenStreamAsync(Int32 fileIndex, CancellationToken cancellationToken = default)
+    Task<Int32> ForceRecheckAsync(IProgress<PeerSharp.Core.PieceCheckProgress> progress = default, CancellationToken cancellationToken = default)
+    UInt32 PieceSize { get; }
+    UInt64 FinishedBytes { get; }
+    UInt64 FinishedSelectedBytes { get; }
+    Void RegisterPeerTransport(PeerSharp.Interfaces.IPeerTransport transport)
+interface PeerSharp.Interfaces.ITorrentEvents
+    Action<PeerSharp.Interfaces.ITorrent, Boolean> Finished { get; }
+    Action<PeerSharp.Interfaces.ITorrent, Exception> Error { get; }
+    Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.DownloadProgress> ProgressChanged { get; }
+    Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.MetadataProgress> MetadataProgress { get; }
+    Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.PieceProgress> PieceCompleted { get; }
+    Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.StateTransition> StateChanged { get; }
+    Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.TransferStats> TransferStats { get; }
+    Action<PeerSharp.Interfaces.ITorrent> MetadataReceived { get; }
+interface PeerSharp.Interfaces.ITrackers
+    Boolean RemoveTracker(String url)
+    IReadOnlyList<PeerSharp.Core.TrackerStatus> GetTrackers()
+    Task AnnounceAsync(String url = default, CancellationToken cancellationToken = default)
+    Void AddTracker(String url)
+struct PeerSharp.Interfaces.MetadataProgress
+    Int32 ReceivedPieces { get; init; }
+    Int32 TotalPieces { get; init; }
+    Single Progress { get; init; }
+struct PeerSharp.Interfaces.PieceProgress
+    Int32 CompletedPieces { get; init; }
+    Int32 PieceIndex { get; init; }
+    Int32 TotalPieces { get; init; }
+    Single Progress { get; }
+sealed class PeerSharp.Interfaces.SavedTorrentEntry
+    .ctor(PeerSharp.Core.InfoHash Hash, Byte[] TorrentFileData = default, String MagnetLink = default, PeerSharp.Core.TorrentResumeData ResumeData = default, PeerSharp.Interfaces.SavedTorrentOptions Options = default)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Interfaces.SavedTorrentEntry other)
+    Byte[] TorrentFileData { get; init; }
+    Int32 GetHashCode()
+    PeerSharp.Core.InfoHash Hash { get; init; }
+    PeerSharp.Core.TorrentResumeData ResumeData { get; init; }
+    PeerSharp.Interfaces.SavedTorrentEntry <Clone>$()
+    PeerSharp.Interfaces.SavedTorrentOptions Options { get; init; }
+    String MagnetLink { get; init; }
+    String ToString()
+    Void Deconstruct(out PeerSharp.Core.InfoHash Hash, out Byte[] TorrentFileData, out String MagnetLink, out PeerSharp.Core.TorrentResumeData ResumeData, out PeerSharp.Interfaces.SavedTorrentOptions Options)
+sealed class PeerSharp.Interfaces.SavedTorrentOptions
+    .ctor(String DownloadPath = default, Boolean WasStarted = default, Int32 DownloadLimitBytesPerSecond = default, Int32 UploadLimitBytesPerSecond = default, Int32 QueuePriority = default, Nullable<Single> RatioLimit = default, Nullable<TimeSpan> SeedTimeLimit = default, PeerSharp.Core.DownloadStrategy DownloadStrategy = default)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Interfaces.SavedTorrentOptions other)
+    Boolean WasStarted { get; init; }
+    Int32 DownloadLimitBytesPerSecond { get; init; }
+    Int32 GetHashCode()
+    Int32 QueuePriority { get; init; }
+    Int32 UploadLimitBytesPerSecond { get; init; }
+    Nullable<Single> RatioLimit { get; init; }
+    Nullable<TimeSpan> SeedTimeLimit { get; init; }
+    PeerSharp.Core.DownloadStrategy DownloadStrategy { get; init; }
+    PeerSharp.Interfaces.SavedTorrentOptions <Clone>$()
+    String DownloadPath { get; init; }
+    String ToString()
+    Void Deconstruct(out String DownloadPath, out Boolean WasStarted, out Int32 DownloadLimitBytesPerSecond, out Int32 UploadLimitBytesPerSecond, out Int32 QueuePriority, out Nullable<Single> RatioLimit, out Nullable<TimeSpan> SeedTimeLimit, out PeerSharp.Core.DownloadStrategy DownloadStrategy)
+struct PeerSharp.Interfaces.StateTransition
+    PeerSharp.Interfaces.TorrentState NewState { get; init; }
+    PeerSharp.Interfaces.TorrentState PreviousState { get; init; }
+sealed class PeerSharp.Interfaces.TorrentEventsBuilder
+    .ctor()
+    PeerSharp.Interfaces.ITorrentEvents Build()
+    PeerSharp.Interfaces.TorrentEventsBuilder OnError(Action<PeerSharp.Interfaces.ITorrent, Exception> handler)
+    PeerSharp.Interfaces.TorrentEventsBuilder OnFinished(Action<PeerSharp.Interfaces.ITorrent, Boolean> handler)
+    PeerSharp.Interfaces.TorrentEventsBuilder OnMetadataProgress(Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.MetadataProgress> handler)
+    PeerSharp.Interfaces.TorrentEventsBuilder OnMetadataReceived(Action<PeerSharp.Interfaces.ITorrent> handler)
+    PeerSharp.Interfaces.TorrentEventsBuilder OnPieceCompleted(Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.PieceProgress> handler)
+    PeerSharp.Interfaces.TorrentEventsBuilder OnProgressChanged(Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.DownloadProgress> handler)
+    PeerSharp.Interfaces.TorrentEventsBuilder OnStateChanged(Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.StateTransition> handler)
+    PeerSharp.Interfaces.TorrentEventsBuilder OnTransferStats(Action<PeerSharp.Interfaces.ITorrent, PeerSharp.Interfaces.TransferStats> handler)
+enum PeerSharp.Interfaces.TorrentState
+    Active = 0
+    CheckingFiles = 3
+    DownloadingMetadata = 4
+    Stopped = 2
+    Stopping = 1
+struct PeerSharp.Interfaces.TransferStats
+    Int32 ConnectedPeers { get; init; }
+    Int32 DownloadSpeed { get; init; }
+    Int32 UploadSpeed { get; init; }
+    Int64 Downloaded { get; init; }
+    Int64 Uploaded { get; init; }
+    Single Ratio { get; }
+class PeerSharp.Internals.Trackers.UdpTrackerException
+    .ctor(String message, Boolean isTransient = default)
+    .ctor(String message, Exception inner, Boolean isTransient = default)
+    Boolean IsTransient { get; }
+interface PeerSharp.PieceWriter.IFileHandleLease
+    Microsoft.Win32.SafeHandles.SafeFileHandle Handle { get; }
+    String Path { get; }
+class PeerSharp.PieceWriter.StorageException
+    .ctor()
+    .ctor(String message)
+    .ctor(String message, Exception inner, Boolean isRecoverable)
+    .ctor(String message, Exception innerException)
+    Boolean IsRecoverable { get; }
+sealed class PeerSharp.Streaming.HttpStreamServer
+    .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex)
+    .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex, Microsoft.Extensions.Logging.ILoggerFactory loggerFactory)
+    String Url { get; }
+    Void Dispose()
+    Void Start()
