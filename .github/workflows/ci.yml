@@ -70,6 +70,33 @@ jobs:
           path: TestResults/*.trx
           if-no-files-found: ignore
 
+  benchmarks-smoke:
+    # Deliberately not a measurement job: shared CI runners are far too noisy for numbers worth
+    # acting on. This only proves the suites still compile and their fixtures still set up, so
+    # benchmarks cannot silently rot between the runs a human actually reads.
+    name: Benchmarks (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore benchmarks/PeerSharp.Benchmarks/PeerSharp.Benchmarks.csproj
+
+      - name: Build (warnings as errors)
+        run: dotnet build benchmarks/PeerSharp.Benchmarks/PeerSharp.Benchmarks.csproj --no-restore --configuration Release -warnaserror
+
+      - name: Dry-run all suites
+        run: >
+          dotnet run --project benchmarks/PeerSharp.Benchmarks --configuration Release --no-build
+          -- --filter "*" --job Dry
+
   webtorrent-tests:
     name: WebTorrent (${{ matrix.os }})
     strategy:
