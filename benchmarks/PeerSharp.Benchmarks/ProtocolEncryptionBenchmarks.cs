@@ -83,25 +83,16 @@ public class ProtocolEncryptionBenchmarks
     [Benchmark(Description = "Encrypt, 8 peers in parallel (own ciphers)")]
     public void ParallelPeersEncrypt()
     {
-        var threads = new Thread[PeerCount];
-        for (int i = 0; i < PeerCount; i++)
+        // Parallel.For rather than fresh OS threads: creating eight threads costs hundreds of
+        // microseconds and would bury the work for small payloads.
+        Parallel.For(0, PeerCount, index =>
         {
-            int index = i;
-            threads[i] = new Thread(() =>
+            var cipher = _peerCiphers[index];
+            var buffer = _peerBuffers[index];
+            for (int op = 0; op < OpsPerPeer; op++)
             {
-                var cipher = _peerCiphers[index];
-                var buffer = _peerBuffers[index];
-                for (int op = 0; op < OpsPerPeer; op++)
-                {
-                    cipher.Encrypt(buffer.AsSpan());
-                }
-            });
-            threads[i].Start();
-        }
-
-        for (int i = 0; i < PeerCount; i++)
-        {
-            threads[i].Join();
-        }
+                cipher.Encrypt(buffer.AsSpan());
+            }
+        });
     }
 }

@@ -158,7 +158,10 @@ internal class TorrentPieceCheckerContext : IPieceCheckerContext
     {
         if (IsMerkle)
         {
-            return _torrent.MerkleTree?.VerifyPiece(pieceIndex, pieceData.ToArray()) ?? false;
+            // Bind the ReadOnlySpan overload directly: .ToArray() here copied the whole piece on
+            // every verification, which at a 4 MiB piece size meant a multi-megabyte LOH
+            // allocation - and a Gen2 collection - per piece checked.
+            return _torrent.MerkleTree?.VerifyPiece(pieceIndex, pieceData) ?? false;
         }
 
         if (IsV2)
