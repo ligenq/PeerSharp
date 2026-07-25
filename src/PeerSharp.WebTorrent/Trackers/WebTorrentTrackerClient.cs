@@ -77,14 +77,26 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
         {
             await connectTask.WaitAsync(_connectTimeout, _timeProvider, cancellationToken).ConfigureAwait(false);
         }
-        catch (TimeoutException)
+        catch
         {
+            // Observe connectTask on every failure path, not just timeouts: we stop awaiting it
+            // here, and the DisposeAsync below will typically fault it. An unobserved fault would
+            // surface later as TaskScheduler.UnobservedTaskException.
             _ = connectTask.ContinueWith(
                 static completed => _ = completed.Exception,
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
-            await socket.DisposeAsync().ConfigureAwait(false);
+
+            try
+            {
+                await socket.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception cleanupException)
+            {
+                _logger.LogDebug(cleanupException, "Ignored socket cleanup error after tracker connect failed for {Url}", _url);
+            }
+
             throw;
         }
 

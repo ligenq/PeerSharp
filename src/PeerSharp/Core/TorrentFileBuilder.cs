@@ -518,10 +518,105 @@ public sealed class TorrentFileBuilder
 
     private async Task<byte[]> BuildHybridTorrentBytesAsync(CancellationToken cancellationToken)
     {
-        var metadata = await BuildV2MetadataAsync(cancellationToken).ConfigureAwait(false);
+        var (metadata, pieceHashes) = await BuildHybridMetadataAndPiecesAsync(cancellationToken).ConfigureAwait(false);
         ApplyHybridV1Fields(metadata.Info);
-        metadata.Info.Dict["pieces"] = new BString(await BuildPieceHashesAsync(cancellationToken).ConfigureAwait(false));
+        metadata.Info.Dict["pieces"] = new BString(pieceHashes);
         return BuildRootDictionary(metadata.Info, metadata.PieceLayers);
+    }
+
+    /// <summary>
+    /// Computes the V1 piece stream, V2 per-file Merkle data, and optional BEP 47 SHA-1 values
+    /// during one pass over each source. Hybrid torrents previously read every file two or three
+    /// times, which dominated build time on large datasets.
+    /// </summary>
+    private async Task<(V2Metadata Metadata, byte[] PieceHashes)> BuildHybridMetadataAndPiecesAsync(
+        CancellationToken cancellationToken)
+    {
+        int pieceLength = checked((int)_pieceLength);
+        var pieceBuffer = new byte[pieceLength];
+        int pieceFill = 0;
+        using var piecesStream = new MemoryStream();
+        var merkleFiles = new List<FileMerkleInfo>(_files.Count);
+        byte[] readBuffer = new byte[Math.Max(MerkleTree.BlockSize, 64 * 1024)];
+
+        foreach (var file in GetV1FilesWithPadding())
+        {
+            bool isPadding = (file.Attributes & TorrentFileAttributes.Padding) != 0;
+            var leaves = isPadding ? null : new List<byte[]>();
+            byte[]? merkleBlock = isPadding ? null : new byte[MerkleTree.BlockSize];
+            int merkleFill = 0;
+            using IncrementalHash? fileSha1 = !isPadding && _emitPerFileSha1 && !file.IsSymlink && file.Sha1 == null
+                ? IncrementalHash.CreateHash(HashAlgorithmName.SHA1)
+                : null;
+
+            await using var stream = file.OpenReadWithAsyncIO();
+            int bytesRead;
+            while ((bytesRead = await stream.ReadAsync(readBuffer.AsMemory(), cancellationToken).ConfigureAwait(false)) > 0)
+            {
+                fileSha1?.AppendData(readBuffer, 0, bytesRead);
+
+                int sourceOffset = 0;
+                while (sourceOffset < bytesRead)
+                {
+                    int copy = Math.Min(pieceLength - pieceFill, bytesRead - sourceOffset);
+                    readBuffer.AsSpan(sourceOffset, copy).CopyTo(pieceBuffer.AsSpan(pieceFill));
+                    pieceFill += copy;
+                    sourceOffset += copy;
+                    if (pieceFill == pieceLength)
+                    {
+                        await piecesStream.WriteAsync(SHA1.HashData(pieceBuffer), cancellationToken).ConfigureAwait(false);
+                        pieceFill = 0;
+                    }
+                }
+
+                if (!isPadding)
+                {
+                    sourceOffset = 0;
+                    while (sourceOffset < bytesRead)
+                    {
+                        int copy = Math.Min(MerkleTree.BlockSize - merkleFill, bytesRead - sourceOffset);
+                        readBuffer.AsSpan(sourceOffset, copy).CopyTo(merkleBlock!.AsSpan(merkleFill));
+                        merkleFill += copy;
+                        sourceOffset += copy;
+                        if (merkleFill == MerkleTree.BlockSize)
+                        {
+                            leaves!.Add(MerkleTree.HashBlock(merkleBlock));
+                            merkleFill = 0;
+                        }
+                    }
+                }
+            }
+
+            if (isPadding)
+            {
+                continue;
+            }
+
+            if (merkleFill > 0)
+            {
+                leaves!.Add(HashMerkleBlock(merkleBlock!, merkleFill));
+            }
+            if (fileSha1 != null)
+            {
+                file.Sha1 = fileSha1.GetHashAndReset();
+            }
+
+            merkleFiles.Add(new FileMerkleInfo(
+                file,
+                MerkleTree.ComputeRoot(leaves!),
+                MerkleTree.GetPieceLayer(leaves!, _pieceLength)));
+        }
+
+        if (pieceFill > 0)
+        {
+            await piecesStream.WriteAsync(
+                SHA1.HashData(pieceBuffer.AsSpan(0, pieceFill)),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        var info = BuildV2InfoDictionary(merkleFiles);
+        var pieceLayers = BuildPieceLayersDictionary(merkleFiles);
+        return (new V2Metadata(info, pieceLayers), piecesStream.ToArray());
     }
 
     private List<FileMerkleInfo> BuildMerkleFiles()
@@ -537,13 +632,19 @@ public sealed class TorrentFileBuilder
 
     private async Task<List<FileMerkleInfo>> BuildMerkleFilesAsync(CancellationToken cancellationToken)
     {
-        var results = new List<FileMerkleInfo>(_files.Count);
-        foreach (var file in _files)
+        var results = new FileMerkleInfo[_files.Count];
+        var options = new ParallelOptions
         {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 1, 4)
+        };
+        await Parallel.ForEachAsync(Enumerable.Range(0, _files.Count), options, async (index, ct) =>
+        {
+            var file = _files[index];
             await using var stream = file.OpenReadWithAsyncIO();
-            results.Add(await BuildMerkleInfoAsync(file, stream, cancellationToken).ConfigureAwait(false));
-        }
-        return results;
+            results[index] = await BuildMerkleInfoAsync(file, stream, ct).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+        return [.. results];
     }
 
     private FileMerkleInfo BuildMerkleInfo(FileSource file, Stream stream)
@@ -678,16 +779,17 @@ public sealed class TorrentFileBuilder
 
     private async Task PrepareFileSha1DigestsAsync(CancellationToken cancellationToken)
     {
-        foreach (var file in _files)
+        var candidates = _files.Where(static file => !file.IsSymlink && file.Sha1 == null).ToArray();
+        var options = new ParallelOptions
         {
-            if (file.IsSymlink || file.Sha1 != null)
-            {
-                continue;
-            }
-
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 1, 4)
+        };
+        await Parallel.ForEachAsync(candidates, options, async (file, ct) =>
+        {
             await using var stream = file.OpenReadWithAsyncIO();
-            file.Sha1 = await SHA1.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
-        }
+            file.Sha1 = await SHA1.HashDataAsync(stream, ct).ConfigureAwait(false);
+        }).ConfigureAwait(false);
     }
 
     private byte[] BuildRawTorrentBytes()
@@ -709,7 +811,7 @@ public sealed class TorrentFileBuilder
     private async Task<byte[]> BuildRawTorrentBytesAsync(CancellationToken cancellationToken)
     {
         ValidateInputs();
-        if (_emitPerFileSha1)
+        if (_emitPerFileSha1 && _version != TorrentFileVersion.Hybrid)
         {
             await PrepareFileSha1DigestsAsync(cancellationToken).ConfigureAwait(false);
         }

@@ -161,17 +161,23 @@ internal sealed class SessionManager : IAsyncDisposable
     public async Task SaveAllResumeDataAsync(CancellationToken cancellationToken = default)
     {
         var torrents = _registry.GetAll();
-        foreach (var torrent in torrents)
+        var options = new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 2, 8)
+        };
+
+        await Parallel.ForEachAsync(torrents, options, async (torrent, ct) =>
         {
             try
             {
-                await SaveTorrentEntryAsync(torrent, null, null, cancellationToken).ConfigureAwait(false);
+                await SaveTorrentEntryAsync(torrent, null, null, ct).ConfigureAwait(false);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "Failed to save resume data for {Name}", torrent.Name);
             }
-        }
+        }).ConfigureAwait(false);
     }
 
     public async Task SaveTorrentEntryAsync(Torrent torrent, byte[]? torrentFileData = null, string? magnetLink = null, CancellationToken cancellationToken = default)

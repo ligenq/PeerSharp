@@ -41,13 +41,13 @@ internal class PortListener : IPortListener
 
     public int Port { get; private set; }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         if (_disposal.MarkDisposed())
         {
             Stop();
         }
-        await ValueTask.CompletedTask.ConfigureAwait(false);
+        return ValueTask.CompletedTask;
     }
 
     public void Start(int port)

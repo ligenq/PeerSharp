@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32.SafeHandles;
 using PeerSharp.Internals;
+using System.Diagnostics;
 
 namespace PeerSharp.PieceWriter;
 
@@ -40,7 +41,7 @@ internal sealed class Storage : IStorage
     private readonly IFileHandleCache _handleCache;
     private readonly TorrentFileMetadata _info;
     private readonly ILogger<Storage> _logger;
-    private readonly ManualResetEventSlim _noWritesInFlight = new(true);
+    private readonly Lock _writeTrackingLock = new();
     private readonly IPathValidator _pathValidator;
     private readonly string _rootPath;
     private readonly bool _enableSparseFiles;
@@ -63,6 +64,7 @@ internal sealed class Storage : IStorage
 
     // Graceful shutdown tracking
     private int _inFlightWrites = 0;
+    private TaskCompletionSource _writesDrained = CreateCompletedSignal();
 
     private int _shutdownRequested = 0;
     private int _initialized = 0;
@@ -169,13 +171,19 @@ internal sealed class Storage : IStorage
 
         Interlocked.Exchange(ref _shutdownRequested, 1);
 
-        if (Interlocked.CompareExchange(ref _inFlightWrites, 0, 0) > 0)
+        Task writesDrained;
+        lock (_writeTrackingLock)
         {
-            bool completed = await Task.Run(() => _noWritesInFlight.Wait(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
-            if (!completed)
-            {
-                _logger.LogWarning("Storage shutdown proceeded with {Count} in-flight writes remaining (timeout)", Interlocked.CompareExchange(ref _inFlightWrites, 0, 0));
-            }
+            writesDrained = _inFlightWrites == 0 ? Task.CompletedTask : _writesDrained.Task;
+        }
+
+        try
+        {
+            await writesDrained.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
+        catch (TimeoutException ex)
+        {
+            _logger.LogWarning(ex, "Storage shutdown proceeded with {Count} in-flight writes remaining (timeout)", Volatile.Read(ref _inFlightWrites));
         }
 
         _handleCache.CloseTorrentHandles(_rootPath);
@@ -204,7 +212,6 @@ internal sealed class Storage : IStorage
             }
         }
 
-        _noWritesInFlight.Dispose();
         _fileSelectionLock.Dispose();
         // Clear _fileLocks because the semaphores above were just disposed; a stray post-dispose
         // access through the array would throw ObjectDisposedException. _files holds POCOs
@@ -373,17 +380,10 @@ internal sealed class Storage : IStorage
             _fileSelectionLock.Release();
         }
 
-        var lockedFiles = new List<int>();
+        var acquiredLocks = new List<SemaphoreSlim>(fileOperations.Count);
         try
         {
-            foreach (var (FileIdx, _, _, _) in fileOperations)
-            {
-                if (!lockedFiles.Contains(FileIdx))
-                {
-                    await _fileLocks[FileIdx].WaitAsync(ct).ConfigureAwait(false);
-                    lockedFiles.Add(FileIdx);
-                }
-            }
+            await AcquireFileLocksAsync(fileOperations, acquiredLocks, failIfShuttingDown: false, ct).ConfigureAwait(false);
 
             foreach (var (fileIdx, fileOffset, readSize, bufferOffset) in fileOperations)
             {
@@ -433,10 +433,7 @@ internal sealed class Storage : IStorage
         }
         finally
         {
-            for (int i = lockedFiles.Count - 1; i >= 0; i--)
-            {
-                _fileLocks[lockedFiles[i]].Release();
-            }
+            ReleaseFileLocks(acquiredLocks);
         }
     }
 
@@ -549,129 +546,189 @@ internal sealed class Storage : IStorage
 
     public async ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
     {
-        int count = Interlocked.Increment(ref _inFlightWrites);
-        if (count == 1)
-        {
-            _noWritesInFlight.Reset();
-        }
-
-        if (Interlocked.CompareExchange(ref _shutdownRequested, 0, 0) == 1)
-        {
-            if (Interlocked.Decrement(ref _inFlightWrites) == 0)
-            {
-                _noWritesInFlight.Set();
-            }
-            throw new ObjectDisposedException(nameof(Storage), "Storage is shutting down");
-        }
-
-        var fileOperations = new List<(int FileIdx, long FileOffset, int WriteSize, int DataOffset)>();
-
-        await _fileSelectionLock.WaitAsync(ct).ConfigureAwait(false);
+        // Everything after this point must run inside the try: leaking the in-flight count
+        // (for example when the token is already cancelled, or _fileSelectionLock has been
+        // disposed by a racing shutdown) would leave _writesDrained permanently uncompleted and
+        // make every later ShutdownAsync wait out its full timeout.
+        BeginWrite();
         try
         {
-            if (_fileMapper != null)
+            var fileOperations = new List<(int FileIdx, long FileOffset, int WriteSize, int DataOffset)>();
+
+            await _fileSelectionLock.WaitAsync(ct).ConfigureAwait(false);
+            try
             {
-                foreach (var (FileIndex, FileOffset, Length, BufferOffset) in _fileMapper.MapRange(offset, data.Length))
+                if (_fileMapper != null)
                 {
-                    fileOperations.Add((FileIndex, FileOffset, Length, BufferOffset));
+                    foreach (var (FileIndex, FileOffset, Length, BufferOffset) in _fileMapper.MapRange(offset, data.Length))
+                    {
+                        fileOperations.Add((FileIndex, FileOffset, Length, BufferOffset));
+                    }
                 }
             }
-        }
-        finally
-        {
-            _fileSelectionLock.Release();
-        }
-
-        var lockedFiles = new List<int>();
-        var acquiredLocks = new List<SemaphoreSlim>();
-        try
-        {
-            foreach (var (FileIdx, _, _, _) in fileOperations)
+            finally
             {
-                if (!lockedFiles.Contains(FileIdx))
-                {
-                    // Check shutdown before accessing array which might be cleared
-                    if (Interlocked.CompareExchange(ref _shutdownRequested, 0, 0) == 1)
-                    {
-                        throw new ObjectDisposedException(nameof(Storage));
-                    }
-
-                    var lockObj = _fileLocks[FileIdx];
-                    await lockObj.WaitAsync(ct).ConfigureAwait(false);
-                    lockedFiles.Add(FileIdx);
-                    acquiredLocks.Add(lockObj);
-                }
+                _fileSelectionLock.Release();
             }
 
-            foreach (var (fileIdx, fileOffset, writeSize, dataOffset) in fileOperations)
+            var acquiredLocks = new List<SemaphoreSlim>(fileOperations.Count);
+            try
             {
-                if (_fileSkipped[fileIdx])
-                {
-                    // Deselected file - dropping this span is intentional
-                    continue;
-                }
+                await AcquireFileLocksAsync(fileOperations, acquiredLocks, failIfShuttingDown: true, ct).ConfigureAwait(false);
 
-                if (_fileFailed[fileIdx])
+                foreach (var (fileIdx, fileOffset, writeSize, dataOffset) in fileOperations)
                 {
-                    // Never pretend the write succeeded: silently skipping would let the piece
-                    // be recorded as complete while its bytes were dropped, corrupting the
-                    // download and later poisoning uploads to other peers.
-                    throw new StorageException(
-                        $"File '{_info.Info.Files[fileIdx].Path}' is marked failed after repeated I/O errors",
-                        null,
-                        isRecoverable: false);
-                }
+                    if (_fileSkipped[fileIdx])
+                    {
+                        // Deselected file - dropping this span is intentional
+                        continue;
+                    }
 
-                var entry = _files[fileIdx];
-                if (entry.FullPath != null)
-                {
-                    try
+                    if (_fileFailed[fileIdx])
                     {
-                        using var lease = await _handleCache.GetHandleAsync(entry.FullPath, true, ct).ConfigureAwait(false);
-                        await WriteWithThrottleAsync(lease.Handle, data.Slice(dataOffset, writeSize), fileOffset, ct).ConfigureAwait(false);
-                        Interlocked.Exchange(ref _consecutiveErrors, 0);
-                    }
-                    catch (IOException ex) when (ex.HResult == unchecked((int)0x80070070)) // ERROR_DISK_FULL
-                    {
-                        HandleDiskFull(fileIdx, ex);
-                        throw new StorageException("Disk full", ex, isRecoverable: false);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // Shutdown/cancellation is not a disk error - don't count it toward file failure
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        bool fileNowFailed = HandleFileWriteError(fileIdx, ex);
+                        // Never pretend the write succeeded: silently skipping would let the piece
+                        // be recorded as complete while its bytes were dropped, corrupting the
+                        // download and later poisoning uploads to other peers.
                         throw new StorageException(
-                            $"Write failed for file '{_info.Info.Files[fileIdx].Path}'",
-                            ex,
-                            isRecoverable: !fileNowFailed);
+                            $"File '{_info.Info.Files[fileIdx].Path}' is marked failed after repeated I/O errors",
+                            null,
+                            isRecoverable: false);
+                    }
+
+                    var entry = _files[fileIdx];
+                    if (entry.FullPath != null)
+                    {
+                        try
+                        {
+                            using var lease = await _handleCache.GetHandleAsync(entry.FullPath, true, ct).ConfigureAwait(false);
+                            await WriteWithThrottleAsync(lease.Handle, data.Slice(dataOffset, writeSize), fileOffset, ct).ConfigureAwait(false);
+                            Interlocked.Exchange(ref _consecutiveErrors, 0);
+                        }
+                        catch (IOException ex) when (ex.HResult == unchecked((int)0x80070070)) // ERROR_DISK_FULL
+                        {
+                            HandleDiskFull(fileIdx, ex);
+                            throw new StorageException("Disk full", ex, isRecoverable: false);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // Shutdown/cancellation is not a disk error - don't count it toward file failure
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            bool fileNowFailed = HandleFileWriteError(fileIdx, ex);
+                            throw new StorageException(
+                                $"Write failed for file '{_info.Info.Files[fileIdx].Path}'",
+                                ex,
+                                isRecoverable: !fileNowFailed);
+                        }
                     }
                 }
+            }
+            finally
+            {
+                ReleaseFileLocks(acquiredLocks);
             }
         }
         finally
         {
-            for (int i = acquiredLocks.Count - 1; i >= 0; i--)
+            EndWrite();
+        }
+    }
+
+    /// <summary>
+    /// Acquires the per-file locks covering <paramref name="fileOperations"/>, in ascending file
+    /// order. Reads and writes must agree on that order or they deadlock against each other.
+    /// <see cref="FileMapper.MapRange"/> walks a contiguous byte range forward, so operations
+    /// already arrive strictly ascending and unique - sorting or de-duplicating them would add
+    /// allocations to a path that runs once per 16 KiB block.
+    /// </summary>
+    private async ValueTask AcquireFileLocksAsync(
+        List<(int FileIdx, long FileOffset, int Length, int BufferOffset)> fileOperations,
+        List<SemaphoreSlim> acquiredLocks,
+        bool failIfShuttingDown,
+        CancellationToken ct)
+    {
+        int previousFileIdx = -1;
+        foreach (var operation in fileOperations)
+        {
+            int fileIdx = operation.FileIdx;
+            Debug.Assert(fileIdx > previousFileIdx, "MapRange must yield strictly ascending, unique file indices.");
+            if (fileIdx <= previousFileIdx)
             {
-                try
-                {
-                    acquiredLocks[i].Release();
-                }
-                catch (ObjectDisposedException) { /* Ignored - storage shutting down */ }
-                catch (Exception ex)
-                {
-                    _logger.LogTrace(ex, "Error releasing file lock in WriteAsync");
-                }
+                continue;
+            }
+            previousFileIdx = fileIdx;
+
+            // Check shutdown before accessing array which might be cleared
+            if (failIfShuttingDown && Volatile.Read(ref _shutdownRequested) == 1)
+            {
+                throw new ObjectDisposedException(nameof(Storage));
             }
 
-            if (Interlocked.Decrement(ref _inFlightWrites) == 0)
+            var lockObj = _fileLocks[fileIdx];
+            await lockObj.WaitAsync(ct).ConfigureAwait(false);
+            acquiredLocks.Add(lockObj);
+        }
+    }
+
+    /// <summary>
+    /// Releases locks in reverse acquisition order. Holding the <see cref="SemaphoreSlim"/>
+    /// references rather than indices matters: a concurrent shutdown may already have cleared
+    /// <c>_fileLocks</c> by the time the caller unwinds.
+    /// </summary>
+    private void ReleaseFileLocks(List<SemaphoreSlim> acquiredLocks)
+    {
+        for (int i = acquiredLocks.Count - 1; i >= 0; i--)
+        {
+            try
             {
-                _noWritesInFlight.Set();
+                acquiredLocks[i].Release();
+            }
+            catch (ObjectDisposedException) { /* Ignored - storage shutting down */ }
+            catch (Exception ex)
+            {
+                _logger.LogTrace(ex, "Error releasing file lock");
             }
         }
+    }
+
+    private void BeginWrite()
+    {
+        lock (_writeTrackingLock)
+        {
+            if (Volatile.Read(ref _shutdownRequested) == 1)
+            {
+                throw new ObjectDisposedException(nameof(Storage), "Storage is shutting down");
+            }
+
+            if (_inFlightWrites == 0)
+            {
+                _writesDrained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+            _inFlightWrites++;
+        }
+    }
+
+    private void EndWrite()
+    {
+        TaskCompletionSource? drained = null;
+        lock (_writeTrackingLock)
+        {
+            _inFlightWrites--;
+            if (_inFlightWrites == 0)
+            {
+                drained = _writesDrained;
+            }
+        }
+        drained?.TrySetResult();
+    }
+
+    private static TaskCompletionSource CreateCompletedSignal()
+    {
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        signal.SetResult();
+        return signal;
     }
 
     private void HandleDiskFull(int fileIdx, Exception ex)

@@ -83,6 +83,58 @@ public sealed class UpnpTests
         Assert.Contains("DeletePortMapping", delReq.Headers.GetValueOrDefault("SOAPACTION", ""));
     }
 
+    [Fact(Timeout = 10000)]
+    public async Task PortMapping_MultipleGateways_MapsConcurrentlyAndTracksMixedResults()
+    {
+        using var mapRequestsEntered = new CountdownEvent(2);
+        using var releaseMapRequests = new ManualResetEventSlim();
+        var firstRequests = new ConcurrentQueue<TestHttpRequest>();
+        var secondRequests = new ConcurrentQueue<TestHttpRequest>();
+        TestHttpResponse Handle(
+            TestHttpRequest request,
+            ConcurrentQueue<TestHttpRequest> requests,
+            bool success)
+        {
+            requests.Enqueue(request);
+            if (request.Body.Contains("AddPortMapping", StringComparison.Ordinal))
+            {
+                mapRequestsEntered.Signal();
+                releaseMapRequests.Wait(TimeSpan.FromSeconds(5));
+            }
+            return success ? TestHttpResponse.Ok("<xml/>") : TestHttpResponse.NotFound();
+        }
+
+        await using var firstServer = new TestHttpServer(req => Handle(req, firstRequests, success: true));
+        await using var secondServer = new TestHttpServer(req => Handle(req, secondRequests, success: false));
+        var gateways = new List<UpnpGateway>
+        {
+            CreateGateway("First", firstServer.BaseUri + "control"),
+            CreateGateway("Second", secondServer.BaseUri + "control")
+        };
+        var mapper = new UpnpPortMapping(_ => Task.FromResult(gateways));
+        await mapper.StartAsync(CancellationToken.None);
+
+        Task<bool> map = mapper.MapPortAsync(23456, "TCP", "multi", CancellationToken.None);
+        try
+        {
+            Assert.True(mapRequestsEntered.Wait(TimeSpan.FromSeconds(2)));
+            Assert.False(map.IsCompleted);
+        }
+        finally
+        {
+            releaseMapRequests.Set();
+        }
+
+        Assert.True(await map);
+        var statuses = mapper.GetStatus();
+        Assert.Contains(statuses, status => status.Protocol.Contains("First") && status.Result == PortMappingResult.Success);
+        Assert.Contains(statuses, status => status.Protocol.Contains("Second") && status.Result == PortMappingResult.Failed);
+
+        await mapper.UnmapAllAsync(CancellationToken.None);
+        Assert.Equal(2, firstRequests.Count);
+        Assert.Equal(2, secondRequests.Count);
+    }
+
     [Fact]
     public async Task GetStatus_NoGateways_ReturnsFailed()
     {
@@ -138,6 +190,14 @@ public sealed class UpnpTests
             await server.SendAsync(bytes, res.RemoteEndPoint, ct).ConfigureAwait(false);
         }
     }
+
+    private static UpnpGateway CreateGateway(string name, string controlUrl) => new()
+    {
+        Name = name,
+        LocalAddress = IPAddress.Loopback,
+        ServiceType = "urn:schemas-upnp-org:service:WANIPConnection:1",
+        ControlUrl = controlUrl
+    };
 
     private static class UpnpTestData
     {

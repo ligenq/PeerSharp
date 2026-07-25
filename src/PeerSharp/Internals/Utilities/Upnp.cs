@@ -341,26 +341,18 @@ internal class UpnpPortMapping : IPortMapper
             _mappings.Add((port, protocol, description));
         }
 
-        bool anySuccess = false;
-        foreach (var gateway in _gateways)
+        var results = await Task.WhenAll(_gateways.Select(async gateway =>
         {
-            if (await MapOnGatewayAsync(gateway, port, protocol, description, ct).ConfigureAwait(false))
+            bool success = await MapOnGatewayAsync(gateway, port, protocol, description, ct).ConfigureAwait(false);
+            lock (_status)
             {
-                anySuccess = true;
-                lock (_status)
-                {
-                    _status[gateway] = (PortMappingResult.Success, null);
-                }
+                _status[gateway] = success
+                    ? (PortMappingResult.Success, null)
+                    : (PortMappingResult.Failed, "Mapping failed");
             }
-            else
-            {
-                lock (_status)
-                {
-                    _status[gateway] = (PortMappingResult.Failed, "Mapping failed");
-                }
-            }
-        }
-        return anySuccess;
+            return success;
+        })).ConfigureAwait(false);
+        return results.Any(static success => success);
     }
 
     public async Task StartAsync(CancellationToken ct)
@@ -402,13 +394,18 @@ internal class UpnpPortMapping : IPortMapper
             _mappings.Clear();
         }
 
-        foreach (var (Port, Protocol, _) in toUnmap)
+        // Fan out across gateways - they are independent devices - but keep the ports for a
+        // single gateway sequential. A flat mappings x gateways fan-out is exactly the burst
+        // that consumer routers rate-limit or silently drop, turning a slow-but-reliable
+        // teardown into a flaky one.
+        UpnpGateway[] gateways = [.. _gateways];
+        await Task.WhenAll(gateways.Select(async gateway =>
         {
-            foreach (var gateway in _gateways)
+            foreach (var (port, protocol, _) in toUnmap)
             {
-                await UnmapOnGatewayAsync(gateway, Port, Protocol, ct).ConfigureAwait(false);
+                await UnmapOnGatewayAsync(gateway, port, protocol, ct).ConfigureAwait(false);
             }
-        }
+        })).ConfigureAwait(false);
     }
 
     private async Task<bool> MapOnGatewayAsync(UpnpGateway gateway, int port, string protocol, string description, CancellationToken ct)

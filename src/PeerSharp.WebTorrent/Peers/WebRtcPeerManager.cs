@@ -227,7 +227,7 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_shutdownToken, pending.LifetimeToken);
         var token = linkedCts.Token;
-        await Task.Run(() => work(token), token).ConfigureAwait(false);
+        await work(token).ConfigureAwait(false);
     }
 
     private async Task PumpLocalIceCandidatesAsync(PendingPeer pending, CancellationToken cancellationToken)

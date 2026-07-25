@@ -27,7 +27,10 @@ internal sealed class WebTorrentDataChannelStream : Stream
 
     public void Start()
     {
-        _pumpTask ??= Task.Run(PumpMessagesAsync);
+        // Task.Run, not a bare call: Start is synchronous and its only job is to kick off the
+        // background pump. Invoking the async method inline runs its prologue - and up to a
+        // full channel's worth of message copies - on the caller's thread before returning.
+        _pumpTask ??= Task.Run(PumpMessagesAsync, CancellationToken.None);
     }
 
     private bool IsDisposed => Volatile.Read(ref _disposed) == 1;
