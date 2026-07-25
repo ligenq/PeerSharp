@@ -69,36 +69,78 @@ internal class FileMapper
     /// <summary>
     /// Maps a global range (offset + length) to a sequence of file operations.
     /// </summary>
-    public IEnumerable<(int FileIndex, long FileOffset, int Length, int BufferOffset)> MapRange(long globalOffset, int length)
+    /// <remarks>
+    /// Returns a struct enumerable rather than an <see cref="IEnumerable{T}"/>, so a foreach over
+    /// it allocates nothing. Every Storage read and write enters here once per 16 KiB block, and a
+    /// compiler-generated iterator was costing an allocation per call on that path - for laziness
+    /// no caller wants, since they all drain the result into a list immediately.
+    /// </remarks>
+    public RangeEnumerable MapRange(long globalOffset, int length) => new(this, globalOffset, length);
+
+    /// <summary>Allocation-free enumerable over the file operations covering a global range.</summary>
+    public readonly struct RangeEnumerable(FileMapper mapper, long globalOffset, int length)
     {
-        long current = globalOffset;
-        int remaining = length;
-        int bufferOffset = 0;
+        public RangeEnumerator GetEnumerator() => new(mapper, globalOffset, length);
 
-        while (remaining > 0)
+        /// <summary>
+        /// Materialises the operations. For callers that want a list anyway - LINQ is unavailable
+        /// here because the type deliberately does not implement <see cref="IEnumerable{T}"/>,
+        /// which is what keeps foreach allocation-free.
+        /// </summary>
+        public List<(int FileIndex, long FileOffset, int Length, int BufferOffset)> ToList()
         {
-            var (fileIdx, fileOffset) = MapOffset(current);
-
-            // Bounds check
-            if (fileIdx >= _fileSizes.Length)
+            var results = new List<(int FileIndex, long FileOffset, int Length, int BufferOffset)>();
+            foreach (var operation in this)
             {
-                yield break;
+                results.Add(operation);
+            }
+            return results;
+        }
+    }
+
+    /// <summary>
+    /// Walks a global range forward, yielding one operation per file it touches. Indices are
+    /// produced strictly ascending and each file appears at most once, which is what lets Storage
+    /// take its per-file locks in a deadlock-free order without sorting.
+    /// </summary>
+    public struct RangeEnumerator(FileMapper mapper, long globalOffset, int length)
+    {
+        private long _current = globalOffset;
+        private int _remaining = length;
+        private int _bufferOffset;
+
+        public (int FileIndex, long FileOffset, int Length, int BufferOffset) Current { get; private set; }
+
+        public bool MoveNext()
+        {
+            if (_remaining <= 0)
+            {
+                return false;
             }
 
-            long fileSize = _fileSizes[fileIdx];
+            var (fileIdx, fileOffset) = mapper.MapOffset(_current);
+
+            // Bounds check
+            if (fileIdx >= mapper._fileSizes.Length)
+            {
+                return false;
+            }
+
+            long fileSize = mapper._fileSizes[fileIdx];
             long spaceLeft = fileSize - fileOffset;
-            int chunk = (int)Math.Min(remaining, spaceLeft);
+            int chunk = (int)Math.Min(_remaining, spaceLeft);
 
             if (chunk <= 0)
             {
-                yield break;
+                return false;
             }
 
-            yield return (fileIdx, fileOffset, chunk, bufferOffset);
+            Current = (fileIdx, fileOffset, chunk, _bufferOffset);
 
-            remaining -= chunk;
-            current += chunk;
-            bufferOffset += chunk;
+            _remaining -= chunk;
+            _current += chunk;
+            _bufferOffset += chunk;
+            return true;
         }
     }
 }

@@ -104,8 +104,11 @@ internal class PieceChecker : IAsyncDisposable
                         var expected = _context.GetExpectedHash(pieceIndex);
                         if (expected != null)
                         {
+                            // AsSpan first: byte[].SequenceEqual(byte[]) binds to LINQ's
+                            // Enumerable.SequenceEqual, which allocates two enumerators and
+                            // compares element by element. The span overload is vectorised.
                             var computed = SHA1.HashData(pieceData.Span);
-                            isValid = computed.SequenceEqual(expected);
+                            isValid = computed.AsSpan().SequenceEqual(expected);
                         }
                         else
                         {
@@ -186,8 +189,11 @@ internal class PieceChecker : IAsyncDisposable
                         if (expected != null)
                         {
                             // Standard SHA-1 verification
+                            // AsSpan first: byte[].SequenceEqual(byte[]) binds to LINQ's
+                            // Enumerable.SequenceEqual, which allocates two enumerators and
+                            // compares element by element. The span overload is vectorised.
                             var computed = SHA1.HashData(pieceData.Span);
-                            isValid = computed.SequenceEqual(expected);
+                            isValid = computed.AsSpan().SequenceEqual(expected);
                         }
                         else
                         {

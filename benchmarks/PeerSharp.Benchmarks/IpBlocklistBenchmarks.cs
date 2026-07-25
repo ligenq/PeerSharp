@@ -18,7 +18,11 @@ namespace PeerSharp.Benchmarks;
 public class IpBlocklistBenchmarks
 {
     private const int ContendedThreads = 8;
-    private const int OpsPerThread = 512;
+
+    // High enough that the lookups dominate. An earlier version used 512 ops on freshly created
+    // OS threads, and the ~500us of thread spin-up buried the ~57us of actual work - the
+    // benchmark reported thread creation and looked unchanged when the lock was removed.
+    private const int OpsPerThread = 20_000;
 
     private IpBlocklist _blocklist = null!;
     private IPAddress _blockedAddress = null!;
@@ -72,26 +76,17 @@ public class IpBlocklistBenchmarks
     /// issued concurrently - the shape a connect storm actually produces. This is throughput
     /// under contention, not single-lookup latency.
     /// </summary>
-    [Benchmark(Description = "IsBlocked, 8 threads contending")]
+    [Benchmark(Description = "IsBlocked, 8 threads concurrent")]
     public void ContendedLookup()
     {
-        var threads = new Thread[ContendedThreads];
-        for (int i = 0; i < ContendedThreads; i++)
+        // Parallel.For runs on pooled threads, so the figure is lookups rather than thread
+        // creation. Each worker walks a different slice of the address set.
+        Parallel.For(0, ContendedThreads, index =>
         {
-            int index = i;
-            threads[i] = new Thread(() =>
+            for (int op = 0; op < OpsPerThread; op++)
             {
-                for (int op = 0; op < OpsPerThread; op++)
-                {
-                    _blocklist.IsBlocked(_mixedAddresses[(index + op) % _mixedAddresses.Length]);
-                }
-            });
-            threads[i].Start();
-        }
-
-        for (int i = 0; i < ContendedThreads; i++)
-        {
-            threads[i].Join();
-        }
+                _blocklist.IsBlocked(_mixedAddresses[(index + op) % _mixedAddresses.Length]);
+            }
+        });
     }
 }

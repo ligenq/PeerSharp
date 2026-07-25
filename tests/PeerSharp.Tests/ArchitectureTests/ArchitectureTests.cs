@@ -794,6 +794,15 @@ public class ArchitectureTests
                 continue;
             }
 
+            // Skip enumerator structs. Advancing state is the entire contract of an enumerator,
+            // and a struct one is the standard way to make foreach allocation-free - the BCL's
+            // own List<T>.Enumerator is a mutable struct for exactly this reason.
+            if (type.Name.EndsWith("Enumerator", StringComparison.Ordinal) &&
+                type.GetMethod("MoveNext") != null)
+            {
+                continue;
+            }
+
             var mutableFields = type
                 .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                 .Where(f => !f.IsInitOnly && !f.IsLiteral)

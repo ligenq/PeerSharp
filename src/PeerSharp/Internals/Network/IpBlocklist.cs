@@ -17,6 +17,15 @@ internal class IpBlocklist
     private readonly List<IpRange> _ranges = [];
     private bool _sorted;
 
+    /// <summary>
+    /// Immutable published view of <see cref="_ranges"/>, sorted and coalesced. Readers take it
+    /// with a single volatile read and never touch the lock: <see cref="IsBlocked(IPAddress)"/>
+    /// runs once per inbound connection and once per discovered peer, and those arrive in
+    /// parallel, so a shared lock on the read path removed all concurrency rather than protecting
+    /// anything. Mutations rebuild and republish under <see cref="_lock"/>; null means stale.
+    /// </summary>
+    private IpRange[]? _snapshot;
+
     public IpBlocklist()
         : this(NullLoggerFactory.Instance)
     {
@@ -58,6 +67,7 @@ internal class IpBlocklist
             {
                 _ranges.Add(new IpRange(start, end, description));
                 _sorted = false;
+                _snapshot = null;
             }
         }
     }
@@ -76,6 +86,7 @@ internal class IpBlocklist
         {
             _ranges.Add(new IpRange(NetworkUtils.IpToUInt128(start), NetworkUtils.IpToUInt128(end), description));
             _sorted = false;
+            _snapshot = null;
         }
     }
 
@@ -88,6 +99,7 @@ internal class IpBlocklist
         {
             _ranges.Clear();
             _sorted = true;
+            _snapshot = [];
         }
         Enabled = false;
     }
@@ -105,12 +117,8 @@ internal class IpBlocklist
         }
 
         var ip = NetworkUtils.IpToUInt128(address);
-
-        lock (_lock)
-        {
-            EnsureSorted();
-            return BinarySearchContains(ip);
-        }
+        var snapshot = Volatile.Read(ref _snapshot) ?? BuildSnapshot();
+        return BinarySearchContains(snapshot, ip);
     }
 
     /// <summary>
@@ -227,25 +235,47 @@ internal class IpBlocklist
         {
             _ranges.AddRange(parsed);
             _sorted = false;
+            _snapshot = null;
         }
 
         Enabled = true;
     }
 
-    private bool BinarySearchContains(UInt128 ip)
+    /// <summary>
+    /// Rebuilds the published snapshot. Only reached on the first lookup after a mutation; the
+    /// second check under the lock keeps concurrent readers from each building their own.
+    /// </summary>
+    private IpRange[] BuildSnapshot()
     {
-        if (_ranges.Count == 0)
+        lock (_lock)
+        {
+            var existing = _snapshot;
+            if (existing != null)
+            {
+                return existing;
+            }
+
+            EnsureSorted();
+            var built = _ranges.ToArray();
+            Volatile.Write(ref _snapshot, built);
+            return built;
+        }
+    }
+
+    private static bool BinarySearchContains(IpRange[] ranges, UInt128 ip)
+    {
+        if (ranges.Length == 0)
         {
             return false;
         }
 
         int left = 0;
-        int right = _ranges.Count - 1;
+        int right = ranges.Length - 1;
 
         while (left <= right)
         {
             int mid = left + ((right - left) / 2);
-            var range = _ranges[mid];
+            var range = ranges[mid];
 
             if (ip < range.Start)
             {

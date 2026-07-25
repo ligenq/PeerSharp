@@ -38,12 +38,14 @@ public class UtpBenchmarks
     private ushort _baseSeq;
     private byte[] _payload = null!;
     private byte[] _sackBitmask = null!;
+    private byte[] _drainBuffer = null!;
 
     [GlobalSetup]
     public void GlobalSetup()
     {
         _payload = new byte[PayloadSize];
         Random.Shared.NextBytes(_payload);
+        _drainBuffer = new byte[64 * 1024];
 
         // A 16-byte SACK bitmask with a realistic scattering of gaps - a solid block of set bits
         // would collapse into one range and skip most of the parser's work.
@@ -58,7 +60,7 @@ public class UtpBenchmarks
     /// Rebuilds the stream so each measured window starts from the same state. Without this the
     /// first window would be in-order and every later one a flood of duplicates.
     /// </summary>
-    [IterationSetup(Targets = [nameof(ProcessInOrderWindow), nameof(ProcessReorderedWindow)])]
+    [IterationSetup(Targets = [nameof(ConstructOnly), nameof(ProcessInOrderWindow), nameof(ProcessReorderedWindow)])]
     public void IterationSetup()
     {
         _stream = new UtpStream(new NullUtpManager(), _remote, 100, 101, TimeProvider.System);
@@ -67,13 +69,23 @@ public class UtpBenchmarks
         AckField.SetValue(_stream, (ushort)(_baseSeq - 1));
     }
 
+    /// <summary>
+    /// Processes nothing, so the construction that <see cref="IterationSetup"/> does can be
+    /// subtracted from the rows below rather than guessed at.
+    /// </summary>
+    [Benchmark(Description = "Baseline: stream construction only, 0 packets")]
+    public void ConstructOnly()
+    {
+    }
+
     [Benchmark(Description = "Process 256-packet window, in order")]
-    public void ProcessInOrderWindow()
+    public async Task ProcessInOrderWindow()
     {
         for (int i = 0; i < WindowSize; i++)
         {
             Deliver((ushort)(_baseSeq + i));
         }
+        await DrainAsync().ConfigureAwait(false);
     }
 
     /// <summary>
@@ -81,12 +93,35 @@ public class UtpBenchmarks
     /// buffer until its predecessor lands.
     /// </summary>
     [Benchmark(Description = "Process 256-packet window, pairwise reordered")]
-    public void ProcessReorderedWindow()
+    public async Task ProcessReorderedWindow()
     {
         for (int i = 0; i < WindowSize; i += 2)
         {
             Deliver((ushort)(_baseSeq + i + 1));
             Deliver((ushort)(_baseSeq + i));
+        }
+        await DrainAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads the window back out. This is not incidental cleanup - it is the other half of the
+    /// pipeline. The receive path rents a pooled buffer per packet and the reader pump returns it
+    /// only after the data reaches the pipe, and the pipe stalls its writer past 64 KiB. Without
+    /// a reader the pool is never replenished, and the benchmark reports fresh allocations for
+    /// buffers that production recycles.
+    /// </summary>
+    private async Task DrainAsync()
+    {
+        int expected = WindowSize * PayloadSize;
+        int total = 0;
+        while (total < expected)
+        {
+            int read = await _stream.ReadAsync(_drainBuffer.AsMemory()).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+            total += read;
         }
     }
 
