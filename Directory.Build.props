@@ -4,4 +4,32 @@
 		<Version>2.1.0</Version>
 	</PropertyGroup>
 
+	<!--
+		Packaging and debuggability defaults for everything that ships.
+
+		SourceLink itself ships with the .NET SDK, so no PackageReference is needed - these
+		properties are what turn it on. Together they let a consumer step into library code from
+		their own debugger: the symbol package carries the PDBs, the repository URL tells the
+		debugger where the sources live, and EmbedUntrackedSources covers generated files that are
+		not in git.
+
+		GenerateDocumentationFile is deliberately not here. It is opted into by each shipping
+		project instead, so tests and benchmarks are not asked to document every public test
+		method.
+	-->
+	<PropertyGroup>
+		<IncludeSymbols>true</IncludeSymbols>
+		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
+		<PublishRepositoryUrl>true</PublishRepositoryUrl>
+		<EmbedUntrackedSources>true</EmbedUntrackedSources>
+	</PropertyGroup>
+
+	<!--
+		Deterministic builds only in CI. Enabling this locally rewrites source paths in the PDB to
+		placeholder values, which breaks stepping through a local build.
+	-->
+	<PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+		<ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+	</PropertyGroup>
+
 </Project>

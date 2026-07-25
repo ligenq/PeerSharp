@@ -83,6 +83,9 @@ jobs:
         with:
           user: ligenq # nuget.org profile name (not email)
 
+      # The glob matches .nupkg only, but `dotnet nuget push` also uploads the matching .snupkg
+      # when one sits beside it - that is the default, and --no-symbols is what opts out. Do not
+      # add a separate *.snupkg push: it would be rejected as a duplicate.
       - name: Push to NuGet
         if: ${{ !inputs.dry_run }}
         run: >
@@ -98,6 +101,7 @@ jobs:
         run: >
           gh release create "v${{ steps.version.outputs.version }}"
           packages/*.nupkg
+          packages/*.snupkg
           --title "v${{ steps.version.outputs.version }}"
           --generate-notes
           --target "${{ github.sha }}"

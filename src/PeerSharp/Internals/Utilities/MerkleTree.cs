@@ -231,6 +231,10 @@ internal static class MerkleTree
     /// <param name="pieceIndex">Index of the piece within the file</param>
     /// <param name="pieceLayerHash">Expected hash from piece layer</param>
     /// <param name="pieceSize">Size of a piece</param>
+    /// <param name="padToPieceSize">
+    /// Zero-pad the leaves out to a full piece before hashing. Required for the final piece of a
+    /// file, whose piece-layer hash is computed over a padded piece.
+    /// </param>
     /// <returns>True if the piece is valid</returns>
     public static bool VerifyPiece(ReadOnlySpan<byte> pieceData, int pieceIndex, byte[] pieceLayerHash, uint pieceSize, bool padToPieceSize = false)
     {

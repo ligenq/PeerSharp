@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+
+    <!--
+      PeerSharp declares IsTrimmable, which is a promise that trimming it is safe. This project
+      exists to check that promise. PublishTrimmed runs the ILLink analysis over the library, and
+      TreatWarningsAsErrors turns any IL2xxx trim warning - unbounded reflection, a type the
+      trimmer cannot see through - into a build failure rather than a runtime surprise in a
+      consumer's trimmed app.
+    -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>$(NETCoreSdkPortableRuntimeIdentifier)</RuntimeIdentifier>
+
+    <!-- One diagnostic per offending call site rather than a single rolled-up summary. -->
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\PeerSharp\PeerSharp.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -82,7 +82,7 @@ internal sealed class UploadQueueManager : IAsyncDisposable
     {
         try
         {
-            await foreach (var item in reader.ReadAllAsync(token))
+            await foreach (var item in reader.ReadAllAsync(token).ConfigureAwait(false))
             {
                 // Check token at the start of every iteration so that already-buffered items
                 // are not processed after the peer disconnects (RemovePeer cancels the token).

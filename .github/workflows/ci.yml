@@ -70,6 +70,29 @@ jobs:
           path: TestResults/*.trx
           if-no-files-found: ignore
 
+  trim-smoke:
+    # PeerSharp declares IsTrimmable. This is what stops that from being an unchecked claim:
+    # PublishTrimmed runs ILLink over the library and TreatWarningsAsErrors turns any IL2xxx
+    # diagnostic into a failure. Running the result afterwards catches the case where trimming
+    # succeeds but removes something the engine needs at startup.
+    name: Trim analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish trimmed (trim warnings are errors)
+        run: dotnet publish tests/PeerSharp.TrimSmoke/PeerSharp.TrimSmoke.csproj --configuration Release --output trimout
+
+      - name: Run trimmed binary
+        run: ./trimout/PeerSharp.TrimSmoke
+
   benchmarks-smoke:
     # Deliberately not a measurement job: shared CI runners are far too noisy for numbers worth
     # acting on. This only proves the suites still compile and their fixtures still set up, so

@@ -11,26 +11,44 @@ namespace PeerSharp.PieceWriter;
 /// </summary>
 public class StorageException : Exception
 {
+    /// <summary>Initializes a new instance with no message.</summary>
     public StorageException()
     {
     }
 
+    /// <summary>Initializes a new instance with the specified message.</summary>
+    /// <param name="message">A description of the failure.</param>
     public StorageException(string message)
         : base(message)
     {
     }
 
+    /// <summary>Initializes a new instance with the specified message and cause.</summary>
+    /// <param name="message">A description of the failure.</param>
+    /// <param name="innerException">The underlying I/O error.</param>
     public StorageException(string message, Exception innerException)
         : base(message, innerException)
     {
     }
 
+    /// <summary>Initializes a new instance and records whether the failure can be retried.</summary>
+    /// <param name="message">A description of the failure.</param>
+    /// <param name="inner">The underlying I/O error, if any.</param>
+    /// <param name="isRecoverable">
+    /// <see langword="true"/> if retrying may succeed; <see langword="false"/> for terminal
+    /// conditions such as a full disk or a file that has failed repeatedly.
+    /// </param>
     public StorageException(string message, Exception? inner, bool isRecoverable)
         : base(message, inner)
     {
         IsRecoverable = isRecoverable;
     }
 
+    /// <summary>
+    /// Gets a value indicating whether the operation may succeed if retried. When
+    /// <see langword="false"/>, the torrent stops rather than looping on a failure that cannot
+    /// clear itself.
+    /// </summary>
     public bool IsRecoverable { get; }
 }
 
@@ -793,7 +811,11 @@ internal sealed class Storage : IStorage
             int granted = await _diskLimiter.RequestReadAsync(request, ct).ConfigureAwait(false);
             if (granted <= 0)
             {
-                await Task.Yield();
+                // Yield before retrying so a limiter that grants nothing cannot spin hot.
+                // Task.Yield is banned - it posts back to the caller's SynchronizationContext -
+                // and Task.Delay would need a TimeProvider this type does not take. A thread-pool
+                // hop gives the same "let something else run" effect with neither problem.
+                await Task.Run(static () => { }, ct).ConfigureAwait(false);
                 continue;
             }
 
@@ -840,7 +862,11 @@ internal sealed class Storage : IStorage
             int granted = await _diskLimiter.RequestWriteAsync(request, ct).ConfigureAwait(false);
             if (granted <= 0)
             {
-                await Task.Yield();
+                // Yield before retrying so a limiter that grants nothing cannot spin hot.
+                // Task.Yield is banned - it posts back to the caller's SynchronizationContext -
+                // and Task.Delay would need a TimeProvider this type does not take. A thread-pool
+                // hop gives the same "let something else run" effect with neither problem.
+                await Task.Run(static () => { }, ct).ConfigureAwait(false);
                 continue;
             }
 
