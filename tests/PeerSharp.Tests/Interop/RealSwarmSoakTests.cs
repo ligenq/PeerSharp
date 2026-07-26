@@ -43,14 +43,13 @@ public class RealSwarmSoakTests
     }
 
     /// <summary>
-    /// Requested bandwidth ceiling.
+    /// Bandwidth ceiling, applied both globally and per torrent so a soak run is a good swarm citizen.
     ///
     /// <para>
-    /// <b>Currently advisory only.</b> Measured against a live swarm, neither
-    /// <c>Settings.Transfer.MaxDownloadSpeed</c> nor <c>ITorrent.DownloadLimitBytesPerSecond</c>
-    /// constrains the peer download path: a run capped at 256 bytes/s still pulled 140 MB in 30
-    /// seconds. Both are set anyway so these runs become polite the moment that is fixed, but the
-    /// enforceable bounds today are the duration and the byte budget below.
+    /// These runs are what found this being ignored on plaintext connections: limiting used to live in
+    /// the encryption wrapper, so it only applied to peers that negotiated encryption. Expect the
+    /// measured rate to sit somewhat above the ceiling regardless - quota bursts up to 3x the limit by
+    /// design - which is why the byte budget below exists as a hard stop.
     /// </para>
     /// </summary>
     private const int DefaultRateLimitBytesPerSecond = 2 * 1024 * 1024;
@@ -220,8 +219,8 @@ public class RealSwarmSoakTests
                 nextProgressLine += TimeSpan.FromSeconds(30);
             }
 
-            // The engine's rate limits do not currently bite, so this is what actually keeps a run from
-            // pulling an unbounded amount of data off strangers' upload capacity.
+            // A hard stop independent of the rate limit, so a run can never pull an unbounded amount of
+            // data off strangers' upload capacity even if the limiter regresses again.
             if ((long)torrent.FinishedBytes >= maxBytes)
             {
                 _output.WriteLine(
