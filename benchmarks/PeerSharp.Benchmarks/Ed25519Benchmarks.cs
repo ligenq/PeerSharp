@@ -38,10 +38,12 @@ public class Ed25519Benchmarks
         Random.Shared.NextBytes(_message);
         _signature = Ed25519.Sign(_message, _seed);
 
-        // A signature that fails late, after the curve work - the expensive rejection path, and
-        // the one an attacker would choose.
-        _corruptSignature = (byte[])_signature.Clone();
-        _corruptSignature[0] ^= 0x01;
+        // A well-formed signature over a different message. Flipping a bit in R instead would
+        // usually make it fail cheaply at point decoding, and whether it did turned out to depend
+        // on the random bytes - the measurement moved between 18 us and 280 us across runs. This
+        // is the real worst case: every field is valid, so rejection only happens at the final
+        // curve comparison, which is the path an attacker would pick.
+        _corruptSignature = Ed25519.Sign("a different message"u8, _seed);
     }
 
     [Benchmark(Baseline = true, Description = "Verify (valid)")]
