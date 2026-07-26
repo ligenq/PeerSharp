@@ -93,34 +93,69 @@ public class RealSwarmSoakTests
     }
 
     /// <summary>
-    /// Resolves the torrent to exercise, or skips with instructions. Accepts a magnet link, a local
-    /// .torrent path, or an http(s) URL to a .torrent.
+    /// Resolves the first configured torrent, or skips with instructions.
     /// </summary>
     private static async Task<object> ResolveTorrentSourceAsync(CancellationToken cancellationToken)
     {
-        var magnet = Environment.GetEnvironmentVariable("PEERSHARP_SOAK_MAGNET");
-        if (!string.IsNullOrWhiteSpace(magnet))
+        return (await ResolveTorrentSourcesAsync(cancellationToken))[0];
+    }
+
+    /// <summary>
+    /// Resolves every configured torrent. Both variables accept a list separated by <c>;</c> or a
+    /// newline, so a run can span several swarms.
+    ///
+    /// <para>
+    /// Variety is worth having: swarm composition differs sharply between projects, and a conclusion
+    /// drawn from one torrent is really a conclusion about that torrent's seeders. Different content
+    /// sizes also exercise different parts of the engine - a 600 MB image and a 20 MB archive item
+    /// have very different piece counts and completion behaviour.
+    /// </para>
+    /// </summary>
+    private static async Task<IReadOnlyList<object>> ResolveTorrentSourcesAsync(CancellationToken cancellationToken)
+    {
+        var sources = new List<object>();
+
+        foreach (var magnet in SplitConfigured("PEERSHARP_SOAK_MAGNET"))
         {
-            return MagnetLink.Parse(magnet);
+            sources.Add(MagnetLink.Parse(magnet));
         }
 
-        var torrent = Environment.GetEnvironmentVariable("PEERSHARP_SOAK_TORRENT");
-        if (string.IsNullOrWhiteSpace(torrent))
+        foreach (var torrent in SplitConfigured("PEERSHARP_SOAK_TORRENT"))
+        {
+            if (torrent.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                torrent.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+                sources.Add(TorrentFile.Parse(await http.GetByteArrayAsync(torrent, cancellationToken)));
+            }
+            else
+            {
+                sources.Add(TorrentFile.Parse(await File.ReadAllBytesAsync(torrent, cancellationToken)));
+            }
+        }
+
+        if (sources.Count == 0)
         {
             Assert.Skip(
-                "Set PEERSHARP_SOAK_MAGNET to a magnet link, or PEERSHARP_SOAK_TORRENT to a .torrent path or URL. " +
-                "Choose content you have the right to distribute - a current Linux distribution image is the " +
-                "conventional choice and gives the broadest mix of peer implementations to measure against.");
+                "Set PEERSHARP_SOAK_MAGNET to magnet links, or PEERSHARP_SOAK_TORRENT to .torrent paths or URLs " +
+                "(separate several with ';'). Choose content you have the right to distribute - the README lists " +
+                "publisher-distributed Linux images and Internet Archive items, which give the broadest mix of " +
+                "peer implementations to measure against.");
         }
 
-        if (torrent!.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-            torrent.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        return sources;
+    }
+
+    private static IEnumerable<string> SplitConfigured(string variable)
+    {
+        var raw = Environment.GetEnvironmentVariable(variable);
+        if (string.IsNullOrWhiteSpace(raw))
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
-            return TorrentFile.Parse(await http.GetByteArrayAsync(torrent, cancellationToken));
+            return [];
         }
 
-        return TorrentFile.Parse(await File.ReadAllBytesAsync(torrent, cancellationToken));
+        char[] separators = [';', (char)10, (char)13];
+        return raw.Split(separators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     /// <summary>
@@ -238,6 +273,100 @@ public class RealSwarmSoakTests
         }
 
         return observer;
+    }
+
+    /// <summary>
+    /// Several real swarms at once, in one engine.
+    ///
+    /// <para>
+    /// Multi-torrent is where engine-wide state gets exercised rather than per-torrent state: shared
+    /// bandwidth channels, the connection governor, the peer id, and the single DHT node all serve every
+    /// torrent at once. A bug in any of them is invisible to a single-torrent run, and cross-torrent
+    /// contamination - one torrent's peers or quota leaking into another's - has nowhere to show up
+    /// until two are running side by side.
+    /// </para>
+    ///
+    /// <para>
+    /// Skips unless at least two torrents are configured, since with one it would duplicate the
+    /// measurement above.
+    /// </para>
+    /// </summary>
+    [Fact(Timeout = 3_600_000)]
+    public async Task Interop_MultipleTorrentsAtOnce()
+    {
+        RequireSoakEnabled();
+
+        var duration = DurationFromEnvironment("PEERSHARP_SOAK_SECONDS", TimeSpan.FromMinutes(10));
+        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(5));
+
+        var sources = await ResolveTorrentSourcesAsync(cts.Token);
+        if (sources.Count < 2)
+        {
+            Assert.Skip(
+                "Configure at least two torrents (separate them with ';') to exercise the multi-torrent paths.");
+        }
+
+        var (engine, downloadPath) = CreateEngine();
+
+        try
+        {
+            await engine.InitializeAsync(cts.Token);
+
+            var torrents = new List<ITorrent>();
+            foreach (var source in sources)
+            {
+                torrents.Add(await AddAndStartAsync(engine, source, cts.Token));
+            }
+
+            var observers = new Dictionary<ITorrent, RealSwarmObserver>();
+            foreach (var torrent in torrents)
+            {
+                observers[torrent] = new RealSwarmObserver();
+            }
+
+            var clock = Stopwatch.StartNew();
+            long maxBytes = MaxBytesFromEnvironment();
+
+            while (clock.Elapsed < duration && !cts.IsCancellationRequested)
+            {
+                long total = 0;
+                foreach (var torrent in torrents)
+                {
+                    observers[torrent].Sample(torrent.Peers.GetConnectedPeers());
+                    total += (long)torrent.FinishedBytes;
+                }
+
+                if (total >= maxBytes)
+                {
+                    _output.WriteLine($"Stopping at the {maxBytes:N0} byte budget across all torrents.");
+                    break;
+                }
+
+                await Task.Delay(SampleInterval, cts.Token);
+            }
+
+            foreach (var torrent in torrents)
+            {
+                _output.WriteLine(observers[torrent].BuildReport($"{torrent.Name}"));
+            }
+
+            var everyPeer = observers.Values.SelectMany(static o => o.Peers.Keys).ToList();
+            _output.WriteLine("");
+            _output.WriteLine($"torrents running       : {torrents.Count}");
+            _output.WriteLine($"peer slots across all  : {everyPeer.Count}");
+            _output.WriteLine($"distinct endpoints     : {everyPeer.Distinct().Count()}");
+            _output.WriteLine($"engine peers connected : {torrents.Sum(static t => t.Peers.ConnectedCount)}");
+
+            Assert.All(torrents, torrent => Assert.True(
+                observers[torrent].Peers.Count > 0,
+                $"'{torrent.Name}' reached no peers at all while sharing an engine with {torrents.Count - 1} other " +
+                "torrent(s). One torrent starving the others is exactly the cross-contamination this test exists for."));
+        }
+        finally
+        {
+            await engine.DisposeAsync();
+            CleanUp(downloadPath);
+        }
     }
 
     /// <summary>

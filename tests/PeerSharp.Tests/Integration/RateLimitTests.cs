@@ -81,6 +81,37 @@ public class RateLimitTests : IDisposable
         AssertWithinLimit(measured, encryption);
     }
 
+    [Theory(Timeout = 120000)]
+    [InlineData(Encryption.Refuse)]
+    [InlineData(Encryption.Require)]
+    public async Task GlobalUploadLimit_IsEnforced(Encryption encryption)
+    {
+        // Limiting the seeder's upload must throttle the leecher's download just as effectively. This
+        // is the other half of the path that was found broken, and the half a seeding deployment
+        // actually depends on.
+        var measured = await MeasureAsync(
+            encryption,
+            configureSettings: null,
+            configureTorrent: null,
+            configureSeedSettings: settings => settings.Transfer.MaxUploadSpeed = LimitBytesPerSecond);
+
+        AssertWithinLimit(measured, encryption);
+    }
+
+    [Theory(Timeout = 120000)]
+    [InlineData(Encryption.Refuse)]
+    [InlineData(Encryption.Require)]
+    public async Task PerTorrentUploadLimit_IsEnforced(Encryption encryption)
+    {
+        var measured = await MeasureAsync(
+            encryption,
+            configureSettings: null,
+            configureTorrent: null,
+            configureSeedTorrent: torrent => torrent.UploadLimitBytesPerSecond = LimitBytesPerSecond);
+
+        AssertWithinLimit(measured, encryption);
+    }
+
     [Fact(Timeout = 120000)]
     public async Task NoLimit_TransfersFasterThanTheLimitedCase()
     {
@@ -115,7 +146,9 @@ public class RateLimitTests : IDisposable
     private async Task<TransferMeasurement> MeasureAsync(
         Encryption encryption,
         Action<Settings>? configureSettings,
-        Action<ITorrent>? configureTorrent = null)
+        Action<ITorrent>? configureTorrent = null,
+        Action<Settings>? configureSeedSettings = null,
+        Action<ITorrent>? configureSeedTorrent = null)
     {
         const string fileName = "payload.bin";
         byte[] payload = new byte[PayloadBytes];
@@ -129,11 +162,12 @@ public class RateLimitTests : IDisposable
             .AddFile(fileName, payload)
             .Build();
 
-        await using var seedEngine = await CreateEngineAsync(_seedPath, encryption, configure: null);
+        await using var seedEngine = await CreateEngineAsync(_seedPath, encryption, configureSeedSettings);
         var seedTorrent = await seedEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
 
         int validPieces = await seedTorrent.ForceRecheckAsync();
         Assert.Equal(torrentFile.PieceCount, validPieces);
+        configureSeedTorrent?.Invoke(seedTorrent);
         await seedTorrent.StartAsync();
 
         await using var leechEngine = await CreateEngineAsync(_leechPath, encryption, configureSettings);
