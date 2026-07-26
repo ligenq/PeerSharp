@@ -313,6 +313,7 @@ of the speed it should, for reasons nothing local will surface.
 | `Soak_ConnectionsStayBoundedUnderChurn` | Whether the connection pool stays inside its ceiling as peers come and go over a long run |
 | `Interop_DownloadRunsToCompletion` | Whether a download from strangers actually finishes, and at what rate |
 | `Interop_MultipleTorrentsAtOnce` | Whether several live swarms in one engine starve each other, sharing bandwidth channels, the connection governor and one DHT node |
+| `Seeding_HowRealClientsRequestFromUs` | The other direction — whether real clients request from us when we hold the data, and whether we actually deliver |
 
 These are diagnostics, not pass/fail gates — swarm composition is not ours to control, so the numbers
 are the deliverable and the assertions cover only what would make the numbers meaningless. They are
@@ -353,6 +354,8 @@ dotnet test tests/PeerSharp.Tests --filter FullyQualifiedName~RealSwarmSoakTests
 | `PEERSHARP_SOAK_CHURN_SECONDS` | Duration of the churn soak (default 1800) |
 | `PEERSHARP_SOAK_COMPLETION_SECONDS` | Budget for the completion run (default 1800) |
 | `PEERSHARP_SOAK_MAX_BYTES` | Hard ceiling on data pulled per run (default 1 GiB) |
+| `PEERSHARP_SOAK_SEED_SECONDS` | Duration of the seeding run (default 900) |
+| `PEERSHARP_SOAK_SEED_PATH` | Directory holding a complete copy of the torrent's content, for the seeding run |
 | `PEERSHARP_SOAK_RATE_BYTES` | Rate cap applied globally and per torrent (default 2 MiB/s) |
 
 ### Reading the report
@@ -366,6 +369,10 @@ reading and are called out in the output itself:
   while seeding.
 - **`seen once`** counts connections that did not outlive one sampling interval. A cluster of those
   against one implementation is what a post-handshake rejection looks like from the outside.
+- **Seeds cannot want your data.** The upload columns are reported against the incomplete peers only,
+  because on a distribution swarm most peers already have everything and counting them would
+  manufacture a problem that is not there. Meeting incomplete peers and serving *none* of them is the
+  finding worth chasing.
 
 Compare runs against each other rather than against an absolute target.
 
@@ -377,6 +384,16 @@ Compare runs against each other rather than against an absolute target.
   pulled 140 MB in 30 seconds. Limiting is now its own layer wrapping every peer connection.
   Regression cover: `RateLimitTests` exercises global and per-torrent limits, in both directions,
   in both encryption modes, over loopback.
+
+- **The bitfield was not sent first, so seeds were ignored.** BEP 3 requires the bitfield to be the
+  first message after the handshake; we sent the BEP 5 Port message ahead of it whenever DHT was
+  enabled — the default in production, and disabled in every local test. Strict clients discard a
+  late bitfield, so peers believed we held nothing. Seeding a complete torrent to a live swarm, 48
+  incomplete peers connected and *not one* became interested. Our own parser tolerates the wrong
+  order, which is exactly why two PeerSharp instances interoperated happily while real clients
+  ignored us. After the fix the same run served its first bytes. Regression cover:
+  `HandshakeMessageOrderTests` asserts on what we send, since testing against ourselves cannot catch
+  it.
 
 The same instinct drives two local suites that run in CI, since a bug worth finding on a real swarm is
 usually cheaper to catch deterministically:

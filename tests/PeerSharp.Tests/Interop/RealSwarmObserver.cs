@@ -69,6 +69,8 @@ internal sealed class RealSwarmObserver
                     SentUsData: group.Count(static p => p.BytesDownloaded > 0),
                     RequestedFromUs: group.Count(static p => p.EverInterestedInUs),
                     WeSentThemData: group.Count(static p => p.BytesUploaded > 0),
+                    Leechers: group.Count(static p => !p.IsSeed),
+                    LeechersThatWantedOurs: group.Count(static p => !p.IsSeed && p.EverInterestedInUs),
                     BytesDownloaded: group.Sum(static p => p.BytesDownloaded),
                     BytesUploaded: group.Sum(static p => p.BytesUploaded),
                     SingleSampleConnections: group.Count(static p => p.SampleCount == 1),
@@ -117,16 +119,23 @@ internal sealed class RealSwarmObserver
         report.AppendLine($"bytes uploaded         : {totalUp:N0}");
         report.AppendLine();
 
+        int totalLeechers = summaries.Sum(static s => s.Leechers);
+        int totalPeers = summaries.Sum(static s => s.PeersMet);
+        report.AppendLine($"incomplete peers       : {totalLeechers} of {totalPeers} (the rest were already seeds)");
+        report.AppendLine();
+
         report.AppendLine("per remote client implementation:");
         report.AppendLine();
-        report.AppendLine($"  {"client",-18} {"met",5} {"unchoked us",13} {"sent data",11} {"wanted ours",12} {"we served",10}");
-        report.AppendLine($"  {new string('-', 18)} {new string('-', 5)} {new string('-', 13)} {new string('-', 11)} {new string('-', 12)} {new string('-', 10)}");
+        report.AppendLine($"  {"client",-18} {"met",5} {"unchoked us",13} {"sent data",11} {"leechers",9} {"wanted ours",13} {"we served",13}");
+        report.AppendLine($"  {new string('-', 18)} {new string('-', 5)} {new string('-', 13)} {new string('-', 11)} {new string('-', 9)} {new string('-', 13)} {new string('-', 13)}");
 
         foreach (var s in summaries)
         {
+            // Upload columns are measured against leechers, not everyone: a seed declining our data is
+            // the protocol working, not us being ignored.
             report.AppendLine(
                 $"  {s.Client,-18} {s.PeersMet,5} {Ratio(s.UnchokedUs, s.PeersMet),13} {Ratio(s.SentUsData, s.PeersMet),11} " +
-                $"{Ratio(s.RequestedFromUs, s.PeersMet),12} {Ratio(s.WeSentThemData, s.PeersMet),10}");
+                $"{s.Leechers,9} {Ratio(s.LeechersThatWantedOurs, s.Leechers),13} {Ratio(s.WeSentThemData, s.Leechers),13}");
         }
 
         report.AppendLine();
@@ -182,6 +191,16 @@ internal sealed class RealSwarmObserver
         /// </summary>
         public int SampleCount { get; private set; }
 
+        /// <summary>The furthest along we ever saw this peer.</summary>
+        public float MaxProgress { get; private set; }
+
+        /// <summary>
+        /// Whether the peer already had everything. A seed will never want our data no matter how well
+        /// we behave, so counting it against our upload figures would manufacture a problem that is not
+        /// there - which matters on distribution swarms, where seeds heavily outnumber leechers.
+        /// </summary>
+        public bool IsSeed => MaxProgress >= 1.0f;
+
         public void Update(PeerInfo info, int sampleIndex)
         {
             SampleCount++;
@@ -190,6 +209,7 @@ internal sealed class RealSwarmObserver
             EverInterestedInUs |= info.PeerInterested;
             UsedUtp |= info.IsUtp;
             WasEncrypted |= info.IsEncrypted;
+            MaxProgress = Math.Max(MaxProgress, info.Progress);
             BytesDownloaded = Math.Max(BytesDownloaded, info.Downloaded);
             BytesUploaded = Math.Max(BytesUploaded, info.Uploaded);
         }
@@ -202,6 +222,11 @@ internal sealed class RealSwarmObserver
     /// <param name="SentUsData">How many actually sent bytes.</param>
     /// <param name="RequestedFromUs">How many became interested in what we hold.</param>
     /// <param name="WeSentThemData">How many we actually served bytes to.</param>
+    /// <param name="Leechers">
+    /// How many were still incomplete. Only these can ever want our data, so upload figures have to be
+    /// read against this rather than against every peer met.
+    /// </param>
+    /// <param name="LeechersThatWantedOurs">Incomplete peers that became interested in what we hold.</param>
     /// <param name="SingleSampleConnections">How many lasted less than one sampling interval.</param>
     internal readonly record struct ClientSummary(
         string Client,
@@ -211,6 +236,8 @@ internal sealed class RealSwarmObserver
         int SentUsData,
         int RequestedFromUs,
         int WeSentThemData,
+        int Leechers,
+        int LeechersThatWantedOurs,
         long BytesDownloaded,
         long BytesUploaded,
         int SingleSampleConnections,

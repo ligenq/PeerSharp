@@ -276,6 +276,118 @@ public class RealSwarmSoakTests
     }
 
     /// <summary>
+    /// The other half of the protocol: how real clients treat us when we are the one with the data.
+    ///
+    /// <para>
+    /// Every other test here downloads, which only measures other clients' willingness to serve us.
+    /// Serving is the direction where they judge us - our bitfield, our unchoke decisions, whether we
+    /// answer requests promptly - and it is the direction a seeding deployment lives or dies on. It has
+    /// never been exercised against real clients: earlier runs uploaded nothing at all, which a
+    /// seed-heavy distribution swarm explains but does not confirm.
+    /// </para>
+    ///
+    /// <para>
+    /// Needs data to serve. Point <c>PEERSHARP_SOAK_SEED_PATH</c> at a directory holding a complete copy
+    /// of the configured torrent's content - a previous completion run, or an ISO you already
+    /// downloaded normally. The run rechecks before starting, and skips rather than pretending if the
+    /// data is incomplete.
+    /// </para>
+    /// </summary>
+    [Fact(Timeout = 7_200_000)]
+    public async Task Seeding_HowRealClientsRequestFromUs()
+    {
+        RequireSoakEnabled();
+
+        var seedPath = Environment.GetEnvironmentVariable("PEERSHARP_SOAK_SEED_PATH");
+        if (string.IsNullOrWhiteSpace(seedPath) || !Directory.Exists(seedPath))
+        {
+            Assert.Skip(
+                "Set PEERSHARP_SOAK_SEED_PATH to a directory containing a complete copy of the configured torrent's " +
+                "content. Without data to serve there is nothing to measure.");
+        }
+
+        var duration = DurationFromEnvironment("PEERSHARP_SOAK_SEED_SECONDS", TimeSpan.FromMinutes(15));
+        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(10));
+
+        var source = await ResolveTorrentSourceAsync(cts.Token);
+        if (source is not TorrentFile torrentFile)
+        {
+            Assert.Skip("Seeding needs a .torrent rather than a magnet: the metadata has to be known before rechecking.");
+            return;
+        }
+
+        int rate = RateLimitFromEnvironment();
+        var settings = new Settings();
+        settings.Transfer.MaxUploadSpeed = (uint)rate;
+        settings.Files.DefaultDownloadPath = seedPath!;
+
+        await using var engine = ClientEngineFactory.Create(new TorrentClientOptions
+        {
+            Settings = settings,
+            LoggerFactory = NullLoggerFactory.Instance
+        });
+
+        await engine.InitializeAsync(cts.Token);
+
+        var torrent = await engine.AddTorrentAsync(
+            torrentFile,
+            new AddTorrentOptions(seedPath!) { StartImmediately = false },
+            cts.Token);
+
+        _output.WriteLine($"Rechecking {torrent.Name} in {seedPath}...");
+        int validPieces = await torrent.ForceRecheckAsync(cancellationToken: cts.Token);
+        _output.WriteLine($"{validPieces} of {torrent.PieceCount} pieces present.");
+
+        if (validPieces < torrent.PieceCount)
+        {
+            Assert.Skip(
+                $"Only {validPieces} of {torrent.PieceCount} pieces are present in {seedPath}, so this would measure " +
+                "a partial seed rather than a seed. Complete the download first.");
+        }
+
+        torrent.UploadLimitBytesPerSecond = rate;
+        await torrent.StartAsync(cts.Token);
+
+        var observer = await ObserveAsync(torrent, duration, stop: null, cts.Token);
+        var summaries = observer.SummariseByClient();
+
+        _output.WriteLine(observer.BuildReport($"seeding to a real swarm for {duration.TotalMinutes:F0} minutes"));
+
+        long uploaded = summaries.Sum(static s => s.BytesUploaded);
+        int leechers = summaries.Sum(static s => s.Leechers);
+        int served = summaries.Sum(static s => s.WeSentThemData);
+
+        _output.WriteLine("");
+        _output.WriteLine($"bytes served           : {uploaded:N0}");
+        _output.WriteLine($"incomplete peers met   : {leechers}");
+        _output.WriteLine($"of those, we served    : {served}");
+        _output.WriteLine("");
+        _output.WriteLine("how to read this:");
+        _output.WriteLine("  - Incomplete peers are the only ones that can want our data. On a distribution swarm");
+        _output.WriteLine("    most peers are seeds, so a small number here is the swarm, not a defect.");
+        _output.WriteLine("  - Meeting incomplete peers and serving none of them is the finding worth chasing: it");
+        _output.WriteLine("    means we advertised data and then failed to deliver it.");
+        _output.WriteLine("  - Without inbound connectivity we only reach peers we dial, which biases who we meet.");
+        _output.WriteLine($"    Configured listen port: {settings.Connection.TcpPort} (0 means an ephemeral one).");
+
+        Assert.True(observer.Peers.Count > 0, "No peers were reached at all while seeding, so nothing was measured.");
+
+        if (leechers == 0)
+        {
+            _output.WriteLine("");
+            _output.WriteLine("No incomplete peers were met, so this run cannot say whether we serve correctly.");
+            _output.WriteLine("Re-run against a busier or newer torrent, where leechers are more common.");
+        }
+        else
+        {
+            Assert.True(
+                served > 0,
+                $"{leechers} incomplete peer(s) were connected and none received a single byte from us. We hold every " +
+                "piece, so this is an upload-path defect rather than a property of the swarm.");
+        }
+    }
+
+    /// <summary>
     /// Several real swarms at once, in one engine.
     ///
     /// <para>

@@ -737,16 +737,20 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
         try
         {
-            // BEP 5: Send Port message to advertise our DHT UDP port if DHT is enabled
-            if (_torrent.DhtManager != null && _settings.Dht.Enabled)
-            {
-                await p.SendPortAsync(_settings.Connection.UdpPort).ConfigureAwait(false);
-            }
+            // BEP 3: "'bitfield' is only ever sent as the first message." Everything else - the BEP 5
+            // Port message included - has to wait until after it.
+            //
+            // This ordering is load-bearing rather than pedantic. Strict clients discard a bitfield that
+            // arrives after another message, and a peer that believes we hold nothing never asks us for
+            // anything. Measured against a live swarm while seeding a complete torrent: 48 incomplete
+            // peers connected and not one became interested, because a Port message had preceded our
+            // bitfield. Our own parser tolerates the wrong order - it exempts Port and Extended from the
+            // first-message rule - which is precisely why no local test ever caught this.
+            bool superSeeding = _torrent.SuperSeedManager.Enabled && _torrent.SuperSeedManager.HandlePeerConnected(p);
 
-            // BEP 16: Check for super-seeding mode
-            if (_torrent.SuperSeedManager.Enabled && _torrent.SuperSeedManager.HandlePeerConnected(p))
+            if (superSeeding)
             {
-                // In superseed mode, send HaveNone (or empty bitfield) instead of our full pieces
+                // BEP 16: claim nothing, then dole pieces out one at a time.
                 if (!await p.SendHaveNoneAsync().ConfigureAwait(false))
                 {
                     // Peer doesn't support Fast Extension, send empty bitfield
@@ -756,39 +760,49 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     };
                     await p.SendMessageAsync(msg).ConfigureAwait(false);
                 }
-
-                // Give the peer their first piece to download
-                await _torrent.SuperSeedManager.AssignPieceToPeerAsync(p).ConfigureAwait(false);
-                return;
             }
-
-            // Normal seeding mode - Await to ensure bitfield is queued before RequestBlocks sends Interested/Request messages
-            int receivedCount = _torrent.Pieces.ReceivedCount;
-            int totalPieces = _torrent.Pieces.Count;
-
-            if (receivedCount == totalPieces && receivedCount > 0)
+            else
             {
-                // BEP-6: Use HaveAll if peer supports Fast Extension
-                if (!await p.SendHaveAllAsync().ConfigureAwait(false))
+                int receivedCount = _torrent.Pieces.ReceivedCount;
+                int totalPieces = _torrent.Pieces.Count;
+
+                if (receivedCount == totalPieces && receivedCount > 0)
                 {
-                    // Peer doesn't support Fast Extension, send full bitfield
+                    // BEP-6: Use HaveAll if peer supports Fast Extension
+                    if (!await p.SendHaveAllAsync().ConfigureAwait(false))
+                    {
+                        // Peer doesn't support Fast Extension, send full bitfield
+                        var msg = new PeerMessage(MessageId.Bitfield)
+                        {
+                            Data = _torrent.Pieces.ToBitfield()
+                        };
+                        await p.SendMessageAsync(msg).ConfigureAwait(false);
+                    }
+                }
+                else if (receivedCount > 0)
+                {
+                    // Have some pieces, send bitfield
                     var msg = new PeerMessage(MessageId.Bitfield)
                     {
                         Data = _torrent.Pieces.ToBitfield()
                     };
                     await p.SendMessageAsync(msg).ConfigureAwait(false);
                 }
+                // else: Have no pieces - no need to send anything (HaveNone is optional and implicit)
             }
-            else if (receivedCount > 0)
+
+            // BEP 5: advertise our DHT UDP port, now that the bitfield has gone out ahead of it.
+            if (_torrent.DhtManager != null && _settings.Dht.Enabled)
             {
-                // Have some pieces, send bitfield
-                var msg = new PeerMessage(MessageId.Bitfield)
-                {
-                    Data = _torrent.Pieces.ToBitfield()
-                };
-                await p.SendMessageAsync(msg).ConfigureAwait(false);
+                await p.SendPortAsync(_settings.Connection.UdpPort).ConfigureAwait(false);
             }
-            // else: Have no pieces - no need to send anything (HaveNone is optional and implicit)
+
+            if (superSeeding)
+            {
+                // Give the peer their first piece to download
+                await _torrent.SuperSeedManager.AssignPieceToPeerAsync(p).ConfigureAwait(false);
+                return;
+            }
 
             // to start downloading as quickly as possible
             await _torrent.FileTransferInternal.RequestBlocksAsync(p, immediate: true).ConfigureAwait(false);
