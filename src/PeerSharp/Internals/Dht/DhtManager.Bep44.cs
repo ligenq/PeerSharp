@@ -16,6 +16,47 @@ namespace PeerSharp.Internals.Dht;
 /// </summary>
 internal partial class DhtManager
 {
+    /// <summary>
+    /// What actually happened during a BEP 44 lookup.
+    ///
+    /// Exists to answer a question that "no node accepted the put" cannot: whether a failure means
+    /// our query is malformed, the nodes are unreachable, or the nodes simply do not implement
+    /// BEP 44. Those need entirely different responses, and error code 204 (Method Unknown)
+    /// distinguishes the last one outright.
+    /// </summary>
+    /// <param name="InitialCandidates">
+    /// Nodes the routing table offered as closest to the target before the walk began. A small
+    /// number here means the table is unusable for this target, whatever its total size.
+    /// </param>
+    /// <param name="NodesQueried">Distinct nodes sent a get.</param>
+    /// <param name="Replied">Nodes that answered with a reply dictionary.</param>
+    /// <param name="Errored">Nodes that answered with an error.</param>
+    /// <param name="TimedOut">Nodes that never answered.</param>
+    /// <param name="WriteTokensReceived">Replies carrying a token, i.e. nodes that would accept a put.</param>
+    /// <param name="ItemsReturned">Replies carrying a value that passed verification.</param>
+    /// <param name="ErrorCodes">Error codes seen, with how many times each occurred.</param>
+    internal readonly record struct DhtItemLookupStats(
+        int InitialCandidates,
+        int NodesQueried,
+        int Replied,
+        int Errored,
+        int TimedOut,
+        int WriteTokensReceived,
+        int ItemsReturned,
+        IReadOnlyDictionary<int, int> ErrorCodes)
+    {
+        /// <summary>A one-line summary suitable for a log line or test output.</summary>
+        public override string ToString()
+        {
+            var codes = ErrorCodes.Count == 0
+                ? "none"
+                : string.Join(", ", ErrorCodes.OrderBy(static pair => pair.Key).Select(static pair => $"{pair.Key}x{pair.Value}"));
+
+            return $"candidates={InitialCandidates} queried={NodesQueried} replied={Replied} errored={Errored} timedOut={TimedOut} " +
+                   $"tokens={WriteTokensReceived} items={ItemsReturned} errorCodes=[{codes}]";
+        }
+    }
+
     /// <summary>Nodes queried in parallel at each step of a lookup.</summary>
     private const int LookupConcurrency = 3;
 
@@ -45,6 +86,18 @@ internal partial class DhtManager
     {
         var result = await RunItemLookupAsync(target, salt, cancellationToken).ConfigureAwait(false);
         return result.Item;
+    }
+
+    /// <summary>
+    /// Fetches an item and reports how the lookup went. For diagnosing why a lookup found nothing.
+    /// </summary>
+    public async Task<(DhtItem? Item, DhtItemLookupStats Stats)> GetItemWithStatsAsync(
+        DhtTarget target,
+        byte[]? salt = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RunItemLookupAsync(target, salt, cancellationToken).ConfigureAwait(false);
+        return (result.Item, result.Stats);
     }
 
     /// <summary>
@@ -108,9 +161,13 @@ internal partial class DhtManager
         var writeTargets = new List<(IPEndPoint Endpoint, byte[] Token)>();
         DhtItem? best = null;
 
+        int replied = 0, errored = 0, timedOut = 0, itemsReturned = 0;
+        var errorCodes = new Dictionary<int, int>();
+
         var candidates = _table.FindClosest(target.Span, ReplicationCount)
             .Select(node => node.EndPoint)
             .ToList();
+        int initialCandidates = candidates.Count;
 
         for (int round = 0; round < MaxLookupRounds && candidates.Count > 0; round++)
         {
@@ -132,10 +189,20 @@ internal partial class DhtManager
 
             for (int i = 0; i < replies.Length; i++)
             {
-                if (replies[i]?.Get("r") is not BDict reply)
+                if (replies[i] is null)
                 {
+                    timedOut++;
                     continue;
                 }
+
+                if (replies[i]!.Get("r") is not BDict reply)
+                {
+                    errored++;
+                    RecordErrorCode(replies[i]!, errorCodes);
+                    continue;
+                }
+
+                replied++;
 
                 var token = reply.GetBytes("token");
                 if (token is not null)
@@ -144,9 +211,13 @@ internal partial class DhtManager
                 }
 
                 var candidate = TryReadItemFromReply(reply, target, salt);
-                if (candidate is not null && IsNewer(candidate, best))
+                if (candidate is not null)
                 {
-                    best = candidate;
+                    itemsReturned++;
+                    if (IsNewer(candidate, best))
+                    {
+                        best = candidate;
+                    }
                 }
 
                 discovered.AddRange(ReadNodeEndpoints(reply));
@@ -155,7 +226,32 @@ internal partial class DhtManager
             candidates = discovered.Where(endpoint => !queried.Contains(endpoint)).Distinct().ToList();
         }
 
-        return new ItemLookupResult(best, writeTargets);
+        var stats = new DhtItemLookupStats(
+            initialCandidates,
+            queried.Count,
+            replied,
+            errored,
+            timedOut,
+            writeTargets.Count,
+            itemsReturned,
+            errorCodes);
+
+        _logger.LogDebug("BEP 44 lookup of {Target}: {Stats}", target, stats);
+
+        return new ItemLookupResult(best, writeTargets, stats);
+    }
+
+    /// <summary>
+    /// Tallies the numeric code from an error reply. 204 (Method Unknown) is the interesting one:
+    /// it means the node is alive and talking to us but does not implement BEP 44 at all.
+    /// </summary>
+    private static void RecordErrorCode(BDict reply, Dictionary<int, int> errorCodes)
+    {
+        int code = reply.Get("e") is BList error && error.List.FirstOrDefault() is BNumber number
+            ? (int)number.Value
+            : 0;
+
+        errorCodes[code] = errorCodes.GetValueOrDefault(code) + 1;
     }
 
     /// <summary>
@@ -318,5 +414,8 @@ internal partial class DhtManager
         }
     }
 
-    private sealed record ItemLookupResult(DhtItem? Item, IReadOnlyList<(IPEndPoint Endpoint, byte[] Token)> WriteTargets);
+    private sealed record ItemLookupResult(
+        DhtItem? Item,
+        IReadOnlyList<(IPEndPoint Endpoint, byte[] Token)> WriteTargets,
+        DhtItemLookupStats Stats);
 }

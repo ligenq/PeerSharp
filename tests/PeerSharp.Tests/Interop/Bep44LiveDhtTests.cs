@@ -43,10 +43,18 @@ public class Bep44LiveDhtTests
     /// Long enough for bootstrap plus an iterative lookup against real latency. The DHT is not
     /// fast, and a tighter bound would fail for reasons that have nothing to do with correctness.
     /// </summary>
-    private static readonly TimeSpan Budget = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan Budget = TimeSpan.FromMinutes(4);
 
-    /// <summary>Time allowed for the routing table to fill enough to run a lookup.</summary>
-    private static readonly TimeSpan BootstrapWait = TimeSpan.FromSeconds(20);
+    /// <summary>
+    /// Ceiling on waiting for the routing table to become usable. Growth against the live network
+    /// is variable - a lookup can have only two candidates for the first half-minute - so this
+    /// polls rather than sleeping a fixed period. Measuring before the table is warm surveys our
+    /// own impatience instead of the network.
+    /// </summary>
+    private static readonly TimeSpan BootstrapCeiling = TimeSpan.FromMinutes(2);
+
+    /// <summary>Candidate nodes a lookup needs before it is worth starting.</summary>
+    private const int UsableCandidates = 6;
 
     private static BString Text(string value) => new(Encoding.UTF8.GetBytes(value));
 
@@ -84,16 +92,20 @@ public class Bep44LiveDhtTests
         var dht = DhtManager.CreateSecure(listener, settings);
         await dht.StartAsync(cancellationToken);
 
-        // Bootstrap is asynchronous; give the routing table time to populate before a lookup.
-        using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        wait.CancelAfter(BootstrapWait);
-        try
+        // Poll until a lookup has somewhere to start. The measured survey showed candidates stuck
+        // at 2 for the first ~30 seconds and then jumping to 8; anything issued before that point
+        // fails for lack of a routing table rather than for any protocol reason.
+        var deadline = DateTimeOffset.UtcNow + BootstrapCeiling;
+        while (DateTimeOffset.UtcNow < deadline)
         {
-            await Task.Delay(BootstrapWait, wait.Token);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            // Expected: the wait elapsed.
+            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+
+            var probe = new DhtTarget(System.Security.Cryptography.RandomNumberGenerator.GetBytes(DhtTarget.Length));
+            var (_, stats) = await dht.GetItemWithStatsAsync(probe, cancellationToken: cancellationToken);
+            if (stats.InitialCandidates >= UsableCandidates)
+            {
+                break;
+            }
         }
 
         return new LiveNode(dht, listener);
@@ -104,7 +116,7 @@ public class Bep44LiveDhtTests
     /// removes signatures from the picture: if this fails, the problem is the get/put plumbing or
     /// the target derivation, not the crypto.
     /// </summary>
-    [Fact(Timeout = 120_000)]
+    [Fact(Timeout = 300_000)]
     public async Task ImmutableItem_RoundTripsThroughTheRealDht()
     {
         RequireInteropEnabled();
@@ -130,7 +142,7 @@ public class Bep44LiveDhtTests
     /// The signature path against foreign verifiers: real nodes must accept our Ed25519 signature,
     /// which they will only do if the signature buffer matches what their implementation builds.
     /// </summary>
-    [Fact(Timeout = 120_000)]
+    [Fact(Timeout = 300_000)]
     public async Task MutableItem_RoundTripsThroughTheRealDht()
     {
         RequireInteropEnabled();
@@ -156,7 +168,7 @@ public class Bep44LiveDhtTests
     /// implementations - the salt has to be appended to the key before hashing, and folded into the
     /// signature buffer, or the record lands somewhere nobody else looks.
     /// </summary>
-    [Fact(Timeout = 120_000)]
+    [Fact(Timeout = 300_000)]
     public async Task SaltedMutableItem_RoundTripsThroughTheRealDht()
     {
         RequireInteropEnabled();
@@ -180,12 +192,12 @@ public class Bep44LiveDhtTests
     /// The whole BEP 46 flow against the real network: publish a record naming an info-hash,
     /// resolve the key back to it, then publish a second version and see the resolution move.
     /// </summary>
-    [Fact(Timeout = 180_000)]
+    [Fact(Timeout = 360_000)]
     public async Task Bep46_PublishAndResolveThroughTheRealDht()
     {
         RequireInteropEnabled();
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         await using var node = await StartLiveNodeAsync(cts.Token);
 
         var seed = Ed25519.GenerateSeed();
@@ -214,7 +226,7 @@ public class Bep44LiveDhtTests
     /// our target derivation finds what other implementations stored, but a miss only means nobody
     /// currently holds that item.
     /// </summary>
-    [Fact(Timeout = 120_000)]
+    [Fact(Timeout = 300_000)]
     public async Task SpecVectorTarget_IsQueryableOnTheRealDht()
     {
         RequireInteropEnabled();

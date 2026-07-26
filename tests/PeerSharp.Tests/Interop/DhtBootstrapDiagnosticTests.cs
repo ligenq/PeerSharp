@@ -70,6 +70,51 @@ public class DhtBootstrapDiagnosticTests
 
         _output.WriteLine($"Final peak: {peak} nodes");
 
+        // Where the nodes actually live. FindClosest only returns Active nodes from the buckets, so
+        // a healthy total with a tiny FindClosest result means the two disagree - and that is the
+        // difference between "bootstrap is fine" and "lookups cannot start".
+        var tableField = typeof(DhtManager).GetField("_table",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var table = tableField!.GetValue(dht)!;
+
+        var getAllNodes = table.GetType().GetMethod("GetAllNodes")!;
+        var all = (System.Collections.ICollection)getAllNodes.Invoke(table, [500])!;
+        _output.WriteLine($"GetAllNodes            : {all.Count}");
+
+        // FindClosest takes a ReadOnlySpan, which reflection cannot invoke, so the equivalent
+        // number is reported by DhtItemLookupStats.InitialCandidates in Bep44SupportSurveyTests.
+
+        var bucketsField = table.GetType().GetField("_buckets",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var buckets = (Array)bucketsField!.GetValue(table)!;
+        int occupied = 0, totalInBuckets = 0, activeInBuckets = 0;
+        for (int i = 0; i < buckets.Length; i++)
+        {
+            var bucket = buckets.GetValue(i)!;
+            var nodesProp = bucket.GetType().GetProperty("Nodes")!;
+            var nodes = (System.Collections.IList)nodesProp.GetValue(bucket)!;
+            if (nodes.Count == 0)
+            {
+                continue;
+            }
+
+            occupied++;
+            totalInBuckets += nodes.Count;
+            foreach (var node in nodes)
+            {
+                var activeProp = node!.GetType().GetProperty("Active")!;
+                if ((bool)activeProp.GetValue(node)!)
+                {
+                    activeInBuckets++;
+                }
+            }
+
+            _output.WriteLine($"  bucket[{i}] = {nodes.Count} node(s)");
+        }
+
+        _output.WriteLine($"occupied buckets       : {occupied}");
+        _output.WriteLine($"nodes in buckets       : {totalInBuckets} ({activeInBuckets} active)");
+
         // A single responsive bootstrap router with no find_node walk yields about one node. Ten is
         // a low bar that still distinguishes "the walk works" from "we only know the routers".
         Assert.True(
