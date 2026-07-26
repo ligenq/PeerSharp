@@ -18,6 +18,13 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     private const int MaxPeersPerInfoHash = 200;
     private const int MaxRecentQueries = 10000;
 
+    /// <summary>
+    /// How many rounds of find_node a bootstrap walk performs. Each round asks the nodes learned in
+    /// the previous one, so the routing table fills outward from the bootstrap routers. Three is
+    /// enough to populate the buckets near our own id without turning startup into a flood.
+    /// </summary>
+    private const int MaxFindNodeDepth = 3;
+
     /// <summary>BEP 5: "203 Protocol Error, such as a malformed packet, invalid arguments, or bad token".</summary>
     private const int DhtErrorProtocol = 203;
     private readonly IUdpListener _listener;
@@ -425,7 +432,12 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                     .ConfigureAwait(false);
                 if (ips.Length > 0)
                 {
-                    Ping(new IPEndPoint(ips[0], node.Port));
+                    var endpoint = new IPEndPoint(ips[0], node.Port);
+
+                    // Ping proves reachability; find_node for our own id is what actually populates
+                    // the routing table, by asking for the nodes nearest us and walking into those.
+                    Ping(endpoint);
+                    SendFindNode(endpoint, NodeId);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -783,6 +795,29 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         _ => "protocol error",
     };
 
+    /// <summary>
+    /// Continues an iterative lookup into a node we have just learned about. get_peers keeps
+    /// walking until it runs out of closer nodes; find_node stops after
+    /// <see cref="MaxFindNodeDepth"/> rounds, which is enough to seed the routing table without
+    /// fanning out indefinitely.
+    /// </summary>
+    private void ContinueWalk(Transaction trans, IPEndPoint discovered)
+    {
+        switch (trans.Type)
+        {
+            case "get_peers":
+                SendGetPeers(discovered, trans.InfoHash, trans.Announce, trans.Port);
+                break;
+
+            case "find_node" when trans.Depth + 1 < MaxFindNodeDepth:
+                SendFindNode(discovered, trans.InfoHash, trans.Depth + 1);
+                break;
+
+            default:
+                break;
+        }
+    }
+
     private void HandleResponse(BDict node, IPEndPoint remote)
     {
         var tBytes = node.GetBytes("t");
@@ -842,10 +877,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 {
                     _table.AddNode(n.Id, n.EndPoint);
                     MarkStateDirty();
-                    if (trans.Type == "get_peers")
-                    {
-                        SendGetPeers(n.EndPoint, trans.InfoHash, trans.Announce, trans.Port);
-                    }
+                    ContinueWalk(trans, n.EndPoint);
                 }
             }
 
@@ -857,10 +889,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 {
                     _table.AddNode(n.Id, n.EndPoint);
                     MarkStateDirty();
-                    if (trans.Type == "get_peers")
-                    {
-                        SendGetPeers(n.EndPoint, trans.InfoHash, trans.Announce, trans.Port);
-                    }
+                    ContinueWalk(trans, n.EndPoint);
                 }
             }
 
@@ -995,7 +1024,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         _rebootstrapTask = BootstrapAsync(DhtToken);
     }
 
-    private void RegisterTransaction(ReadOnlySpan<byte> tid, string type, InfoHash infoHash, bool announce = false, int port = 0, bool scrape = false)
+    private void RegisterTransaction(ReadOnlySpan<byte> tid, string type, InfoHash infoHash, bool announce = false, int port = 0, bool scrape = false, int depth = 0)
     {
         var idString = Encoding.Latin1.GetString(tid);
         _transactions[idString] = new Transaction
@@ -1006,8 +1035,57 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             Timestamp = _timeProvider.GetUtcNow(),
             Announce = announce,
             Port = port,
-            Scrape = scrape
+            Scrape = scrape,
+            Depth = depth
         };
+    }
+
+    /// <summary>
+    /// Sends a find_node query, which is the mechanism by which a routing table actually fills.
+    ///
+    /// Nothing here sent one previously: find_node existed only as a handler for queries from other
+    /// peers. A node that merely pings its bootstrap routers learns exactly those routers and has
+    /// no way to discover anyone else, so every iterative lookup - get_peers as much as BEP 44 get
+    /// - began from a table of at most three entries. Asking for the nodes nearest a target and
+    /// then asking those in turn is what BEP 5 expects, and what makes lookups work at all.
+    /// </summary>
+    /// <param name="ep">The node to ask.</param>
+    /// <param name="target">The id to find nodes near; our own id during bootstrap.</param>
+    /// <param name="depth">Rounds already walked. The response handler stops at MaxFindNodeDepth.</param>
+    private void SendFindNode(IPEndPoint ep, InfoHash target, int depth = 0)
+    {
+        if (!_running || _transactions.Count >= MaxTransactions)
+        {
+            return;
+        }
+
+        // The same dedup guard get_peers uses, so a walk cannot loop between nodes that know each
+        // other.
+        var queryKey = $"fn:{ep}:{Convert.ToHexString(target.Span)}";
+        var now = _timeProvider.GetUtcNow();
+        if (_recentGetPeersQueries.TryGetValue(queryKey, out var lastQueried) &&
+            (now - lastQueried).TotalMinutes < ProtocolConstants.DhtTransactionTimeoutMinutes)
+        {
+            return;
+        }
+
+        _recentGetPeersQueries[queryKey] = now;
+
+        Span<byte> tid = stackalloc byte[4];
+        GenerateTransactionId(tid);
+
+        var dict = new BDict();
+        dict.Dict["t"] = new BString(tid.ToArray());
+        dict.Dict["y"] = new BString("q"u8.ToArray());
+        dict.Dict["q"] = new BString("find_node"u8.ToArray());
+
+        var a = new BDict();
+        a.Dict["id"] = new BString(NodeId.ToArray());
+        a.Dict["target"] = new BString(target.Span.ToArray());
+        dict.Dict["a"] = a;
+
+        RegisterTransaction(tid, "find_node", target, depth: depth);
+        SendPacket(dict, ep, DhtToken);
     }
 
     private void RotateSecret()
@@ -1287,6 +1365,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     internal sealed class Transaction
     {
         public bool Announce { get; init; }
+
+        /// <summary>Rounds of find_node already walked, so recursion terminates.</summary>
+        public int Depth { get; init; }
+
         public required string Id { get; init; }
         public InfoHash InfoHash { get; init; }
 
