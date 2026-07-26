@@ -36,6 +36,12 @@ internal static class Ed25519
     /// <summary>Length in bytes of a signature.</summary>
     public const int SignatureSize = 64;
 
+    /// <summary>
+    /// Length in bytes of an expanded private key: the clamped scalar followed by the nonce
+    /// prefix, i.e. SHA-512 of the seed.
+    /// </summary>
+    public const int ExpandedKeySize = 64;
+
     /// <summary>Order of the base point (RFC 8032 section 5.1).</summary>
     private static readonly BigInteger L =
         BigInteger.Pow(2, 252) + BigInteger.Parse("27742317777372353535851937790883648493");
@@ -93,17 +99,57 @@ internal static class Ed25519
             throw new ArgumentException($"Seed must be {SeedSize} bytes.", nameof(seed));
         }
 
-        Span<byte> expanded = stackalloc byte[64];
+        Span<byte> expanded = stackalloc byte[ExpandedKeySize];
         SHA512.HashData(seed, expanded);
+        return SignWithExpandedKey(message, expanded);
+    }
+
+    /// <summary>
+    /// Derives the public key from a 64-byte expanded private key.
+    /// </summary>
+    /// <param name="expandedKey">
+    /// The clamped scalar followed by the nonce prefix - the form produced by libsodium-style
+    /// keypair generation, and the form BEP 44's own test vectors use.
+    /// </param>
+    public static byte[] PublicKeyFromExpandedKey(ReadOnlySpan<byte> expandedKey)
+    {
+        if (expandedKey.Length != ExpandedKeySize)
+        {
+            throw new ArgumentException($"An expanded key must be {ExpandedKeySize} bytes.", nameof(expandedKey));
+        }
+
+        Span<byte> scalar = stackalloc byte[32];
+        ClampScalar(expandedKey[..32], scalar);
+        return Encode(ScalarMultiplyBase(scalar));
+    }
+
+    /// <summary>
+    /// Signs with a 64-byte expanded private key rather than a seed.
+    /// </summary>
+    /// <param name="message">The message to sign.</param>
+    /// <param name="expandedKey">
+    /// The clamped scalar followed by the nonce prefix. Existing BEP 44 publishers commonly
+    /// persist this form rather than the seed - it is what libtorrent's keypair API yields - so a
+    /// key store built against another implementation can be used directly.
+    /// </param>
+    /// <remarks>Not constant-time; see the remarks on <see cref="Ed25519"/>.</remarks>
+    public static byte[] SignWithExpandedKey(ReadOnlySpan<byte> message, ReadOnlySpan<byte> expandedKey)
+    {
+        if (expandedKey.Length != ExpandedKeySize)
+        {
+            throw new ArgumentException($"An expanded key must be {ExpandedKeySize} bytes.", nameof(expandedKey));
+        }
 
         Span<byte> scalarBytes = stackalloc byte[32];
-        ClampScalar(expanded[..32], scalarBytes);
+        // Already clamped in a well-formed expanded key; clamping is idempotent, and re-applying
+        // it means a hand-assembled key cannot produce an out-of-subgroup scalar.
+        ClampScalar(expandedKey[..32], scalarBytes);
         var scalar = LittleEndianToBigInteger(scalarBytes);
         var publicKey = Encode(ScalarMultiplyBase(scalarBytes));
 
         // r = SHA512(prefix || message) mod L, where prefix is the upper half of the expansion.
         var prefixed = new byte[32 + message.Length];
-        expanded[32..].CopyTo(prefixed);
+        expandedKey[32..].CopyTo(prefixed);
         message.CopyTo(prefixed.AsSpan(32));
         var r = Mod(LittleEndianToBigInteger(SHA512.HashData(prefixed)), L);
 
