@@ -17,6 +17,16 @@ namespace PeerSharp.Internals.Dht;
 internal partial class DhtManager
 {
     /// <summary>
+    /// A lookup that starts with fewer nodes is too dependent on one or two bootstrap routers to
+    /// be useful. Live bootstrap measurements show the table commonly sits at two candidates for
+    /// roughly 30 seconds before filling to the normal replication width.
+    /// </summary>
+    private const int UsableItemLookupCandidates = 6;
+
+    private static readonly TimeSpan RoutingTablePollInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan RoutingTableWarmupTimeout = TimeSpan.FromMinutes(2);
+
+    /// <summary>
     /// What actually happened during a BEP 44 lookup.
     ///
     /// Exists to answer a question that "no node accepted the put" cannot: whether a failure means
@@ -98,6 +108,64 @@ internal partial class DhtManager
     {
         var result = await RunItemLookupAsync(target, salt, cancellationToken).ConfigureAwait(false);
         return (result.Item, result.Stats);
+    }
+
+    /// <summary>
+    /// Waits until a BEP 44 lookup for <paramref name="target"/> has enough active starting nodes
+    /// to be useful. Bootstrap runs in the background, so startup callers must not interpret its
+    /// initially sparse routing table as a completed lookup.
+    /// </summary>
+    internal async Task WaitForUsableItemRoutingTableAsync(
+        DhtTarget target,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_running)
+        {
+            throw new InvalidOperationException("The DHT must be started before publishing an item.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var timeProvider = _timeProvider;
+        var deadline = timeProvider.GetUtcNow() + RoutingTableWarmupTimeout;
+        int candidates = _table.FindClosest(target.Span, ReplicationCount).Count;
+
+        if (candidates < UsableItemLookupCandidates)
+        {
+            _logger.LogDebug(
+                "Waiting for the DHT routing table before publishing {Target}; {Candidates}/{Required} active candidates are available",
+                target,
+                candidates,
+                UsableItemLookupCandidates);
+        }
+
+        while (candidates < UsableItemLookupCandidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var remaining = deadline - timeProvider.GetUtcNow();
+            if (remaining <= TimeSpan.Zero)
+            {
+                throw new TimeoutException(
+                    $"The DHT routing table did not become ready for publishing within {RoutingTableWarmupTimeout}. " +
+                    $"Only {candidates} of {UsableItemLookupCandidates} required active candidates were available.");
+            }
+
+            var delay = remaining < RoutingTablePollInterval ? remaining : RoutingTablePollInterval;
+            await Task.Delay(delay, timeProvider, cancellationToken).ConfigureAwait(false);
+
+            if (!_running)
+            {
+                throw new InvalidOperationException("The DHT stopped while waiting to publish an item.");
+            }
+
+            candidates = _table.FindClosest(target.Span, ReplicationCount).Count;
+        }
+
+        _logger.LogDebug(
+            "DHT routing table is ready to publish {Target} with {Candidates} active candidates",
+            target,
+            candidates);
     }
 
     /// <summary>

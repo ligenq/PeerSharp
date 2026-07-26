@@ -182,9 +182,10 @@ Notes:
   and against the live Mainline DHT. A survey of 105 walked nodes found 69% answer BEP 44 `get`
   and every one of those issues a write token; 7.6% return `204 Method Unknown`. See
   `tests/PeerSharp.Tests/Interop`, which is excluded from CI and gated on `PEERSHARP_INTEROP=1`.
-- A fresh node's routing table takes around 30 seconds to become usable for lookups. Publishing or
-  resolving immediately after startup can fail for want of a routing table rather than for any
-  protocol reason.
+- A fresh node's routing table commonly takes around 30 seconds to become usable. Publishing waits
+  for six active lookup candidates (up to two minutes, or until its cancellation token is
+  cancelled) before reading the current version and writing the update. Resolving remains a
+  best-effort lookup and can return null while the table is still cold.
 
 ### Streaming
 
