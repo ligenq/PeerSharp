@@ -23,6 +23,7 @@ public class NetworkManagerTests
         public void Announce(InfoHash hash, int port) { }
         public static void GetPeers(InfoHash hash) { }
         public void Ping(System.Net.IPEndPoint endpoint) { }
+        public void ReportExternalIp(System.Net.IPAddress address) { }
         public static void AddNode(System.Net.IPEndPoint endpoint) { }
         public void SetCallback(IDhtCallback callback) { }
         public void FindPeers(InfoHash hash) { }

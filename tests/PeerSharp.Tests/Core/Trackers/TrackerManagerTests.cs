@@ -1,11 +1,42 @@
 using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
+using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Trackers;
+using System.Net;
 
 namespace PeerSharp.Tests.Core.Trackers;
 
 public class TrackerManagerTests
 {
+    /// <summary>
+    /// Records the BEP 24 addresses the tracker layer forwards for BEP 42 voting.
+    /// </summary>
+    private sealed class RecordingDhtManager : IDhtManager
+    {
+        public List<IPAddress> Reports { get; } = [];
+        public bool ThrowOnReport { get; set; }
+        public InfoHash NodeId { get; } = new InfoHash(new byte[20]);
+
+        public void ReportExternalIp(IPAddress address)
+        {
+            Reports.Add(address);
+            if (ThrowOnReport)
+            {
+                throw new InvalidOperationException("DHT is not running");
+            }
+        }
+
+        public void Announce(InfoHash infoHash, int port) { }
+        public void FindPeers(InfoHash infoHash) { }
+        public void Ping(IPEndPoint ep) { }
+        public void ScrapeInfoHash(InfoHash infoHash) { }
+        public void SetCallback(IDhtCallback callback) { }
+        public Task StartAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public DhtState? ConsumeStateSnapshot() => null;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private class MockTracker : ITracker
     {
         public string Url { get; private set; } = string.Empty;
@@ -532,6 +563,253 @@ public class TrackerManagerTests
         var status = manager.GetTrackers().Single();
         Assert.Equal(12u, status.SeedCount);
         Assert.Equal(4u, status.LeechCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RetryNever_StopsAnnouncingAndReportsDisabled()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://not-a-tracker.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        tracker.TriggerResult(false, new AnnounceResponse { RetryHint = TrackerRetryHint.NeverRetry }, "Not a tracker");
+        int announcesWhenDisabled = tracker.AnnounceCount;
+
+        // A day of timer ticks must not produce another announce.
+        _timeProvider.Advance(TimeSpan.FromDays(1));
+
+        Assert.Equal(announcesWhenDisabled, tracker.AnnounceCount);
+        Assert.Equal(TrackerStatusType.Disabled, manager.GetTrackers().Single().Status);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RetryNever_IgnoresManualAnnounce()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://not-a-tracker.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        tracker.TriggerResult(false, new AnnounceResponse { RetryHint = TrackerRetryHint.NeverRetry }, "Not a tracker");
+        int announcesWhenDisabled = tracker.AnnounceCount;
+
+        await manager.AnnounceAsync();
+
+        Assert.Equal(announcesWhenDisabled, tracker.AnnounceCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RetryNever_SkipsStoppedAnnounceOnStop()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://not-a-tracker.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        tracker.TriggerResult(false, new AnnounceResponse { RetryHint = TrackerRetryHint.NeverRetry }, "Not a tracker");
+        int announcesWhenDisabled = tracker.AnnounceCount;
+
+        await manager.StopAsync();
+
+        // "Never send this query again" includes the courtesy Stopped announce.
+        Assert.Equal(announcesWhenDisabled, tracker.AnnounceCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RetryNever_LetsTheNextTierTakeOver()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        manager.AddTrackers(
+        [
+            new[] { "http://tier0.example/announce" },
+            ["http://tier1.example/announce"]
+        ]);
+
+        await manager.StartAsync();
+        var disabledTracker = _factory.Trackers["http://tier0.example/announce"];
+        var fallbackTracker = _factory.Trackers["http://tier1.example/announce"];
+        await disabledTracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        // One "never" is enough to exhaust the tier - waiting for three failures would never happen.
+        disabledTracker.TriggerResult(false, new AnnounceResponse { RetryHint = TrackerRetryHint.NeverRetry }, "Not a tracker");
+
+        await fallbackTracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal(1, fallbackTracker.AnnounceCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RetryIn_DelaysTheNextAnnounceBeyondTheDefaultRetry()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://busy.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        // A single failure would normally be retried after one minute.
+        tracker.TriggerResult(false, new AnnounceResponse { RetryHint = TrackerRetryHint.After(TimeSpan.FromMinutes(20)) }, "Rate limited");
+        int announcesWhenFailed = tracker.AnnounceCount;
+
+        _timeProvider.Advance(TimeSpan.FromMinutes(5));
+        Assert.Equal(announcesWhenFailed, tracker.AnnounceCount);
+
+        _timeProvider.Advance(TimeSpan.FromMinutes(16));
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal(announcesWhenFailed + 1, tracker.AnnounceCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RetryIn_CannotShortenOurOwnBackoff()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://fail.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        // Open the circuit, then have the tracker ask to be hammered again in one minute.
+        tracker.TriggerResult(false, new AnnounceResponse());
+        tracker.TriggerResult(false, new AnnounceResponse());
+        tracker.TriggerResult(false, new AnnounceResponse(), "third failure");
+        Assert.Equal(TrackerStatusType.CircuitOpen, manager.GetTrackers().Single().Status);
+
+        tracker.TriggerResult(false, new AnnounceResponse { RetryHint = TrackerRetryHint.After(TimeSpan.FromMinutes(1)) }, "come back soon");
+        int announcesWhenFailed = tracker.AnnounceCount;
+
+        // The fourth failure opened the circuit again, so the backoff is already past one minute.
+        _timeProvider.Advance(TimeSpan.FromSeconds(90));
+        Assert.Equal(announcesWhenFailed, tracker.AnnounceCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RetryIn_IsClampedToTwentyFourHours()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://hostile.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+
+        // An unbounded hint would silence this tracker for the life of the process.
+        tracker.TriggerResult(false, new AnnounceResponse { RetryHint = TrackerRetryHint.After(TimeSpan.FromDays(400)) }, "go away");
+        int announcesWhenFailed = tracker.AnnounceCount;
+
+        _timeProvider.Advance(TimeSpan.FromHours(25));
+
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
+        Assert.Equal(announcesWhenFailed + 1, tracker.AnnounceCount);
+    }
+
+    [Fact]
+    public void ExternalIp_FromTracker_IsReportedToTheDht()
+    {
+        var dht = new RecordingDhtManager();
+        _torrent.DhtManager = dht;
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://tracker.example/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+
+        tracker.TriggerResult(true, new AnnounceResponse { ExternalIp = IPAddress.Parse("203.0.113.7") });
+
+        Assert.Equal([IPAddress.Parse("203.0.113.7")], dht.Reports);
+    }
+
+    [Fact]
+    public void ExternalIp_RepeatedFromSameTracker_VotesOnlyOnce()
+    {
+        // Otherwise a single tracker announcing on its interval would reach the BEP 42 vote
+        // threshold on its own and drive a node ID regeneration.
+        var dht = new RecordingDhtManager();
+        _torrent.DhtManager = dht;
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://tracker.example/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+
+        var address = IPAddress.Parse("203.0.113.7");
+        tracker.TriggerResult(true, new AnnounceResponse { ExternalIp = address });
+        tracker.TriggerResult(true, new AnnounceResponse { ExternalIp = address });
+        tracker.TriggerResult(true, new AnnounceResponse { ExternalIp = address });
+
+        Assert.Single(dht.Reports);
+    }
+
+    [Fact]
+    public void ExternalIp_ChangedValue_IsReportedAgain()
+    {
+        var dht = new RecordingDhtManager();
+        _torrent.DhtManager = dht;
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://tracker.example/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+
+        tracker.TriggerResult(true, new AnnounceResponse { ExternalIp = IPAddress.Parse("203.0.113.7") });
+        tracker.TriggerResult(true, new AnnounceResponse { ExternalIp = IPAddress.Parse("198.51.100.4") });
+
+        Assert.Equal(
+            [IPAddress.Parse("203.0.113.7"), IPAddress.Parse("198.51.100.4")],
+            dht.Reports);
+    }
+
+    [Fact]
+    public void ExternalIp_AbsentFromResponse_IsNotReported()
+    {
+        var dht = new RecordingDhtManager();
+        _torrent.DhtManager = dht;
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://tracker.example/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+
+        tracker.TriggerResult(true, new AnnounceResponse());
+
+        Assert.Empty(dht.Reports);
+    }
+
+    [Fact]
+    public void ExternalIp_WhenDhtReportThrows_AnnounceStillSucceeds()
+    {
+        var dht = new RecordingDhtManager { ThrowOnReport = true };
+        _torrent.DhtManager = dht;
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://tracker.example/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+
+        tracker.TriggerResult(true, new AnnounceResponse
+        {
+            ExternalIp = IPAddress.Parse("203.0.113.7"),
+            SeedCount = 9
+        });
+
+        var status = manager.GetTrackers().Single();
+        Assert.Equal(TrackerStatusType.Working, status.Status);
+        Assert.Equal(9u, status.SeedCount);
+    }
+
+    [Fact]
+    public void ExternalIp_WithoutDht_IsIgnored()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://tracker.example/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+
+        tracker.TriggerResult(true, new AnnounceResponse { ExternalIp = IPAddress.Parse("203.0.113.7") });
+
+        Assert.Equal(TrackerStatusType.Working, manager.GetTrackers().Single().Status);
     }
 
     [Fact]

@@ -54,7 +54,15 @@ internal class HttpTracker : TrackerBase, IDisposable
             {
                 _logger.LogWarning(ex, "Announce to {Url} failed", Url);
             }
-            RaiseAnnounceResult(false, new AnnounceResponse(), ex.Message);
+
+            // BEP 31: a failure response can tell us when to come back. Only the tracker's own
+            // failure carries that - a timeout or a transport error leaves the hint unset, and the
+            // manager falls back to its exponential backoff.
+            var failure = new AnnounceResponse
+            {
+                RetryHint = (ex as TrackerFailureException)?.RetryHint
+            };
+            RaiseAnnounceResult(false, failure, ex.Message);
         }
     }
 
@@ -207,18 +215,26 @@ internal class HttpTracker : TrackerBase, IDisposable
 
 
 
+    /// <summary>
+    /// BEP 3: a tracker may return {'failure reason': '...'} with no other keys. Surface that string
+    /// rather than silently treating the empty response as success, and carry the BEP 31
+    /// <c>retry in</c> hint that may accompany it.
+    /// </summary>
+    private static void ThrowIfFailure(BDict dict)
+    {
+        var failureReason = dict.GetString("failure reason");
+        if (!string.IsNullOrEmpty(failureReason))
+        {
+            throw new TrackerFailureException(failureReason, TrackerRetryHint.TryParse(dict));
+        }
+    }
+
     private static AnnounceResponse ParseResponse(byte[] data)
     {
         var node = BencodeParser.Parse(data);
         if (node is BDict dict)
         {
-            // BEP 3: a tracker may return {'failure reason': '...'} with no other keys.
-            // Surface that string rather than silently treating the empty response as success.
-            var failureReason = dict.GetString("failure reason");
-            if (!string.IsNullOrEmpty(failureReason))
-            {
-                throw new InvalidDataException($"Tracker returned failure: {failureReason}");
-            }
+            ThrowIfFailure(dict);
 
             var resp = new AnnounceResponse
             {
@@ -232,6 +248,14 @@ internal class HttpTracker : TrackerBase, IDisposable
             if (minInterval > 0)
             {
                 resp.MinInterval = (uint)minInterval.Value;
+            }
+
+            // BEP 24: the tracker may report the address it saw us announce from, as a bare 4 byte
+            // (IPv4) or 16 byte (IPv6) binary address with no port.
+            var externalIp = dict.GetBytes("external ip");
+            if (externalIp != null && externalIp.Value.Length is 4 or 16)
+            {
+                resp.ExternalIp = new IPAddress(externalIp.Value.Span);
             }
 
             // BEP 23: Compact IPv4 peers (6 bytes each: 4 IP + 2 port)
@@ -272,11 +296,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         var node = BencodeParser.Parse(data);
         if (node is BDict dict)
         {
-            var failureReason = dict.GetString("failure reason");
-            if (!string.IsNullOrEmpty(failureReason))
-            {
-                throw new InvalidDataException($"Tracker returned failure: {failureReason}");
-            }
+            ThrowIfFailure(dict);
         }
         if (node is BDict dict2 && dict2.Get("files") is BDict files)
         {
@@ -305,11 +325,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         var node = BencodeParser.Parse(data);
         if (node is BDict dict)
         {
-            var failureReason = dict.GetString("failure reason");
-            if (!string.IsNullOrEmpty(failureReason))
-            {
-                throw new InvalidDataException($"Tracker returned failure: {failureReason}");
-            }
+            ThrowIfFailure(dict);
         }
         if (node is BDict dict2 && dict2.Get("files") is BDict files)
         {

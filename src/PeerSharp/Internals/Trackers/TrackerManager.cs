@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Peers;
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
+using System.Net;
 
 namespace PeerSharp.Internals.Trackers;
 
@@ -47,6 +48,18 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     private static int ClampAnnounceInterval(uint seconds)
     {
         return (int)Math.Clamp(seconds, (uint)MinAnnounceIntervalSeconds, (uint)MaxAnnounceIntervalSeconds);
+    }
+
+    /// <summary>
+    /// Bounds a BEP 31 <c>retry in</c> hint. The point of the extension is to obey the tracker, so
+    /// the ceiling is the same 24 hours we already allow a tracker to ask for via <c>interval</c>
+    /// rather than the circuit breaker's one hour - but it is still a ceiling, because the value is
+    /// attacker-controlled and an unbounded one would silence this tracker for the process lifetime.
+    /// </summary>
+    private static TimeSpan ClampRetryHint(TimeSpan retryIn)
+    {
+        double seconds = Math.Clamp(retryIn.TotalSeconds, MinAnnounceIntervalSeconds, MaxAnnounceIntervalSeconds);
+        return TimeSpan.FromSeconds(seconds);
     }
     private readonly ILogger<TrackerManager> _logger;
 
@@ -187,7 +200,11 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             foreach (var info in _trackers)
             {
                 TrackerStatusType statusType;
-                if (info.CircuitState == CircuitBreakerState.Open)
+                if (info.RetryDisabled)
+                {
+                    statusType = TrackerStatusType.Disabled;
+                }
+                else if (info.CircuitState == CircuitBreakerState.Open)
                 {
                     statusType = TrackerStatusType.CircuitOpen;
                 }
@@ -200,14 +217,19 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                     statusType = info.IsWorking ? TrackerStatusType.Working : TrackerStatusType.NotWorking;
                 }
 
+                // A tracker disabled by BEP 31 has no next announce to report; leaving this at
+                // MinValue is how the existing "nothing scheduled" case is already expressed.
                 DateTimeOffset nextRetry = DateTimeOffset.MinValue;
-                if (info.NextRetryTime > DateTimeOffset.MinValue && info.CircuitState != CircuitBreakerState.Closed)
+                if (!info.RetryDisabled)
                 {
-                    nextRetry = info.NextRetryTime;
-                }
-                else if (info.LastAnnounce != DateTimeOffset.MinValue)
-                {
-                    nextRetry = info.LastAnnounce.AddSeconds(info.Interval);
+                    if (info.NextRetryTime > DateTimeOffset.MinValue && info.CircuitState != CircuitBreakerState.Closed)
+                    {
+                        nextRetry = info.NextRetryTime;
+                    }
+                    else if (info.LastAnnounce != DateTimeOffset.MinValue)
+                    {
+                        nextRetry = info.LastAnnounce.AddSeconds(info.Interval);
+                    }
                 }
 
                 result.Add(new TrackerStatus(
@@ -268,6 +290,8 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
                 MarkTierSuccess(info.TierIndex);
 
+                ReportExternalIp(info, response.ExternalIp);
+
                 // Add peers to peer manager
                 try
                 {
@@ -288,9 +312,20 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                     OpenCircuit(info);
                 }
 
-                // Schedule retry based on circuit state
-                if (_started)
+                // BEP 31: "retry in: never" means stop asking this tracker altogether. Honour it for
+                // the rest of the session but never persist it - a tracker that answers "Not a
+                // tracker" today may be reconfigured tomorrow, and a stale permanent block would be
+                // indistinguishable from a broken client.
+                if (response.RetryHint is { Never: true })
                 {
+                    info.RetryDisabled = true;
+                    info.Timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+                    _logger.LogInformation(
+                        "Tracker {Url} asked us not to retry (BEP 31); no further announces this session", info.Url);
+                }
+                else if (_started)
+                {
+                    // Schedule retry based on circuit state
                     TimeSpan interval;
                     if (info.CircuitState == CircuitBreakerState.Open)
                     {
@@ -303,6 +338,24 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                         // Circuit still closed - use short retry
                         interval = TimeSpan.FromMinutes(1);
                     }
+
+                    // BEP 31: a numeric hint replaces our guess, but only ever to wait longer. The
+                    // tracker knows when it will be ready; it does not get to shorten a backoff we
+                    // opened to protect it from us.
+                    if (response.RetryHint is { Never: false } hint)
+                    {
+                        var requested = ClampRetryHint(hint.RetryIn);
+                        if (requested > interval)
+                        {
+                            interval = requested;
+                        }
+
+                        info.NextRetryTime = _timeProvider.GetUtcNow() + interval;
+                        _logger.LogDebug(
+                            "Tracker {Url} asked us to retry in {RequestedSeconds}s (BEP 31); next attempt in {IntervalSeconds}s",
+                            info.Url, (int)requested.TotalSeconds, (int)interval.TotalSeconds);
+                    }
+
                     info.Timer.Change(interval, Timeout.InfiniteTimeSpan);
                 }
 
@@ -315,6 +368,42 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                     }
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// BEP 24: forwards a tracker-reported external address to the DHT, where it counts as one vote
+    /// towards the BEP 42 secure node ID.
+    ///
+    /// A tracker only ever gets one vote per distinct address. Without that, a single hostile or
+    /// misconfigured tracker announcing every few minutes would reach the vote threshold on its own
+    /// and drive a node ID regeneration; requiring a changed value means agreement has to come from
+    /// distinct sources, which is the only reason this is worth wiring up at all given the DHT
+    /// already reports our address.
+    /// </summary>
+    private void ReportExternalIp(TrackerInfo info, IPAddress? address)
+    {
+        if (address == null || address.Equals(info.LastReportedExternalIp))
+        {
+            return;
+        }
+
+        info.LastReportedExternalIp = address;
+
+        var dht = _torrent.DhtManager;
+        if (dht == null)
+        {
+            return;
+        }
+
+        try
+        {
+            dht.ReportExternalIp(address);
+        }
+        catch (Exception ex)
+        {
+            // Never let an advisory address report break an otherwise successful announce.
+            _logger.LogDebug(ex, "Failed to report external IP {ExternalIP} from tracker {Url}", address, info.Url);
         }
     }
 
@@ -352,9 +441,10 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             var info = _trackers.FirstOrDefault(t => t.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
             if (info != null)
             {
-                shouldSendStopped = _started
-                    || info.LastAnnounce != DateTimeOffset.MinValue
-                    || info.CurrentAnnounceTask != null;
+                shouldSendStopped = !info.RetryDisabled
+                    && (_started
+                        || info.LastAnnounce != DateTimeOffset.MinValue
+                        || info.CurrentAnnounceTask != null);
                 info.Dispose();
 
                 _trackers.Remove(info);
@@ -518,6 +608,12 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
     private static async Task SendStoppedAnnounceAsync(TrackerInfo info)
     {
+        // BEP 31: "never send this query again" includes the courtesy Stopped announce.
+        if (info.RetryDisabled)
+        {
+            return;
+        }
+
         using var timeoutCts = new CancellationTokenSource(StopAnnounceTimeout);
         try
         {
@@ -568,7 +664,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         var info = (TrackerInfo)state!;
         lock (_lock)
         {
-            if (!_started)
+            if (!_started || info.RetryDisabled)
             {
                 return;
             }
@@ -671,6 +767,14 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                 return;
             }
 
+            // BEP 31: the single choke point for every scheduled announce - timer ticks, manual
+            // AnnounceAsync, StartAsync and tier advancement all land here - so honouring
+            // "retry in: never" once covers all of them.
+            if (info.RetryDisabled)
+            {
+                return;
+            }
+
             // Cancel existing announce for this tracker
             info.CurrentAnnounceCts?.Cancel();
             info.CurrentAnnounceCts?.Dispose();
@@ -727,6 +831,18 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         public DateTimeOffset LastAnnounce { get; set; }
         public string? LastError { get; set; }
         public uint LeechCount { get; set; }
+
+        /// <summary>
+        /// BEP 31: set when the tracker answered <c>retry in: never</c>. Session-scoped, never
+        /// persisted.
+        /// </summary>
+        public bool RetryDisabled { get; set; }
+
+        /// <summary>
+        /// BEP 24: the last external address this tracker reported, so a single tracker can only
+        /// contribute one vote per distinct address.
+        /// </summary>
+        public IPAddress? LastReportedExternalIp { get; set; }
 
         // Default 10 mins
         // For resetting backoff history
@@ -866,7 +982,10 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
         foreach (var info in tier.Trackers)
         {
-            if (info.CircuitState != CircuitBreakerState.Open && info.ConsecutiveFailures < FailureThreshold)
+            // A tracker that answered BEP 31 "never" is spent, however few failures it recorded -
+            // otherwise a tier holding one such tracker would never look exhausted and we would
+            // never fall through to the next one.
+            if (!info.RetryDisabled && info.CircuitState != CircuitBreakerState.Open && info.ConsecutiveFailures < FailureThreshold)
             {
                 return false;
             }

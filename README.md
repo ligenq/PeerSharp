@@ -14,9 +14,10 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 
 ## Key Features
 
-- **Full BEP Support:** Implements 29 BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
+- **Full BEP Support:** Implements 31 BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
 - **Hybrid Networking:** Native support for both TCP and uTP (BEP 29) with automatic congestion control.
 - **DHT & Peer Discovery:** Full Mainline DHT (BEP 5), Local Service Discovery (BEP 14), Peer Exchange (PEX), and UDP/HTTP Tracker support.
+- **Torrent Discovery:** Crawl the DHT for the info-hashes it knows about (BEP 51) and resolve them to names via BEP 9 — the building block for a search index.
 - **Magnet Links:** Fast metadata exchange (BEP 9) allowing torrent starts from magnet links alone, with metadata-only fetch for previewing the file list before downloading, and metadata export for caching.
 - **Self-Updating Torrents:** Mutable DHT records (BEP 44) and `xs=urn:btpk:` magnet links (BEP 46), so a publisher can release a new version under the same link and subscribers follow it automatically.
 - **BitTorrent v2 & Hybrid Torrents:** Parse, create, announce, and verify v2/hybrid torrents with BEP 52 file trees, piece layers, and Merkle proofs.
@@ -187,6 +188,63 @@ Notes:
   cancelled) before reading the current version and writing the update. Resolving remains a
   best-effort lookup and can return null while the table is still cold.
 
+### Discovering Torrents in the DHT (BEP 51)
+
+BEP 51 answers a question the rest of the library cannot: *what is out there*. Nodes will hand over a
+sample of the info-hashes they hold peers for, so the DHT itself becomes enumerable — the basis for a
+search index, or for surveying what is actually being shared.
+
+Discovery yields bare info-hashes. Pairing it with the BEP 9 metadata fetch is what turns them into
+names and file lists:
+
+```csharp
+var options = new DhtIndexerOptions { MaxInfoHashes = 500 };
+
+await foreach (var found in engine.DiscoverInfoHashesAsync(options, cancellationToken))
+{
+    var link = MagnetLink.Parse($"magnet:?xt=urn:btih:{found.InfoHash}");
+
+    // Bound the fetch: plenty of discovered hashes have no reachable peers left.
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    timeout.CancelAfter(TimeSpan.FromSeconds(30));
+
+    try
+    {
+        var metadata = await engine.GetMagnetMetadataAsync(link, timeout.Token);
+        Console.WriteLine($"{found.InfoHash}  {metadata.Name}  ({metadata.FileCount} file(s))");
+    }
+    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+    {
+        // No peers answered in time; the hash is still a real discovery.
+    }
+}
+```
+
+Notes:
+
+- A result is one node's claim to hold peers for a hash. It is not evidence the torrent exists, is
+  reachable, or is anything in particular.
+- The crawl has no natural end. It stops at `MaxInfoHashes`, when you `break`, or when the token is
+  cancelled — cancelling throws `OperationCanceledException`, as cancelling any `IAsyncEnumerable`
+  does. `MaxInfoHashes` also bounds memory, because suppressing duplicates means remembering every
+  hash already returned.
+- Each node's requested requery interval is honoured, floored by
+  `DhtIndexerOptions.MinNodeRequeryInterval`. Live nodes really do ask for `0`, so the floor is what
+  stops a crawl hammering them. While every known node is inside its interval, the crawl waits rather
+  than finishing.
+- Nodes without BEP 51 support are still queried with `find_node` so the frontier keeps growing. This
+  matters more than it sounds: the bootstrap routers a fresh crawl necessarily starts from do not
+  implement BEP 51, and without the fallback a crawl strands itself among them.
+- The responder side is on by default and can be turned off with
+  `Settings.Dht.AnswerInfoHashSampling = false`, which replies `204 Method Unknown` like any
+  pre-BEP 51 node. It discloses nothing new — the same hashes are obtainable by asking us `get_peers`
+  — but indexing is a choice an operator may want to opt out of. The subset offered is stable for the
+  interval advertised and rotates afterwards, and the reported interval counts down to that rotation.
+- Interoperability is verified against the live Mainline DHT: of 55 walked nodes, 87% answered
+  `sample_infohashes` (notably better than the 69% BEP 44 `get` support measured above), 13 had
+  hashes to give, and observed intervals spanned the full permitted 0–21600s range. See
+  `tests/PeerSharp.Tests/Interop`, excluded from CI and gated on `PEERSHARP_INTEROP=1`.
+
 ### Streaming
 
 ```csharp
@@ -259,9 +317,11 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 19  | WebSeed - HTTP/FTP Seeding (GetRight style) | Supported |
 | 20  | Peer ID Conventions | Supported |
 | 23  | Tracker Returns Compact Peer Lists | Supported |
+| 24  | Tracker Returns External IP | Supported, counted as a vote towards the BEP 42 node ID |
 | 27  | Private Torrents | Supported |
 | 29  | uTorrent Transport Protocol (uTP) | Supported |
 | 30  | Merkle Hash Torrent Extension | Supported |
+| 31  | Tracker Failure Retry Extension | Supported, `retry in` overrides our own backoff; `never` disables the tracker for the session |
 | 32  | IPv6 Extension for DHT | Supported |
 | 33  | DHT Scrape | Supported |
 | 40  | Canonical Peer Priority | Supported |
@@ -270,9 +330,14 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 47  | Padding Files and Extended File Attributes | Supported, including padding-file creation and download skipping |
 | 46  | Updating Torrents Via DHT Mutable Items | Supported, including `xs=urn:btpk:` magnet links |
 | 48  | Tracker Protocol Extension: Scrape | Supported |
+| 51  | DHT Infohash Indexing | Supported, both as responder and as crawler |
 | 52  | The BitTorrent Protocol Specification v2 | Supported |
 | 53  | Magnet URI Extension - Select Specific File Indices for Download | Supported |
 | 55  | Holepunch Extension | Supported |
+
+BEP 17 (HTTP Seeding, Hoffman style) is deliberately not implemented: it needs a server-side script
+speaking its own query format, effectively nothing deploys it, and every web seed in the wild is
+reachable through the GetRight-style BEP 19 support above.
 
 ## Architecture
 

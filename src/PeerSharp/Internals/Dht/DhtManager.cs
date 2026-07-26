@@ -27,6 +27,9 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
     /// <summary>BEP 5: "203 Protocol Error, such as a malformed packet, invalid arguments, or bad token".</summary>
     private const int DhtErrorProtocol = 203;
+
+    /// <summary>BEP 5: "204 Method Unknown".</summary>
+    private const int DhtErrorMethodUnknown = 204;
     private readonly IUdpListener _listener;
     private readonly ILogger<DhtManager> _logger;
     private readonly ConcurrentDictionary<string, List<DhtPeer>> _peers = new();
@@ -34,6 +37,9 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
     /// <summary>BEP 44 items held on behalf of the network.</summary>
     private readonly DhtItemStore _itemStore;
+
+    /// <summary>BEP 51: the rotating subset of stored info-hashes offered to indexers.</summary>
+    private readonly DhtInfoHashSampler _infoHashSampler;
     private readonly Settings _settings;
     private readonly TimeProvider _timeProvider;
     private readonly IDnsResolver _dnsResolver;
@@ -77,6 +83,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         _logger = loggerFactory.CreateLogger<DhtManager>();
         _lastSecretRotation = _timeProvider.GetUtcNow();
         _itemStore = new DhtItemStore(_timeProvider);
+        _infoHashSampler = new DhtInfoHashSampler(_timeProvider);
         _listener.RegisterReceiver(this);
     }
 
@@ -584,6 +591,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 SendResponse(t, r, remote);
             }
         }
+        else if (q == "sample_infohashes")
+        {
+            HandleSampleInfoHashesQuery(a, t, r, remote);
+        }
         else if (q == "get")
         {
             HandleGetQuery(a, t, r, remote);
@@ -634,6 +645,62 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 SendResponse(t, r, remote);
             }
         }
+    }
+
+    /// <summary>
+    /// BEP 51 <c>sample_infohashes</c>. Reports a subset of the info-hashes we hold peers for, how
+    /// many we hold in total, and how long that subset stays put, alongside the closest nodes to the
+    /// requested target - the node list is what lets an indexer traverse the keyspace with a single
+    /// RPC per node instead of interleaving find_node.
+    ///
+    /// <para>
+    /// This discloses nothing that was not already public: any node can learn the same info-hashes by
+    /// asking us <c>get_peers</c> for them, and we only ever hold hashes that peers announced to us.
+    /// It is still opt-out via <see cref="DhtSettings.AnswerInfoHashSampling"/> for operators who
+    /// would rather not make indexing cheap.
+    /// </para>
+    /// </summary>
+    private void HandleSampleInfoHashesQuery(BDict a, BString t, BDict r, IPEndPoint remote)
+    {
+        if (!_settings.Dht.AnswerInfoHashSampling)
+        {
+            // BEP 5's "204 Method Unknown" is exactly how a node says it does not implement a query,
+            // and an indexer already has to handle it from every node that predates BEP 51.
+            SendError(t, DhtErrorMethodUnknown, "Method Unknown", remote);
+            return;
+        }
+
+        var targetBytes = a.GetBytes("target");
+        if (targetBytes is null || targetBytes.Value.Length != DhtTarget.Length)
+        {
+            SendError(t, DhtErrorProtocol, "Missing or malformed target", remote);
+            return;
+        }
+
+        var sample = _infoHashSampler.Take(_peers.Keys);
+
+        r.Dict["interval"] = new BNumber(sample.IntervalSeconds);
+        r.Dict["num"] = new BNumber(sample.Num);
+
+        // The spec requires the field even when it is empty, so an indexer can tell "no hashes" from
+        // "does not implement this".
+        r.Dict["samples"] = new BString(sample.Samples);
+
+        // BEP 32: same dual node lists as every other reply that carries nodes.
+        var nodes = _table.FindClosest(targetBytes.Value.Span, 8);
+        var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
+        var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
+        if (nodesV4.Length > 0)
+        {
+            r.Dict["nodes"] = new BString(nodesV4);
+        }
+
+        if (nodesV6.Length > 0)
+        {
+            r.Dict["nodes6"] = new BString(nodesV6);
+        }
+
+        SendResponse(t, r, remote);
     }
 
     /// <summary>
@@ -831,7 +898,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
         // BEP 44 queries are awaited by their caller rather than driven by callbacks, so they
         // have their own correlation table and are matched before the fire-and-forget one.
-        if (_pendingItemQueries.TryRemove(t, out var pending))
+        if (_pendingQueries.TryRemove(t, out var pending))
         {
             if (node.Get("r") is BDict itemReply)
             {
@@ -945,21 +1012,36 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// </summary>
     private void ProcessExternalIp(ReadOnlySpan<byte> ipBytes)
     {
-        var result = _externalIpVoteTracker.ProcessReport(ipBytes);
+        ApplyExternalIpVote(_externalIpVoteTracker.ProcessReport(ipBytes), "BEP 42 DHT node");
+    }
+
+    /// <summary>
+    /// BEP 24: an external address a tracker reported. It joins the same vote pool as the DHT's own
+    /// reports, so a tracker cannot single-handedly move our node ID - the vote threshold still has
+    /// to be met, and the caller is responsible for not submitting the same tracker's opinion twice.
+    /// </summary>
+    public void ReportExternalIp(IPAddress address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        ApplyExternalIpVote(_externalIpVoteTracker.ProcessReport(address), "BEP 24 tracker");
+    }
+
+    private void ApplyExternalIpVote(DhtExternalIpVoteResult result, string source)
+    {
         switch (result.Status)
         {
             case DhtExternalIpVoteStatus.FirstReport:
-                _logger.LogDebug("BEP 42: First external IP report: {ExternalIP}", result.Address);
+                _logger.LogDebug("{Source}: First external IP report: {ExternalIP}", source, result.Address);
                 break;
             case DhtExternalIpVoteStatus.Progress:
-                _logger.LogDebug("BEP 42: External IP confirmed ({Votes}/{Required}): {ExternalIP}", result.Votes, result.RequiredVotes, result.Address);
+                _logger.LogDebug("{Source}: External IP confirmed ({Votes}/{Required}): {ExternalIP}", source, result.Votes, result.RequiredVotes, result.Address);
                 break;
             case DhtExternalIpVoteStatus.Confirmed:
-                _logger.LogDebug("BEP 42: External IP confirmed ({Votes}/{Required}): {ExternalIP}", result.Votes, result.RequiredVotes, result.Address);
+                _logger.LogDebug("{Source}: External IP confirmed ({Votes}/{Required}): {ExternalIP}", source, result.Votes, result.RequiredVotes, result.Address);
                 RegenerateNodeId(result.Address!);
                 break;
             case DhtExternalIpVoteStatus.Changed:
-                _logger.LogDebug("BEP 42: External IP changed to: {ExternalIP}", result.Address);
+                _logger.LogDebug("{Source}: External IP changed to: {ExternalIP}", source, result.Address);
                 break;
         }
     }
@@ -1297,7 +1379,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         }
 
         var t = Encoding.Latin1.GetString(tBytes.Value.Span);
-        if (!_pendingItemQueries.TryRemove(t, out var pending))
+        if (!_pendingQueries.TryRemove(t, out var pending))
         {
             return false;
         }

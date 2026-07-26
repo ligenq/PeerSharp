@@ -72,7 +72,11 @@ internal sealed class DhtLoopbackFixture : IAsyncDisposable
     /// Builds a client and a server, starts both, and seeds the client's routing table with the
     /// server so a lookup has somewhere to begin.
     /// </summary>
-    public static async Task<DhtLoopbackFixture> CreateAsync()
+    /// <param name="configureSettings">
+    /// Adjusts the settings both managers share, for tests that need a non-default DHT
+    /// configuration.
+    /// </param>
+    public static async Task<DhtLoopbackFixture> CreateAsync(Action<Settings>? configureSettings = null)
     {
         var clientEndPoint = new IPEndPoint(IPAddress.Parse("192.0.2.1"), 6881);
         var serverEndPoint = new IPEndPoint(IPAddress.Parse("192.0.2.2"), 6882);
@@ -84,6 +88,7 @@ internal sealed class DhtLoopbackFixture : IAsyncDisposable
 
         var settings = new Settings();
         settings.Dht.BootstrapNodes = [];
+        configureSettings?.Invoke(settings);
         var serverId = InfoHash.CreateRandom();
 
         // TimeProvider.System rather than a fake: the client awaits real replies against a real
