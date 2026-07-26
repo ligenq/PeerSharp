@@ -19,10 +19,10 @@ jobs:
         include:
           - os: ubuntu-latest
             lane: fast
-            filter: FullyQualifiedName!~PeerSharp.Tests.Integration&FullyQualifiedName!~PeerSharp.Tests.Concurrency&FullyQualifiedName!~PeerSharp.Tests.Robustness
+            filter: FullyQualifiedName!~PeerSharp.Tests.Integration&FullyQualifiedName!~PeerSharp.Tests.Concurrency&FullyQualifiedName!~PeerSharp.Tests.Robustness&FullyQualifiedName!~PeerSharp.Tests.Interop
           - os: windows-latest
             lane: fast
-            filter: FullyQualifiedName!~PeerSharp.Tests.Integration&FullyQualifiedName!~PeerSharp.Tests.Concurrency&FullyQualifiedName!~PeerSharp.Tests.Robustness
+            filter: FullyQualifiedName!~PeerSharp.Tests.Integration&FullyQualifiedName!~PeerSharp.Tests.Concurrency&FullyQualifiedName!~PeerSharp.Tests.Robustness&FullyQualifiedName!~PeerSharp.Tests.Interop
           - os: ubuntu-latest
             lane: integration
             filter: FullyQualifiedName~PeerSharp.Tests.Integration

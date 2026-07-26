@@ -201,13 +201,15 @@ public class Bep46Tests
     public void MagnetLink_ParsesABtpkPublicKeyWithSalt()
     {
         var publicKey = Ed25519.PublicKeyFromSeed(Ed25519.GenerateSeed());
-        var uri = $"magnet:?xs=urn:btpk:{Convert.ToHexStringLower(publicKey)}&s=nightly";
+        // BEP 46: "magnet:?xs=urn:btpk:[Public Key (Hex)]&s=[Salt (Hex)]" - the salt is hex.
+        var salt = "nightly"u8.ToArray();
+        var uri = $"magnet:?xs=urn:btpk:{Convert.ToHexStringLower(publicKey)}&s={Convert.ToHexStringLower(salt)}";
 
         var magnet = MagnetLink.Parse(uri);
 
         Assert.True(magnet.IsSelfUpdating);
         Assert.Equal(publicKey, magnet.PublicKey.ToArray());
-        Assert.Equal("nightly"u8.ToArray(), magnet.Salt.ToArray());
+        Assert.Equal(salt, magnet.Salt.ToArray());
     }
 
     [Fact]
@@ -245,6 +247,22 @@ public class Bep46Tests
         Assert.False(magnet.IsSelfUpdating);
     }
 
+    /// <summary>
+    /// A salt that is not hex would address a different record than the link names, so the link is
+    /// treated as not self-updating rather than resolved against the wrong target.
+    /// </summary>
+    [Fact]
+    public void MagnetLink_RejectsANonHexSalt()
+    {
+        var publicKey = Ed25519.PublicKeyFromSeed(Ed25519.GenerateSeed());
+        var uri = $"magnet:?xs=urn:btpk:{Convert.ToHexStringLower(publicKey)}&s=nightly"
+            + $"&xt=urn:btih:{new string('d', 40)}";
+
+        var magnet = MagnetLink.Parse(uri);
+
+        Assert.False(magnet.IsSelfUpdating);
+    }
+
     [Fact]
     public void MagnetLink_KeepsTheBtpkSourceInExactSources()
     {
@@ -268,10 +286,12 @@ public class Bep46Tests
         var publicKey = Ed25519.PublicKeyFromSeed(seed);
         var published = InfoHash.CreateRandom();
 
+        var salt = "nightly"u8.ToArray();
         var resolver = new Bep46Resolver(fixture.Client);
-        await resolver.PublishAsync(seed, published, 0, "nightly"u8.ToArray());
+        await resolver.PublishAsync(seed, published, 0, salt);
 
-        var magnet = MagnetLink.Parse($"magnet:?xs=urn:btpk:{Convert.ToHexStringLower(publicKey)}&s=nightly");
+        var magnet = MagnetLink.Parse(
+            $"magnet:?xs=urn:btpk:{Convert.ToHexStringLower(publicKey)}&s={Convert.ToHexStringLower(salt)}");
 
         Assert.True(magnet.IsSelfUpdating);
         var resolved = await resolver.ResolveAsync(magnet.PublicKey.ToArray(), magnet.Salt.ToArray());
