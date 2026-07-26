@@ -322,6 +322,16 @@ public class RealSwarmSoakTests
         settings.Transfer.MaxUploadSpeed = (uint)rate;
         settings.Files.DefaultDownloadPath = seedPath!;
 
+        // Encryption mode is configurable so the two arms can be compared against the same swarm.
+        // Almost every real connection is encrypted, while almost every local test is plaintext, so a
+        // fault confined to the MSE layer would be invisible locally and near-total in the wild. Running
+        // this with Refuse and with Require is the experiment that separates the two.
+        if (Enum.TryParse<Encryption>(Environment.GetEnvironmentVariable("PEERSHARP_SOAK_ENCRYPTION"), out var mode))
+        {
+            settings.Connection.Encryption = mode;
+            _output.WriteLine($"Encryption mode: {mode}");
+        }
+
         // The peer list shows symptoms; the log shows causes. A peer that never becomes interested and
         // a connection we tore down for a protocol error look identical from the outside.
         var capturedLogs = new CapturingLoggerProvider(LogLevel.Debug);
@@ -379,6 +389,8 @@ public class RealSwarmSoakTests
         _output.WriteLine("    means we advertised data and then failed to deliver it.");
         _output.WriteLine("  - Without inbound connectivity we only reach peers we dial, which biases who we meet.");
         _output.WriteLine($"    Configured listen port: {settings.Connection.TcpPort} (0 means an ephemeral one).");
+
+        _output.WriteLine(observer.BuildEncryptionSplit());
 
         _output.WriteLine("");
         _output.WriteLine("engine warnings and errors:");
