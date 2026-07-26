@@ -44,46 +44,31 @@ namespace PeerSharp.Internals.Peers;
  * - All Send* methods are thread-safe (add to queue)
  */
 
+/// <summary>
+/// Encrypts and decrypts one peer connection.
+///
+/// <para>
+/// Rate limiting deliberately does not live here. It used to, which meant a configured limit only
+/// applied to connections that negotiated encryption and silently did nothing on plaintext ones. It is
+/// now <see cref="RateLimitedStream"/>, layered underneath this one so it meters what the wire carries.
+/// </para>
+/// </summary>
 internal class EncryptedStream : Stream
 {
     private const int ChunkSize = ProtocolConstants.BlockSize;
-    private readonly IBandwidthManager _bandwidthManager;
-    private readonly string[] _downloadChannels;
     private readonly Stream _inner;
     private readonly bool _leaveInnerOpen;
     private readonly ProtocolEncryption _pe;
-    private readonly string[] _uploadChannels;
-    private readonly IBandwidthUser _user;
     private AtomicDisposal _disposal = new();
-
-    // These are returned to the BandwidthManager on disposal to prevent bandwidth leaks
-    private int _reservedDownloadBandwidth;
-
-    private int _reservedUploadBandwidth;
 
     public EncryptedStream(
         Stream inner,
         ProtocolEncryption pe,
-        IBandwidthUser user,
-        IBandwidthManager bandwidthManager,
-        string[] downloadChannels,
-        string[] uploadChannels,
         bool leaveInnerOpen = false)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _pe = pe;
-        _user = user;
-        _bandwidthManager = bandwidthManager;
-        _downloadChannels = downloadChannels;
-        _uploadChannels = uploadChannels;
         _leaveInnerOpen = leaveInnerOpen;
-    }
-
-    // This prevents permanent bandwidth leaks when exceptions cause objects to be GC'd
-    [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
-    ~EncryptedStream()
-    {
-        Dispose(false);
     }
 
     public override bool CanRead => _inner.CanRead;
@@ -114,46 +99,11 @@ internal class EncryptedStream : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        int toRead = buffer.Length;
-        if (toRead > ChunkSize)
-        {
-            toRead = ChunkSize;
-        }
+        int toRead = Math.Min(buffer.Length, ChunkSize);
 
-        if (_reservedDownloadBandwidth < toRead)
-        {
-            // Optimize: Request bandwidth in larger chunks (256KB) to reduce lock contention in BandwidthManager
-            // But don't request absurdly large amounts if we only need a little
-            int needed = toRead - _reservedDownloadBandwidth;
-            const int batchSize = ProtocolConstants.DownloadBatchSize;
-            int requestAmount = Math.Max(needed, batchSize);
-
-            int granted = await _bandwidthManager.RequestBandwidthAsync(
-                _user,
-                requestAmount,
-                1,
-                _downloadChannels,
-                cancellationToken
-            ).ConfigureAwait(false);
-
-            if (granted <= 0)
-            {
-                return 0;
-            }
-
-            _reservedDownloadBandwidth += granted;
-        }
-
-        // Use from reservation
-        int canRead = Math.Min(toRead, _reservedDownloadBandwidth);
-
-        // Note: We don't catch OperationCanceledException here to return canRead because the reservation
-        // is still tracked in _reservedDownloadBandwidth and will be returned on Dispose().
-        int r = await _inner.ReadAsync(buffer[..canRead], cancellationToken).ConfigureAwait(false);
-
+        int r = await _inner.ReadAsync(buffer[..toRead], cancellationToken).ConfigureAwait(false);
         if (r > 0)
         {
-            _reservedDownloadBandwidth -= r;
             _pe.Decrypt(buffer.Span[..r]);
         }
 
@@ -200,50 +150,8 @@ internal class EncryptedStream : Stream
             buffer.CopyTo(encryptedBuf);
             _pe.Encrypt(encryptedBuf.AsSpan(0, buffer.Length));
 
-            int sent = 0;
-            while (sent < buffer.Length)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                int remaining = buffer.Length - sent;
-
-                // If we have enough reserved, use it
-                if (_reservedUploadBandwidth < remaining)
-                {
-                    // Reserve more, batching small requests
-                    int needed = remaining - _reservedUploadBandwidth;
-                    const int batchSize = ProtocolConstants.UploadBatchSize;
-                    int requestAmount = Math.Max(needed, batchSize);
-
-                    int granted = await _bandwidthManager.RequestBandwidthAsync(
-                        _user,
-                        requestAmount,
-                        1,
-                        _uploadChannels,
-                        cancellationToken
-                    ).ConfigureAwait(false);
-
-                    if (granted <= 0)
-                    {
-                        // If we can't get bandwidth, we can't send.
-                        // Bandwidth was not granted, so nothing to return.
-                        break;
-                    }
-
-                    _reservedUploadBandwidth += granted;
-                }
-
-                int canSend = Math.Min(remaining, _reservedUploadBandwidth);
-                // Clamp to ChunkSize to ensure we don't block the underlying stream for too long
-                int toSend = Math.Min(canSend, ChunkSize);
-
-                // Note: We don't catch OperationCanceledException here to return toSend because
-                // the reservation is still tracked and will be returned on Dispose().
-                await _inner.WriteAsync(encryptedBuf.AsMemory(sent, toSend), cancellationToken).ConfigureAwait(false);
-
-                _reservedUploadBandwidth -= toSend;
-                sent += toSend;
-            }
+            // Handed down whole: the rate limited layer beneath splits it into chunks it has quota for.
+            await _inner.WriteAsync(encryptedBuf.AsMemory(0, buffer.Length), cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -258,24 +166,9 @@ internal class EncryptedStream : Stream
 
     protected override void Dispose(bool disposing)
     {
-        if (_disposal.MarkDisposed())
+        if (_disposal.MarkDisposed() && disposing && !_leaveInnerOpen)
         {
-            // This runs both for explicit Dispose() and finalizer to ensure cleanup
-            if (_reservedDownloadBandwidth > 0)
-            {
-                _bandwidthManager.ReturnBandwidth(_reservedDownloadBandwidth, _downloadChannels);
-                _reservedDownloadBandwidth = 0;
-            }
-            if (_reservedUploadBandwidth > 0)
-            {
-                _bandwidthManager.ReturnBandwidth(_reservedUploadBandwidth, _uploadChannels);
-                _reservedUploadBandwidth = 0;
-            }
-
-            if (disposing && !_leaveInnerOpen)
-            {
-                _inner.Dispose();
-            }
+            _inner.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -532,7 +425,50 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     internal bool IsOutgoing { get; set; }
 
-    internal Stream? Stream { get; set; }
+    private Stream? _stream;
+
+    /// <summary>
+    /// The peer connection, always metered.
+    ///
+    /// <para>
+    /// The setter wraps whatever it is handed in a <see cref="RateLimitedStream"/>. Doing it here rather
+    /// than at each assignment is deliberate: raw sockets, proxied streams and uTP streams are assigned
+    /// from half a dozen places across connect, accept and handshake paths, and a limiter that has to be
+    /// remembered at every one of them is a limiter that will eventually be forgotten - which is exactly
+    /// how it came to apply only to encrypted connections.
+    /// </para>
+    /// </summary>
+    internal Stream? Stream
+    {
+        get => _stream;
+        set => _stream = WrapRateLimited(value);
+    }
+
+    /// <summary>
+    /// Wraps a freshly assigned stream in the rate limiter, unless it is already metered. An
+    /// <see cref="EncryptedStream"/> is only ever constructed over the current <see cref="Stream"/>,
+    /// so by the time one is assigned the limiter is already underneath it.
+    /// </summary>
+    private Stream? WrapRateLimited(Stream? stream)
+    {
+        if (stream is null or RateLimitedStream or EncryptedStream)
+        {
+            return stream;
+        }
+
+        string hash = _torrent.Hash.ToHexStringUpper();
+        return new RateLimitedStream(
+            stream,
+            this,
+            _torrent.Bandwidth,
+            [BandwidthManager.GlobalDownload, $"{hash}_DL"],
+            [BandwidthManager.GlobalUpload, $"{hash}_UL"],
+
+            // Owns the stream it wraps: CleanupResourcesAsync disposes Stream and expects that to
+            // close the connection. Client and UtpStream are disposed separately too, which is a
+            // harmless second call, but a bare stream has no such owner and would otherwise leak.
+            leaveInnerOpen: false);
+    }
 
     internal UtpStream? UtpStream { get; set; }
 
@@ -1242,15 +1178,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
         if (encryption != null)
         {
-            Stream = new EncryptedStream(
-                Stream,
-                encryption,
-                this,
-                _torrent.Bandwidth,
-                [BandwidthManager.GlobalDownload, $"{_torrent.Hash.ToHexStringUpper()}_DL"],
-                [BandwidthManager.GlobalUpload, $"{_torrent.Hash.ToHexStringUpper()}_UL"],
-                leaveInnerOpen: true
-            );
+            // Layered over the already rate limited Stream, so metering stays on the wire side.
+            // Owns it, so disposing Stream cascades encryption -> rate limiter -> socket.
+            Stream = new EncryptedStream(Stream, encryption, leaveInnerOpen: false);
             _encryptionHandshakeComplete = true;
         }
 
@@ -1363,9 +1293,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
         // Always dispose resources, even if we weren't fully connected
         // This prevents leaks when connection fails during ConnectAsync
-        // Dispose the stream (handles EncryptedStream wrapper if present)
-        // Note: EncryptedStream is created with leaveInnerOpen=true, so inner stream
-        // is not double-closed when we close _client/_utpStream below
+        // Disposing Stream cascades through the encryption and rate limiting wrappers to the socket.
+        // Client and UtpStream are still disposed below for the paths that own one; both are
+        // idempotent, so the second call is a no-op.
         try
         {
             if (Stream != null)
@@ -1713,15 +1643,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             // so wrapping it in EncryptedStream would be pointless.
             if (Stream is not null)
             {
+                // "stream" is the captured Stream property, so the rate limiter is already underneath,
+                // and owning it makes one Dispose cascade down to the socket.
                 Stream = new EncryptedStream(
                     stream,
                     pe.Encryption ?? new ProtocolEncryption(),
-                    this,
-                    _torrent.Bandwidth,
-                    [BandwidthManager.GlobalDownload, $"{_torrent.Hash.ToHexStringUpper()}_DL"],
-                    [BandwidthManager.GlobalUpload, $"{_torrent.Hash.ToHexStringUpper()}_UL"],
-                    leaveInnerOpen: true // Inner stream is closed via _client or _utpStream in Close()
-                    );
+                    leaveInnerOpen: false);
 
                 if (pe.ReceivedPayload != null)
                 {

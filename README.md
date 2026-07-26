@@ -341,7 +341,7 @@ dotnet test tests/PeerSharp.Tests --filter FullyQualifiedName~RealSwarmSoakTests
 | `PEERSHARP_SOAK_CHURN_SECONDS` | Duration of the churn soak (default 1800) |
 | `PEERSHARP_SOAK_COMPLETION_SECONDS` | Budget for the completion run (default 1800) |
 | `PEERSHARP_SOAK_MAX_BYTES` | Hard ceiling on data pulled per run (default 1 GiB) |
-| `PEERSHARP_SOAK_RATE_BYTES` | Requested rate cap — see the caveat below |
+| `PEERSHARP_SOAK_RATE_BYTES` | Rate cap applied globally and per torrent (default 2 MiB/s) |
 
 ### Reading the report
 
@@ -357,11 +357,13 @@ reading and are called out in the output itself:
 
 Compare runs against each other rather than against an absolute target.
 
-> **Known limitation surfaced by these tests:** download rate limiting is not currently enforced.
-> Neither `Settings.Transfer.MaxDownloadSpeed` nor `ITorrent.DownloadLimitBytesPerSecond` constrains
-> the peer download path — a run capped at 256 bytes/s still pulled 140 MB in 30 seconds. The soak
-> tests therefore enforce their own byte budget, and `PEERSHARP_SOAK_RATE_BYTES` is advisory until
-> this is fixed.
+### Bugs these tests have found
+
+- **Download rate limiting was not enforced on plaintext connections.** Limiting lived inside the
+  encrypted stream wrapper, so it only applied when a peer negotiated encryption; a configured
+  ceiling silently did nothing on every other connection, and a run capped at 256 bytes/s still
+  pulled 140 MB in 30 seconds. Limiting is now its own layer wrapping every peer connection.
+  Regression cover: `RateLimitTests` exercises both encryption modes over loopback.
 
 ## Supported BEPs
 
