@@ -286,6 +286,7 @@ sealed class PeerSharp.Core.MagnetLink
     Boolean Equals(Object obj)
     Boolean Equals(PeerSharp.Core.MagnetLink other)
     Boolean IsHybrid { get; }
+    Boolean IsSelfUpdating { get; }
     Boolean IsV1 { get; }
     Boolean IsV2 { get; }
     Boolean TryParse(String magnetUri, out PeerSharp.Core.MagnetLink result)
@@ -298,6 +299,8 @@ sealed class PeerSharp.Core.MagnetLink
     PeerSharp.Core.InfoHash InfoHash { get; }
     PeerSharp.Core.InfoHash InfoHashV2 { get; }
     PeerSharp.Core.MagnetLink Parse(String magnetUri)
+    ReadOnlyMemory<Byte> PublicKey { get; }
+    ReadOnlyMemory<Byte> Salt { get; }
     String DisplayName { get; }
     String OriginalString { get; }
     String ToString()
