@@ -14,10 +14,11 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 
 ## Key Features
 
-- **Full BEP Support:** Implements 25+ BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
+- **Full BEP Support:** Implements 29 BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
 - **Hybrid Networking:** Native support for both TCP and uTP (BEP 29) with automatic congestion control.
 - **DHT & Peer Discovery:** Full Mainline DHT (BEP 5), Local Service Discovery (BEP 14), Peer Exchange (PEX), and UDP/HTTP Tracker support.
 - **Magnet Links:** Fast metadata exchange (BEP 9) allowing torrent starts from magnet links alone, with metadata-only fetch for previewing the file list before downloading, and metadata export for caching.
+- **Self-Updating Torrents:** Mutable DHT records (BEP 44) and `xs=urn:btpk:` magnet links (BEP 46), so a publisher can release a new version under the same link and subscribers follow it automatically.
 - **BitTorrent v2 & Hybrid Torrents:** Parse, create, announce, and verify v2/hybrid torrents with BEP 52 file trees, piece layers, and Merkle proofs.
 - **Streaming Engine:** Integrated HTTP streaming server for real-time media playback while downloading.
 - **Protocol Encryption:** MSE (Message Stream Encryption) with configurable enforcement modes.
@@ -210,7 +211,9 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 33  | DHT Scrape | Supported |
 | 40  | Canonical Peer Priority | Supported |
 | 42  | DHT Security Extension | Supported |
+| 44  | Storing Arbitrary Data in the DHT | Supported, immutable and mutable items, as both client and storage node |
 | 47  | Padding Files and Extended File Attributes | Supported, including padding-file creation and download skipping |
+| 46  | Updating Torrents Via DHT Mutable Items | Supported, including `xs=urn:btpk:` magnet links |
 | 48  | Tracker Protocol Extension: Scrape | Supported |
 | 52  | The BitTorrent Protocol Specification v2 | Supported |
 | 53  | Magnet URI Extension - Select Specific File Indices for Download | Supported |

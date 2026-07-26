@@ -1,4 +1,5 @@
 using PeerSharp.Internals.Utilities;
+using System.Text;
 using System.Web;
 
 namespace PeerSharp.Core;
@@ -17,6 +18,8 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
             IReadOnlyList<string> exactSources,
             IReadOnlyList<System.Net.IPEndPoint> peers,
             IReadOnlyList<int> selectOnlyFileIndices,
+            byte[]? publicKey,
+            byte[]? salt,
             string originalString)
     {
         InfoHash = infoHash;
@@ -26,8 +29,33 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
         ExactSources = exactSources;
         Peers = peers;
         SelectOnlyFileIndices = selectOnlyFileIndices;
+        _publicKey = publicKey;
+        _salt = salt;
         OriginalString = originalString;
     }
+
+    private readonly byte[]? _publicKey;
+    private readonly byte[]? _salt;
+
+    /// <summary>
+    /// BEP 46: the Ed25519 public key from an <c>xs=urn:btpk:</c> source, if present.
+    ///
+    /// A link carrying one names a record in the DHT rather than a fixed torrent: the record holds
+    /// whichever info-hash is current, so the same link keeps working after the publisher updates
+    /// the content. Resolve it before the info-hash is known.
+    /// </summary>
+    public ReadOnlyMemory<byte> PublicKey => _publicKey ?? ReadOnlyMemory<byte>.Empty;
+
+    /// <summary>
+    /// BEP 46: the optional salt that, with <see cref="PublicKey"/>, addresses the record. Lets
+    /// one key publish several independent torrents.
+    /// </summary>
+    public ReadOnlyMemory<byte> Salt => _salt ?? ReadOnlyMemory<byte>.Empty;
+
+    /// <summary>
+    /// BEP 46: whether this link points at a mutable DHT record rather than a fixed info-hash.
+    /// </summary>
+    public bool IsSelfUpdating => _publicKey is not null;
 
     /// <summary>
     /// Gets the display name from the magnet link, if present.
@@ -206,9 +234,14 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
                 }
             }
 
-            if (infoHash.IsEmpty && infoHashV2.IsEmpty)
+            // Parsed before the info-hash check, because a BEP 46 link legitimately has no
+            // info-hash: the whole point is that the current one is not knowable from the link and
+            // has to be resolved from the DHT.
+            var (publicKey, salt) = ParseSelfUpdatingSource(query);
+
+            if (infoHash.IsEmpty && infoHashV2.IsEmpty && publicKey is null)
             {
-                error = "Magnet link must contain a valid info hash (xt=urn:btih: or xt=urn:btmh:).";
+                error = "Magnet link must contain a valid info hash (xt=urn:btih: or xt=urn:btmh:) or a BEP 46 public key (xs=urn:btpk:).";
                 return false;
             }
 
@@ -261,7 +294,17 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
             var distinctSources = exactSources.Distinct(StringComparer.OrdinalIgnoreCase).ToList().AsReadOnly();
             var distinctPeers = peers.Distinct().ToList().AsReadOnly();
 
-            result = new MagnetLink(infoHash, infoHashV2, displayName, distinctTrackers, distinctSources, distinctPeers, selectOnly, magnetUri);
+            result = new MagnetLink(
+                infoHash,
+                infoHashV2,
+                displayName,
+                distinctTrackers,
+                distinctSources,
+                distinctPeers,
+                selectOnly,
+                publicKey,
+                salt,
+                magnetUri);
             return true;
         }
         catch (UriFormatException)
@@ -269,6 +312,56 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
             error = "Invalid magnet link URI format.";
             return false;
         }
+    }
+
+    /// <summary>
+    /// BEP 46: extracts the Ed25519 public key from an <c>xs=urn:btpk:&lt;hex&gt;</c> source, plus
+    /// the optional salt that narrows which of the key's records is meant.
+    /// </summary>
+    /// <remarks>
+    /// Reads the query directly rather than the assembled source list, so it does not depend on
+    /// where in the parse the xs values happen to be collected. The key is still left in
+    /// <see cref="ExactSources"/>: it is a legitimate exact source, and removing it would change
+    /// behaviour for callers that read that list.
+    /// </remarks>
+    private static (byte[]? PublicKey, byte[]? Salt) ParseSelfUpdatingSource(
+        System.Collections.Specialized.NameValueCollection query)
+    {
+        const string Prefix = "urn:btpk:";
+        const int PublicKeyLength = 32;
+
+        foreach (var source in query.GetValues("xs") ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(source) || !source.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var hex = source[Prefix.Length..].Trim();
+            if (hex.Length != PublicKeyLength * 2)
+            {
+                continue;
+            }
+
+            byte[] publicKey;
+            try
+            {
+                publicKey = Convert.FromHexString(hex);
+            }
+            catch (FormatException)
+            {
+                // A malformed key is ignored rather than fatal: the rest of the link may still
+                // carry a usable info-hash.
+                continue;
+            }
+
+            var saltValue = query.GetValues("s")?.FirstOrDefault(value => !string.IsNullOrEmpty(value));
+            var salt = saltValue is null ? null : Encoding.UTF8.GetBytes(saltValue);
+
+            return (publicKey, salt is { Length: > 0 } ? salt : null);
+        }
+
+        return (null, null);
     }
 
     /// <summary>
