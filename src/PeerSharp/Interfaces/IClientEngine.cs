@@ -138,6 +138,46 @@ public interface IClientEngine : IAsyncDisposable
     bool StopMaintainingSelfUpdatingTorrent(TorrentPublisherKey publisher, ReadOnlyMemory<byte> salt = default);
 
     /// <summary>
+    /// BEP 51: crawls the DHT and streams the distinct info-hashes it reports, for building a search
+    /// index or surveying what is being shared.
+    ///
+    /// <para>
+    /// The crawl walks outward from the routing table, asking each node for a sample of what it holds
+    /// and for more nodes, and honours the requery interval every node asks for. It has no natural
+    /// end: it runs until <see cref="DhtIndexerOptions.MaxInfoHashes"/> is reached, the enumeration is
+    /// abandoned, or the token is cancelled - which throws <see cref="OperationCanceledException"/>,
+    /// as cancelling an <see cref="IAsyncEnumerable{T}"/> does. Leaving the loop with <c>break</c>
+    /// stops the crawl without an exception. While every known node is inside the interval it asked
+    /// for, the crawl waits rather than finishing.
+    /// </para>
+    ///
+    /// <para>
+    /// A result is one node's claim to hold peers for a hash - nothing more. To learn what a hash
+    /// actually is, fetch its metadata with <see cref="GetMagnetMetadataAsync"/>:
+    /// <code>
+    /// await foreach (var found in engine.DiscoverInfoHashesAsync(cancellationToken: token))
+    /// {
+    ///     var link = MagnetLink.Parse($"magnet:?xt=urn:btih:{found.InfoHash}");
+    ///     var metadata = await engine.GetMagnetMetadataAsync(link, token);
+    /// }
+    /// </code>
+    /// </para>
+    /// </summary>
+    /// <param name="options">Crawl limits and politeness settings. Defaults are used when null.</param>
+    /// <param name="cancellationToken">Cancellation token; ending the crawl is the normal way to stop.</param>
+    /// <returns>Distinct info-hashes, streamed as they are discovered.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// An option is outside its valid range; the message names which one.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">The DHT is not available.</exception>
+    /// <exception cref="TimeoutException">
+    /// The DHT routing table was still empty after two minutes, leaving the crawl nowhere to start.
+    /// </exception>
+    IAsyncEnumerable<DiscoveredInfoHash> DiscoverInfoHashesAsync(
+        DhtIndexerOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Adds a torrent from a TorrentFile.
     /// </summary>
     /// <param name="torrentFile">The parsed torrent file.</param>

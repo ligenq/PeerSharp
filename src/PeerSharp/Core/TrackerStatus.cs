@@ -15,7 +15,13 @@ public enum TrackerStatusType
     CircuitOpen,
 
     /// <summary>Initial state, no announce attempted yet.</summary>
-    Unknown
+    Unknown,
+
+    /// <summary>
+    /// The tracker asked us not to retry (BEP 31 <c>retry in: never</c>), so no further announces
+    /// will be sent to it. This lasts for the lifetime of the session and is not persisted.
+    /// </summary>
+    Disabled
 }
 
 /// <summary>

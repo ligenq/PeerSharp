@@ -267,6 +267,7 @@ public class PortMappingTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         public void SetCallback(IDhtCallback callback) { }
         public void Ping(IPEndPoint ep) { }
+        public void ReportExternalIp(IPAddress address) { }
         public void Announce(InfoHash infoHash, int port) { }
         public void FindPeers(InfoHash infoHash) { }
         public void ScrapeInfoHash(InfoHash infoHash) { }

@@ -491,6 +491,124 @@ public class HttpTrackerTests
         return stats;
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_ExternalIpV4_IsParsed()
+    {
+        // BEP 24: 4 raw bytes, no port.
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["interval"] = new BNumber(1800);
+        dict.Dict["external ip"] = new BString([203, 0, 113, 7]);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.Equal(IPAddress.Parse("203.0.113.7"), _callback.AnnounceResponse!.ExternalIp);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_ExternalIpV6_IsParsed()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var expected = IPAddress.Parse("2001:db8::1");
+        var dict = new BDict();
+        dict.Dict["interval"] = new BNumber(1800);
+        dict.Dict["external ip"] = new BString(expected.GetAddressBytes());
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.Equal(expected, _callback.AnnounceResponse!.ExternalIp);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(5)]
+    [InlineData(17)]
+    public async Task AnnounceAsync_ExternalIpWithWrongLength_IsIgnored(int length)
+    {
+        // An IPAddress cannot be built from anything but 4 or 16 bytes, so a malformed value has to
+        // be dropped rather than thrown - the peer list in the same response is still good.
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["interval"] = new BNumber(1800);
+        dict.Dict["external ip"] = new BString(new byte[length]);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.Null(_callback.AnnounceResponse!.ExternalIp);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_FailureWithRetryIn_SurfacesHint()
+    {
+        // BEP 31: d14:failure reason...8:retry ini30ee
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["failure reason"] = new BString("Down for maintenance"u8.ToArray());
+        dict.Dict["retry in"] = new BNumber(30);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.False(_callback.Success);
+        Assert.Contains("Down for maintenance", _callback.ErrorMessage);
+        var hint = _callback.AnnounceResponse!.RetryHint;
+        Assert.NotNull(hint);
+        Assert.False(hint.Value.Never);
+        Assert.Equal(TimeSpan.FromMinutes(30), hint.Value.RetryIn);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_FailureWithRetryNever_SurfacesNeverHint()
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["failure reason"] = new BString("Not a tracker"u8.ToArray());
+        dict.Dict["retry in"] = new BString("never"u8.ToArray());
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.False(_callback.Success);
+        Assert.True(_callback.AnnounceResponse!.RetryHint!.Value.Never);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_TransportFailure_HasNoRetryHint()
+    {
+        // Only the tracker's own failure response carries a hint. A timeout tells us nothing about
+        // when it wants us back, and must leave the manager on its own backoff.
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+        _mockHttp.Exception = new HttpRequestException("connection refused");
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.False(_callback.Success);
+        Assert.Null(_callback.AnnounceResponse!.RetryHint);
+    }
+
     private static int CountOccurrences(string value, string search)
     {
         var count = 0;

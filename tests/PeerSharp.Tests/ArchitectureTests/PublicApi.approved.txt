@@ -82,6 +82,7 @@ sealed class PeerSharp.Config.DhtBootstrapNode
     Void Deconstruct(out String Host, out UInt16 Port)
 sealed class PeerSharp.Config.DhtSettings
     .ctor()
+    Boolean AnswerInfoHashSampling { get; set; }
     Boolean Enabled { get; set; }
     IReadOnlyList<PeerSharp.Config.DhtBootstrapNode> BootstrapNodes { get; set; }
     PeerSharp.Core.DhtState InitialState { get; set; }
@@ -205,6 +206,12 @@ sealed class PeerSharp.Core.ConfigAlert
     PeerSharp.Core.ConfigAlert <Clone>$()
     String ConfigType { get; init; }
     String ToString()
+sealed class PeerSharp.Core.DhtIndexerOptions
+    .ctor()
+    Int32 MaxConcurrency { get; set; }
+    Int32 MaxTrackedNodes { get; set; }
+    Nullable<Int32> MaxInfoHashes { get; set; }
+    TimeSpan MinNodeRequeryInterval { get; set; }
 sealed class PeerSharp.Core.DhtNode
     .ctor(Byte[] Id, Net.IPEndPoint EndPoint)
     Boolean Equals(Object obj)
@@ -225,6 +232,18 @@ sealed class PeerSharp.Core.DhtState
     PeerSharp.Core.DhtState <Clone>$()
     String ToString()
     Void Deconstruct(out Byte[] NodeId, out IReadOnlyList<PeerSharp.Core.DhtNode> Nodes)
+sealed class PeerSharp.Core.DiscoveredInfoHash
+    .ctor(PeerSharp.Core.InfoHash InfoHash, Net.IPEndPoint Source, DateTimeOffset DiscoveredAt, Int32 SourceTotalInfoHashes)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Core.DiscoveredInfoHash other)
+    DateTimeOffset DiscoveredAt { get; init; }
+    Int32 GetHashCode()
+    Int32 SourceTotalInfoHashes { get; init; }
+    Net.IPEndPoint Source { get; init; }
+    PeerSharp.Core.DiscoveredInfoHash <Clone>$()
+    PeerSharp.Core.InfoHash InfoHash { get; init; }
+    String ToString()
+    Void Deconstruct(out PeerSharp.Core.InfoHash InfoHash, out Net.IPEndPoint Source, out DateTimeOffset DiscoveredAt, out Int32 SourceTotalInfoHashes)
 enum PeerSharp.Core.DownloadStrategy
     RarestFirst = 0
     Sequential = 1
@@ -572,6 +591,7 @@ sealed class PeerSharp.Core.TrackerStatus
     Void Deconstruct(out String Url, out PeerSharp.Core.TrackerStatusType Status, out DateTimeOffset LastAnnounce, out DateTimeOffset NextAnnounce, out Int32 Interval, out Int32 ConsecutiveFailures, out String LastError, out UInt32 SeedCount, out UInt32 LeechCount)
 enum PeerSharp.Core.TrackerStatusType
     CircuitOpen = 2
+    Disabled = 4
     NotWorking = 1
     Unknown = 3
     Working = 0
@@ -622,6 +642,7 @@ interface PeerSharp.Interfaces.IClientEngine
     Boolean BlocklistEnabled { get; set; }
     Boolean GeoIpEnabled { get; set; }
     Boolean StopMaintainingSelfUpdatingTorrent(PeerSharp.Core.TorrentPublisherKey publisher, ReadOnlyMemory<Byte> salt = default)
+    IAsyncEnumerable<PeerSharp.Core.DiscoveredInfoHash> DiscoverInfoHashesAsync(PeerSharp.Core.DhtIndexerOptions options = default, CancellationToken cancellationToken = default)
     IReadOnlyList<PeerSharp.Core.PortMappingStatus> GetPortMappingStatus()
     IReadOnlyList<PeerSharp.Interfaces.ITorrent> GetTorrents()
     Int32 BoundTcpPort { get; }

@@ -18,7 +18,11 @@ internal sealed class DhtExternalIpVoteTracker
 
     public DhtExternalIpVoteResult ProcessReport(ReadOnlySpan<byte> ipBytes)
     {
-        IPAddress? reportedIp = TryParseReport(ipBytes);
+        return ProcessReport(TryParseReport(ipBytes));
+    }
+
+    public DhtExternalIpVoteResult ProcessReport(IPAddress? reportedIp)
+    {
         if (reportedIp == null || !DhtSecurity.ShouldValidate(reportedIp))
         {
             return DhtExternalIpVoteResult.Ignored;

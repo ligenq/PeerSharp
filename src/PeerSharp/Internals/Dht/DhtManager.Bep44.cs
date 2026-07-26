@@ -78,7 +78,7 @@ internal partial class DhtManager
 
     private static readonly TimeSpan QueryTimeout = TimeSpan.FromSeconds(5);
 
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<BDict>> _pendingItemQueries = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<BDict>> _pendingQueries = new();
 
     /// <summary>
     /// Fetches an item from the DHT.
@@ -203,7 +203,7 @@ internal partial class DhtManager
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var reply = await SendItemQueryAsync(
+            var reply = await SendCorrelatedQueryAsync(
                 BuildPutQuery(item, token, compareAndSwap, out var transactionId),
                 transactionId,
                 endpoint,
@@ -247,7 +247,7 @@ internal partial class DhtManager
                 break;
             }
 
-            var replies = await Task.WhenAll(batch.Select(endpoint => SendItemQueryAsync(
+            var replies = await Task.WhenAll(batch.Select(endpoint => SendCorrelatedQueryAsync(
                 BuildGetQuery(target, out var transactionId),
                 transactionId,
                 endpoint,
@@ -455,10 +455,10 @@ internal partial class DhtManager
     /// Sends a query and waits for the matching reply. Returns null on timeout or cancellation;
     /// an unresponsive node is ordinary in a DHT and not worth an exception.
     /// </summary>
-    private async Task<BDict?> SendItemQueryAsync(BDict query, string transactionId, IPEndPoint endpoint, CancellationToken cancellationToken)
+    private async Task<BDict?> SendCorrelatedQueryAsync(BDict query, string transactionId, IPEndPoint endpoint, CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource<BDict>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_pendingItemQueries.TryAdd(transactionId, completion))
+        if (!_pendingQueries.TryAdd(transactionId, completion))
         {
             return null;
         }
@@ -478,7 +478,7 @@ internal partial class DhtManager
         }
         finally
         {
-            _pendingItemQueries.TryRemove(transactionId, out _);
+            _pendingQueries.TryRemove(transactionId, out _);
         }
     }
 

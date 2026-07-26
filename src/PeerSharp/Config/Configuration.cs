@@ -345,6 +345,18 @@ public sealed class DhtSettings
     public bool Enabled { get; set; } = true;
 
     /// <summary>
+    /// Whether to answer BEP 51 <c>sample_infohashes</c> queries, which let indexers enumerate the
+    /// info-hashes this node holds peers for.
+    ///
+    /// <para>
+    /// On by default: the same information is already obtainable by asking us <c>get_peers</c>, and
+    /// answering makes us a useful participant rather than a dead end. Turn it off to reply
+    /// <c>204 Method Unknown</c> instead, as every pre-BEP 51 node does.
+    /// </para>
+    /// </summary>
+    public bool AnswerInfoHashSampling { get; set; } = true;
+
+    /// <summary>
     /// Initial DHT state (Node ID and routing table) to restore.
     /// </summary>
     public DhtState? InitialState { get; set; }
