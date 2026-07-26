@@ -10,6 +10,28 @@ namespace PeerSharp.Tests.Core.Seeding;
 public class SuperSeedManagerTests
 {
     [Fact]
+    public async Task AssignPieceToPeerAsync_SkipsUploadOnlyPeers()
+    {
+        // BEP 21 meets BEP 16: superseeding releases very few pieces at a time, so spending one on a
+        // peer that has said it will not download anything stalls distribution behind a dead end.
+        var ctx = CreateTorrentContext(3);
+        var manager = new SuperSeedManager(ctx.Torrent) { Enabled = true };
+        var peer = new TestPeer(new IPEndPoint(IPAddress.Loopback, 1)) { RemoteIsUploadOnly = true };
+
+        try
+        {
+            Assert.True(manager.HandlePeerConnected(peer));
+            await manager.AssignPieceToPeerAsync(peer);
+
+            Assert.Empty(peer.SentMessages);
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
+    [Fact]
     public async Task AssignPieceToPeerAsync_SendsHave()
     {
         var ctx = CreateTorrentContext(3);
@@ -359,6 +381,8 @@ public class SuperSeedManagerTests
         public IPEndPoint? RemoteEndPoint { get; }
         public ExtensionHandshake? RemoteExtensions => null;
         public bool RemoteSupportsExtensions => false;
+        public bool RemoteIsUploadOnly { get; set; }
+        public PiecesProgress PeerPieces { get; } = new(16);
         public IUtHashPiece? UtHashPiece => null;
         public IUtHolepunch UtHolepunch { get; } = new NullHolepunch();
         public IUtMetadata UtMetadata { get; } = new NullMetadata();

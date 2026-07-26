@@ -104,7 +104,7 @@ internal static class TorrentTestUtility
 
     internal class MockFileSelectionManager : IFileSelectionManager
     {
-        public bool IsSelectionFinished => true;
+        public bool IsSelectionFinished { get; set; } = true;
         public int TotalSelectedPieces => 0;
         public int ReceivedSelectedPieces => 0;
         public ulong CalculateFinishedSelectedBytes()

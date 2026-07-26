@@ -417,6 +417,19 @@ internal class HttpTracker : TrackerBase, IDisposable
         return string.Empty;
     }
 
+    /// <summary>
+    /// BEP 21: whether we are a partial seed - "a peer that is incomplete without downloading anything
+    /// more", which happens when only some files of a multi-file torrent were selected. A fully complete
+    /// torrent is a plain seed and announces normally.
+    /// </summary>
+    private bool IsPartialSeed()
+    {
+        // HasMetadata first: without metadata DataLeft reports 1 as a stand-in for "unknown", so a
+        // magnet link still fetching its metadata would otherwise look like a partial seed and announce
+        // paused before it had downloaded anything at all.
+        return Torrent.HasMetadata && Torrent.SelectionFinished && Torrent.DataLeft > 0;
+    }
+
     private string BuildUrl(TrackerEvent evt)
     {
         // Build query manually to avoid double-encoding of percent-encoded info_hash/peer_id
@@ -444,9 +457,19 @@ internal class HttpTracker : TrackerBase, IDisposable
         AppendParam("ipv6", "1"); // BEP 7: Request IPv6 peers
         AppendParam("numwant", Torrent.Settings.MaxPeersPerTrackerRequest.ToString());
 
-        if (evt != TrackerEvent.None)
+        // BEP 21: a partial seed "MUST send an event=paused parameter in every announce while it is a
+        // partial seed". Applied only where we would otherwise send no event - started, completed and
+        // stopped are transitions the tracker needs, and replacing one of those with paused would lose
+        // information rather than add it.
+        var effectiveEvent = evt;
+        if (evt == TrackerEvent.None && IsPartialSeed())
         {
-            AppendParam("event", evt.ToString().ToLower());
+            effectiveEvent = TrackerEvent.Paused;
+        }
+
+        if (effectiveEvent != TrackerEvent.None)
+        {
+            AppendParam("event", effectiveEvent.ToString().ToLower());
         }
 
         var baseUrl = Url;

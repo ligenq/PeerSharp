@@ -474,11 +474,29 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             return;
         }
 
+        // BEP 43: a read-only node "no longer responds to 'query' messages that it receives". Dropping
+        // them silently is the point of the mode - a transient or unreachable node that answered would
+        // be added to routing tables it cannot serve.
+        if (_settings.Dht.ReadOnly)
+        {
+            return;
+        }
+
         var id = a.GetBytes("id");
         if (id != null)
         {
-            _table.AddNode(id.Value.Span, remote);
-            MarkStateDirty();
+            // BEP 43: a sender flagged read-only must not enter the routing table. Pinging it later
+            // would go unanswered and cost it traffic, so it would only ever be dead weight - but the
+            // query itself is still serviced as usual.
+            if ((node.GetLong("ro") ?? 0) == 1)
+            {
+                _logger.LogTrace("BEP 43: not adding read-only node {Remote} to the routing table", remote);
+            }
+            else
+            {
+                _table.AddNode(id.Value.Span, remote);
+                MarkStateDirty();
+            }
         }
 
         var r = new BDict();
@@ -1342,6 +1360,15 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
     private void SendPacket(BDict dict, IPEndPoint ep, CancellationToken ct)
     {
+        // BEP 43: "the read-only DHT node places a 'ro' key in the top-level message dictionary and
+        // sets its value to 1", on queries. Stamped here rather than in each query builder because this
+        // is the one path every outgoing message takes - a builder that forgot the flag would quietly
+        // undo the whole point of the mode.
+        if (_settings.Dht.ReadOnly && dict.GetString("y") == "q")
+        {
+            dict.Dict["ro"] = new BNumber(1);
+        }
+
         var result = BencodeWriter.WriteToResult(dict);
         _ = SendAsyncAndDispose(result, ep, ct);
     }

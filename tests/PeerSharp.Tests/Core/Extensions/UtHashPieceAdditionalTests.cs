@@ -19,6 +19,8 @@ public class UtHashPieceAdditionalTests
         public byte[] PeerId { get; set; } = new byte[20];
         public IPEndPoint? RemoteEndPoint { get; set; } = new IPEndPoint(IPAddress.Loopback, 1234);
         public bool RemoteSupportsExtensions { get; set; }
+        public bool RemoteIsUploadOnly { get; set; }
+        public PiecesProgress PeerPieces { get; set; } = new(16);
         public ExtensionHandshake? RemoteExtensions { get; set; }
         public IUtMetadata UtMetadata => throw new NotImplementedException();
         public IUtPex UtPex => throw new NotImplementedException();

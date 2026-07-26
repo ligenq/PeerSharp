@@ -67,6 +67,15 @@ internal class SuperSeedManager
             return;
         }
 
+        // BEP 21: superseeding deliberately releases very few pieces at a time, so an assignment is a
+        // scarce resource. Spending one on a peer that has told us it will not download anything wastes
+        // the slot and stalls distribution behind a peer that will never pass the piece on.
+        if (peer.RemoteIsUploadOnly)
+        {
+            _logger.LogDebug("SuperSeed: {RemoteEndPoint} is upload-only, so no piece was assigned", peer.RemoteEndPoint);
+            return;
+        }
+
         int pieceToGive = SelectPieceForPeer(peer);
         if (pieceToGive < 0)
         {

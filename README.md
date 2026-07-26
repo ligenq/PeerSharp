@@ -14,7 +14,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 
 ## Key Features
 
-- **Full BEP Support:** Implements 31 BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
+- **Full BEP Support:** Implements 35 BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
 - **Hybrid Networking:** Native support for both TCP and uTP (BEP 29) with automatic congestion control.
 - **DHT & Peer Discovery:** Full Mainline DHT (BEP 5), Local Service Discovery (BEP 14), Peer Exchange (PEX), and UDP/HTTP Tracker support.
 - **Torrent Discovery:** Crawl the DHT for the info-hashes it knows about (BEP 51) and resolve them to names via BEP 9 — the building block for a search index.
@@ -316,6 +316,7 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 16  | Superseeding | Supported |
 | 19  | WebSeed - HTTP/FTP Seeding (GetRight style) | Supported |
 | 20  | Peer ID Conventions | Supported |
+| 21  | Extension for Partial Seeds | Supported, `upload_only` plus `event=paused` while a partial seed |
 | 23  | Tracker Returns Compact Peer Lists | Supported |
 | 24  | Tracker Returns External IP | Supported, counted as a vote towards the BEP 42 node ID |
 | 27  | Private Torrents | Supported |
@@ -325,7 +326,9 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 32  | IPv6 Extension for DHT | Supported |
 | 33  | DHT Scrape | Supported |
 | 40  | Canonical Peer Priority | Supported |
+| 41  | UDP Tracker Protocol Extensions | Supported, carries the URL path and query so passkeys survive a UDP announce |
 | 42  | DHT Security Extension | Supported |
+| 43  | Read-only DHT Nodes | Supported, honoured inbound and settable via `Settings.Dht.ReadOnly` |
 | 44  | Storing Arbitrary Data in the DHT | Supported, immutable and mutable items, as both client and storage node |
 | 47  | Padding Files and Extended File Attributes | Supported, including padding-file creation and download skipping |
 | 46  | Updating Torrents Via DHT Mutable Items | Supported, including `xs=urn:btpk:` magnet links |
@@ -333,11 +336,35 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 51  | DHT Infohash Indexing | Supported, both as responder and as crawler |
 | 52  | The BitTorrent Protocol Specification v2 | Supported |
 | 53  | Magnet URI Extension - Select Specific File Indices for Download | Supported |
+| 54  | The lt_donthave Extension | Supported, sent when a piece turns out to be unreadable |
 | 55  | Holepunch Extension | Supported |
 
-BEP 17 (HTTP Seeding, Hoffman style) is deliberately not implemented: it needs a server-side script
-speaking its own query format, effectively nothing deploys it, and every web seed in the wild is
-reachable through the GetRight-style BEP 19 support above.
+### Deliberate non-goals
+
+The remaining BEPs are omissions on purpose, not gaps:
+
+| BEP | Title | Why not |
+|-----|-------|---------|
+| 17  | HTTP Seeding (Hoffman-style) | Needs a server-side script speaking its own query format; effectively nothing deploys it, and every web seed in the wild is reachable through BEP 19 above |
+| 34  | DNS Tracker Preferences | Requires tracker operators to publish DNS records; essentially none do |
+| 35  | Torrent Signing | Never deployed. BEP 46 covers the "is this really from the publisher" need with Ed25519 |
+| 36  | Torrent RSS Feeds | Not a wire protocol — an application fetching XML. Belongs above a library, not inside one |
+| 39  | Updating Torrents Via Feed URL | The feed-based predecessor to BEP 46, which is implemented instead |
+| 45  | Multiple-address Operation for the DHT | IPv4/IPv6 is already covered by BEP 32; this only pays off on genuinely multi-homed hosts |
+| 49  | Distributed Torrent Feeds | Buildable on the BEP 44/46 foundation here, but near-zero deployment means defining an ecosystem rather than joining one |
+| 50  | Publish/Subscribe Protocol | As above, and less finished |
+| 38  | Finding Local Data Via Torrent File Hints | Not ruled out. Worth it only if publishing related torrents is a use case; the matching half needs a local cross-torrent file search |
+
+BEPs 0, 1, 2 and 1000 are process documents. BEP 4 is a number registry rather than a feature, and the
+reserved bits and extension message ids used here follow it.
+
+### A note on BEP 41 and packet size
+
+BEP 41 makes UDP announces longer than the 98 bytes of BEP 15 alone. That is the extension point the
+BEP defines, and implementations read fixed offsets, so trackers without support ignore the trailing
+bytes. It is on by default because the alternative is a silent failure — a passkey that never arrives,
+a working socket and no peers. Set `Settings.SendUdpTrackerUrlData = false` if a particular tracker
+rejects the longer packet.
 
 ## Architecture
 
