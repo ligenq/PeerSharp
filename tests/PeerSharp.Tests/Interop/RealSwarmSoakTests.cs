@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Clients;
 using System.Diagnostics;
@@ -321,10 +322,19 @@ public class RealSwarmSoakTests
         settings.Transfer.MaxUploadSpeed = (uint)rate;
         settings.Files.DefaultDownloadPath = seedPath!;
 
+        // The peer list shows symptoms; the log shows causes. A peer that never becomes interested and
+        // a connection we tore down for a protocol error look identical from the outside.
+        var capturedLogs = new CapturingLoggerProvider(LogLevel.Debug);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.AddProvider(capturedLogs);
+            builder.SetMinimumLevel(LogLevel.Debug);
+        });
+
         await using var engine = ClientEngineFactory.Create(new TorrentClientOptions
         {
             Settings = settings,
-            LoggerFactory = NullLoggerFactory.Instance
+            LoggerFactory = loggerFactory
         });
 
         await engine.InitializeAsync(cts.Token);
@@ -369,6 +379,26 @@ public class RealSwarmSoakTests
         _output.WriteLine("    means we advertised data and then failed to deliver it.");
         _output.WriteLine("  - Without inbound connectivity we only reach peers we dial, which biases who we meet.");
         _output.WriteLine($"    Configured listen port: {settings.Connection.TcpPort} (0 means an ephemeral one).");
+
+        _output.WriteLine("");
+        _output.WriteLine("engine warnings and errors:");
+        var problems = capturedLogs.SummariseProblems();
+        if (problems.Count == 0)
+        {
+            _output.WriteLine("  (none)");
+        }
+
+        foreach (var (message, count) in problems)
+        {
+            _output.WriteLine($"  {count,6} x {message}");
+        }
+
+        _output.WriteLine("");
+        _output.WriteLine("most frequent engine log messages:");
+        foreach (var (message, count) in capturedLogs.Summarise())
+        {
+            _output.WriteLine($"  {count,6} x {message}");
+        }
 
         Assert.True(observer.Peers.Count > 0, "No peers were reached at all while seeding, so nothing was measured.");
 

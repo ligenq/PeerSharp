@@ -51,6 +51,18 @@ internal sealed class RealSwarmObserver
     }
 
     /// <summary>
+    /// Connection sessions per endpoint, which is not the same as peers met.
+    ///
+    /// <para>
+    /// Observations are keyed by endpoint, so a peer that connects and drops eleven times looks
+    /// identical to one that stays for the whole run. That difference decides how to read everything
+    /// else: a peer that never asks us for data because it is never connected long enough is a
+    /// connectivity problem, not a protocol one. A gap in the samples is counted as a reconnect.
+    /// </para>
+    /// </summary>
+    public int TotalSessions => _peers.Values.Sum(static p => p.Sessions);
+
+    /// <summary>
     /// Groups observations by remote client implementation. This is the breakdown that matters: a
     /// figure averaged across the whole swarm hides the case where one implementation works perfectly
     /// and another never unchokes us at all, which is exactly the shape an interop bug takes.
@@ -104,6 +116,7 @@ internal sealed class RealSwarmObserver
         report.AppendLine($"samples taken          : {Samples}");
         report.AppendLine($"distinct peers met     : {_peers.Count}");
         report.AppendLine($"peak concurrent peers  : {PeakConcurrentPeers}");
+        report.AppendLine($"connection sessions    : {TotalSessions} (more than peers met means reconnect churn)");
 
         var summaries = SummariseByClient();
         if (summaries.Count == 0)
@@ -201,8 +214,19 @@ internal sealed class RealSwarmObserver
         /// </summary>
         public bool IsSeed => MaxProgress >= 1.0f;
 
+        /// <summary>How many separate times this endpoint appeared after being absent.</summary>
+        public int Sessions { get; private set; }
+
+        private int _lastSampleIndex = -1;
+
         public void Update(PeerInfo info, int sampleIndex)
         {
+            if (sampleIndex != _lastSampleIndex + 1)
+            {
+                Sessions++;
+            }
+
+            _lastSampleIndex = sampleIndex;
             SampleCount++;
             EverUnchokedUs |= !info.PeerChoking;
             WeWereInterested |= info.AmInterested;
