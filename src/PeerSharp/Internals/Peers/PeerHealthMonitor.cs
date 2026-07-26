@@ -26,6 +26,7 @@ internal sealed class PeerHealthMonitor
     {
         long now = Environment.TickCount64;
         var closeTasks = new List<Task>();
+        var keepAliveTasks = new List<Task>();
         var settings = _torrent.Settings.Connection;
         bool isSeeding = _torrent.Finished;
 
@@ -37,6 +38,13 @@ internal sealed class PeerHealthMonitor
                 closeTasks.Add(peer.CloseAsync());
                 Remove(peer);
                 continue;
+            }
+
+            // BEP 3 keepalive. A connection with nothing to say - a seed serving a peer that is not
+            // interested, say - would otherwise go silent and be dropped by the remote's own timeout.
+            if (now - peer.LastSentTicks > ProtocolConstants.KeepAliveIntervalMs)
+            {
+                keepAliveTasks.Add(peer.SendKeepAliveAsync());
             }
 
             if (connectedCount < settings.SlowPeerMinConnectedPeers)
@@ -68,6 +76,11 @@ internal sealed class PeerHealthMonitor
                 closeTasks.Add(peer.CloseAsync());
                 Remove(peer);
             }
+        }
+
+        if (keepAliveTasks.Count > 0)
+        {
+            await Task.WhenAll(keepAliveTasks).ConfigureAwait(false);
         }
 
         if (closeTasks.Count > 0)

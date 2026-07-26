@@ -187,6 +187,51 @@ internal class UtpStream : Stream
     internal ushort AckNr => _ackNr;
     internal ushort SeqNr => _seqNr;
 
+    /// <summary>
+    /// Retry policy while the connection is still being established. Separate from the data-path
+    /// timeout so a peer that never answers is given up on promptly rather than waiting out the
+    /// inactivity timeout.
+    /// </summary>
+    private void HandleHandshakeTimeout(DateTimeOffset now)
+    {
+        if (_state == UtpState.SynRecv)
+        {
+
+                if (_timeoutCount >= MaxSynRetries)
+                {
+                    _logger.LogWarning("uTP {Remote}: SYN-RECV timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
+                    CloseInternal(false, new TimeoutException("SYN-RECV timeout"));
+                    return;
+                }
+
+                SendPacket(MessageType.ST_STATE, null);
+                _timeoutCount++;
+                _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << _timeoutCount)));
+
+        }
+        else
+        {
+
+                if (_timeoutCount >= MaxSynRetries)
+                {
+                    _logger.LogWarning("uTP {Remote}: SYN timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
+                    var ex = new TimeoutException($"Connection to {RemoteEndPoint} timed out after {MaxSynRetries} SYN retries");
+                    _connectTcs?.TrySetException(ex);
+                    CloseInternal(false, ex);
+                    return;
+                }
+
+                // Resend existing SYN packet (don't create new one to avoid duplicate entries)
+                if (_sentPackets.TryGetValue(_oldestUnackedSeq, out var synPkt))
+                {
+                    ResendPacket(synPkt);
+                }
+                _timeoutCount++;
+                _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << _timeoutCount)));
+
+        }
+    }
+
     public void CheckTimeout()
     {
         lock (_lock)
@@ -198,10 +243,15 @@ internal class UtpStream : Stream
 
             var now = _timeProvider.GetUtcNow();
 
-            // INACTIVITY TIMEOUT: If we haven't received anything for 60s, close.
-            if ((now - _lastReceiveTime).TotalSeconds > 60)
+            // INACTIVITY TIMEOUT. Longer than the peer-level idle policy on purpose - see
+            // ProtocolConstants.UtpInactivityTimeoutMs. Logged at debug because a quiet peer going away
+            // is ordinary, not a defect.
+            if ((now - _lastReceiveTime).TotalMilliseconds > ProtocolConstants.UtpInactivityTimeoutMs)
             {
-                _logger.LogWarning("uTP {Remote}: Inactivity timeout - no packets received for 60s", RemoteEndPoint);
+                _logger.LogDebug(
+                    "uTP {Remote}: Inactivity timeout - no packets received for {Timeout}ms",
+                    RemoteEndPoint,
+                    ProtocolConstants.UtpInactivityTimeoutMs);
                 CloseInternal(false, new TimeoutException("Inactivity timeout"));
                 return;
             }
@@ -214,6 +264,16 @@ internal class UtpStream : Stream
 
             if (now > _nextTimeout)
             {
+                // Handshake states are checked first. The SYN is itself an unacked packet, so the
+                // general resend branch below would otherwise always win and these retry limits could
+                // never fire - leaving a connection attempt to an unreachable peer to be ended by the
+                // inactivity timeout instead, which is far longer and not what it is for.
+                if (_state == UtpState.SynSend || _state == UtpState.SynRecv)
+                {
+                    HandleHandshakeTimeout(now);
+                    return;
+                }
+
                 if (_sentPackets.Count > 0)
                 {
                     bool ignoreLoss = false;
@@ -257,40 +317,7 @@ internal class UtpStream : Stream
                     _timeoutCount++;
                     // Exponential backoff per libutp, cap at 30s
                     _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << Math.Min(_timeoutCount, 4))));
-                }
-                else if (_state == UtpState.SynRecv)
-                {
-                    if (_timeoutCount >= MaxSynRetries)
-                    {
-                        _logger.LogWarning("uTP {Remote}: SYN-RECV timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
-                        CloseInternal(false, new TimeoutException("SYN-RECV timeout"));
-                        return;
-                    }
-
-                    SendPacket(MessageType.ST_STATE, null);
-                    _timeoutCount++;
-                    _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << _timeoutCount)));
-                }
-                else if (_state == UtpState.SynSend)
-                {
-                    if (_timeoutCount >= MaxSynRetries)
-                    {
-                        _logger.LogWarning("uTP {Remote}: SYN timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
-                        var ex = new TimeoutException($"Connection to {RemoteEndPoint} timed out after {MaxSynRetries} SYN retries");
-                        _connectTcs?.TrySetException(ex);
-                        CloseInternal(false, ex);
-                        return;
-                    }
-
-                    // Resend existing SYN packet (don't create new one to avoid duplicate entries)
-                    if (_sentPackets.TryGetValue(_oldestUnackedSeq, out var synPkt))
-                    {
-                        ResendPacket(synPkt);
-                    }
-                    _timeoutCount++;
-                    _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << _timeoutCount)));
-                }
-                else if (_state == UtpState.Closing && _sentPackets.Count == 0)
+                }               else if (_state == UtpState.Closing && _sentPackets.Count == 0)
                 {
                     CheckIfClosed();
                 }

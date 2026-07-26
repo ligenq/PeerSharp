@@ -178,7 +178,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return AddIncomingTcpPeerCoreAsync(client, handshake, encryption);
     }
 
-    public async Task AddIncomingPeerAsync(Stream stream, byte[] handshake, IPEndPoint? remote = null)
+    public async Task AddIncomingPeerAsync(
+        Stream stream,
+        byte[] handshake,
+        IPEndPoint? remote = null,
+        ProtocolEncryption? encryption = null)
     {
         remote = NetworkUtils.NormalizeEndPoint(remote);
 
@@ -279,7 +283,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _connectedPeers.TryAdd(peer, 0);
         Interlocked.Increment(ref _connectedPeersCount);
 
-        peer.Start(stream);
+        peer.Start(stream, encryption);
     }
 
     private async Task AddIncomingTcpPeerCoreAsync(System.Net.Sockets.TcpClient client, byte[] handshake, ProtocolEncryption? encryption)

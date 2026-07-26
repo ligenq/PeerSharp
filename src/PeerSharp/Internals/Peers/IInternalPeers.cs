@@ -23,7 +23,17 @@ internal interface IInternalPeers : IPeers
     /// <param name="stream">The connection stream.</param>
     /// <param name="handshake">The received handshake data.</param>
     /// <param name="remote">Optional remote endpoint info.</param>
-    Task AddIncomingPeerAsync(Stream stream, byte[] handshake, System.Net.IPEndPoint? remote = null);
+    /// <param name="encryption">
+    /// The negotiated MSE state when the peer connected encrypted, or null for plaintext. uTP carries
+    /// encrypted connections exactly as TCP does - both libtorrent and Transmission decide encryption
+    /// from policy alone, with no reference to the transport - so this must be plumbed through for
+    /// inbound uTP just as it is for inbound TCP.
+    /// </param>
+    Task AddIncomingPeerAsync(
+        Stream stream,
+        byte[] handshake,
+        System.Net.IPEndPoint? remote = null,
+        ProtocolEncryption? encryption = null);
 
     /// <summary>
     /// Attaches an already-connected duplex stream as a BitTorrent peer.

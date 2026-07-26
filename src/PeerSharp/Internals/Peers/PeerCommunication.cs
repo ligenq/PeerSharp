@@ -225,6 +225,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     // Rate limit for messages > 64KB
     private long _lastActivityTicksValue = Environment.TickCount64;
 
+    /// <summary>When we last put anything on the wire, which is what drives keepalives.</summary>
+    private long _lastSentTicksValue = Environment.TickCount64;
+
     private DateTimeOffset _lastChokeChange = DateTimeOffset.MinValue;
     private long _lastDownloaded;
     private DateTimeOffset _lastUnchokedAt = DateTimeOffset.MinValue;
@@ -306,6 +309,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public long Downloaded => Interlocked.Read(ref _downloaded);
     public int DownloadSpeed { get; private set; }
     public long LastActivityTicks => Interlocked.Read(ref _lastActivityTicksValue);
+
+    /// <summary>When we last sent anything. Distinct from receive activity: a peer drops us for being
+    /// silent, regardless of how chatty it has been.</summary>
+    public long LastSentTicks => Interlocked.Read(ref _lastSentTicksValue);
     public IPeerListener Listener { get; }
     public string Name => RemoteEndPoint?.ToString() ?? "Unknown";
 
@@ -418,6 +425,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     /// <summary>Test hook: overrides the activity timestamp used by idle-timeout policy.</summary>
     internal void SetLastActivityTicksForTesting(long ticks) => Interlocked.Exchange(ref _lastActivityTicksValue, ticks);
+
+    internal void SetLastSentTicksForTesting(long ticks) => Interlocked.Exchange(ref _lastSentTicksValue, ticks);
 
     /// <summary>
     /// True if the local side initiated this connection (outgoing dial). Used by PeerManager
@@ -1008,6 +1017,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
+        Interlocked.Exchange(ref _lastSentTicksValue, Environment.TickCount64);
+
         if (ShouldDropNonCriticalMessage(msg))
         {
             msg.Dispose();
@@ -1062,6 +1073,21 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// BEP 5: Send Port message to advertise our DHT UDP port to the peer.
     /// This allows the peer to add us to their DHT routing table.
     /// </summary>
+    /// <summary>
+    /// BEP 3: "There is also a keepalive message, which is simply a message of length zero."
+    ///
+    /// <para>
+    /// Without these an idle connection looks dead to the remote, which drops it after its own
+    /// timeout - two minutes in libtorrent, and Transmission expects traffic on a 100 second cadence.
+    /// A seed with nothing to say is exactly the case that goes quiet, so this is what keeps long
+    /// lived seeding connections alive.
+    /// </para>
+    /// </summary>
+    public Task SendKeepAliveAsync()
+    {
+        return SendMessageAsync(new PeerMessage(MessageId.KeepAlive));
+    }
+
     public async Task SendPortAsync(ushort dhtPort)
     {
         var msg = new PeerMessage(MessageId.Port)

@@ -136,48 +136,32 @@ internal class PortListener : IPortListener
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var stream = client.GetStream();
 
-            // Peek first byte to determine protocol
-            byte[] peekBuffer = new byte[1];
-            int read = await stream.ReadAsync(peekBuffer, cts.Token).ConfigureAwait(false);
-            if (read == 0)
+            // Shared with the inbound uTP path, so the two cannot drift apart. They already had:
+            // this one negotiated MSE, that one assumed plaintext and rejected every encrypted peer.
+            var negotiated = await IncomingHandshakeNegotiator.NegotiateAsync(
+                stream,
+                _resolver,
+                _logger,
+                cts.Token).ConfigureAwait(false);
+
+            if (!negotiated.Success)
             {
-                // Connection closed
                 return;
             }
 
-            if (peekBuffer[0] == 19)
+            var torrent = _resolver.GetTorrent(negotiated.InfoHash);
+            if (torrent is Torrent t)
             {
-                // Plaintext Handshake
-                // 1 (19) + 19 (Protocol) + 8 (Reserved) + 20 (InfoHash) + 20 (PeerId) = 68
-                byte[] buffer = new byte[68];
-                buffer[0] = 19;
-                read = 1;
-
-                while (read < 68)
+                if (negotiated.Encryption != null)
                 {
-                    int r = await stream.ReadAsync(buffer.AsMemory(read, 68 - read), cts.Token).ConfigureAwait(false);
-                    if (r == 0)
-                    {
-                        throw new InvalidDataException("Connection closed");
-                    }
-
-                    read += r;
+                    await t.PeersInternal.AddIncomingPeerAsync(client, negotiated.Handshake, negotiated.Encryption).ConfigureAwait(false);
+                }
+                else
+                {
+                    await t.PeersInternal.AddIncomingPeerAsync(client, negotiated.Handshake).ConfigureAwait(false);
                 }
 
-                // Extract InfoHash
-                var infoHash = new InfoHash(buffer.AsSpan(28, 20));
-
-                var torrent = _resolver.GetTorrent(infoHash);
-                if (torrent is Torrent t)
-                {
-                    await t.PeersInternal.AddIncomingPeerAsync(client, buffer).ConfigureAwait(false);
-                    ownershipTransferred = true;
-                }
-            }
-            else
-            {
-                // Encrypted Handshake
-                ownershipTransferred = await HandleEncryptedClientAsync(client, peekBuffer, cts.Token).ConfigureAwait(false);
+                ownershipTransferred = true;
             }
         }
         catch (Exception ex)
@@ -193,56 +177,4 @@ internal class PortListener : IPortListener
         }
     }
 
-    private async Task<bool> HandleEncryptedClientAsync(TcpClient client, byte[] initialBytes, CancellationToken token)
-    {
-        var pe = new ProtocolEncryptionHandshake(_resolver);
-        var stream = client.GetStream();
-
-        try
-        {
-            // Feed initial bytes
-            var response = pe.HandleIncoming(initialBytes);
-            if (response.Length > 0)
-            {
-                await stream.WriteAsync(response, token).ConfigureAwait(false);
-            }
-
-            byte[] buffer = new byte[4096];
-            while (!pe.IsComplete && !pe.IsError)
-            {
-                int read = await stream.ReadAsync(buffer, token).ConfigureAwait(false);
-                if (read == 0)
-                {
-                    return false;
-                }
-
-                var data = buffer.AsSpan(0, read).ToArray();
-                response = pe.HandleIncoming(data);
-                if (response.Length > 0)
-                {
-                    await stream.WriteAsync(response, token).ConfigureAwait(false);
-                }
-            }
-
-            if (pe.IsComplete && pe.MatchedInfoHash != null && pe.Encryption != null)
-            {
-                var infoHash = new InfoHash(pe.MatchedInfoHash);
-                var torrent = _resolver.GetTorrent(infoHash);
-                if (torrent is Torrent t)
-                {
-                    await t.PeersInternal.AddIncomingPeerAsync(client, pe.ReceivedPayload ?? [], pe.Encryption).ConfigureAwait(false);
-                    return true;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Encryption handshake error");
-        }
-        finally
-        {
-            pe.Dispose();
-        }
-        return false;
-    }
 }
