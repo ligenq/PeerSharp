@@ -297,6 +297,72 @@ Recommended validation before broad rollout:
 2. Run long-lived churn tests with forced tracker disconnects and failed negotiations to confirm pending peers remain bounded.
 3. Test at least one TURN-backed path in addition to STUN-only connectivity.
 
+## Real-Swarm Interop and Soak Testing
+
+The core engine gets the same treatment. Local swarms prove the protocol encodes correctly; they
+cannot detect the failure that actually decides production viability — being quietly throttled,
+choked or dropped by real libtorrent, qBittorrent and Transmission peers. Those clients enforce their
+own expectations, and a client they dislike still *appears* to work. It just downloads at a fraction
+of the speed it should, for reasons nothing local will surface.
+
+`tests/PeerSharp.Tests/Interop/RealSwarmSoakTests.cs` measures that against a live swarm:
+
+| Test | What it answers |
+|------|-----------------|
+| `Interop_HowRealClientsTreatUs` | Which implementations we meet, and how many of each ever unchoke us, send us data, or want ours |
+| `Soak_ConnectionsStayBoundedUnderChurn` | Whether the connection pool stays inside its ceiling as peers come and go over a long run |
+| `Interop_DownloadRunsToCompletion` | Whether a download from strangers actually finishes, and at what rate |
+
+These are diagnostics, not pass/fail gates — swarm composition is not ours to control, so the numbers
+are the deliverable and the assertions cover only what would make the numbers meaningless. They are
+opt-in twice: the `PeerSharp.Tests.Interop` namespace is excluded from every CI job, and each test
+also requires `PEERSHARP_SOAK=1`, separately from the DHT probes' `PEERSHARP_INTEROP=1`, because these
+transfer real data for a long time.
+
+**You choose the content.** Nothing is hardcoded; the tests skip until you point them somewhere.
+Use something you have the right to distribute — Linux distribution images are the conventional
+choice, are published over BitTorrent by the projects themselves, and give the broadest mix of peer
+implementations to measure against.
+
+```bash
+PEERSHARP_SOAK=1 \
+PEERSHARP_SOAK_TORRENT=https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/debian-13.6.0-amd64-netinst.iso.torrent \
+PEERSHARP_SOAK_SECONDS=600 \
+PEERSHARP_SOAK_MAX_BYTES=1073741824 \
+dotnet test tests/PeerSharp.Tests --filter FullyQualifiedName~RealSwarmSoakTests --logger "console;verbosity=detailed"
+```
+
+| Variable | Purpose |
+|----------|---------|
+| `PEERSHARP_SOAK` | Must be `1`; nothing runs otherwise |
+| `PEERSHARP_SOAK_TORRENT` | `.torrent` path or http(s) URL |
+| `PEERSHARP_SOAK_MAGNET` | Magnet link, as an alternative to the above |
+| `PEERSHARP_SOAK_SECONDS` | Duration of the interop measurement (default 600) |
+| `PEERSHARP_SOAK_CHURN_SECONDS` | Duration of the churn soak (default 1800) |
+| `PEERSHARP_SOAK_COMPLETION_SECONDS` | Budget for the completion run (default 1800) |
+| `PEERSHARP_SOAK_MAX_BYTES` | Hard ceiling on data pulled per run (default 1 GiB) |
+| `PEERSHARP_SOAK_RATE_BYTES` | Requested rate cap — see the caveat below |
+
+### Reading the report
+
+Read the **unchoke** column first. A client that meets fifty libtorrent peers and is unchoked by none
+of them has an interop bug, however healthy the aggregate throughput looks. Two things confound that
+reading and are called out in the output itself:
+
+- **Tit-for-tat.** If the `we served` column is near zero everywhere, low unchoke rates say more
+  about our upload than about anyone's opinion of us. A leech-only run cannot conclude much; re-run
+  while seeding.
+- **`seen once`** counts connections that did not outlive one sampling interval. A cluster of those
+  against one implementation is what a post-handshake rejection looks like from the outside.
+
+Compare runs against each other rather than against an absolute target.
+
+> **Known limitation surfaced by these tests:** download rate limiting is not currently enforced.
+> Neither `Settings.Transfer.MaxDownloadSpeed` nor `ITorrent.DownloadLimitBytesPerSecond` constrains
+> the peer download path — a run capped at 256 bytes/s still pulled 140 MB in 30 seconds. The soak
+> tests therefore enforce their own byte budget, and `PEERSHARP_SOAK_RATE_BYTES` is advisory until
+> this is fixed.
+
 ## Supported BEPs
 
 PeerSharp aims for high compatibility with the BitTorrent ecosystem:
