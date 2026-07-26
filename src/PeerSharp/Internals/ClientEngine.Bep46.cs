@@ -116,6 +116,9 @@ internal sealed partial class ClientEngine
     /// <exception cref="InvalidOperationException">
     /// The identity holds no private key, or DHT is disabled.
     /// </exception>
+    /// <exception cref="TimeoutException">
+    /// The DHT routing table did not become usable within two minutes.
+    /// </exception>
     public async Task<(int AcceptedByNodes, long Version)> PublishSelfUpdatingTorrentAsync(
         TorrentPublisherKey publisher,
         InfoHash infoHash,
@@ -130,8 +133,13 @@ internal sealed partial class ClientEngine
                 "This identity holds no private key, so it cannot publish. Use TorrentPublisherKey.Create, FromSeed or FromExpandedKey.");
         }
 
-        var resolver = RequireBep46Resolver();
         byte[]? saltBytes = salt.IsEmpty ? null : salt.ToArray();
+        var target = Bep46Resolver.ComputeTarget(publisher.PublicKey.Span, salt.Span);
+
+        var dht = RequireDhtForBep46();
+        await dht.WaitForUsableItemRoutingTableAsync(target, cancellationToken).ConfigureAwait(false);
+
+        var resolver = new Bep46Resolver(dht, _loggerFactory);
 
         var current = await resolver.ResolveAsync(publisher.PublicKey.ToArray(), saltBytes, cancellationToken)
             .ConfigureAwait(false);
@@ -177,13 +185,18 @@ internal sealed partial class ClientEngine
 
     private Bep46Resolver RequireBep46Resolver()
     {
+        return new Bep46Resolver(RequireDhtForBep46(), _loggerFactory);
+    }
+
+    private DhtManager RequireDhtForBep46()
+    {
         if (Dht is not DhtManager dht)
         {
             throw new InvalidOperationException(
                 "BEP 46 requires the DHT. Enable it via Settings.Dht and start the engine first.");
         }
 
-        return new Bep46Resolver(dht, _loggerFactory);
+        return dht;
     }
 
     /// <summary>

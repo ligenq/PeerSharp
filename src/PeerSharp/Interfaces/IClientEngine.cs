@@ -121,6 +121,9 @@ public interface IClientEngine : IAsyncDisposable
     /// <exception cref="InvalidOperationException">
     /// The identity cannot publish, or the DHT is not available.
     /// </exception>
+    /// <exception cref="TimeoutException">
+    /// The DHT routing table did not become usable within two minutes.
+    /// </exception>
     Task<(int AcceptedByNodes, long Version)> PublishSelfUpdatingTorrentAsync(
         TorrentPublisherKey publisher,
         InfoHash infoHash,
