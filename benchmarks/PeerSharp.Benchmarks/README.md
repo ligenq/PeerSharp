@@ -66,6 +66,26 @@ expected.
 processing advances sequence state and cannot be measured one call at a time. Its figures are per
 256-packet window.
 
+### Check the fixture before believing the result
+
+Every wrong number this suite has produced so far came from the harness, not the engine. Four
+cases, all of which looked like real findings first:
+
+- `UtpBenchmarks` did not drain the receive pipe, so pooled buffers were never returned and the
+  engine appeared to allocate 1.1 KB per packet. With a reader attached it is 57 B.
+- The concurrent benchmarks created OS threads per invocation, so ~500 us of thread spin-up buried
+  ~57 us of work and the blocklist looked unchanged after its lock was removed.
+- `PiecePickerBenchmarks` had a fake context computing `CompletedPieceCount` with a LINQ scan per
+  call. The real context exposes an O(1) counter. RarestFirst looked superlinear - 33 us at 20,000
+  pieces - when it is actually flat at 47 ns.
+- `AvailabilityBenchmarks` drove a per-piece API that locks per call to stand in for a method that
+  locks once, overstating peer connect by the difference.
+
+Before acting on a surprising result, check that the fixture does what the engine does: that fakes
+have the same complexity as the real implementations, that consumers on the other end of a queue
+or pipe are actually running, and that setup cost is not inside the measurement. A result that
+makes the engine look bad is more often a bug in the benchmark.
+
 ### One benchmark that is deliberately an upper bound
 
 `AvailabilityBenchmarks.BulkIncrementUnbatched` walks the whole piece range through the per-piece
