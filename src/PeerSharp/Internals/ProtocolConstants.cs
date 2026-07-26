@@ -68,9 +68,32 @@ internal static class ProtocolConstants
     public const int HttpTrackerTimeoutSeconds = 15;
 
     /// <summary>
-    /// Idle timeout before closing connection (2 minutes).
+    /// Idle timeout before closing connection (2 minutes). Matches libtorrent's peer_timeout.
     /// </summary>
     public const int IdleTimeoutMs = 120000;
+
+    /// <summary>
+    /// How long a connection may go without us sending anything before we send a keepalive.
+    ///
+    /// <para>
+    /// Must stay comfortably below the two minutes other clients allow, or an otherwise healthy
+    /// connection is dropped by the remote for looking dead. Transmission uses 100 seconds for the same
+    /// reason and libtorrent's peer_timeout is 120, so this matches the stricter of the two.
+    /// </para>
+    /// </summary>
+    public const int KeepAliveIntervalMs = 100000;
+
+    /// <summary>
+    /// How long a uTP connection may receive nothing before the transport tears it down.
+    ///
+    /// <para>
+    /// Deliberately longer than <see cref="IdleTimeoutMs"/>. A transport that gives up sooner than the
+    /// protocol riding on it pre-empts a decision that is not its to make: this was 60 seconds, so a
+    /// quiet peer was killed at the transport before the peer layer's own two-minute policy applied,
+    /// and well before a remote keepalive at 100 seconds could arrive.
+    /// </para>
+    /// </summary>
+    public const int UtpInactivityTimeoutMs = 180000;
 
     /// <summary>
     /// Timeout for pending connection cleanup (10 seconds).

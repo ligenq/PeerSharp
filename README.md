@@ -401,6 +401,24 @@ Compare runs against each other rather than against an absolute target.
   The retry could only throw, and the peer was lost even though it might have been reachable in
   plaintext. Roughly 3% of connection attempts. Regression cover: `EncryptionFallbackTests`.
 
+- **Inbound uTP rejected every encrypted peer.** The TCP listener peeked a byte and ran an MSE
+  handshake when it was not `19`; the uTP path had no such branch, so it read 68 bytes, saw the first
+  byte of somebody's Diffie-Hellman key, and dropped the connection. Encryption and transport are
+  independent choices — libtorrent decides encryption from policy alone and Transmission hands every
+  inbound socket to the same handshake regardless of transport — and encrypted uTP is the common
+  case, not a corner: 63 of 68 qBittorrent connections in one measurement were uTP and all 68 were
+  encrypted. Both transports now share one negotiator so they cannot diverge again. Regression cover:
+  `EncryptedUtpTests`, which fails on `Encryption.Require` without the fix.
+
+- **We never sent keepalives, and the transport gave up before the protocol.** BEP 3's zero-length
+  keepalive was defined in the serializer and never sent, so an idle connection went silent and the
+  remote dropped it — libtorrent after 120s, Transmission expecting traffic every 100s. Meanwhile the
+  uTP layer closed after 60s of quiet, half our own peer-level idle policy, so the transport was
+  ending connections the protocol still considered healthy. Fixing the timeout then exposed dead
+  code: the uTP handshake retry limits sat behind a branch that always won, so connection attempts
+  had been relying on the inactivity timeout instead. Regression cover: `KeepAliveTests`, which pins
+  the ordering between the three timeouts rather than their literal values.
+
 Two of these were found by tests that assert on real bytes rather than on mocked calls, which is a
 distinction worth keeping: `WireSequenceTests` captures the opening sequence from a real socket, and
 `MseConformanceTests` decodes our encrypted handshake with an implementation that shares no code with

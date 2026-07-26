@@ -432,8 +432,9 @@ public class UtpExhaustiveTests
     {
         var stream = await ConnectStream();
 
-        // 60 seconds inactivity timeout
-        _time.Advance(TimeSpan.FromSeconds(61));
+        // Past the transport inactivity timeout, which is deliberately longer than the peer-level
+        // idle policy so the protocol decides when a peer is dead, not the transport.
+        _time.Advance(TimeSpan.FromMilliseconds(PeerSharp.Internals.ProtocolConstants.UtpInactivityTimeoutMs + 1000));
 
         Assert.Equal(UtpState.Closed, stream.State);
     }

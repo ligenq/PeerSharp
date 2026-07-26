@@ -247,7 +247,7 @@ public class UtpStreamStateTests
         Assert.Equal(UtpState.Connected, stream.State);
 
         // Advance time past 60s inactivity threshold without any received packets
-        time.Advance(TimeSpan.FromSeconds(61));
+        time.Advance(TimeSpan.FromMilliseconds(PeerSharp.Internals.ProtocolConstants.UtpInactivityTimeoutMs + 1000));
         stream.CheckTimeout();
 
         Assert.Equal(UtpState.Closed, stream.State);

@@ -724,45 +724,49 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         {
             // Wait for connection state? UtpStream usually starts in Connected if accepted.
 
-            byte[] buffer = new byte[68];
-            int read = 0;
-
-            // One deadline for the whole 68-byte handshake. Creating it per read would restart
-            // the clock on every chunk, letting a peer that drips a byte every few seconds hold
-            // the connection open indefinitely.
+            // One deadline for the whole handshake. Creating it per read would restart the clock on
+            // every chunk, letting a peer that drips a byte every few seconds hold the connection open
+            // indefinitely.
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            while (read < 68)
-            {
-                int r = await stream.ReadAsync(buffer.AsMemory(read, 68 - read), timeoutCts.Token).ConfigureAwait(false);
-                if (r == 0)
-                {
-                    _logger.LogWarning("uTP connection from {Remote} closed before handshake complete (read {Bytes}/68)", stream.RemoteEndPoint, read);
-                    throw new IOException("Connection closed");
-                }
 
-                read += r;
-            }
+            // uTP peers negotiate MSE exactly as TCP peers do. This path used to read 68 bytes and
+            // insist the first was 19, so every encrypted inbound uTP peer was rejected - its
+            // Diffie-Hellman key looks like noise, which is what the old "Invalid uTP handshake ...
+            // first byte" warnings were actually reporting. Both libtorrent and Transmission decide
+            // encryption from policy alone with no reference to the transport, and our own measurements
+            // show encrypted uTP is the common case rather than an oddity.
+            var negotiated = await IncomingHandshakeNegotiator.NegotiateAsync(
+                stream,
+                this,
+                _logger,
+                timeoutCts.Token).ConfigureAwait(false);
 
-            if (buffer[0] != 19)
+            if (!negotiated.Success)
             {
-                _logger.LogWarning("Invalid uTP handshake from {Remote}: first byte {Byte} (expected 19), hex: {Hex}",
-                    stream.RemoteEndPoint, buffer[0], Convert.ToHexString(buffer, 0, read));
+                _logger.LogDebug("uTP handshake from {Remote} did not complete", stream.RemoteEndPoint);
                 throw new InvalidDataException("Invalid handshake");
             }
 
-            var infoHash = new InfoHash(buffer.AsSpan(28, 20));
-
-            var torrent = GetTorrent(infoHash);
+            var torrent = GetTorrent(negotiated.InfoHash);
             if (torrent is Torrent t)
             {
-                _logger.LogDebug("Accepted uTP connection for {TorrentName} from {Remote}", t.Name, stream.RemoteEndPoint);
-                await t.PeersInternal.AddIncomingPeerAsync(stream, buffer, stream.RemoteEndPoint).ConfigureAwait(false);
+                _logger.LogDebug(
+                    "Accepted {Kind} uTP connection for {TorrentName} from {Remote}",
+                    negotiated.Encryption != null ? "encrypted" : "plaintext",
+                    t.Name,
+                    stream.RemoteEndPoint);
+
+                await t.PeersInternal.AddIncomingPeerAsync(
+                    stream,
+                    negotiated.Handshake,
+                    stream.RemoteEndPoint,
+                    negotiated.Encryption).ConfigureAwait(false);
                 ownershipTransferred = true;
                 return; // Ownership transferred
             }
             else
             {
-                _logger.LogWarning("uTP connection for unknown info hash {Hash} from {Remote}", infoHash, stream.RemoteEndPoint);
+                _logger.LogWarning("uTP connection for unknown info hash {Hash} from {Remote}", negotiated.InfoHash, stream.RemoteEndPoint);
             }
         }
         catch (Exception ex)
