@@ -330,6 +330,9 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
         const string Prefix = "urn:btpk:";
         const int PublicKeyLength = 32;
 
+        // BEP 44 caps the salt that addresses the record.
+        const int DhtSaltMaxLength = 64;
+
         foreach (var source in query.GetValues("xs") ?? [])
         {
             if (string.IsNullOrWhiteSpace(source) || !source.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase))
@@ -355,8 +358,30 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
                 continue;
             }
 
+            // BEP 46 specifies the magnet form as
+            // "magnet:?xs=urn:btpk:[Public Key (Hex)]&s=[Salt (Hex)]", so the salt is hex, not
+            // text. Decoding it as UTF-8 would derive the wrong target and fail against every
+            // other client.
             var saltValue = query.GetValues("s")?.FirstOrDefault(value => !string.IsNullOrEmpty(value));
-            var salt = saltValue is null ? null : Encoding.UTF8.GetBytes(saltValue);
+            byte[]? salt = null;
+            if (saltValue is not null)
+            {
+                try
+                {
+                    salt = Convert.FromHexString(saltValue);
+                }
+                catch (FormatException)
+                {
+                    // A malformed salt would silently address the wrong record, so drop the key
+                    // as well rather than resolve something the link did not name.
+                    return (null, null);
+                }
+            }
+
+            if (salt is { Length: > DhtSaltMaxLength })
+            {
+                return (null, null);
+            }
 
             return (publicKey, salt is { Length: > 0 } ? salt : null);
         }
