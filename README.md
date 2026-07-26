@@ -341,19 +341,26 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 
 ### Deliberate non-goals
 
-The remaining BEPs are omissions on purpose, not gaps:
+Every other BEP on bittorrent.org is an omission on purpose, not a gap. Those marked *deferred* are the
+ones the BEP editors themselves record as no longer progressing toward standardization; the rest are
+live drafts we chose not to implement.
 
 | BEP | Title | Why not |
 |-----|-------|---------|
+| 8   | Tracker Peer Obfuscation *(deferred)* | RC4 keyed on the info-hash, a value every participant already holds — the BEP is explicit that it is obfuscation, not security. An `https://` announce URL does the job properly and already works, with MSE covering peer connections. Also needs tracker-side support that essentially nothing deploys |
 | 17  | HTTP Seeding (Hoffman-style) | Needs a server-side script speaking its own query format; effectively nothing deploys it, and every web seed in the wild is reachable through BEP 19 above |
+| 18  | Search Engine Specification *(deferred)* | An OpenSearch-subset XML file describing a search provider for a client's search box. UI scope, not engine scope — and a consumer can parse `.btsearch` with `System.Xml` in a few lines |
+| 22  | Local Tracker Discovery *(deferred)* | Requires ISPs to publish SRV records under their reverse-DNS domains, which never happened. Were it working, it would announce to a tracker chosen automatically by the network rather than by the user, so it would belong behind an explicit opt-in regardless |
+| 26  | Zeroconf Peer Advertising *(deferred)* | The same LAN discovery job as BEP 14 above, but delegated to a Bonjour/Avahi daemon — a platform dependency where the current LSD is self-contained multicast. Its browsable registry also lets a device enumerate what a host shares retroactively, where LSD only reaches whoever was listening |
+| 28  | Tracker Exchange *(deferred)* | The closest call of these. It is genuinely deployed (libtorrent) and would be cheap here — BEP 10, BEP 12 tiers, `MagnetTrackerMerger` and the circuit breaker are all in place. But a peer-supplied announce URL lets a stranger make us disclose our IP and info-hash to a server of their choosing, and the BEP resolves that with nothing firmer than "a certain amount of suspicion". BEP 27 also excludes private torrents, which is the population that most wants it. Revisit only as opt-in, off by default, capped, and never propagating a tracker that has not worked for us |
 | 34  | DNS Tracker Preferences | Requires tracker operators to publish DNS records; essentially none do |
 | 35  | Torrent Signing | Never deployed. BEP 46 covers the "is this really from the publisher" need with Ed25519 |
 | 36  | Torrent RSS Feeds | Not a wire protocol — an application fetching XML. Belongs above a library, not inside one |
+| 38  | Finding Local Data Via Torrent File Hints | Not ruled out. Worth it only if publishing related torrents is a use case; the matching half needs a local cross-torrent file search |
 | 39  | Updating Torrents Via Feed URL | The feed-based predecessor to BEP 46, which is implemented instead |
 | 45  | Multiple-address Operation for the DHT | IPv4/IPv6 is already covered by BEP 32; this only pays off on genuinely multi-homed hosts |
 | 49  | Distributed Torrent Feeds | Buildable on the BEP 44/46 foundation here, but near-zero deployment means defining an ecosystem rather than joining one |
 | 50  | Publish/Subscribe Protocol | As above, and less finished |
-| 38  | Finding Local Data Via Torrent File Hints | Not ruled out. Worth it only if publishing related torrents is a use case; the matching half needs a local cross-torrent file search |
 
 BEPs 0, 1, 2 and 1000 are process documents. BEP 4 is a number registry rather than a feature, and the
 reserved bits and extension message ids used here follow it.
