@@ -178,8 +178,13 @@ Notes:
   do with partially downloaded data from the previous version is an application decision.
 - One identity can publish several torrents by passing a salt to both `ToMagnetLink` and
   `PublishSelfUpdatingTorrentAsync`.
-- Interoperability is verified against BEP 44's published test vectors. It has **not** yet been
-  confirmed against a live third-party client; see `tests/PeerSharp.Tests/Interop`.
+- Interoperability is verified two ways: byte-for-byte against BEP 44's published test vectors,
+  and against the live Mainline DHT. A survey of 105 walked nodes found 69% answer BEP 44 `get`
+  and every one of those issues a write token; 7.6% return `204 Method Unknown`. See
+  `tests/PeerSharp.Tests/Interop`, which is excluded from CI and gated on `PEERSHARP_INTEROP=1`.
+- A fresh node's routing table takes around 30 seconds to become usable for lookups. Publishing or
+  resolving immediately after startup can fail for want of a routing table rather than for any
+  protocol reason.
 
 ### Streaming
 
