@@ -163,6 +163,31 @@ internal sealed class RealSwarmObserver
         return report.ToString();
     }
 
+    /// <summary>
+    /// Splits the leecher-interest figures by whether the connection was encrypted.
+    ///
+    /// <para>
+    /// Local testing runs almost entirely in plaintext, so a fault in the MSE stream would leave every
+    /// local test green while most real connections - which are encrypted - silently carried garbage.
+    /// If incomplete peers become interested over plaintext but never over MSE, the fault is in the
+    /// encryption layer rather than anywhere in the protocol logic.
+    /// </para>
+    /// </summary>
+    public string BuildEncryptionSplit()
+    {
+        var leechers = _peers.Values.Where(static p => !p.IsSeed).ToArray();
+        var encrypted = leechers.Where(static p => p.WasEncrypted).ToArray();
+        var plain = leechers.Where(static p => !p.WasEncrypted).ToArray();
+
+        var report = new StringBuilder();
+        report.AppendLine();
+        report.AppendLine("incomplete peers by transport:");
+        report.AppendLine($"  encrypted : {encrypted.Length,4} met, {encrypted.Count(static p => p.EverInterestedInUs),4} wanted ours, {encrypted.Count(static p => p.BytesUploaded > 0),4} served");
+        report.AppendLine($"  plaintext : {plain.Length,4} met, {plain.Count(static p => p.EverInterestedInUs),4} wanted ours, {plain.Count(static p => p.BytesUploaded > 0),4} served");
+        report.AppendLine("  A stark split here points at the MSE layer rather than the protocol logic.");
+        return report.ToString();
+    }
+
     private static string Ratio(int part, int total)
     {
         return total == 0 ? "-" : $"{part}/{total} ({100.0 * part / total:F0}%)";
