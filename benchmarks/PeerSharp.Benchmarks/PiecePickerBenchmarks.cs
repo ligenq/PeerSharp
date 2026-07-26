@@ -61,16 +61,30 @@ public class PiecePickerBenchmarks
         return _picker.PickNextPiece(_peer, out int pieceIndex) ? pieceIndex : -1;
     }
 
-    private sealed class FakeContext(int pieceCount, DownloadStrategy strategy, Random random) : IPiecePickerContext
+    private sealed class FakeContext : IPiecePickerContext
     {
-        private readonly bool[] _have = BuildHave(pieceCount, random);
+        private readonly bool[] _have;
 
-        public DownloadStrategy DownloadStrategy => strategy;
-        public int PieceCount => pieceCount;
-        public int CompletedPieceCount => _have.Count(static x => x);
+        public FakeContext(int pieceCount, DownloadStrategy strategy, Random random)
+        {
+            PieceCount = pieceCount;
+            DownloadStrategy = strategy;
+            _have = BuildHave(pieceCount, random);
 
-        public IReadOnlyList<int>? StreamingPriorityPieces { get; } =
-            strategy == DownloadStrategy.Streaming ? [.. Enumerable.Range(0, Math.Min(32, pieceCount))] : null;
+            // Precomputed, because the real context exposes Torrent.Pieces.ReceivedCount - an
+            // O(1) counter. Recomputing it per call added a full LINQ scan of the piece range to
+            // every PickNextPiece, a cost the engine never pays.
+            CompletedPieceCount = _have.Count(static x => x);
+
+            StreamingPriorityPieces = strategy == DownloadStrategy.Streaming
+                ? [.. Enumerable.Range(0, Math.Min(32, pieceCount))]
+                : null;
+        }
+
+        public DownloadStrategy DownloadStrategy { get; }
+        public int PieceCount { get; }
+        public int CompletedPieceCount { get; }
+        public IReadOnlyList<int>? StreamingPriorityPieces { get; }
 
         public IReadOnlyList<FileSelection>? GetFileSelectionSnapshot() => null;
 
