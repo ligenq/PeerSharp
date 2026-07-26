@@ -312,6 +312,7 @@ of the speed it should, for reasons nothing local will surface.
 | `Interop_HowRealClientsTreatUs` | Which implementations we meet, and how many of each ever unchoke us, send us data, or want ours |
 | `Soak_ConnectionsStayBoundedUnderChurn` | Whether the connection pool stays inside its ceiling as peers come and go over a long run |
 | `Interop_DownloadRunsToCompletion` | Whether a download from strangers actually finishes, and at what rate |
+| `Interop_MultipleTorrentsAtOnce` | Whether several live swarms in one engine starve each other, sharing bandwidth channels, the connection governor and one DHT node |
 
 These are diagnostics, not pass/fail gates — swarm composition is not ours to control, so the numbers
 are the deliverable and the assertions cover only what would make the numbers meaningless. They are
@@ -320,9 +321,20 @@ also requires `PEERSHARP_SOAK=1`, separately from the DHT probes' `PEERSHARP_INT
 transfer real data for a long time.
 
 **You choose the content.** Nothing is hardcoded; the tests skip until you point them somewhere.
-Use something you have the right to distribute — Linux distribution images are the conventional
-choice, are published over BitTorrent by the projects themselves, and give the broadest mix of peer
-implementations to measure against.
+Use something you have the right to distribute. Projects that publish their own releases over
+BitTorrent are the conventional choice, and are also the most useful to measure against — they are
+well seeded by a broad mix of client implementations:
+
+| Source | Where |
+|--------|-------|
+| Debian installer images | `https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/` |
+| Ubuntu releases | `https://releases.ubuntu.com/` (each `.iso` has an `.iso.torrent`) |
+| Tails | `https://tails.net/install/` |
+| Internet Archive | most public-domain items offer a `.torrent` from their details page |
+
+Both variables accept several entries separated by `;`, which is what `Interop_MultipleTorrentsAtOnce`
+uses. Prefer a mix of sizes: swarm composition differs sharply between projects, so a conclusion drawn
+from one torrent is really a conclusion about that torrent's seeders.
 
 ```bash
 PEERSHARP_SOAK=1 \
@@ -363,7 +375,17 @@ Compare runs against each other rather than against an absolute target.
   encrypted stream wrapper, so it only applied when a peer negotiated encryption; a configured
   ceiling silently did nothing on every other connection, and a run capped at 256 bytes/s still
   pulled 140 MB in 30 seconds. Limiting is now its own layer wrapping every peer connection.
-  Regression cover: `RateLimitTests` exercises both encryption modes over loopback.
+  Regression cover: `RateLimitTests` exercises global and per-torrent limits, in both directions,
+  in both encryption modes, over loopback.
+
+The same instinct drives two local suites that run in CI, since a bug worth finding on a real swarm is
+usually cheaper to catch deterministically:
+
+- `RateLimitTests` — limits actually constrain throughput, with a control proving an unlimited
+  transfer is genuinely faster, so a broken transfer cannot masquerade as a working limiter.
+- `ResumeIntegrityTests` — completed downloads match the source byte for byte (including multi-file
+  layouts, where pieces straddle file boundaries), a mid-transfer restart keeps its verified pieces,
+  and a recheck actually detects corruption rather than always reporting success.
 
 ## Supported BEPs
 
