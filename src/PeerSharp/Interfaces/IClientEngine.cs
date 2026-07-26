@@ -76,6 +76,65 @@ public interface IClientEngine : IAsyncDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// BEP 46: resolves a self-updating magnet link to the torrent it currently names.
+    ///
+    /// A link carrying <c>xs=urn:btpk:</c> has no info-hash of its own - the publisher stores the
+    /// current one in a signed DHT record, so the same link keeps working across releases. Resolve
+    /// it, then add the resulting info-hash with the ordinary magnet or torrent APIs.
+    /// </summary>
+    /// <param name="magnetLink">A link with <see cref="Core.MagnetLink.IsSelfUpdating"/> set.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>
+    /// The current info-hash and version, or null when no node holds a usable record. Records that
+    /// fail verification read as absent, since the DHT is untrusted input.
+    /// </returns>
+    /// <exception cref="ArgumentException">The link carries no public key.</exception>
+    /// <exception cref="InvalidOperationException">The DHT is not available.</exception>
+    Task<SelfUpdatingTorrentInfo?> ResolveSelfUpdatingMagnetAsync(
+        MagnetLink magnetLink,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// BEP 46: resolves a publisher identity to the torrent it currently names.
+    /// </summary>
+    /// <param name="publisher">The publisher to follow; only the public key is used.</param>
+    /// <param name="salt">Optional salt selecting which of the publisher's records to read.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task<SelfUpdatingTorrentInfo?> ResolveSelfUpdatingTorrentAsync(
+        TorrentPublisherKey publisher,
+        ReadOnlyMemory<byte> salt = default,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// BEP 46: publishes the info-hash that subscribers following this identity should now fetch.
+    ///
+    /// The version number is chosen automatically from whatever is currently published, and the
+    /// write is compare-and-swapped against it so a concurrent publish from another instance of
+    /// the same identity fails rather than silently overwriting. The record is then kept alive in
+    /// the DHT for as long as this engine runs.
+    /// </summary>
+    /// <param name="publisher">The publishing identity; must hold private key material.</param>
+    /// <param name="infoHash">The info-hash of the new version. Must be a v1 (20-byte) hash.</param>
+    /// <param name="salt">Optional salt, letting one identity publish several torrents.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>How many DHT nodes accepted the record, and the version number published.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The identity cannot publish, or the DHT is not available.
+    /// </exception>
+    Task<(int AcceptedByNodes, long Version)> PublishSelfUpdatingTorrentAsync(
+        TorrentPublisherKey publisher,
+        InfoHash infoHash,
+        ReadOnlyMemory<byte> salt = default,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// BEP 46: stops keeping a published record alive. The record remains in the DHT until it
+    /// expires of its own accord, which takes a couple of hours.
+    /// </summary>
+    /// <returns>True if the record was being maintained by this engine.</returns>
+    bool StopMaintainingSelfUpdatingTorrent(TorrentPublisherKey publisher, ReadOnlyMemory<byte> salt = default);
+
+    /// <summary>
     /// Adds a torrent from a TorrentFile.
     /// </summary>
     /// <param name="torrentFile">The parsed torrent file.</param>

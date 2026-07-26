@@ -1,4 +1,5 @@
 using PeerSharp.BEncoding;
+using PeerSharp.Core;
 using PeerSharp.Internals.Utilities;
 using System.Globalization;
 using System.Security.Cryptography;
@@ -106,6 +107,42 @@ internal static class DhtItemCodec
         {
             Value = value,
             PublicKey = Ed25519.PublicKeyFromSeed(seed),
+            SequenceNumber = sequenceNumber,
+            Signature = signature,
+            Salt = salt.Length > 0 ? salt.ToArray() : null,
+        };
+    }
+
+    /// <summary>
+    /// Signs a value using a publisher identity, which may be backed by a seed or by a 64-byte
+    /// expanded key. Keeps the private material inside <see cref="TorrentPublisherKey"/> rather
+    /// than passing raw seeds around.
+    /// </summary>
+    public static DhtMutableItem CreateSigned(TorrentPublisherKey key, ReadOnlySpan<byte> salt, long sequenceNumber, IBNode value)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(value);
+        ArgumentOutOfRangeException.ThrowIfNegative(sequenceNumber);
+
+        if (salt.Length > DhtItem.MaxSaltLength)
+        {
+            throw new ArgumentException($"A salt may be at most {DhtItem.MaxSaltLength} bytes.", nameof(salt));
+        }
+
+        int encodedLength = BencodeWriter.Write(value).Length;
+        if (encodedLength > DhtItem.MaxValueLength)
+        {
+            throw new ArgumentException(
+                $"The bencoded value is {encodedLength} bytes, over the {DhtItem.MaxValueLength}-byte limit.",
+                nameof(value));
+        }
+
+        var signature = key.Sign(BuildSignatureBuffer(salt, sequenceNumber, value));
+
+        return new DhtMutableItem
+        {
+            Value = value,
+            PublicKey = key.PublicKey.ToArray(),
             SequenceNumber = sequenceNumber,
             Signature = signature,
             Salt = salt.Length > 0 ? salt.ToArray() : null,
