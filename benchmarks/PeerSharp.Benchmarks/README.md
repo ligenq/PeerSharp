@@ -42,6 +42,9 @@ dotnet run -c Release --project benchmarks/PeerSharp.Benchmarks -- --filter '*' 
 | `BencodeBenchmarks` | Parse/write of torrents and tracker responses | Every tracker response and extension message; backs the "zero-copy" claim |
 | `MerkleTreeBenchmarks` | Leaves, root, piece layer, piece verification | BEP 52 hashing for v2/hybrid torrents |
 | `PiecePickerBenchmarks` | `PickNextPiece` across strategies and piece counts | Once per request slot per peer; scales with piece count |
+| `AvailabilityBenchmarks` | `IncrementAvailability` / `GetAvailability`, single and whole-range | The data structure behind RarestFirst; driven by peer churn and `Have` traffic |
+| `TorrentFileParseBenchmarks` | `TorrentFile.Parse` for v1/v2/hybrid, 1 and 500 files | Every torrent added, and every entry when a session is restored |
+| `DhtRoutingTableBenchmarks` | `FindClosest`, `AddNode`, `GetAllNodes` at 500 and 8,000 nodes | Once per round of every iterative lookup; `AddNode` runs at inbound packet rate |
 | `FileMapperBenchmarks` | `MapOffset` / `MapRange` from 2 to 10,000 files | Entered by every Storage read and write; scaling is hidden inside the Storage suite |
 | `IpBlocklistBenchmarks` | Lookup hit/miss and 8-thread contention, 1k–200k ranges | Once per inbound connection and per discovered peer; connect storms arrive in parallel |
 | `UtpBenchmarks` | 256-packet windows in order and reordered, SACK parsing | Per-packet path in the second-largest file in the library |
@@ -62,6 +65,19 @@ expected.
 `UtpBenchmarks` uses `[IterationSetup]` to rebuild the stream between iterations, because packet
 processing advances sequence state and cannot be measured one call at a time. Its figures are per
 256-packet window.
+
+### One benchmark that is deliberately an upper bound
+
+`AvailabilityBenchmarks.BulkIncrementUnbatched` walks the whole piece range through the per-piece
+API, which takes the picker's selection lock once **per piece**. The method it stands in for,
+`PiecePicker.RegisterPeerAvailability`, takes that lock once and loops inside it. The real cost of
+a peer connecting is therefore lower than that row, by roughly the per-call locking — compare it
+against `Whole range, bitfield probe only` to see how much of the walk is lock acquisition rather
+than reading the peer's bitfield.
+
+`RegisterPeerAvailability` takes a concrete `PeerCommunication`, which cannot be constructed
+without a live torrent, bandwidth manager and transport, so the batched path is not directly
+measurable here. Do not quote the unbatched row as the cost of a peer connect.
 
 ## Comparing a change
 
