@@ -11,7 +11,7 @@ using System.Text;
 
 namespace PeerSharp.Internals.Dht;
 
-internal class DhtManager : IUdpReceiver, IDhtManager
+internal partial class DhtManager : IUdpReceiver, IDhtManager
 {
     private const int ExternalIpVotesRequired = 3;
     private const int MaxTransactions = 5000;
@@ -24,6 +24,9 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     private readonly ILogger<DhtManager> _logger;
     private readonly ConcurrentDictionary<string, List<DhtPeer>> _peers = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _recentGetPeersQueries = new();
+
+    /// <summary>BEP 44 items held on behalf of the network.</summary>
+    private readonly DhtItemStore _itemStore;
     private readonly Settings _settings;
     private readonly TimeProvider _timeProvider;
     private readonly IDnsResolver _dnsResolver;
@@ -66,6 +69,7 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         _callback = callback;
         _logger = loggerFactory.CreateLogger<DhtManager>();
         _lastSecretRotation = _timeProvider.GetUtcNow();
+        _itemStore = new DhtItemStore(_timeProvider);
         _listener.RegisterReceiver(this);
     }
 
@@ -568,6 +572,14 @@ internal class DhtManager : IUdpReceiver, IDhtManager
                 SendResponse(t, r, remote);
             }
         }
+        else if (q == "get")
+        {
+            HandleGetQuery(a, t, r, remote);
+        }
+        else if (q == "put")
+        {
+            HandlePutQuery(a, t, remote);
+        }
         else if (q == "announce_peer")
         {
             var infoHash = a.GetBytes("info_hash");
@@ -612,6 +624,165 @@ internal class DhtManager : IUdpReceiver, IDhtManager
         }
     }
 
+    /// <summary>
+    /// BEP 44 <c>get</c>. Answers with the stored item when we hold one, and always with a write
+    /// token and the closest nodes we know, so the caller can both continue the lookup and put
+    /// afterwards.
+    /// </summary>
+    private void HandleGetQuery(BDict a, BString t, BDict r, IPEndPoint remote)
+    {
+        var targetBytes = a.GetBytes("target");
+        if (targetBytes is null || targetBytes.Value.Length != DhtTarget.Length)
+        {
+            SendError(t, DhtErrorProtocol, "Missing or malformed target", remote);
+            return;
+        }
+
+        // The token is keyed on the target exactly as get_peers keys it on the info-hash, so the
+        // same validation covers a subsequent put.
+        r.Dict["token"] = new BString(GenerateToken(remote, targetBytes.Value.Span));
+
+        var target = new DhtTarget(targetBytes.Value.Span);
+        var item = _itemStore.TryGet(target);
+
+        if (item is DhtMutableItem mutable)
+        {
+            r.Dict["seq"] = new BNumber(mutable.SequenceNumber);
+
+            // A caller that already holds sequence number N only wants the value if ours is
+            // newer; replying with seq alone saves sending a payload it would discard.
+            long? knownSequence = a.Get("seq") is BNumber requested ? requested.Value : null;
+            if (knownSequence is null || mutable.SequenceNumber > knownSequence.Value)
+            {
+                r.Dict["v"] = mutable.Value;
+                r.Dict["k"] = new BString(mutable.PublicKey);
+                r.Dict["sig"] = new BString(mutable.Signature);
+            }
+        }
+        else if (item is not null)
+        {
+            r.Dict["v"] = item.Value;
+        }
+
+        // Closest nodes always accompany the reply; a get is a lookup step as well as a read.
+        var nodes = _table.FindClosest(targetBytes.Value.Span, 8);
+        var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
+        var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
+        if (nodesV4.Length > 0)
+        {
+            r.Dict["nodes"] = new BString(nodesV4);
+        }
+
+        if (nodesV6.Length > 0)
+        {
+            r.Dict["nodes6"] = new BString(nodesV6);
+        }
+
+        SendResponse(t, r, remote);
+    }
+
+    /// <summary>
+    /// BEP 44 <c>put</c>.
+    ///
+    /// The check order is deliberate and is the node's main defence. Token validation and the
+    /// rate limit are both cheap and come first; signature verification costs roughly 270
+    /// microseconds, so letting an unauthenticated flood reach it would be a CPU exhaustion
+    /// primitive.
+    /// </summary>
+    private void HandlePutQuery(BDict a, BString t, IPEndPoint remote)
+    {
+        var token = a.GetBytes("token");
+        var value = a.Get("v");
+
+        if (token is null || value is null)
+        {
+            SendError(t, DhtErrorProtocol, "Missing arguments", remote);
+            return;
+        }
+
+        if (!TryReadPutItem(a, value, out var item, out var parseError))
+        {
+            SendError(t, (int)parseError, DescribeError(parseError), remote);
+            return;
+        }
+
+        if (!ValidateToken(token.Value.Span, remote, item.Target.Span))
+        {
+            SendError(t, DhtErrorProtocol, "Invalid token", remote);
+            return;
+        }
+
+        if (!_itemStore.IsPutAllowed(remote.Address))
+        {
+            SendError(t, DhtErrorProtocol, "Rate limited", remote);
+            return;
+        }
+
+        long? compareAndSwap = a.Get("cas") is BNumber cas ? cas.Value : null;
+
+        var result = _itemStore.Store(item, compareAndSwap);
+        if (result != DhtPutError.None)
+        {
+            SendError(t, (int)result, DescribeError(result), remote);
+            return;
+        }
+
+        var r = new BDict();
+        r.Dict["id"] = new BString(NodeId.ToArray());
+        SendResponse(t, r, remote);
+    }
+
+    /// <summary>
+    /// Reads an item out of a put's arguments. Presence of <c>k</c> is what distinguishes a
+    /// mutable put from an immutable one.
+    /// </summary>
+    private static bool TryReadPutItem(BDict a, IBNode value, out DhtItem item, out DhtPutError error)
+    {
+        item = null!;
+        error = DhtPutError.None;
+
+        var publicKey = a.GetBytes("k");
+        if (publicKey is null)
+        {
+            item = new DhtImmutableItem { Value = value };
+            return true;
+        }
+
+        var signature = a.GetBytes("sig");
+        if (signature is null || a.Get("seq") is not BNumber sequence)
+        {
+            error = DhtPutError.Protocol;
+            return false;
+        }
+
+        var salt = a.GetBytes("salt");
+        if (salt is { Length: > DhtItem.MaxSaltLength })
+        {
+            error = DhtPutError.SaltTooBig;
+            return false;
+        }
+
+        item = new DhtMutableItem
+        {
+            Value = value,
+            PublicKey = publicKey.Value.ToArray(),
+            SequenceNumber = sequence.Value,
+            Signature = signature.Value.ToArray(),
+            Salt = salt?.ToArray(),
+        };
+        return true;
+    }
+
+    private static string DescribeError(DhtPutError error) => error switch
+    {
+        DhtPutError.ValueTooBig => "message (v field) too big",
+        DhtPutError.InvalidSignature => "invalid signature",
+        DhtPutError.SaltTooBig => "salt (salt field) too big",
+        DhtPutError.CasMismatch => "the CAS hash mismatched, re-read value and try again",
+        DhtPutError.SequenceNumberTooLow => "sequence number less than current",
+        _ => "protocol error",
+    };
+
     private void HandleResponse(BDict node, IPEndPoint remote)
     {
         var tBytes = node.GetBytes("t");
@@ -622,6 +793,25 @@ internal class DhtManager : IUdpReceiver, IDhtManager
 
         // Use Latin1 encoding to match how transactions are registered
         var t = Encoding.Latin1.GetString(tBytes.Value.Span);
+
+        // BEP 44 queries are awaited by their caller rather than driven by callbacks, so they
+        // have their own correlation table and are matched before the fire-and-forget one.
+        if (_pendingItemQueries.TryRemove(t, out var pending))
+        {
+            if (node.Get("r") is BDict itemReply)
+            {
+                var responderId = itemReply.GetBytes("id");
+                if (responderId != null)
+                {
+                    _table.AddNode(responderId.Value.Span, remote);
+                    MarkStateDirty();
+                }
+            }
+
+            pending.TrySetResult(node);
+            return;
+        }
+
         if (!_transactions.TryRemove(t, out var trans))
         {
             return;
@@ -762,6 +952,13 @@ internal class DhtManager : IUdpReceiver, IDhtManager
             else if (y == "r")
             {
                 HandleResponse(node, remote);
+            }
+            // Error replies were previously dropped on the floor. That is harmless for the
+            // callback-driven queries, but a BEP 44 caller awaiting a reply would sit out its
+            // whole timeout against a node that answered immediately.
+            else if (y == "e" && !TryCompleteItemQueryWithError(node))
+            {
+                _logger.LogDebug("Received a DHT error reply from {Remote} with no matching query", remote);
             }
         }
         catch (FormatException)
@@ -1009,6 +1206,28 @@ internal class DhtManager : IUdpReceiver, IDhtManager
     /// <summary>
     /// BEP 5: Sends an error reply: {"t": tid, "y": "e", "e": [code, message]}.
     /// </summary>
+    /// <summary>
+    /// Completes a pending BEP 44 query that came back as an error rather than a reply.
+    /// Without this the caller would sit out the full timeout on a node that answered promptly.
+    /// </summary>
+    private bool TryCompleteItemQueryWithError(BDict node)
+    {
+        var tBytes = node.GetBytes("t");
+        if (tBytes is null)
+        {
+            return false;
+        }
+
+        var t = Encoding.Latin1.GetString(tBytes.Value.Span);
+        if (!_pendingItemQueries.TryRemove(t, out var pending))
+        {
+            return false;
+        }
+
+        pending.TrySetResult(node);
+        return true;
+    }
+
     private void SendError(BString t, int code, string message, IPEndPoint ep)
     {
         var e = new BList();
