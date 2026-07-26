@@ -491,6 +491,93 @@ public class HttpTrackerTests
         return stats;
     }
 
+    /// <summary>
+    /// Announces once and returns the URL that was requested.
+    /// </summary>
+    private async Task<string> CaptureAnnounceUrlAsync(Torrent torrent, TrackerEvent evt)
+    {
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["interval"] = new BNumber(1800);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(evt, CancellationToken.None);
+
+        Assert.NotNull(_mockHttp.LastUrl);
+        return _mockHttp.LastUrl;
+    }
+
+    /// <summary>
+    /// A partial seed: everything selected is present, but the torrent as a whole is not complete.
+    /// </summary>
+    private static Torrent CreatePartialSeed()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 32768; // Nothing finished, so DataLeft > 0.
+        metadata.Info.Pieces = [new byte[20], new byte[20]]; // Enough for HasMetadata.
+        return TorrentTestUtility.CreateMinimal(metadata);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_AsPartialSeed_SendsEventPaused()
+    {
+        // BEP 21: a partial seed "MUST send an event=paused parameter in every announce while it is a
+        // partial seed", which is how a tracker tells it apart from an ordinary incomplete peer.
+        var url = await CaptureAnnounceUrlAsync(CreatePartialSeed(), TrackerEvent.None);
+
+        Assert.Contains("event=paused", url);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_WithoutMetadata_SendsNoEvent()
+    {
+        // A torrent with no metadata reports DataLeft as 1 to mean "unknown", not "one byte short". A
+        // magnet link that has not fetched its metadata is the furthest thing from a partial seed, so
+        // the paused state must not be inferred from that sentinel.
+        var url = await CaptureAnnounceUrlAsync(_torrent, TrackerEvent.None);
+
+        Assert.DoesNotContain("event=", url);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_AsFullSeed_SendsNoEvent()
+    {
+        // Everything is present, so this is a plain seed rather than a partial one.
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384;
+        metadata.Info.Pieces = [new byte[20]];
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        torrent.Pieces.SetHaveAll();
+
+        var url = await CaptureAnnounceUrlAsync(torrent, TrackerEvent.None);
+
+        Assert.DoesNotContain("event=", url);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_PartialSeedStarting_KeepsTheRealEvent()
+    {
+        // Replacing a transition the tracker needs would lose information rather than add it.
+        var url = await CaptureAnnounceUrlAsync(CreatePartialSeed(), TrackerEvent.Started);
+
+        Assert.Contains("event=started", url);
+        Assert.DoesNotContain("event=paused", url);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_PartialSeedStopping_KeepsTheRealEvent()
+    {
+        var url = await CaptureAnnounceUrlAsync(CreatePartialSeed(), TrackerEvent.Stopped);
+
+        Assert.Contains("event=stopped", url);
+        Assert.DoesNotContain("event=paused", url);
+    }
+
     [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_ExternalIpV4_IsParsed()
     {

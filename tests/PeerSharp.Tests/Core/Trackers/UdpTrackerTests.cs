@@ -833,7 +833,9 @@ public class UdpTrackerTests
         await CompleteConnectAsync(packetIndex: 0, connectionId: 0x1234);
 
         var announceRequest = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
-        Assert.Equal(98, announceRequest.Length);
+
+        // BEP 15's fixed request is the first 98 bytes; the BEP 41 options for "/announce" follow it.
+        Assert.Equal(98 + 2 + "/announce".Length, announceRequest.Length);
         Assert.Equal(expectedEventId, BinaryPrimitives.ReadInt32BigEndian(announceRequest.AsSpan(80)));
 
         await CompleteAnnounceAtIndexAsync(packetIndex: 1);
@@ -861,7 +863,9 @@ public class UdpTrackerTests
 
         var pkt = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
 
-        Assert.Equal(98, pkt.Length);
+        // The fixed layout below occupies the first 98 bytes and is unaffected by the BEP 41 options
+        // appended after it.
+        Assert.Equal(98 + 2 + "/announce".Length, pkt.Length);
         Assert.Equal(0x0102_0304_0506_0708, BinaryPrimitives.ReadInt64BigEndian(pkt.AsSpan(0)));
         Assert.Equal(1, BinaryPrimitives.ReadInt32BigEndian(pkt.AsSpan(8))); // action = announce
         // bytes 12..15 = transaction id (random, just check non-zero across multiple bytes)
@@ -1412,6 +1416,79 @@ public class UdpTrackerTests
     }
 
     private Task CompleteAnnounceAtIndexAsync(int packetIndex) => CompleteAnnounceAsync(packetIndex);
+
+    /// <summary>
+    /// Runs a full connect-and-announce cycle and returns the raw announce datagram.
+    /// </summary>
+    private async Task<byte[]> CaptureAnnouncePacketAsync(string url)
+    {
+        var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        tracker.Init(url, _torrent, _callback);
+
+        var announceTask = tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        await CompleteConnectAsync(0, 0x12345678);
+        var announcePacket = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
+        await CompleteAnnounceAsync(1);
+        await announceTask;
+
+        return announcePacket;
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_AppendsTheUrlPathAndQuery()
+    {
+        // BEP 41. Without this the passkey never reaches the tracker: a BEP 15 announce carries only
+        // an endpoint, so this URL is indistinguishable on the wire from udp://127.0.0.1:80/.
+        var packet = await CaptureAnnouncePacketAsync("udp://127.0.0.1:80/announce?passkey=abc123");
+
+        const string expected = "/announce?passkey=abc123";
+        Assert.Equal(98 + 2 + expected.Length, packet.Length);
+
+        // Options begin immediately after the fixed request: option-type 0x2, then a length byte.
+        Assert.Equal(0x2, packet[98]);
+        Assert.Equal(expected.Length, packet[99]);
+        Assert.Equal(expected, Encoding.ASCII.GetString(packet, 100, expected.Length));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_LeavesTheFixedFieldsUntouchedWhenAppendingOptions()
+    {
+        // The options must be additive. If they displaced anything, every tracker would break rather
+        // than just the ones this extension is for.
+        var packet = await CaptureAnnouncePacketAsync("udp://127.0.0.1:80/announce?passkey=abc123");
+
+        Assert.Equal(0x12345678, BinaryPrimitives.ReadInt64BigEndian(packet.AsSpan(0)));
+        Assert.Equal(1, BinaryPrimitives.ReadInt32BigEndian(packet.AsSpan(8))); // action = announce
+        Assert.Equal(
+            _torrent.InfoFile.Info.GetTrackerInfoHash().ToArray(),
+            packet.AsSpan(16, 20).ToArray());
+        Assert.Equal(_torrent.Settings.PeerId, packet.AsSpan(36, 20).ToArray());
+        Assert.Equal(
+            _torrent.Settings.Connection.TcpPort,
+            BinaryPrimitives.ReadUInt16BigEndian(packet.AsSpan(96)));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_WithNoPathOrQuery_SendsExactly98Bytes()
+    {
+        // Nothing to convey, so the packet stays byte-identical to a plain BEP 15 announce and
+        // trackers that this extension cannot help see no change at all.
+        var packet = await CaptureAnnouncePacketAsync("udp://127.0.0.1:80/");
+
+        Assert.Equal(98, packet.Length);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_WithUrlDataDisabled_SendsExactly98Bytes()
+    {
+        // The escape hatch for a tracker that rejects anything longer than BEP 15's fixed request.
+        _torrent.Settings.SendUdpTrackerUrlData = false;
+
+        var packet = await CaptureAnnouncePacketAsync("udp://127.0.0.1:80/announce?passkey=abc123");
+
+        Assert.Equal(98, packet.Length);
+    }
 }
 
 

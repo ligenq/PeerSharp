@@ -378,6 +378,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         UtPex = new UtPex(this);
         UtMetadata = new UtMetadata(this);
         UtHolepunch = new UtHolepunch(this);
+        LtDontHave = new LtDontHave(this, loggerFactory.CreateLogger<LtDontHave>());
 
         // BEP 30: Initialize ut_hash_piece extension for Merkle hash torrents
         if (torrent.InfoFile.Info.IsMerkle)
@@ -459,6 +460,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public bool RemoteSupportsFastExtension { get; private set; }
 
     /// <summary>
+    /// BEP 21: the peer told us it is not interested in downloading anything, so an upload slot spent
+    /// on it is wasted.
+    /// </summary>
+    public bool RemoteIsUploadOnly { get; private set; }
+
+    /// <summary>
     /// BEP-52 BitTorrent v2 support. Indicates peer can handle v2 info hashes and Merkle trees.
     /// </summary>
     public bool RemoteSupportsV2 { get; internal set; }
@@ -487,6 +494,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public UtHolepunch UtHolepunch { get; }
 
     IUtHolepunch IPeerCommunication.UtHolepunch => UtHolepunch;
+
+    /// <summary>BEP 54: piece retraction for this peer.</summary>
+    public LtDontHave LtDontHave { get; }
 
     public UtMetadata UtMetadata { get; }
 
@@ -1427,6 +1437,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 UtMetadata.Init(RemoteExtensions);
                 UtPex.Init(RemoteExtensions);
                 UtHolepunch.Init(RemoteExtensions);
+                LtDontHave.Init(RemoteExtensions);
+
+                // BEP 21: a peer may re-send its handshake to change this, so it is re-read every
+                // time rather than latched on the first one.
+                RemoteIsUploadOnly = RemoteExtensions.IsUploadOnly;
 
                 // BEP 30: Initialize ut_hash_piece from remote handshake
                 if (UtHashPiece != null && RemoteExtensions.MessageIds.TryGetValue(UtHashPiece.Name, out int hashPieceId))
@@ -1457,6 +1472,18 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             {
                 // BEP 30: Handle ut_hash_piece messages
                 UtHashPiece.HandleMessage(payload);
+            }
+            else if (LtDontHave.LocalMessageId == id)
+            {
+                // BEP 54: the peer lost a piece, so clear it from their bitfield. That is what stops
+                // us picking this peer for the piece again and lets the picker source it elsewhere.
+                //
+                // Requests already in flight for it are left to the existing request timeout rather
+                // than being purged here. BEP 54 says they "are silently cancelled, just like when
+                // receiving a Choke" - a description of what the peer will do, namely never answer -
+                // and reclaiming them early would mean a new hook on IPeerListener for a latency
+                // refinement the timeout path already covers.
+                LtDontHave.HandleMessage(payload);
             }
             else
             {
@@ -2261,6 +2288,18 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             {
                 handshake.MessageIds[UtHashPiece.Name] = 4;
                 UtHashPiece.SetLocalMessageId(4);
+            }
+
+            // BEP 54: advertise lt_donthave so peers can tell us when they lose a piece.
+            handshake.MessageIds[LtDontHave.Name] = 5;
+            LtDontHave.SetLocalMessageId(5);
+
+            // BEP 21: tells the peer we will not be downloading, so it need not spend an upload slot
+            // on us. Set whenever everything we intend to fetch is already here - which includes a
+            // partial seed, not just a complete torrent.
+            if (_torrent.SelectionFinished)
+            {
+                handshake.IsUploadOnly = true;
             }
 
             if (_torrent.InfoFile.InfoBytes?.Length > 0)

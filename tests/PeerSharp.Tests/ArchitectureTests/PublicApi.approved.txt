@@ -84,6 +84,7 @@ sealed class PeerSharp.Config.DhtSettings
     .ctor()
     Boolean AnswerInfoHashSampling { get; set; }
     Boolean Enabled { get; set; }
+    Boolean ReadOnly { get; set; }
     IReadOnlyList<PeerSharp.Config.DhtBootstrapNode> BootstrapNodes { get; set; }
     PeerSharp.Core.DhtState InitialState { get; set; }
 enum PeerSharp.Config.Encryption
@@ -136,6 +137,7 @@ sealed class PeerSharp.Config.SessionSettings
     String SessionPath { get; set; }
 sealed class PeerSharp.Config.Settings
     .ctor()
+    Boolean SendUdpTrackerUrlData { get; set; }
     Byte[] PeerId { get; set; }
     Int32 MaxKnownPeersCache { get; set; }
     PeerSharp.Config.ConnectionSettings Connection { get; set; }

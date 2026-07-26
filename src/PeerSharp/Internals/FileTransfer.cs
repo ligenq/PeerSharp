@@ -670,6 +670,55 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         {
             Logger.LogError(ex, "Failed to fulfil request from {RemoteEndPoint}", peer.RemoteEndPoint);
             block?.Dispose();
+
+            await RetractUnreadablePieceAsync(peer, item).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// BEP 54: a piece we advertised turned out to be unreadable, so tell the swarm.
+    ///
+    /// <para>
+    /// The usual cause is the file having been moved or deleted from under a seeding client, which used
+    /// to leave the requester waiting on a block that would never arrive and every later request for the
+    /// piece failing the same silent way. A retraction lets peers source the piece elsewhere
+    /// immediately, and the reject stops this particular request hanging.
+    /// </para>
+    ///
+    /// <para>
+    /// A transient I/O error costs peers a re-source they did not strictly need. That is the better
+    /// error: continuing to advertise data we cannot read is indistinguishable, from the outside, from
+    /// being an unreliable peer.
+    /// </para>
+    /// </summary>
+    private async Task RetractUnreadablePieceAsync(PeerCommunication peer, UploadQueueItem item)
+    {
+        try
+        {
+            // Not withdrawn from _torrent.Pieces: the completion counters behind it only ever count
+            // upward, so clearing a piece there would leave progress and "finished" state inconsistent.
+            // A recheck is the correct way to rebuild the local bitfield, hence the warning.
+            Logger.LogWarning(
+                "Piece {PieceIndex} could not be read while serving it; retracting it from peers (BEP 54). " +
+                "Run a recheck to rebuild local piece state.",
+                item.PieceIndex);
+
+            await peer.SendRejectAsync(new BlockRequest
+            {
+                PieceIndex = item.PieceIndex,
+                Offset = item.Offset,
+                Length = item.Length
+            }).ConfigureAwait(false);
+
+            foreach (var other in _torrent.PeersInternal.GetConnectedPeersInternal())
+            {
+                await other.LtDontHave.SendAsync(item.PieceIndex).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Best effort: the read already failed, and failing to announce that must not cascade.
+            Logger.LogDebug(ex, "Failed to retract unreadable piece {PieceIndex}", item.PieceIndex);
         }
     }
 

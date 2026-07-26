@@ -640,8 +640,18 @@ internal class UdpTracker : TrackerBase, IDisposable
         // NumWant (4) = -1
         // Port (2)
 
-        byte[] req = new byte[98];
+        // BEP 41: the path and query of the tracker URL, appended as options after the fixed 98 byte
+        // request. Without them a UDP announce is indistinguishable from one to any other endpoint on
+        // the same host and port, which breaks trackers that authenticate on a passkey in the URL.
+        // Non-supporting trackers read BEP 15's fixed offsets and ignore the trailing bytes, which is
+        // exactly the extension point BEP 41 relies on ("parsing starts ... at byte offset 98").
+        byte[] urlData = Torrent.Settings.SendUdpTrackerUrlData
+            ? UdpTrackerUrlData.Encode(Url)
+            : [];
+
+        byte[] req = new byte[98 + urlData.Length];
         var span = req.AsSpan();
+        urlData.CopyTo(span[98..]);
 
         BinaryPrimitives.WriteInt64BigEndian(span[..], connId);
         BinaryPrimitives.WriteInt32BigEndian(span[8..], 1); // Action Announce

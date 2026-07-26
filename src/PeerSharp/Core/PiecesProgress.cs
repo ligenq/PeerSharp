@@ -70,6 +70,53 @@ internal sealed class PiecesProgress
     }
 
     /// <summary>
+    /// Clears a single piece.
+    ///
+    /// <para>
+    /// Added for BEP 54 (<c>lt_donthave</c>), where a peer retracts a piece it previously advertised.
+    /// The <c>_hasAll</c> shortcut has to be expanded into a real bitfield first: a peer that sent
+    /// HaveAll and then retracts one piece would otherwise keep reporting every piece as present, and
+    /// we would keep requesting the one it just told us it lost.
+    /// </para>
+    /// </summary>
+    public void RemovePiece(int index)
+    {
+        if ((uint)index >= (uint)Count)
+        {
+            return;
+        }
+
+        // Only the thread that observes the transition expands the bitfield, so the fill happens once.
+        if (Interlocked.Exchange(ref _hasAll, 0) == 1)
+        {
+            for (int i = 0; i < _pieces.Length; i++)
+            {
+                Interlocked.Exchange(ref _pieces[i], -1);
+            }
+
+            Interlocked.Exchange(ref _receivedCount, Count);
+        }
+
+        int arrayIdx = index >> 5;
+        int mask = 1 << (index & 31);
+
+        int oldVal, newVal;
+        do
+        {
+            oldVal = Interlocked.CompareExchange(ref _pieces[arrayIdx], 0, 0);
+            if ((oldVal & mask) == 0)
+            {
+                return; // Already clear
+            }
+
+            newVal = oldVal & ~mask;
+        }
+        while (Interlocked.CompareExchange(ref _pieces[arrayIdx], newVal, oldVal) != oldVal);
+
+        Interlocked.Decrement(ref _receivedCount);
+    }
+
+    /// <summary>
     /// Load pieces from bitfield. Should only be called during initialization
     /// before any concurrent access.
     /// </summary>

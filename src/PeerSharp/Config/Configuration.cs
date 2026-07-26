@@ -344,6 +344,26 @@ public sealed class DhtSettings
     /// <summary>Whether DHT is enabled for peer discovery.</summary>
     public bool Enabled { get; set; } = true;
 
+
+    /// <summary>
+    /// BEP 43: run as a read-only DHT node - one that queries the network but does not serve it.
+    ///
+    /// <para>
+    /// Off by default, because an ordinary client should be a full participant. Turn it on for a node
+    /// that is transient, unreachable behind a NAT, or exists only to crawl (see
+    /// <c>DiscoverInfoHashesAsync</c>): such a node in someone's routing table is dead weight, and
+    /// flagging it keeps it out of them.
+    /// </para>
+    ///
+    /// <para>
+    /// The mode has teeth. Queries carry <c>ro=1</c> so other nodes leave us out of their tables, and
+    /// incoming queries go unanswered - which means no peers are served, no BEP 44 items are stored, and
+    /// <see cref="AnswerInfoHashSampling"/> becomes moot. Announcing a torrent from a read-only node
+    /// still works, but other peers will find it harder to find us.
+    /// </para>
+    /// </summary>
+    public bool ReadOnly { get; set; }
+
     /// <summary>
     /// Whether to answer BEP 51 <c>sample_infohashes</c> queries, which let indexers enumerate the
     /// info-hashes this node holds peers for.
@@ -637,6 +657,25 @@ public sealed class Settings
 
     /// <summary>Maximum number of peers to request from a tracker in one announce.</summary>
     public uint MaxPeersPerTrackerRequest { get; set; } = 200;
+
+    /// <summary>
+    /// Whether UDP announces carry the tracker URL's path and query as BEP 41 options.
+    ///
+    /// <para>
+    /// On by default, because without it a UDP announce conveys only a host and port: a tracker that
+    /// authenticates on a passkey in the URL cannot identify the announce, and the failure is silent -
+    /// a working socket and no peers. Sending the options makes such trackers work with no
+    /// configuration.
+    /// </para>
+    ///
+    /// <para>
+    /// The cost is that announces grow past the 98 bytes of BEP 15 alone. That is the extension point
+    /// BEP 41 defines, and implementations read fixed offsets, so trailing bytes are ignored by
+    /// trackers that do not support it. Turn this off if a particular tracker rejects the longer
+    /// packet.
+    /// </para>
+    /// </summary>
+    public bool SendUdpTrackerUrlData { get; set; } = true;
 
     /// <summary>The client's unique 20-byte Peer ID (BEP 20).</summary>
     public byte[] PeerId { get; set; } = new byte[20];

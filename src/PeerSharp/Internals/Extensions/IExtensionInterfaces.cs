@@ -8,9 +8,21 @@ internal interface IPeerCommunication
 {
     IPeerListener Listener { get; }
     byte[] PeerId { get; }
+
+    /// <summary>
+    /// Pieces the remote has advertised. Read live rather than captured: the bitfield is replaced when
+    /// the handshake completes and the piece count becomes known.
+    /// </summary>
+    PiecesProgress PeerPieces { get; }
+
     IPEndPoint? RemoteEndPoint { get; }
     ExtensionHandshake? RemoteExtensions { get; }
     bool RemoteSupportsExtensions { get; }
+
+    /// <summary>
+    /// BEP 21: the peer said it is not interested in downloading anything.
+    /// </summary>
+    bool RemoteIsUploadOnly { get; }
     IUtHashPiece? UtHashPiece { get; }
     IUtHolepunch UtHolepunch { get; }
     IUtMetadata UtMetadata { get; }
