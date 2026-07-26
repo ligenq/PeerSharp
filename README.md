@@ -395,6 +395,20 @@ Compare runs against each other rather than against an absolute target.
   `HandshakeMessageOrderTests` asserts on what we send, since testing against ourselves cannot catch
   it.
 
+- **The plaintext fallback reused a dead socket.** When the encryption handshake hit a network error
+  we reported "failed" rather than "connection gone", so the `Encryption.Allow` fallback retried
+  plaintext on the same socket — already dead, and already carrying the MSE bytes we had written.
+  The retry could only throw, and the peer was lost even though it might have been reachable in
+  plaintext. Roughly 3% of connection attempts. Regression cover: `EncryptionFallbackTests`.
+
+Two of these were found by tests that assert on real bytes rather than on mocked calls, which is a
+distinction worth keeping: `WireSequenceTests` captures the opening sequence from a real socket, and
+`MseConformanceTests` decodes our encrypted handshake with an implementation that shares no code with
+the engine — written from the spec and cross-checked against Transmission's `peer-mse.cc`. Encryption
+is the production path (forcing plaintext against a live swarm dropped a run from 127 peers to 12)
+while the rest of the suite barely touches it, and self-consistent encryption tests would agree just
+as happily on a wrong keystream.
+
 The same instinct drives two local suites that run in CI, since a bug worth finding on a real swarm is
 usually cheaper to catch deterministically:
 
