@@ -16,7 +16,7 @@ using System.Net;
 
 namespace PeerSharp.Internals;
 
-internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolver
+internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolver
 {
     private static readonly ConcurrentDictionary<ProxySettings, HttpClient> MagnetClientCache = new();
     private static readonly ProxySettings NoProxy = new();
@@ -42,6 +42,9 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
     private int _initialized;
     private INetworkManager? _networkManager;
     private CancellationTokenSource? _dhtSaveCts;
+
+    /// <summary>Drives the BEP 46 record keep-alive loop.</summary>
+    private CancellationTokenSource? _republishCts;
     private Task? _dhtSaveTask;
     private CancellationTokenSource? _queueCts;
     private TorrentQueueManager? _queueManager;
@@ -219,6 +222,11 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
                 await _dhtSaveCts.CancelAsync().ConfigureAwait(false);
             }
 
+            if (_republishCts != null)
+            {
+                await _republishCts.CancelAsync().ConfigureAwait(false);
+            }
+
             if (_queueTask is { } queueTask)
             {
                 try { await queueTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
@@ -229,10 +237,17 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
                 try { await dhtSaveTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
             }
 
+            if (_republishTask is { } republishTask)
+            {
+                try { await republishTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
+            }
+
             _queueCts?.Dispose();
             _queueCts = null;
             _dhtSaveCts?.Dispose();
             _dhtSaveCts = null;
+            _republishCts?.Dispose();
+            _republishCts = null;
             _logger.LogDebug("Shutdown phase queue completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
 
             // Save all resume data before shutting down
@@ -1556,6 +1571,7 @@ internal sealed class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolv
         try
         {
             await InitAsync(cancellationToken).ConfigureAwait(false);
+            StartRepublishLoop();
         }
         catch
         {

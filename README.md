@@ -132,6 +132,55 @@ Fetched metadata can also be cached so the same magnet never needs a second meta
 download: persist `torrent.ExportTorrentFile().RawData` (or `torrentFile.RawData` from
 option 1) and later re-add it via `TorrentFile.Parse(bytes)`.
 
+### Self-Updating Torrents (BEP 46)
+
+A publisher owns a key pair and stores a signed DHT record naming the current version. Subscribers
+hold the public key instead of an info-hash, so a new release reaches everyone following the link
+without a new link having to be distributed.
+
+```csharp
+// Publisher: create an identity once and persist the seed - it *is* the identity.
+var key = TorrentPublisherKey.Create();
+File.WriteAllBytes("publisher.seed", key.Seed.ToArray());
+
+// Publish the current version. The version number is chosen automatically and
+// compare-and-swapped, so a concurrent publish fails rather than silently overwriting.
+var (nodes, version) = await engine.PublishSelfUpdatingTorrentAsync(key, created.InfoHash);
+
+// Hand this link out once; it keeps working across releases.
+Console.WriteLine(key.ToMagnetLink());
+
+// Later, release a new version under the same identity.
+await engine.PublishSelfUpdatingTorrentAsync(key, rebuilt.InfoHash);
+```
+
+```csharp
+// Subscriber: resolve the link, then add the info-hash it names.
+var magnet = MagnetLink.Parse("magnet:?xs=urn:btpk:...");
+if (magnet.IsSelfUpdating)
+{
+    var current = await engine.ResolveSelfUpdatingMagnetAsync(magnet);
+    if (current is not null)
+    {
+        var torrent = await engine.AddMagnetAsync(
+            MagnetLink.Parse($"magnet:?xt=urn:btih:{current.Value.InfoHash}"),
+            new AddTorrentOptions("./downloads"));
+    }
+}
+```
+
+Notes:
+
+- Records expire from the DHT after roughly two hours. The engine re-publishes everything it has
+  published on a timer, so a publisher only needs to stay running.
+- Swapping a running torrent to a new version is **not** automatic. Poll
+  `ResolveSelfUpdatingMagnetAsync` and compare `Version` against the one you already have; what to
+  do with partially downloaded data from the previous version is an application decision.
+- One identity can publish several torrents by passing a salt to both `ToMagnetLink` and
+  `PublishSelfUpdatingTorrentAsync`.
+- Interoperability is verified against BEP 44's published test vectors. It has **not** yet been
+  confirmed against a live third-party client; see `tests/PeerSharp.Tests/Interop`.
+
 ### Streaming
 
 ```csharp

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.BEncoding;
+using PeerSharp.Core;
 using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.Internals.Dht;
@@ -105,6 +106,38 @@ internal sealed class Bep46Resolver
     }
 
     /// <summary>
+    /// Builds the record value BEP 46 defines: a dictionary with a single <c>ih</c> key.
+    /// </summary>
+    public static BDict BuildRecord(InfoHash infoHash)
+    {
+        if (infoHash.Length != InfoHash.V1Length)
+        {
+            throw new ArgumentException(
+                $"A BEP 46 record carries a {InfoHash.V1Length}-byte v1 info-hash; this one is {infoHash.Length} bytes.",
+                nameof(infoHash));
+        }
+
+        var value = new BDict();
+        value.Dict[InfoHashKey] = new BString(infoHash.Span.ToArray());
+        return value;
+    }
+
+    /// <summary>
+    /// Re-publishes an already-signed record to keep it alive in the DHT.
+    ///
+    /// BEP 46 states that "both publisher and consumer should periodically put the mutable items
+    /// they have active to keep them alive", because storage nodes expire items after a couple of
+    /// hours. This re-puts at the same sequence number, which storage nodes accept as an idempotent
+    /// refresh of identical bytes.
+    /// </summary>
+    /// <returns>The number of nodes that accepted the refresh.</returns>
+    public Task<int> RefreshAsync(DhtMutableItem item, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        return _dht.PutItemAsync(item, compareAndSwap: null, cancellationToken);
+    }
+
+    /// <summary>
     /// Publishes a new version, replacing whatever the key currently points at.
     /// </summary>
     /// <param name="seed">The publisher's 32-byte private seed.</param>
@@ -130,19 +163,41 @@ internal sealed class Bep46Resolver
     {
         ArgumentNullException.ThrowIfNull(seed);
 
-        // BEP 46 records carry a v1 info-hash. A v2 hash is 32 bytes and would not fit the
-        // contract subscribers expect, so reject it rather than truncate silently.
-        if (infoHash.Length != InfoHash.V1Length)
-        {
-            throw new ArgumentException(
-                $"A BEP 46 record carries a {InfoHash.V1Length}-byte v1 info-hash; this one is {infoHash.Length} bytes.",
-                nameof(infoHash));
-        }
+        // BuildRecord rejects a v2 info-hash: it is 32 bytes and would not fit the contract
+        // subscribers expect, so it fails rather than being silently truncated.
+        var item = DhtItemCodec.CreateSigned(seed, salt ?? [], sequenceNumber, BuildRecord(infoHash));
 
-        var value = new BDict();
-        value.Dict[InfoHashKey] = new BString(infoHash.Span.ToArray());
+        int accepted = await _dht.PutItemAsync(item, compareAndSwap, cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation(
+            "Published BEP 46 version {Sequence} pointing at {InfoHash}; accepted by {Accepted} node(s)",
+            sequenceNumber,
+            infoHash,
+            accepted);
 
-        var item = DhtItemCodec.CreateSigned(seed, salt ?? [], sequenceNumber, value);
+        return accepted;
+    }
+
+    /// <summary>
+    /// Publishes a new version using a publisher identity.
+    /// </summary>
+    /// <param name="key">The publisher identity; must hold private material.</param>
+    /// <param name="infoHash">The info-hash of the new version.</param>
+    /// <param name="sequenceNumber">Version number; must exceed the previously published one.</param>
+    /// <param name="salt">Optional salt.</param>
+    /// <param name="compareAndSwap">Optional expected current sequence number.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The number of nodes that accepted the record.</returns>
+    public async Task<int> PublishAsync(
+        TorrentPublisherKey key,
+        InfoHash infoHash,
+        long sequenceNumber,
+        byte[]? salt = null,
+        long? compareAndSwap = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+
+        var item = DhtItemCodec.CreateSigned(key, salt ?? [], sequenceNumber, BuildRecord(infoHash));
 
         int accepted = await _dht.PutItemAsync(item, compareAndSwap, cancellationToken).ConfigureAwait(false);
         _logger.LogInformation(
