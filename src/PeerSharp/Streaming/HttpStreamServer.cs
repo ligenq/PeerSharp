@@ -17,6 +17,12 @@ public sealed class HttpStreamServer : IDisposable
     private readonly HttpListener _listener;
     private readonly HttpStreamRequestHandler _handler;
     private readonly CancellationTokenSource _cts = new();
+
+    /// <summary>
+    /// The stopping token, taken once and held. Requests already being served when the server shuts
+    /// down would otherwise read <c>_cts.Token</c> after it was disposed and fault on the way out.
+    /// </summary>
+    private readonly CancellationToken _stoppingToken;
     private readonly ILogger<HttpStreamServer> _logger;
     private readonly string _baseUrl;
     private AtomicDisposal _disposal = new();
@@ -43,6 +49,7 @@ public sealed class HttpStreamServer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(loggerFactory);
 
+        _stoppingToken = _cts.Token;
         _logger = loggerFactory.CreateLogger<HttpStreamServer>();
         _handler = new HttpStreamRequestHandler(torrent, fileIndex, loggerFactory);
         _listener = new HttpListener();
@@ -97,7 +104,7 @@ public sealed class HttpStreamServer : IDisposable
             await _handler.ProcessAsync(
                 new HttpListenerStreamRequest(context.Request),
                 new HttpListenerStreamResponse(response),
-                _cts.Token).ConfigureAwait(false);
+                _stoppingToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
