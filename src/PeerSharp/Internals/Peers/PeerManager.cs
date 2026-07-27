@@ -1206,7 +1206,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         history.NextConnectAttempt = now + delay;
     }
 
-    private async Task ConnectAndHandleAsync(PeerCommunication peer, string ip, int port, IReadOnlyList<TransportPreference> transportPlan, bool useGovernor)
+    /// <summary>
+    /// Dials a peer over each transport in its plan until one connects, then records the outcome.
+    ///
+    /// <para>
+    /// <c>isHolepunch</c> marks a dial made because a relay asked us to, as the far side of a NAT
+    /// traversal. Such a dial deliberately bypasses the per-peer backoff, since both ends have to fire
+    /// at the same moment for the hole to open - which is exactly why it must not be allowed to request
+    /// another rendezvous when it fails, or a peer that is simply unreachable is retried forever.
+    /// </para>
+    /// </summary>
+    private async Task ConnectAndHandleAsync(PeerCommunication peer, string ip, int port, IReadOnlyList<TransportPreference> transportPlan, bool useGovernor, bool isHolepunch)
     {
         IPEndPoint? endpoint = null;
         try
@@ -1330,8 +1340,16 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     history.RegisterUtpFailure(_timeProvider.GetUtcNow(), _settings.Connection);
                 }
 
+                // A holepunch that failed does not earn another one. The dial a relay asks us to make
+                // skips the per-peer backoff by design, so letting its failure request a fresh
+                // rendezvous closes a loop with nothing to stop it: fail, ask, dial, fail. One endpoint
+                // in a live run was dialled 29 times in eight minutes that way, and the holepunch budget
+                // it consumed is shared with every other peer. libtorrent guards the same call with
+                // !m_holepunch_mode for the same reason.
                 var ep = endpoint ?? new IPEndPoint(IPAddress.Parse(ip), port);
-                if (_peerSources.TryGetValue(ep, out var source) && source.RemoteExtensions?.MessageIds.ContainsKey(UtHolepunch.Name) == true)
+                if (!isHolepunch
+                    && _peerSources.TryGetValue(ep, out var source)
+                    && source.RemoteExtensions?.MessageIds.ContainsKey(UtHolepunch.Name) == true)
                 {
                     _logger.LogDebug("Connection failed to {Endpoint}, attempting holepunch via {Via}", ep, source.RemoteEndPoint);
                     source.UtHolepunch.SendRendezvous(ep);
@@ -1466,7 +1484,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _logger.LogDebug("Initiating connection to {Ip}:{Port} (plan={Plan}), connecting={Connecting}, connected={Connected}", ip, port, string.Join("->", transportPlan), _connectingPeersCount, _connectedPeersCount);
 
         // Track the connection task
-        var task = ConnectAndHandleAsync(peer, ip, port, transportPlan, !forceUtp);
+        var task = ConnectAndHandleAsync(peer, ip, port, transportPlan, !forceUtp, isHolepunch: forceUtp);
         _activeConnectionTasks.TryAdd(task, 0);
 
         _ = task.ContinueWith(t =>
