@@ -371,6 +371,39 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         return _registry.GetAll();
     }
 
+    /// <summary>
+    /// Lookups from background work, which answer "nothing" once the engine is gone rather than
+    /// throwing.
+    ///
+    /// <para>
+    /// Listeners, DHT callbacks and in-flight handshakes all resolve info hashes, and they keep
+    /// arriving for a moment after disposal begins - a packet already in the socket buffer does not
+    /// know the engine is shutting down. Throwing there turns an ordinary shutdown race into an
+    /// exception on a background thread, when the honest answer is simply that no torrent matches.
+    /// The public methods above still throw, which is the conventional behaviour a caller expects.
+    /// </para>
+    /// </summary>
+    ITorrent? ITorrentResolver.GetTorrent(InfoHash hash)
+    {
+        return ResolveTorrentForBackgroundWork(hash);
+    }
+
+    IReadOnlyList<ITorrent> ITorrentResolver.GetTorrents()
+    {
+        return _disposal.IsDisposed ? [] : _registry.GetAll();
+    }
+
+    private ITorrent? ResolveTorrentForBackgroundWork(InfoHash hash)
+    {
+        if (_disposal.IsDisposed)
+        {
+            return null;
+        }
+
+        _registry.TryGet(hash, out var torrent);
+        return torrent;
+    }
+
     public void LoadBlocklist(Stream stream)
     {
         _disposal.ThrowIfDisposed(this);
@@ -397,7 +430,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
     public void OnPeersFound(InfoHash infoHash, List<IPEndPoint> peers)
     {
-        var torrent = GetTorrent(infoHash);
+        var torrent = ResolveTorrentForBackgroundWork(infoHash);
         if (torrent is Torrent t)
         {
             t.PeersInternal.AddPeers(peers, PeerSourceKind.Dht, null);
@@ -407,7 +440,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
     public void OnScrapeResult(InfoHash infoHash, int estimatedSeeds, int estimatedPeers)
     {
-        var torrent = GetTorrent(infoHash);
+        var torrent = ResolveTorrentForBackgroundWork(infoHash);
         if (torrent is Torrent t)
         {
             _logger.LogDebug("DHT scrape for {TorrentName}: ~{Seeds} seeds, ~{Peers} peers", t.Name, estimatedSeeds, estimatedPeers);
@@ -747,7 +780,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 throw new InvalidDataException("Invalid handshake");
             }
 
-            var torrent = GetTorrent(negotiated.InfoHash);
+            var torrent = ResolveTorrentForBackgroundWork(negotiated.InfoHash);
             if (torrent is Torrent t)
             {
                 _logger.LogDebug(

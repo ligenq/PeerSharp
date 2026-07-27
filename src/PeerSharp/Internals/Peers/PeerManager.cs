@@ -1937,21 +1937,35 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private void PruneKnownPeersCache()
     {
-        // Remove oldest 20% of entries to make room for new peers (by LastAttempt)
-        var snapshot = new List<KeyValuePair<IPEndPoint, PeerHistory>>(Math.Max(0, _knownPeersCacheCount));
-        snapshot.AddRange(_knownPeersCache);
+        // Remove oldest 20% of entries to make room for new peers (by LastAttempt).
+        //
+        // ToArray rather than AddRange. List.AddRange sees ICollection, reads Count, then calls
+        // CopyTo and advances its size by that original count - but ConcurrentDictionary.CopyTo
+        // recomputes the count under its own locks, so an entry removed in between leaves default
+        // pairs, with a null Value, in the tail of the list. Sorting those dereferences null.
+        // ToArray is the dictionary's own consistent snapshot and cannot disagree with itself.
+        var entries = _knownPeersCache.ToArray();
 
-        int removeCount = snapshot.Count / 5;
+        int removeCount = entries.Length / 5;
         if (removeCount == 0)
         {
             return;
         }
 
-        snapshot.Sort((a, b) => a.Value.LastAttempt.CompareTo(b.Value.LastAttempt));
+        // Sort on captured keys. LastAttempt is written by connection attempts on other threads, and a
+        // comparison whose answer changes mid-sort makes the sort itself throw.
+        var ordered = new (IPEndPoint EndPoint, DateTimeOffset LastAttempt)[entries.Length];
+        for (int i = 0; i < entries.Length; i++)
+        {
+            ordered[i] = (entries[i].Key, entries[i].Value.LastAttempt);
+        }
+
+        Array.Sort(ordered, static (a, b) => a.LastAttempt.CompareTo(b.LastAttempt));
+
         var toRemove = new List<IPEndPoint>(removeCount);
         for (int i = 0; i < removeCount; i++)
         {
-            toRemove.Add(snapshot[i].Key);
+            toRemove.Add(ordered[i].EndPoint);
         }
 
         foreach (var ep in toRemove)
