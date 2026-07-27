@@ -1247,19 +1247,18 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             bool usedUtp = false;
             bool attemptedUtp = false;
             int remainingTimeoutMs = timeoutMs;
-            int utpFallbackTimeoutMs = Math.Min(timeoutMs, _settings.Connection.UtpFallbackTimeoutMs);
-            if (utpFallbackTimeoutMs < _settings.Connection.MinConnectionTimeoutMs)
-            {
-                utpFallbackTimeoutMs = _settings.Connection.MinConnectionTimeoutMs;
-            }
+            int fallbackTimeoutMs = ConnectionBudgetCalculator.FallbackCap(
+                timeoutMs,
+                _settings.Connection.UtpFallbackTimeoutMs,
+                _settings.Connection.MinConnectionTimeoutMs);
 
-            foreach (var transport in transportPlan)
+            for (int attempt = 0; attempt < transportPlan.Count; attempt++)
             {
-                int attemptTimeoutMs = remainingTimeoutMs;
-                if (transport == TransportPreference.Utp && transportPlan.Count > 1)
-                {
-                    attemptTimeoutMs = Math.Min(remainingTimeoutMs, utpFallbackTimeoutMs);
-                }
+                var transport = transportPlan[attempt];
+
+                bool hasFallback = attempt < transportPlan.Count - 1;
+                int attemptTimeoutMs = ConnectionBudgetCalculator.ForAttempt(
+                    remainingTimeoutMs, hasFallback, fallbackTimeoutMs);
 
                 bool attemptUtp = transport == TransportPreference.Utp;
                 success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption).ConfigureAwait(false);
@@ -1275,7 +1274,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     attemptedUtp = true;
                 }
 
-                remainingTimeoutMs = Math.Max(_settings.Connection.MinConnectionTimeoutMs, remainingTimeoutMs - attemptTimeoutMs);
+                remainingTimeoutMs = ConnectionBudgetCalculator.Remaining(
+                    remainingTimeoutMs, attemptTimeoutMs, _settings.Connection.MinConnectionTimeoutMs);
             }
 
             // Record connection result for adaptive timeout and history
