@@ -363,21 +363,42 @@ public class TrackerManagerTests
         await manager.AnnounceAsync(url);
         await currentEntered.Task;
 
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        await manager.StopAsync();
-        stopwatch.Stop();
-
         try
         {
-            Assert.True(
-                stopwatch.Elapsed < TimeSpan.FromSeconds(15),
-                $"StopAsync took {stopwatch.Elapsed} waiting on an announce that ignores cancellation.");
+            Task stop = manager.StopAsync();
+
+            // The drain runs on the injected clock, so nothing but the clock can release it. Stepping
+            // past the deadline is what proves the bound exists - a stopwatch would only have proved
+            // the machine was not busy at that moment.
+            await AdvanceUntilCompleteAsync(stop, TimeSpan.FromSeconds(5));
+
             Assert.Equal(TrackerEvent.Stopped, tracker.LastEvent);
         }
         finally
         {
             releaseCurrent.TrySetResult();
         }
+    }
+
+    /// <summary>
+    /// Steps the fake clock forward until <paramref name="task"/> completes, giving continuations real
+    /// time to run in between. The announce being drained never completes on its own, so without the
+    /// advance the wait would never expire.
+    /// </summary>
+    private async Task AdvanceUntilCompleteAsync(Task task, TimeSpan step)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (!task.IsCompleted && DateTime.UtcNow < deadline)
+        {
+            _timeProvider.Advance(step);
+
+            for (int i = 0; i < 20 && !task.IsCompleted; i++)
+            {
+                await Task.Delay(10);
+            }
+        }
+
+        await task.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact(Timeout = 30000)]
@@ -411,7 +432,18 @@ public class TrackerManagerTests
         Assert.Equal(1, tracker.DeinitCount);
     }
 
-    [Fact(Timeout = 10000)]
+    /// <summary>
+    /// A tracker that never answers the Stopped announce must not hold up shutdown.
+    ///
+    /// <para>
+    /// This used to time a stopwatch around StopAsync and assert the result landed between 1.5 and 6
+    /// seconds. That measures the machine as much as the code: a busy CI runner took 8.2 seconds for a
+    /// two-second timeout and failed. The timeout now runs on the injected clock, so the test can hold
+    /// the clock still, confirm StopAsync really is waiting, and then move it past the deadline -
+    /// which asserts the actual intent rather than how quickly the runner happened to schedule.
+    /// </para>
+    /// </summary>
+    [Fact(Timeout = 30000)]
     public async Task StopAsync_TimesOutUnresponsiveStoppedAnnounce()
     {
         var manager = new TrackerManager(_torrent, _factory, _timeProvider);
@@ -420,15 +452,27 @@ public class TrackerManagerTests
         await manager.StartAsync();
         var tracker = _factory.Trackers[url];
         await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(1));
-        tracker.AnnounceHandler = (evt, ct) => evt == TrackerEvent.Stopped
-            ? Task.Delay(Timeout.InfiniteTimeSpan, ct)
-            : Task.CompletedTask;
 
-        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        await manager.StopAsync();
-        stopwatch.Stop();
+        var stoppedEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tracker.AnnounceHandler = (evt, ct) =>
+        {
+            if (evt != TrackerEvent.Stopped)
+            {
+                return Task.CompletedTask;
+            }
 
-        Assert.InRange(stopwatch.Elapsed, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(6));
+            stoppedEntered.TrySetResult();
+            return Task.Delay(Timeout.InfiniteTimeSpan, ct);
+        };
+
+        Task stop = manager.StopAsync();
+
+        // The announce is in progress and will never finish on its own.
+        await stoppedEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(stop.IsCompleted, "StopAsync returned before the Stopped announce had even begun.");
+
+        // Nothing but the clock should release it, so stepping past the deadline is what completes it.
+        await AdvanceUntilCompleteAsync(stop, TimeSpan.FromSeconds(5));
     }
 
     [Fact(Timeout = 30000)]

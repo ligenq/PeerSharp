@@ -107,7 +107,10 @@ public class UdpListenerTests
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         await listener.StopAsync();
 
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1), $"Stop took {stopwatch.Elapsed}");
+        // Generous on purpose. What this distinguishes is "returned" from "blocked on the hung
+        // dependency", and blocking there is unbounded - so a threshold only has to be clear of
+        // how long a loaded CI runner can stall, which has been measured at several seconds.
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(15), $"Stop took {stopwatch.Elapsed}");
 
         // Release the deliberately non-cooperative receive task so the test leaves no work behind.
         factory.LastSocket.EnqueueReceive([], new IPEndPoint(IPAddress.Loopback, 1));
