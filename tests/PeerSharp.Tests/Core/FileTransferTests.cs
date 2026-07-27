@@ -43,9 +43,15 @@ public class FileTransferTests
 
     public FileTransferTests()
     {
-        _torrent = TorrentTestUtility.CreateMinimal();
-        _torrent.InfoFile.Info.PieceSize = 16384 * 2; // 2 blocks per piece
-        _torrent.InfoFile.Info.FullSize = _torrent.InfoFile.Info.PieceSize * 10;
+        // Geometry has to be in the metadata before the torrent is built, or the piece tracker is
+        // created empty and every piece index is out of range - which silently disables any check that
+        // validates one.
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 16384 * 2; // 2 blocks per piece
+        metadata.Info.FullSize = metadata.Info.PieceSize * 10;
+        metadata.Info.Pieces = [.. Enumerable.Range(0, 10).Select(_ => new byte[20])];
+
+        _torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         _fileTransfer = new FileTransfer(_torrent, _timeProvider);
         _peer = new PeerCommunication(_torrent, new MockPeerListener(), _timeProvider);
@@ -189,7 +195,9 @@ public class FileTransferTests
 
         Assert.True(tracker.TryGetPeerRequests(_peer, out var before) && !before.IsEmpty);
 
-        var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 0, BlockOffset = 0 };
+        // A real Reject carries index, begin and length; the decoder requires all three, and the
+        // handler now checks the block is real before letting it touch request or offer state.
+        var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 0, BlockOffset = 0, BlockLength = 16384 };
         await _fileTransfer.BlockRejectedAsync(_peer, msg);
 
         // The specific request is removed even though the empty peer collection may linger
@@ -199,7 +207,9 @@ public class FileTransferTests
     [Fact]
     public async Task BlockRejectedAsync_NoopWhenNoPendingRequest()
     {
-        var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 0, BlockOffset = 0 };
+        // A real Reject carries index, begin and length; the decoder requires all three, and the
+        // handler now checks the block is real before letting it touch request or offer state.
+        var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 0, BlockOffset = 0, BlockLength = 16384 };
         await _fileTransfer.BlockRejectedAsync(_peer, msg); // Must not throw
     }
 
@@ -219,7 +229,9 @@ public class FileTransferTests
         connectedPeers.TryAdd(_peer, 0);
         connectedPeers.TryAdd(alternatePeer, 0);
 
-        var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 0, BlockOffset = 0 };
+        // A real Reject carries index, begin and length; the decoder requires all three, and the
+        // handler now checks the block is real before letting it touch request or offer state.
+        var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 0, BlockOffset = 0, BlockLength = 16384 };
         await _fileTransfer.BlockRejectedAsync(_peer, msg); // Must not throw
         // If EvaluateNextRequestsAsync was called on alternatePeer it queued for background processing;
         // just verify no exception and the pending request was cleaned up.
