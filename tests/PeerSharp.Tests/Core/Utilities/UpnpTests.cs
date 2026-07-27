@@ -83,7 +83,7 @@ public sealed class UpnpTests
         Assert.Contains("DeletePortMapping", delReq.Headers.GetValueOrDefault("SOAPACTION", ""));
     }
 
-    [Fact(Timeout = 10000)]
+    [Fact(Timeout = 60000)]
     public async Task PortMapping_MultipleGateways_MapsConcurrentlyAndTracksMixedResults()
     {
         using var mapRequestsEntered = new CountdownEvent(2);
@@ -99,7 +99,7 @@ public sealed class UpnpTests
             if (request.Body.Contains("AddPortMapping", StringComparison.Ordinal))
             {
                 mapRequestsEntered.Signal();
-                releaseMapRequests.Wait(TimeSpan.FromSeconds(5));
+                releaseMapRequests.Wait(TimeSpan.FromSeconds(45));
             }
             return success ? TestHttpResponse.Ok("<xml/>") : TestHttpResponse.NotFound();
         }
@@ -117,7 +117,14 @@ public sealed class UpnpTests
         Task<bool> map = mapper.MapPortAsync(23456, "TCP", "multi", CancellationToken.None);
         try
         {
-            Assert.True(mapRequestsEntered.Wait(TimeSpan.FromSeconds(2)));
+            // Generous on purpose. This waits for two real HTTP servers to be reached
+            // concurrently, so the bound has to clear how long a loaded runner can take to
+            // schedule them rather than how long the work needs - it was two seconds, and a CI
+            // runner missed it. The handler parks until released, so a genuine failure to reach
+            // both still fails this assertion.
+            Assert.True(
+                mapRequestsEntered.Wait(TimeSpan.FromSeconds(30)),
+                "Both gateways should have received an AddPortMapping request.");
             Assert.False(map.IsCompleted);
         }
         finally

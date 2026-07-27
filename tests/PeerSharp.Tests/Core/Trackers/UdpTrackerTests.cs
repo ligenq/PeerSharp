@@ -1022,18 +1022,17 @@ public class UdpTrackerTests
         var announceTask = tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
 
         int[] retryDelaysMs = [1000, 2000, 4000];
-
-        // 4 attempts (initial + 3 retries), all timing out on the Connect packet.
         for (int attempt = 0; attempt < 4; attempt++)
         {
-            await _socketFactory.LastSocket.WaitForPacketAsync(attempt, TimeSpan.FromSeconds(5));
-            await Task.Delay(50, TestContext.Current.CancellationToken);
+            await _socketFactory.LastSocket.WaitForPacketAsync(attempt, TimeSpan.FromSeconds(20));
             _socketFactory.LastSocket.TriggerTimeout();
 
             if (attempt < 3)
             {
-                await Task.Delay(50, TestContext.Current.CancellationToken);
-                _timeProvider.Advance(TimeSpan.FromMilliseconds(retryDelaysMs[attempt]));
+                // Advance until the retry is actually sent, rather than sleeping a fixed moment and
+                // hoping the retry timer has been registered by then. Advancing first moves the clock
+                // past a deadline that does not exist yet, and the retry then never fires at all.
+                await AdvanceUntilPacketAsync(attempt + 1, TimeSpan.FromMilliseconds(retryDelaysMs[attempt]));
             }
         }
 
@@ -1489,6 +1488,38 @@ public class UdpTrackerTests
 
         Assert.Equal(98, packet.Length);
     }
+
+    /// <summary>
+    /// Steps the fake clock forward until the socket has sent packet <paramref name="index"/>.
+    ///
+    /// <para>
+    /// The tracker registers its retry timer from a continuation, so a single advance timed by a fixed
+    /// real-time sleep can land before that timer exists - and then nothing fires, because the deadline
+    /// is set relative to a clock that has already moved past it. Advancing repeatedly and checking
+    /// removes the guess.
+    /// </para>
+    /// </summary>
+    private async Task AdvanceUntilPacketAsync(int index, TimeSpan step)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (_socketFactory.LastSocket.SentPackets.Count > index)
+            {
+                return;
+            }
+
+            _timeProvider.Advance(step);
+
+            for (int i = 0; i < 20 && _socketFactory.LastSocket.SentPackets.Count <= index; i++)
+            {
+                await Task.Delay(10);
+            }
+        }
+
+        Assert.Fail($"Timed out waiting for packet {index} to be sent.");
+    }
+
 }
 
 
