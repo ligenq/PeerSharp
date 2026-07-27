@@ -1234,6 +1234,15 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 timeoutMs = _settings.Connection.InitialConnectionTimeoutMs;
             }
 
+            // What worked for this peer last time. Encryption support cannot be discovered without
+            // trying, so the choice alternates across attempts and is remembered on the peer rather than
+            // retried inside one attempt - see PeerHistory.OfferEncryptionNext.
+            bool offerEncryption = true;
+            if (endpoint is not null && _knownPeersCache.TryGetValue(endpoint, out var knownHistory))
+            {
+                offerEncryption = knownHistory.OfferEncryptionNext;
+            }
+
             bool success = false;
             bool usedUtp = false;
             bool attemptedUtp = false;
@@ -1253,7 +1262,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 }
 
                 bool attemptUtp = transport == TransportPreference.Utp;
-                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs).ConfigureAwait(false);
+                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption).ConfigureAwait(false);
 
                 if (success)
                 {
@@ -1289,11 +1298,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             {
                 history.FruitlessConnectionCount = 0;
                 history.NextConnectAttempt = DateTimeOffset.MinValue;
+                history.RegisterHandshakeSuccess(peer.Stream is EncryptedStream);
             }
             else
             {
                 history.FruitlessConnectionCount++;
                 ApplyConnectionBackoff(history);
+
+                // Flip what we offer next time. A peer that refuses both ends up alternating, which
+                // costs nothing extra because the attempt was going to happen anyway; a peer that only
+                // speaks one of them is reached on the following try.
+                history.RegisterHandshakeFailure();
             }
 
             // Remove from connecting list regardless of outcome

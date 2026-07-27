@@ -590,12 +590,22 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     // 10 seconds
     public async virtual Task<bool> ConnectAsync(string ip, int port, bool useUtp, CancellationToken ct = default)
     {
-        return await ConnectAsync(ip, port, useUtp, DefaultConnectionTimeoutMs, ct).ConfigureAwait(false);
+        return await ConnectAsync(ip, port, useUtp, DefaultConnectionTimeoutMs, ct: ct).ConfigureAwait(false);
     }
 
-    public async virtual Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, CancellationToken ct = default)
+    /// <summary>
+    /// Dials a peer and completes the BitTorrent handshake.
+    ///
+    /// <para>
+    /// <paramref name="offerEncryption"/> decides whether to open with an encryption handshake when the
+    /// configured policy leaves it open. The caller decides because the answer belongs to the peer
+    /// rather than to any one attempt: it is remembered on the peer's history and alternates until
+    /// something works.
+    /// </para>
+    /// </summary>
+    public async virtual Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, bool offerEncryption = true, CancellationToken ct = default)
     {
-        _logger.LogDebug("Connecting to {Ip}:{Port} (uTP: {UseUtp}, timeout: {Timeout}ms)", ip, port, useUtp, timeoutMs);
+        _logger.LogDebug("Connecting to {Ip}:{Port} (uTP: {UseUtp}, encryption: {Encryption}, timeout: {Timeout}ms)", ip, port, useUtp, offerEncryption, timeoutMs);
         IsOutgoing = true;
 
         // Record start time for adaptive timeout tracking
@@ -669,10 +679,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             _logger.LogDebug("Connected to {Ip}:{Port}", ip, port);
 
             var encryptionSetting = _torrent.Settings.Connection.Encryption;
-            bool needsReconnect = false;
 
-            // Try encryption handshake first (unless Encryption=Refuse)
-            if (encryptionSetting != Encryption.Refuse)
+            // Require and Refuse are absolute. Allow leaves the choice to the caller, which is where the
+            // peer's remembered preference lives.
+            bool tryEncryption = encryptionSetting switch
+            {
+                Encryption.Require => true,
+                Encryption.Refuse => false,
+                _ => offerEncryption
+            };
+
+            if (tryEncryption)
             {
                 var encryptionResult = await PerformEncryptionHandshakeAsync(true).ConfigureAwait(false);
                 if (encryptionResult == EncryptionHandshakeResult.Success)
@@ -705,63 +722,21 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
                 else if (encryptionResult == EncryptionHandshakeResult.ConnectionClosed)
                 {
-                    // Peer closed connection after receiving encryption handshake
-                    // Need to reconnect with a fresh connection for plaintext
-                    _logger.LogDebug("Peer {Ip}:{Port} closed connection (doesn't support encryption), reconnecting for plaintext", ip, port);
-                    needsReconnect = true;
-                }
-                // Encryption failed and Allow mode - fall through to plaintext
-            }
-
-            // If peer closed the connection, we need a fresh connection for plaintext
-            if (needsReconnect)
-            {
-                // TcpClient.Close() is not sufficient - must call Dispose() to release all resources
-                try { Client?.Dispose(); } catch { /* Ignore disposal errors during reconnect */ }
-                try { UtpStream?.Close(); } catch { /* Ignore disposal errors during reconnect */ }
-                Client = null;
-                UtpStream = null;
-                Stream = null;
-
-                // Re-create CTS if it was cancelled during the failed attempt
-                if (_cts?.IsCancellationRequested == true)
-                {
-                    _cts.Dispose();
-                    _cts = new CancellationTokenSource();
-                }
-
-                // Small delay to avoid overwhelming the peer
-                await Task.Delay(TimeSpan.FromMilliseconds(100), _timeProvider, ct).ConfigureAwait(false);
-
-                // Reconnect
-                try
-                {
-                    if (useUtp && _torrent.UtpManager != null)
-                    {
-                        var ipAddress = System.Net.IPAddress.Parse(ip);
-                        var endpoint = new System.Net.IPEndPoint(ipAddress, port);
-                        UtpStream = _torrent.UtpManager.CreateStream(endpoint);
-                        Stream = UtpStream;
-                        await UtpStream.ConnectAsync(linkedCts.Token).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        Client = new TcpClient();
-                        ConfigureTcpClient(Client, _torrent.Settings, _logger);
-                        await Client.ConnectAsync(ip, port, linkedCts.Token).ConfigureAwait(false);
-                        if (Client is not null)
-                        {
-                            Stream = Client.GetStream();
-                        }
-                    }
-                    _logger.LogDebug("Reconnected to {Ip}:{Port} for plaintext", ip, port);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Reconnect failed for {Ip}:{Port}", ip, port);
+                    // The peer hung up rather than answering. That is not evidence about encryption:
+                    // peers hang up because they are at their connection limit, do not have the torrent,
+                    // or already have us - and dialling straight back in plaintext meets the same reason
+                    // again. Measured against a live swarm, that immediate retry failed 72 times out of
+                    // 77, and one peer was redialled fifteen times.
+                    //
+                    // Neither reference implementation retries within an attempt. libtorrent alternates
+                    // its per-peer pe_support flag across separate connections; Transmission gives up and
+                    // marks a peer that sent nothing back as unconnectable. We follow libtorrent: report
+                    // the failure and let the peer's history choose plaintext next time.
+                    _logger.LogDebug("Peer {Ip}:{Port} hung up during the encryption handshake", ip, port);
                     await CloseAsync().ConfigureAwait(false);
                     return false;
                 }
+                // Encryption failed on a still-open connection - fall through and try plaintext on it.
             }
 
             // Try plaintext handshake (encryption failed or Encryption=Refuse)
@@ -779,11 +754,18 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return false;
             }
         }
+        // The catches below report a peer that did not answer, hung up, or refused a handshake. Those
+        // are the ordinary outcomes of dialling strangers, and their stack traces are identical every
+        // time, so the exception type or message is kept and the trace is not. In one 3.9 MB log,
+        // 17,174 of 31,509 lines were traces, most of them from a connect timeout. Genuine faults, in
+        // the general catch at the end, still carry theirs.
         catch (OperationCanceledException ex) when (!_cts.IsCancellationRequested)
         {
             // Connection timeout (not explicit cancellation via CloseAsync()) - expected in BitTorrent
             int elapsedMs = GetConnectionElapsedMs();
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, ex.GetType().Name);
+            #pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
@@ -791,28 +773,36 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             // OS-level connection timeout (timeoutMs > OS timeout)
             int elapsedMs = GetConnectionElapsedMs();
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, ex.GetType().Name);
+            #pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
-        catch (OperationCanceledException ex)
+        catch (OperationCanceledException)
         {
             // Explicit cancellation via CloseAsync()
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect cancelled {Ip}:{Port}", ip, port);
+            #pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (SocketException ex)
         {
             // Expected network errors - log without stack trace at Debug level
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, ex.Message);
+            #pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (IOException ex) when (ex.InnerException is SocketException)
         {
             // Expected network errors wrapped in IOException - log without stack trace
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, ex.InnerException.Message);
+            #pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
@@ -1566,7 +1556,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
         catch (IOException ex)
         {
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Incoming handshake I/O error for {PeerName} - {Message}", Name, ex.Message);
+            #pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1596,7 +1588,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
         catch (IOException ex)
         {
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Outgoing connected handshake I/O error for {PeerName} - {Message}", Name, ex.Message);
+            #pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1639,9 +1633,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     using var timeoutCts = new CancellationTokenSource(firstRead ? 5000 : 30000);
                     read = await stream.ReadAsync(buffer, timeoutCts.Token).ConfigureAwait(false);
                 }
-                catch (OperationCanceledException ex)
+                catch (OperationCanceledException)
                 {
+                    #pragma warning disable S6667 // Deliberately no stack trace: see note above.
                     _logger.LogDebug("Encryption handshake timeout for {PeerName}", Name);
+                    #pragma warning restore S6667
                     return EncryptionHandshakeResult.Failed;
                 }
 
@@ -1716,12 +1712,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // pairs in two minutes, roughly 3% of all connection attempts.
         catch (SocketException ex)
         {
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Encryption handshake failed for {PeerName} - {Message}", Name, ex.Message);
+            #pragma warning restore S6667
             return EncryptionHandshakeResult.ConnectionClosed;
         }
         catch (IOException ex)
         {
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Encryption handshake I/O failure for {PeerName} - {Message}", Name, ex.Message);
+            #pragma warning restore S6667
             return EncryptionHandshakeResult.ConnectionClosed;
         }
         catch (ObjectDisposedException ex)

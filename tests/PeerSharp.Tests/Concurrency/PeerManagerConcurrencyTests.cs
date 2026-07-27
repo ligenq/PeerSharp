@@ -46,7 +46,7 @@ public class PeerManagerConcurrencyTests
         {
         }
 
-        public override Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, CancellationToken ct)
+        public override Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, bool offerEncryption = true, CancellationToken ct = default)
         {
             MockConnected = true;
             return Task.FromResult(true);

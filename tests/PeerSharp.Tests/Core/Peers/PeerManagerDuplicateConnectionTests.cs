@@ -570,7 +570,7 @@ public class PeerManagerDuplicateConnectionTests
         /// </summary>
         public byte[]? HandshakePeerId { get; set; }
 
-        public override async Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, CancellationToken ct = default)
+        public override async Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, bool offerEncryption = true, CancellationToken ct = default)
         {
             IsOutgoing = true;
             RemoteEndPoint = new IPEndPoint(IPAddress.Parse(ip), port);

@@ -64,6 +64,48 @@ internal sealed class PeerHistory
     /// <summary>Whether uTP is known to be unsupported or failing for this peer.</summary>
     public bool UtpSupported { get; set; } = true;
 
+    /// <summary>
+    /// Whether the next outgoing connection to this peer should offer encryption.
+    ///
+    /// <para>
+    /// Encryption support cannot be discovered without trying, and a peer that refuses one form may
+    /// accept the other, so the choice alternates across attempts and is remembered here rather than
+    /// being retried inside a single attempt. libtorrent does the same thing with its per-peer
+    /// <c>pe_support</c> flag: it flips the flag before dialling and flips it back only when the
+    /// handshake completes, so a peer that keeps failing keeps alternating, and one that works stays
+    /// on whatever worked.
+    /// </para>
+    ///
+    /// <para>
+    /// The alternative - reconnecting immediately in plaintext when a peer hangs up mid-handshake -
+    /// was measured against a live swarm and failed 72 times out of 77. Peers hang up for reasons that
+    /// have nothing to do with encryption, and dialling straight back meets the same reason again while
+    /// costing the peer a second connection.
+    /// </para>
+    /// </summary>
+    public bool OfferEncryptionNext { get; set; } = true;
+
+    /// <summary>Consecutive outgoing handshakes to this peer that ended without a reply.</summary>
+    public int HandshakeFailureCount { get; set; }
+
+    /// <summary>
+    /// Records that a handshake completed, and settles the encryption choice on whatever worked.
+    /// </summary>
+    public void RegisterHandshakeSuccess(bool wasEncrypted)
+    {
+        HandshakeFailureCount = 0;
+        OfferEncryptionNext = wasEncrypted;
+    }
+
+    /// <summary>
+    /// Records a handshake that produced no usable connection, and switches what we offer next time.
+    /// </summary>
+    public void RegisterHandshakeFailure()
+    {
+        HandshakeFailureCount++;
+        OfferEncryptionNext = !OfferEncryptionNext;
+    }
+
     /// <summary>Calculates a score for this candidate. Lower is better (higher priority).</summary>
     public long GetScore(bool torrentIsSeeding, Priority torrentPriority, DateTimeOffset now)
     {

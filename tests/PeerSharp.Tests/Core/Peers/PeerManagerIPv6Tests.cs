@@ -15,7 +15,7 @@ public class PeerManagerIPv6Tests
         public MockPeerCommunication(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
             : base(torrent, listener, timeProvider) { }
 
-        public override Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, CancellationToken ct = default)
+        public override Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, bool offerEncryption = true, CancellationToken ct = default)
         {
             ConnectedIp = ip;
             return ConnectTask.Task;
