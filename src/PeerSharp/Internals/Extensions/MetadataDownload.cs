@@ -11,6 +11,13 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private readonly Lock _lock = new();
     private readonly ILogger<MetadataDownload> _logger;
     private readonly ILoggerFactory _loggerFactory;
+    /// <summary>
+    /// How many random draws to make when looking for a peer other than the one that just failed.
+    /// A handful is enough to miss the current peer with high probability on any realistic pool, and
+    /// bounds the work when the pool is tiny.
+    /// </summary>
+    private const int AlternatePeerDrawAttempts = 4;
+
     private readonly Dictionary<int, PendingMetadataRequest> _pendingRequests = [];
 
     /// <summary>Test hook: number of in-flight metadata piece requests.</summary>
@@ -421,7 +428,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             {
                 if (_pendingRequests.Remove(piece, out var pending) && pending.Attempts < MetadataMaxRequestAttempts)
                 {
-                    RequestPiece(piece, preferredPeer: GetAlternatePeer(pending.Peer));
+                    RequestPiece(piece, GetAlternatePeer(pending.Peer), pending.Attempts);
                 }
             }
 
@@ -532,7 +539,20 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         }
     }
 
-    private void RequestPiece(int pieceIndex, IPeerCommunication? preferredPeer = null)
+    /// <summary>
+    /// Asks a peer for one piece of the metadata, recording the request so it can be timed out.
+    /// </summary>
+    /// <param name="pieceIndex">Which metadata piece to ask for.</param>
+    /// <param name="preferredPeer">Peer to ask, or null to pick one at random from the active list.</param>
+    /// <param name="attemptsSoFar">
+    /// How many times this piece has already been asked for. The retry path removes the pending request
+    /// before calling back in, so the count cannot be recovered from <c>_pendingRequests</c> - it has to
+    /// be carried. Losing it pinned every request at attempt 1, which made the give-up check
+    /// (<c>Attempts &lt; MetadataMaxRequestAttempts</c>) permanently true: a peer that never answered
+    /// was asked again every ten seconds for as long as the torrent ran, and the piece was never handed
+    /// back to the random-peer path that would have found a different one.
+    /// </param>
+    private void RequestPiece(int pieceIndex, IPeerCommunication? preferredPeer = null, int attemptsSoFar = 0)
     {
         if (!Active || Finished)
         {
@@ -556,8 +576,8 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 _logger.LogInformation("Skipping metadata request for piece {PieceIndex}; peer {PeerId} has no ut_metadata id", pieceIndex, peer.PeerId);
                 return;
             }
-            int attempts = 1;
-            if (_pendingRequests.TryGetValue(pieceIndex, out var existing))
+            int attempts = attemptsSoFar + 1;
+            if (attemptsSoFar == 0 && _pendingRequests.TryGetValue(pieceIndex, out var existing))
             {
                 attempts = existing.Attempts + 1;
             }
@@ -586,7 +606,21 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             return GetRandomMetadataPeer();
         }
 
-        // Deterministic scan for small lists to ensure we find a different peer
+        // Pick at random rather than taking the first peer that is not the current one. Returning the
+        // first match makes consecutive retries alternate between _activePeers[0] and [1] and never
+        // reach anyone else: in a live run 302 peers advertised ut_metadata and only 9 were ever asked,
+        // the same two over and over, while three torrents sat without metadata for minutes.
+        for (int i = 0; i < AlternatePeerDrawAttempts; i++)
+        {
+            var candidate = _activePeers[Random.Shared.Next(_activePeers.Count)];
+            if (candidate != current)
+            {
+                return candidate;
+            }
+        }
+
+        // Every draw landed on the current peer, which is possible with a short list. Take whoever else
+        // is there rather than asking the same one again.
         foreach (var p in _activePeers)
         {
             if (p != current)
