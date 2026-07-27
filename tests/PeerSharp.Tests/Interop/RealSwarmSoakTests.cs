@@ -565,6 +565,78 @@ public class RealSwarmSoakTests
     }
 
     /// <summary>
+    /// How many exceptions the engine throws while doing nothing but its ordinary job.
+    ///
+    /// <para>
+    /// Exceptions caught and handled leave no trace in normal operation, so the cost accumulates
+    /// unnoticed. Two things make that worth measuring. Each throw captures a stack, which is real work
+    /// on a path that runs per message rather than per connection. And with a debugger attached each
+    /// throw is a round trip to the debugger, which turns a rate that is merely wasteful into one that
+    /// makes the application visibly unresponsive - so a consumer debugging their own app pays for our
+    /// choices far more than we do.
+    /// </para>
+    ///
+    /// <para>
+    /// A handful per connection is ordinary: peers vanish, sockets reset, timeouts fire. The number
+    /// that matters is per connection, not per second, since the latter only says how busy the swarm is.
+    /// </para>
+    /// </summary>
+    [Fact(Timeout = 3_600_000)]
+    public async Task Soak_ExceptionRatePerConnectionStaysReasonable()
+    {
+        RequireSoakEnabled();
+
+        var duration = DurationFromEnvironment("PEERSHARP_SOAK_SECONDS", TimeSpan.FromMinutes(5));
+        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(5));
+
+        var source = await ResolveTorrentSourceAsync(cts.Token);
+        var (engine, downloadPath) = CreateEngine();
+
+        // Subscribed after setup so one-time startup costs are not counted as steady state.
+        using var counter = new FirstChanceExceptionCounter();
+
+        try
+        {
+            await engine.InitializeAsync(cts.Token);
+            var torrent = await AddAndStartAsync(engine, source, cts.Token);
+
+            var observer = await ObserveAsync(torrent, duration, stop: null, cts.Token);
+
+            _output.WriteLine(counter.BuildReport());
+            _output.WriteLine($"distinct peers over the run : {observer.Peers.Count}");
+
+            // The breakdown is the whole point of the run, and a passing test prints nothing, so put it
+            // somewhere it survives.
+            var reportPath = Environment.GetEnvironmentVariable("PEERSHARP_SOAK_REPORT");
+            if (!string.IsNullOrWhiteSpace(reportPath))
+            {
+                await File.WriteAllTextAsync(
+                    reportPath,
+                    $"peers: {observer.Peers.Count}{counter.BuildReport(limit: 40)}",
+                    CancellationToken.None);
+            }
+
+            Assert.True(observer.Peers.Count > 0, "No peers were reached, so nothing was exercised.");
+
+            double perConnection = (double)counter.Total / observer.Peers.Count;
+            _output.WriteLine($"exceptions per connection   : {perConnection:F1}");
+
+            // Deliberately loose. This is not a performance gate - it is a tripwire for a throw that has
+            // been moved onto a per-message path, which shows up as hundreds per connection, not tens.
+            Assert.True(
+                perConnection < 50,
+                $"{counter.Total:N0} exceptions across {observer.Peers.Count} connections is {perConnection:F1} " +
+                "per connection. That is high enough to suggest a throw sitting on a per-message path rather " +
+                $"than per-connection teardown. Breakdown by throwing method:{counter.BuildReport()}");
+        }
+        finally
+        {
+            await engine.DisposeAsync();
+            CleanUp(downloadPath);
+        }
+    }
+
+    /// <summary>
     /// The churn half of the discipline: run long enough for peers to come and go repeatedly, and
     /// confirm the connection pool stays bounded rather than creeping upward.
     /// </summary>

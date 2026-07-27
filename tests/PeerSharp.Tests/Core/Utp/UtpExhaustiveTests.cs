@@ -280,8 +280,11 @@ public class UtpExhaustiveTests
 
         await Task.Delay(50);
 
-        // Write should throw InvalidOperationException (State is Closed)
-        await Assert.ThrowsAsync<InvalidOperationException>(async () => await stream.WriteAsync(new byte[1]));
+        // Write should throw IOException (State is Closed). The peer resetting the connection is an I/O
+        // failure in both directions - reporting it as InvalidOperationException, as this once did, made
+        // the same event arrive as a different type depending on which way the data was going, and
+        // callers that swallow disconnects catch IOException.
+        await Assert.ThrowsAsync<IOException>(async () => await stream.WriteAsync(new byte[1]));
 
         // Read should throw IOException (Connection Reset)
         // Currently this fails (returns 0) until we fix UtpStream to propagate the error
