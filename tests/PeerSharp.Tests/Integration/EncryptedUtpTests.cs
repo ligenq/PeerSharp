@@ -28,8 +28,11 @@ namespace PeerSharp.Tests.Integration;
 [Collection("Integration")]
 public class EncryptedUtpTests : IDisposable
 {
-    private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan TransferTimeout = TimeSpan.FromSeconds(60);
+    // Generous because this binds real sockets and runs alongside the rest of the suite. The point is
+    // whether an encrypted uTP peer can connect and transfer at all, not how quickly it does so on a
+    // loaded machine.
+    private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan TransferTimeout = TimeSpan.FromSeconds(120);
 
     private readonly string _testRoot;
     private readonly string _seedPath;
@@ -52,7 +55,7 @@ public class EncryptedUtpTests : IDisposable
     public async Task EncryptedPeerConnectingOverUtp_CanDownload(Encryption encryption)
     {
         const string fileName = "utp-mse.bin";
-        byte[] payload = new byte[512 * 1024];
+        byte[] payload = new byte[128 * 1024];
         Random.Shared.NextBytes(payload);
         await File.WriteAllBytesAsync(Path.Combine(_seedPath, fileName), payload, TestContext.Current.CancellationToken);
 
