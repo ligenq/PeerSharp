@@ -78,7 +78,11 @@ internal sealed class MseResponder
     /// Performs the responder side of the handshake. Throws when the initiator deviates from the spec,
     /// which is the failure this exists to detect.
     /// </summary>
-    public async Task AcceptAsync(NetworkStream stream, CancellationToken ct = default)
+    /// <param name="trailingPayload">
+    /// Payload bytes to append to the final handshake write, so they arrive in the same read as the end
+    /// of the MSE handshake rather than as a separate segment.
+    /// </param>
+    public async Task AcceptAsync(NetworkStream stream, CancellationToken ct = default, ReadOnlyMemory<byte> trailingPayload = default)
     {
         // 1. Ya. PadA follows and its length is unknown, so it is skipped later by resynchronising on
         //    HASH('req1', S).
@@ -168,10 +172,15 @@ internal sealed class MseResponder
         }
 
         // 8. ENCRYPT(VC, crypto_select, len(PadD), PadD). RC4 is selected, so the stream stays encrypted.
-        var response = new byte[8 + 4 + 2];
+        var response = new byte[8 + 4 + 2 + trailingPayload.Length];
         Vc.CopyTo(response, 0);
         BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(8), CryptoRc4);
         BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(12), 0);
+
+        // Anything the caller wants carried in the same write as the handshake's last block. Real
+        // clients do exactly this - the BitTorrent handshake and the bitfield follow immediately - and
+        // it is the only way to land payload bytes in the same read as the end of the MSE handshake.
+        trailingPayload.Span.CopyTo(response.AsSpan(14));
 
         byte[] encrypted = new byte[response.Length];
         _outgoing.Process(response, encrypted);
