@@ -320,6 +320,20 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     private readonly List<Task> _backgroundTasks = new(3);
 
     private readonly CancellationTokenSource _cts;
+
+    /// <summary>
+    /// The stopping token, taken once from <see cref="_cts"/> and held.
+    ///
+    /// <para>
+    /// <c>CancellationTokenSource.Token</c> throws once the source is disposed, and work driven by peers
+    /// rather than by our own background loops is still arriving at that point - a block already on the
+    /// wire does not know the torrent is stopping. Disposal waits only for the loops it owns, so reading
+    /// the property from those paths raced with it. A token captured beforehand keeps working: it simply
+    /// reports cancellation, and because cancellation happens before disposal, callers that pass it
+    /// short-circuit rather than trying to register on a dead source.
+    /// </para>
+    /// </summary>
+    private readonly CancellationToken _stoppingToken;
     private readonly Channel<(PeerCommunication Peer, Block Block)> _incomingBlocks;
 
     // Limit restart attempts to prevent infinite loops
@@ -467,9 +481,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             peerSchedulerLogger);
 
         _cts = new CancellationTokenSource();
+        _stoppingToken = _cts.Token;
 
         var uploadQueueLogger = loggerFactory.CreateLogger<UploadQueueManager>();
-        _uploadQueueManager = new UploadQueueManager(ExecuteUploadItemAsync, uploadQueueLogger, _cts.Token);
+        _uploadQueueManager = new UploadQueueManager(ExecuteUploadItemAsync, uploadQueueLogger, _stoppingToken);
 
         // Track background tasks for proper disposal and error handling
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessIncomingBlocksAsync, "ProcessIncomingBlocks"));
@@ -507,11 +522,12 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         try
         {
-            await _incomingBlocks.Writer.WriteAsync((peer, block), _cts.Token).ConfigureAwait(false);
+            await _incomingBlocks.Writer.WriteAsync((peer, block), _stoppingToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is OperationCanceledException or ChannelClosedException or ObjectDisposedException)
         {
-            // Torrent stopping
+            // The torrent is stopping. Blocks keep arriving for a moment either way, because the peer
+            // sent them before it knew, so this is the ordinary end of a transfer rather than a fault.
             block.Dispose();
         }
         catch (Exception ex)
@@ -1100,7 +1116,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// </summary>
     public async Task WebSeedBlockReceivedAsync(Block block)
     {
-        await _blockProcessor.HandleWebSeedBlockReceivedAsync(block, _cts.Token).ConfigureAwait(false);
+        await _blockProcessor.HandleWebSeedBlockReceivedAsync(block, _stoppingToken).ConfigureAwait(false);
     }
 
     internal Task ProcessBlockAsync(PeerCommunication peer, Block block)
@@ -1277,7 +1293,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         }
 
         Logger.LogWarning("Piece processing queue full - forcing immediate processing for piece {PieceIndex}. Disk I/O may be bottlenecked", pieceToProcess.Index);
-        var task = ProcessPieceWithOverflowLimitAsync(pieceToProcess, _cts.Token);
+        var task = ProcessPieceWithOverflowLimitAsync(pieceToProcess, _stoppingToken);
         _overflowTasks.TryAdd(task, 0);
 
         _ = task.ContinueWith(t =>
@@ -1504,11 +1520,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     private async Task RunBackgroundTaskAsync(Func<CancellationToken, Task> taskFunc, string taskName)
     {
         int restartCount = 0;
-        while (!_cts.Token.IsCancellationRequested)
+        while (!_stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await taskFunc(_cts.Token).ConfigureAwait(false);
+                await taskFunc(_stoppingToken).ConfigureAwait(false);
                 break; // Normal completion
             }
             catch (OperationCanceledException)
@@ -1533,7 +1549,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
                 try
                 {
-                    await Task.Delay(TimeSpan.FromMilliseconds(1000), _timeProvider, _cts.Token).ConfigureAwait(false);
+                    await Task.Delay(TimeSpan.FromMilliseconds(1000), _timeProvider, _stoppingToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
