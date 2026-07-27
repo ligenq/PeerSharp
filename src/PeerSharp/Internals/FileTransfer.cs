@@ -566,11 +566,29 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         Logger.LogDebug("Request rejected by {RemoteEndPoint}: {PieceIndex}:{BlockOffset}", peer.RemoteEndPoint, msg.PieceIndex, msg.BlockOffset);
 
+        // Check the reject describes a real block before letting it touch our state. A reject naming an
+        // arbitrary piece would otherwise let a peer withdraw offers it never made, or clear requests
+        // belonging to a different block. libtorrent validates the same three things and ignores the
+        // message outright when they do not hold.
+        if (!IsValidUploadRequest(msg))
+        {
+            Logger.LogDebug(
+                "Ignoring malformed reject from {RemoteEndPoint}: {PieceIndex}:{BlockOffset} ({Length}B)",
+                peer.RemoteEndPoint, msg.PieceIndex, msg.BlockOffset, msg.BlockLength);
+            return;
+        }
+
         var key = (msg.PieceIndex, msg.BlockOffset);
         if (_requestTracker.TryRemovePeerRequest(peer, key, out var r))
         {
             RemoveBlockRequest(r.PieceIndex, r.Offset, peer);
         }
+
+        // The peer has gone back on an offer. Keeping it would have us ask for the same piece again and
+        // be refused again, for as long as the connection lasts. Which set it came from depends on
+        // whether we are choked: allowed-fast is what may be requested while choked, suggested is a hint
+        // that only applies once unchoked.
+        peer.WithdrawOfferedPiece(msg.PieceIndex, fromAllowedFast: peer.PeerChoking);
 
         // Immediately try to re-request rejected blocks from other peers
         // This is important when a peer chokes us and rejects all pending requests

@@ -1344,6 +1344,35 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
     }
 
+    /// <summary>
+    /// Withdraws a piece the peer offered but then refused, so we stop asking for it.
+    ///
+    /// <para>
+    /// A peer that rejects a request for a piece it had listed as allowed-fast or suggested has changed
+    /// its mind - it may have run out of upload slots or dropped the piece. Leaving the offer in place
+    /// invites the same request again and the same rejection after it, which is a loop that ends only
+    /// when the connection does. libtorrent drops the piece from whichever set it came from on exactly
+    /// this signal.
+    /// </para>
+    /// </summary>
+    public void WithdrawOfferedPiece(int pieceIndex, bool fromAllowedFast)
+    {
+        lock (_fastPiecesLock)
+        {
+            if (fromAllowedFast)
+            {
+                if (_allowedFastPieces.Remove(pieceIndex))
+                {
+                    _allowedFastSnapshot = null;
+                }
+            }
+            else if (_suggestedPieces.Remove(pieceIndex))
+            {
+                _suggestedSnapshot = null;
+            }
+        }
+    }
+
     private async Task CleanupResourcesAsync()
     {
         if (_cts != null)
