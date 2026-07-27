@@ -286,8 +286,15 @@ public sealed class ConnectionSettings
     public int UtpFailureHardLimit { get; set; } = 3;
 
     /// <summary>
-    /// When PreferUtp is enabled, how long to wait (ms) before falling back to TCP if uTP stalls.
+    /// How long to spend (ms) on a transport that has another one behind it, before falling back.
     /// Default is 3000ms to keep the connection pool responsive.
+    ///
+    /// <para>
+    /// Applies to whichever transport is tried first, not only uTP. The whole connection attempt shares
+    /// one budget, so an unbounded first attempt can exhaust it and leave the fallback with the
+    /// <see cref="MinConnectionTimeoutMs"/> floor - which is not long enough to reach most peers, and
+    /// makes the fallback fail almost every time it is needed.
+    /// </para>
     /// </summary>
     public int UtpFallbackTimeoutMs { get; set; } = 3000;
 
