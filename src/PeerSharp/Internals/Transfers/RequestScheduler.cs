@@ -29,7 +29,7 @@ internal sealed class RequestScheduler
         _logger = options.Logger;
         _blockSize = options.BlockSize;
         _maxRequestsPerPeer = Math.Max(1, options.MaxRequestsPerPeer);
-        _standardStrategy = new StandardBlockRequestStrategy(_requestTracker, _timeProvider, options.GetSoftTimeoutMs, _logger, _blockSize);
+        _standardStrategy = new StandardBlockRequestStrategy(_requestTracker, _timeProvider, options.GetSoftTimeoutMs, _blockSize);
         _endGameStrategy = new EndGameBlockRequestStrategy(_requestTracker, _blockSize);
     }
 
@@ -114,7 +114,7 @@ internal sealed class RequestScheduler
                     var newState = new PieceState(pieceIndex, blocksCount);
                     if (_pieceStateManager.TryAddPiece(newState))
                     {
-                        _logger.LogDebug("NEW PIECE {PieceIndex} started: {BlocksCount} blocks, {Size} bytes, active pieces now={ActiveCount}", pieceIndex, blocksCount, pieceSize, _pieceStateManager.Count);
+                        _logger.LogTrace("NEW PIECE {PieceIndex} started: {BlocksCount} blocks, {Size} bytes, active pieces now={ActiveCount}", pieceIndex, blocksCount, pieceSize, _pieceStateManager.Count);
                         sent += await ProcessPieceForRequestsAsync(newState, peer, needed - sent, strategy).ConfigureAwait(false);
                     }
                     loopLimit--;
@@ -183,6 +183,9 @@ internal sealed class RequestScheduler
                     Attempts = 1
                 };
 
+                // Read before adding our own, so this counts the peers that already owed us this block.
+                int alreadyOutstanding = _requestTracker.GetPendingRequestCount(pieceIndex, offset);
+
                 _requestTracker.AddBlockRequest(pieceIndex, offset, peer, request);
 
                 bool queued = await peer.SendRequestAsync(request).ConfigureAwait(false);
@@ -195,6 +198,17 @@ internal sealed class RequestScheduler
                     _requestTracker.RemoveBlockRequest(pieceIndex, offset, peer);
                     return sent;
                 }
+
+                if (alreadyOutstanding > 0)
+                {
+                    // Logged here rather than where requestability is decided, so a line means a
+                    // duplicate request genuinely went out. Trace because on a healthy transfer this is
+                    // a routine reaction to one slow peer, not a fault.
+                    _logger.LogTrace(
+                        "Duplicate request {PieceIndex}:{Offset} sent to {RemoteEndPoint}; {Outstanding} peer(s) already owed it",
+                        pieceIndex, offset, peer.RemoteEndPoint, alreadyOutstanding);
+                }
+
                 sent++;
             }
         }

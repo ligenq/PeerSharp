@@ -51,7 +51,9 @@ internal sealed class BlockProcessor
 
     public async Task HandlePeerBlockAsync(PeerCommunication peer, Block block)
     {
-        _logger.LogDebug("Block received: Piece {PieceIndex}, Offset {Offset}, Length {Length} from {RemoteEndPoint}",
+        // Trace, not Debug: this is the per-block path, so at 16 KiB a block a healthy transfer emits
+        // hundreds of these a second. Debug should stay usable while a transfer is running.
+        _logger.LogTrace("Block received: Piece {PieceIndex}, Offset {Offset}, Length {Length} from {RemoteEndPoint}",
             block.PieceIndex, block.Offset, block.Length, peer.RemoteEndPoint);
 
         PieceState? pieceToProcess = null;
@@ -90,13 +92,13 @@ internal sealed class BlockProcessor
                     {
                         pieceToProcess = state;
 
-                        _logger.LogDebug("Piece {PieceIndex} all blocks received ({BlockCount} blocks), starting hash verification", state.Index, state.Blocks.Length);
+                        _logger.LogTrace("Piece {PieceIndex} all blocks received ({BlockCount} blocks), starting hash verification", state.Index, state.Blocks.Length);
                     }
                 }
             }
             else
             {
-                _logger.LogDebug("Received block for inactive piece {PieceIndex}", block.PieceIndex);
+                _logger.LogTrace("Received block for inactive piece {PieceIndex}", block.PieceIndex);
             }
 
             if (!stored)
@@ -140,7 +142,7 @@ internal sealed class BlockProcessor
 
     private async Task ProcessWebSeedBlockAsync(Block block, CancellationToken ct)
     {
-        _logger.LogDebug("WebSeed block received: Piece {PieceIndex}, Offset {Offset}, Length {Length}", block.PieceIndex, block.Offset, block.Length);
+        _logger.LogTrace("WebSeed block received: Piece {PieceIndex}, Offset {Offset}, Length {Length}", block.PieceIndex, block.Offset, block.Length);
 
         PieceState? pieceToProcess = null;
         bool stored = false;
@@ -160,13 +162,13 @@ internal sealed class BlockProcessor
                 {
                     pieceToProcess = state;
 
-                    _logger.LogDebug("WebSeed: Piece {PieceIndex} all blocks received ({BlockCount} blocks), starting hash verification", state.Index, state.Blocks.Length);
+                    _logger.LogTrace("WebSeed: Piece {PieceIndex} all blocks received ({BlockCount} blocks), starting hash verification", state.Index, state.Blocks.Length);
                 }
             }
         }
         else
         {
-            _logger.LogDebug("WebSeed: Received block for inactive piece {PieceIndex}", block.PieceIndex);
+            _logger.LogTrace("WebSeed: Received block for inactive piece {PieceIndex}", block.PieceIndex);
         }
 
         if (!stored)

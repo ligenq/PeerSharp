@@ -66,7 +66,7 @@ internal sealed class PieceCompletionHandler
         }
 
         await _torrent.PeersInternal.BroadcastHaveAsync(pieceIndex).ConfigureAwait(false);
-        _logger.LogDebug("Piece {PieceIndex} complete", pieceIndex);
+        _logger.LogTrace("Piece {PieceIndex} complete", pieceIndex);
 
         // Send Suggest messages (BEP 6) to peers who don't have this piece
         foreach (var connectedPeer in _torrent.PeersInternal.GetConnectedPeersInternal())
@@ -74,7 +74,7 @@ internal sealed class PieceCompletionHandler
             if (connectedPeer.RemoteSupportsExtensions && !connectedPeer.PeerPieces.HasPiece(pieceIndex))
             {
                 await connectedPeer.SendSuggestAsync(pieceIndex).ConfigureAwait(false);
-                _logger.LogDebug("Suggested piece {PieceIndex} to {PeerName}", pieceIndex, connectedPeer.Name);
+                _logger.LogTrace("Suggested piece {PieceIndex} to {PeerName}", pieceIndex, connectedPeer.Name);
             }
         }
     }

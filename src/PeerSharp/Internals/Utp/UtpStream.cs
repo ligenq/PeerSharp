@@ -294,7 +294,7 @@ internal class UtpStream : Stream
                         _packetTimeout = Math.Min(_packetTimeout * 2, 10000);
                     }
 
-                    _logger.LogDebug("LEDBAT {Remote}: TIMEOUT - cwnd {OldCwnd:F0}B -> {Cwnd:F0}B, timeoutCount={TimeoutCount}, mss={Mss}, packetTimeout={PacketTimeout}ms",
+                    _logger.LogTrace("LEDBAT {Remote}: TIMEOUT - cwnd {OldCwnd:F0}B -> {Cwnd:F0}B, timeoutCount={TimeoutCount}, mss={Mss}, packetTimeout={PacketTimeout}ms",
                         RemoteEndPoint, oldCwnd, _cwnd, _timeoutCount, _mss, _packetTimeout);
 
                     var resendList = new List<SentPacket>(4);
@@ -570,7 +570,7 @@ internal class UtpStream : Stream
 
             if ((header.Type != MessageType.ST_SYN || _state != UtpState.None) && !IsAckNrValid(header.AckNr))
             {
-                _logger.LogDebug("uTP {Remote}: Invalid ack_nr {AckNr} for seq {SeqNr}", RemoteEndPoint, header.AckNr, _seqNr);
+                _logger.LogTrace("uTP {Remote}: Invalid ack_nr {AckNr} for seq {SeqNr}", RemoteEndPoint, header.AckNr, _seqNr);
                 return;
             }
             // Update timestamps and RTT
@@ -822,7 +822,7 @@ internal class UtpStream : Stream
             _lastDecayTime = now;
             if (Math.Abs(_cwnd - oldCwnd) > 0.001)
             {
-                _logger.LogDebug("LEDBAT {Remote}: Window decay {OldCwnd:F0}B -> {Cwnd:F0}B", RemoteEndPoint, oldCwnd, _cwnd);
+                _logger.LogTrace("LEDBAT {Remote}: Window decay {OldCwnd:F0}B -> {Cwnd:F0}B", RemoteEndPoint, oldCwnd, _cwnd);
             }
         }
     }
@@ -923,7 +923,7 @@ internal class UtpStream : Stream
                         ackedCount++;
                         ackedBytes += pkt.Length;
                         HandleMtuProbeAck(seq, pkt.Length);
-                        _logger.LogDebug("SACK {Remote}: Selectively acked packet {SeqNr}", RemoteEndPoint, seq);
+                        _logger.LogTrace("SACK {Remote}: Selectively acked packet {SeqNr}", RemoteEndPoint, seq);
                     }
 
                     // Safety: if we somehow hit 65k iterations, stop (should be caught by CompareSeq)
@@ -1033,7 +1033,7 @@ internal class UtpStream : Stream
 
                     foreach (var pkt in resendList)
                     {
-                        _logger.LogDebug("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd CUT {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
+                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd CUT {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
                             RemoteEndPoint, oldCwnd, _cwnd, _mss, pkt.SeqNr);
                         ResendPacket(pkt);
                     }
@@ -1428,7 +1428,7 @@ internal class UtpStream : Stream
             buffer[21] = (byte)(extensionLen - 2);
             bitmask[..(extensionLen - 2)].CopyTo(buffer.AsSpan(22));
 
-            _logger.LogDebug("SACK {Remote}: Sending SACK extension with {Count} out-of-order packets, {Len} bytes",
+            _logger.LogTrace("SACK {Remote}: Sending SACK extension with {Count} out-of-order packets, {Len} bytes",
                 RemoteEndPoint, _reorderBufferSeqs.Count, extensionLen - 2);
         }
 
@@ -1613,7 +1613,7 @@ internal class UtpStream : Stream
         double changeRatio = _lastLoggedCwnd > 0 ? Math.Abs(_cwnd - _lastLoggedCwnd) / _lastLoggedCwnd : 1;
         if (changeRatio > 0.25 || (now - _lastCwndLog).TotalSeconds >= 10)
         {
-            _logger.LogDebug("LEDBAT {Remote}: cwnd={Cwnd:F0}B ({CwndKb:F1}KB), delay={Delay}us, baseDelay={BaseDelay}us, rtt={Rtt}ms, slowStart={SlowStart}",
+            _logger.LogTrace("LEDBAT {Remote}: cwnd={Cwnd:F0}B ({CwndKb:F1}KB), delay={Delay}us, baseDelay={BaseDelay}us, rtt={Rtt}ms, slowStart={SlowStart}",
                 RemoteEndPoint, _cwnd, _cwnd / 1024, ourDelay, baseDelay, _rtt, _slowStart);
             _lastLoggedCwnd = _cwnd;
             _lastCwndLog = now;

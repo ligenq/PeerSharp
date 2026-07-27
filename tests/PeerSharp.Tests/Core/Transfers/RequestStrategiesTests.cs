@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
@@ -40,7 +39,6 @@ public class RequestStrategiesTests
             tracker,
             TimeProvider.System,
             _ => 1000,
-            NullLogger.Instance,
             16384);
 
         var pieceState = new PieceState(0, 1); // 1 block
@@ -60,7 +58,6 @@ public class RequestStrategiesTests
             tracker,
             TimeProvider.System,
             _ => 1000,
-            NullLogger.Instance,
             16384);
 
         var pieceState = new PieceState(0, 1);
@@ -87,7 +84,6 @@ public class RequestStrategiesTests
             tracker,
             timeProvider,
             _ => 5000,
-            NullLogger.Instance,
             16384);
 
         var pieceState = new PieceState(0, 1);
@@ -112,7 +108,6 @@ public class RequestStrategiesTests
             tracker,
             timeProvider,
             _ => 1000, // Soft timeout 1s
-            NullLogger.Instance,
             16384);
 
         var pieceState = new PieceState(0, 1);
@@ -129,6 +124,98 @@ public class RequestStrategiesTests
         bool result = strategy.IsBlockRequestable(pieceState, 0, 0, peer2, isPeerFast: true);
 
         Assert.True(result);
+    }
+
+    /// <summary>
+    /// Duplication of a stalled block stops once enough peers owe it.
+    ///
+    /// <para>
+    /// Staleness is measured from the oldest outstanding request, and that age only grows until the
+    /// block arrives - so a block that passes the soft timeout stays past it permanently, and without a
+    /// cap every fast peer keeps qualifying for a copy. A live run duplicated one block 183 times and
+    /// delivered 42,769 blocks that were already held, a tenth of everything downloaded, because the
+    /// cancel sent when the first copy lands cannot overtake data already on the wire.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void StandardStrategy_StopsDuplicating_OnceEnoughPeersOweTheBlock()
+    {
+        var tracker = new BlockRequestTracker();
+        var timeProvider = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var strategy = new StandardBlockRequestStrategy(
+            tracker,
+            timeProvider,
+            _ => 1000,
+            16384);
+
+        var pieceState = new PieceState(0, 1);
+        var original = CreatePeer();
+
+        tracker.AddBlockRequest(0, 0, original, new BlockRequest { Timestamp = timeProvider.GetUtcNow() });
+
+        // Well past the soft timeout, and it stays past it however long we wait.
+        timeProvider.Advance(TimeSpan.FromSeconds(30));
+
+        // The first duplicate is the point of the feature: a second peer may be asked.
+        var second = CreatePeer();
+        Assert.True(strategy.IsBlockRequestable(pieceState, 0, 0, second, isPeerFast: true));
+        tracker.AddBlockRequest(0, 0, second, new BlockRequest { Timestamp = timeProvider.GetUtcNow() });
+
+        // Two peers already owe it, so further fast peers must be refused - previously they were not,
+        // and the request kept being duplicated for as long as the block was outstanding.
+        timeProvider.Advance(TimeSpan.FromSeconds(30));
+        Assert.False(strategy.IsBlockRequestable(pieceState, 0, 0, CreatePeer(), isPeerFast: true));
+        Assert.False(strategy.IsBlockRequestable(pieceState, 0, 0, CreatePeer(), isPeerFast: true));
+    }
+
+    /// <summary>
+    /// The cap tracks what is outstanding, not what has ever been sent: when a duplicate is cancelled or
+    /// times out, another peer becomes eligible again. Otherwise a block whose holders all vanished
+    /// would never be re-requested.
+    /// </summary>
+    [Fact]
+    public void StandardStrategy_AllowsAnotherDuplicate_AfterAnOutstandingOneClears()
+    {
+        var tracker = new BlockRequestTracker();
+        var timeProvider = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var strategy = new StandardBlockRequestStrategy(
+            tracker,
+            timeProvider,
+            _ => 1000,
+            16384);
+
+        var pieceState = new PieceState(0, 1);
+        var first = CreatePeer();
+        var second = CreatePeer();
+
+        tracker.AddBlockRequest(0, 0, first, new BlockRequest { Timestamp = timeProvider.GetUtcNow() });
+        tracker.AddBlockRequest(0, 0, second, new BlockRequest { Timestamp = timeProvider.GetUtcNow() });
+        timeProvider.Advance(TimeSpan.FromSeconds(30));
+
+        Assert.False(strategy.IsBlockRequestable(pieceState, 0, 0, CreatePeer(), isPeerFast: true));
+
+        tracker.RemoveBlockRequest(0, 0, second);
+
+        Assert.True(strategy.IsBlockRequestable(pieceState, 0, 0, CreatePeer(), isPeerFast: true));
+    }
+
+    /// <summary>
+    /// End game is exempt. Broad duplication is the whole strategy there - it runs only when the last
+    /// few blocks are outstanding, where finishing matters more than the wasted copies.
+    /// </summary>
+    [Fact]
+    public void EndGameStrategy_IsNotSubjectToTheDuplicationCap()
+    {
+        var tracker = new BlockRequestTracker();
+        var strategy = new EndGameBlockRequestStrategy(tracker, 16384);
+        var pieceState = new PieceState(0, 1);
+
+        for (int i = 0; i < 5; i++)
+        {
+            tracker.AddBlockRequest(0, 0, CreatePeer(), new BlockRequest());
+        }
+
+        Assert.True(strategy.IsBlockRequestable(pieceState, 0, 0, CreatePeer(), isPeerFast: false));
     }
 
     [Fact]
