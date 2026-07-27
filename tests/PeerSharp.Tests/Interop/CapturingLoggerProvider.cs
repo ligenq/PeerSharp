@@ -18,11 +18,18 @@ internal sealed class CapturingLoggerProvider : ILoggerProvider
 {
     private readonly ConcurrentDictionary<string, Counter> _counts = new();
     private readonly LogLevel _minimum;
+    private int _total;
 
     public CapturingLoggerProvider(LogLevel minimum = LogLevel.Warning)
     {
         _minimum = minimum;
     }
+
+    /// <summary>
+    /// Every message recorded, before collapsing into templates. This is the number a consumer actually
+    /// pays for - it is what gets formatted and written to their log sink.
+    /// </summary>
+    public int Total => Volatile.Read(ref _total);
 
     public ILogger CreateLogger(string categoryName) => new CapturingLogger(this, categoryName, _minimum);
 
@@ -32,6 +39,8 @@ internal sealed class CapturingLoggerProvider : ILoggerProvider
 
     private void Record(string category, LogLevel level, string message, Exception? exception)
     {
+        Interlocked.Increment(ref _total);
+
         // Endpoints and byte counts vary per peer; collapsing them is what turns thousands of lines
         // into a handful of distinct findings.
         string key = $"{level} {ShortCategory(category)}: {Collapse(message)}";
@@ -72,6 +81,26 @@ internal sealed class CapturingLoggerProvider : ILoggerProvider
         }
 
         return collapsed.ToString();
+    }
+
+    /// <summary>
+    /// How many messages were recorded at one level. Lets a run capture everything while still
+    /// measuring what a consumer sees at the level they actually enable.
+    /// </summary>
+    public int CountAtLevel(LogLevel level)
+    {
+        string prefix = level + " ";
+        return _counts
+            .Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal))
+            .Sum(static pair => pair.Value.Count);
+    }
+
+    /// <summary>Total recorded for messages whose collapsed text contains <paramref name="fragment"/>.</summary>
+    public int CountMatching(string fragment)
+    {
+        return _counts
+            .Where(pair => pair.Key.Contains(fragment, StringComparison.Ordinal))
+            .Sum(static pair => pair.Value.Count);
     }
 
     /// <summary>The distinct messages seen, most frequent first.</summary>

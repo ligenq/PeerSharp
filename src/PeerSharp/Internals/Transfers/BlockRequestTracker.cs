@@ -173,4 +173,18 @@ internal sealed class BlockRequestTracker
         }
         return false;
     }
+
+    /// <summary>
+    /// How many peers currently owe us this block.
+    ///
+    /// <para>
+    /// Duplicating a stalled request is worth doing, but only a bounded number of times: every extra
+    /// copy is a block we will most likely receive twice, because the cancel we send when the first one
+    /// lands races the data already on the wire. Callers use this to cap the fan-out.
+    /// </para>
+    /// </summary>
+    public int GetPendingRequestCount(int piece, int offset)
+    {
+        return _blockRequestIndex.TryGetValue((piece, offset), out var list) ? list.Count : 0;
+    }
 }

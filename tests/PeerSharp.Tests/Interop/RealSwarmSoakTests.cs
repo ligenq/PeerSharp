@@ -162,7 +162,7 @@ public class RealSwarmSoakTests
     /// <summary>
     /// Builds an engine with bounded rates and its own scratch directory.
     /// </summary>
-    private static (IClientEngine Engine, string DownloadPath) CreateEngine()
+    private static (IClientEngine Engine, string DownloadPath) CreateEngine(ILoggerProvider? logProvider = null)
     {
         int rate = RateLimitFromEnvironment();
 
@@ -177,7 +177,11 @@ public class RealSwarmSoakTests
         var engine = ClientEngineFactory.Create(new TorrentClientOptions
         {
             Settings = settings,
-            LoggerFactory = NullLoggerFactory.Instance
+            LoggerFactory = logProvider is null
+                ? NullLoggerFactory.Instance
+                : LoggerFactory.Create(builder => builder
+                    .SetMinimumLevel(LogLevel.Trace)
+                    .AddProvider(logProvider))
         });
 
         return (engine, downloadPath);
@@ -628,6 +632,100 @@ public class RealSwarmSoakTests
                 $"{counter.Total:N0} exceptions across {observer.Peers.Count} connections is {perConnection:F1} " +
                 "per connection. That is high enough to suggest a throw sitting on a per-message path rather " +
                 $"than per-connection teardown. Breakdown by throwing method:{counter.BuildReport()}");
+        }
+        finally
+        {
+            await engine.DisposeAsync();
+            CleanUp(downloadPath);
+        }
+    }
+
+    /// <summary>
+    /// How much a consumer's log fills up while a transfer runs.
+    ///
+    /// <para>
+    /// A library decides this on its consumer's behalf: they choose a level, we choose what is worth a
+    /// line at that level. Getting it wrong is not cosmetic. A real run produced 216 MB across 1.44
+    /// million lines in under thirteen minutes - 1,876 a second - which is enough writing and
+    /// formatting to slow an application down on its own, and enough noise to bury anything that
+    /// mattered. Two thirds came from just two messages sitting on per-block paths.
+    /// </para>
+    ///
+    /// <para>
+    /// Debug is the level being measured because that is what a consumer turns on when investigating
+    /// something. Per-packet and per-block detail belongs at Trace, which is the level you opt into
+    /// knowing what you are asking for.
+    /// </para>
+    /// </summary>
+    [Fact(Timeout = 3_600_000)]
+    public async Task Soak_DebugLoggingStaysProportionateToTheWork()
+    {
+        RequireSoakEnabled();
+
+        var duration = DurationFromEnvironment("PEERSHARP_SOAK_SECONDS", TimeSpan.FromMinutes(5));
+        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(5));
+
+        var source = await ResolveTorrentSourceAsync(cts.Token);
+        // Capture everything, but judge the rate on Debug alone - Trace is the level you opt into
+        // knowing it is verbose, and it is also where the duplicate-request measurement below lives.
+        var capture = new CapturingLoggerProvider(LogLevel.Trace);
+        var (engine, downloadPath) = CreateEngine(capture);
+
+        try
+        {
+            await engine.InitializeAsync(cts.Token);
+            var torrent = await AddAndStartAsync(engine, source, cts.Token);
+
+            var observer = await ObserveAsync(torrent, duration, stop: null, cts.Token);
+
+            int debugCount = capture.CountAtLevel(LogLevel.Debug);
+            double perSecond = debugCount / duration.TotalSeconds;
+
+            // Every request sent, and the subset that went to a block someone already owed us. Capping
+            // the fan-out is what keeps the second number small; without a cap a stalled block stayed
+            // eligible forever, because staleness is measured from the oldest outstanding request.
+            int blocksReceived = capture.CountMatching("BlockProcessor: Block received");
+            int duplicateRequests = capture.CountMatching("RequestScheduler: Duplicate request");
+
+            _output.WriteLine($"debug messages     : {debugCount:N0} over {duration.TotalSeconds:F0}s");
+            _output.WriteLine($"rate               : {perSecond:F1} per second");
+            _output.WriteLine($"all levels         : {capture.Total:N0}");
+            _output.WriteLine($"peers seen         : {observer.Peers.Count:N0}");
+            _output.WriteLine($"blocks received    : {blocksReceived:N0}");
+            _output.WriteLine($"duplicate requests : {duplicateRequests:N0}");
+            _output.WriteLine("");
+            _output.WriteLine("most frequent messages at Debug:");
+            foreach (var (message, count) in capture.Summarise(20))
+            {
+                _output.WriteLine($"  {count,8:N0}  {message}");
+            }
+
+            var reportPath = Environment.GetEnvironmentVariable("PEERSHARP_SOAK_REPORT");
+            if (!string.IsNullOrWhiteSpace(reportPath))
+            {
+                var top = capture.Summarise(200);
+                await File.WriteAllTextAsync(
+                    reportPath,
+                    $"debug {debugCount:N0} over {duration.TotalSeconds:F0}s = {perSecond:F1}/s across " +
+                    $"{observer.Peers.Count} peers; blocks={blocksReceived:N0} dupRequests={duplicateRequests:N0}" +
+                    Environment.NewLine +
+                    string.Join(
+                        Environment.NewLine,
+                        top.Select(static e => $"{e.Count,8:N0}  {e.Message}")),
+                    CancellationToken.None);
+            }
+
+            Assert.True(observer.Peers.Count > 0, "No peers were reached, so nothing was exercised.");
+
+            // Deliberately generous - this is a tripwire for a line that has been put on a per-block or
+            // per-packet path, which shows up in the hundreds per second, not a style guide.
+            Assert.True(
+                perSecond < 100,
+                $"Debug logging ran at {perSecond:F0} messages per second. That is high enough to suggest a " +
+                $"message sitting on a per-block or per-packet path. Most frequent:{Environment.NewLine}" +
+                string.Join(
+                    Environment.NewLine,
+                    capture.Summarise(10).Select(static entry => $"  {entry.Count,8:N0}  {entry.Message}")));
         }
         finally
         {

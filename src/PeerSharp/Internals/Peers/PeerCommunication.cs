@@ -1837,7 +1837,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 break;
 
             case MessageId.Reject:
-                _logger.LogDebug("{PeerName} REJECTED request {PieceIndex}:{BlockOffset}", Name, msg.PieceIndex, msg.BlockOffset);
+                _logger.LogTrace("{PeerName} REJECTED request {PieceIndex}:{BlockOffset}", Name, msg.PieceIndex, msg.BlockOffset);
                 await SafeNotifyListenerAsync(msg).ConfigureAwait(false);
                 break;
 
