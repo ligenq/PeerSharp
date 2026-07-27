@@ -116,9 +116,7 @@ public class WebSeedManagerErrorTests
         // Wait for all 3 requests, advancing time to resolve delays
         await WaitForRequestCount(mockHttp, 3, timeProvider);
 
-        // Allow tasks to settle
-        await Task.Delay(100);
-
+        // No settle needed: WaitForRequestCount above already establishes the condition asserted here.
         Assert.True(mockHttp.RequestedUrls.Count >= 3, $"Expected 3 requests but got {mockHttp.RequestedUrls.Count}");
 
         // After 3 failures, FailureCount == MaxRetries so IsAvailable checks time.
@@ -148,8 +146,10 @@ public class WebSeedManagerErrorTests
         await WaitForRequestCount(mockHttp, 1, timeProvider);
         Assert.True(mockHttp.RequestedUrls.Count >= 1, $"Expected at least 1 request but got {mockHttp.RequestedUrls.Count}");
 
-        // Allow the download task and ContinueWith to complete
-        await Task.Delay(100);
+        // Wait for the state being asserted rather than a fixed moment: the download task and its
+        // continuation have to finish first, and how long that takes is the runner's business.
+        await TorrentTestUtility.WaitUntilAsync(
+            () => manager.GetStats().TotalSources == 1, 10000, "the web seed to be registered");
 
         var stats = manager.GetStats();
         Assert.Equal(1, stats.TotalSources);
@@ -184,7 +184,12 @@ public class WebSeedManagerErrorTests
             timeProvider.Advance(TimeSpan.FromSeconds(1));
             await Task.Delay(20);
         }
-        await Task.Delay(50);
+        // Wait for the condition being asserted rather than a fixed settle: seed1 is expected to have
+        // been tried exactly MaxRetries times before it was taken out of service.
+        await TorrentTestUtility.WaitUntilAsync(
+            () => mockHttp.RequestedUrls.Count(u => u.Contains("seed1.com")) >= 3,
+            10000,
+            "seed1 to be exhausted");
 
         var seed1Requests = mockHttp.RequestedUrls.Count(u => u.Contains("seed1.com"));
         var seed2Requests = mockHttp.RequestedUrls.Count(u => u.Contains("seed2.com"));

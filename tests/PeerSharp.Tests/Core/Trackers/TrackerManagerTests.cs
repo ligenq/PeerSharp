@@ -370,7 +370,7 @@ public class TrackerManagerTests
             // The drain runs on the injected clock, so nothing but the clock can release it. Stepping
             // past the deadline is what proves the bound exists - a stopwatch would only have proved
             // the machine was not busy at that moment.
-            await AdvanceUntilCompleteAsync(stop, TimeSpan.FromSeconds(5));
+            await TorrentTestUtility.AdvanceUntilCompleteAsync(_timeProvider, stop, TimeSpan.FromSeconds(5));
 
             Assert.Equal(TrackerEvent.Stopped, tracker.LastEvent);
         }
@@ -380,26 +380,7 @@ public class TrackerManagerTests
         }
     }
 
-    /// <summary>
-    /// Steps the fake clock forward until <paramref name="task"/> completes, giving continuations real
-    /// time to run in between. The announce being drained never completes on its own, so without the
-    /// advance the wait would never expire.
-    /// </summary>
-    private async Task AdvanceUntilCompleteAsync(Task task, TimeSpan step)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(20);
-        while (!task.IsCompleted && DateTime.UtcNow < deadline)
-        {
-            _timeProvider.Advance(step);
 
-            for (int i = 0; i < 20 && !task.IsCompleted; i++)
-            {
-                await Task.Delay(10);
-            }
-        }
-
-        await task.WaitAsync(TimeSpan.FromSeconds(5));
-    }
 
     [Fact(Timeout = 30000)]
     public async Task StopAsync_AwaitsRemovedTrackersPendingStoppedAnnounce()
@@ -472,7 +453,7 @@ public class TrackerManagerTests
         Assert.False(stop.IsCompleted, "StopAsync returned before the Stopped announce had even begun.");
 
         // Nothing but the clock should release it, so stepping past the deadline is what completes it.
-        await AdvanceUntilCompleteAsync(stop, TimeSpan.FromSeconds(5));
+        await TorrentTestUtility.AdvanceUntilCompleteAsync(_timeProvider, stop, TimeSpan.FromSeconds(5));
     }
 
     [Fact(Timeout = 30000)]

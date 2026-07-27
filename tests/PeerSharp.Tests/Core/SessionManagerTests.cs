@@ -49,7 +49,8 @@ public class SessionManagerTests
         // Nothing is written before the first interval elapses.
         Assert.Empty(_persistence.SavedEntries);
 
-        await AdvanceUntilAsync(
+        await TorrentTestUtility.AdvanceUntilAsync(
+            _timeProvider,
             () => _persistence.SavedEntries.Count > 0,
             TimeSpan.FromSeconds(intervalSeconds + 1),
             "the auto-save loop to write resume data");
@@ -58,32 +59,7 @@ public class SessionManagerTests
         Assert.Equal(torrent.Hash, _persistence.SavedEntries[0].Hash);
     }
 
-    /// <summary>
-    /// Advances the fake clock in <paramref name="step"/> increments until <paramref name="condition"/>
-    /// holds, giving the loop's continuation real time to run between advances.
-    /// </summary>
-    private async Task AdvanceUntilAsync(Func<bool> condition, TimeSpan step, string because)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(20);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (condition())
-            {
-                return;
-            }
 
-            _timeProvider.Advance(step);
-
-            // Poll rather than sleeping a fixed amount: this returns as soon as the continuation has
-            // run, instead of always paying the worst case.
-            for (int i = 0; i < 20 && !condition(); i++)
-            {
-                await Task.Delay(10);
-            }
-        }
-
-        Assert.Fail($"Timed out waiting for {because}.");
-    }
 
     [Fact]
     public async Task SaveTorrentEntryAsync_CorrectlyMapsTorrentState()

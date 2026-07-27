@@ -562,8 +562,13 @@ public class DhtManagerTests
         }
 
         // Advance time by 15 seconds to trigger maintenance
-        _timeProvider.Advance(TimeSpan.FromSeconds(16));
-        await Task.Delay(100); // Let maintenance run
+        // Advance until maintenance has actually run, rather than waiting a fixed moment for it.
+        // Maintenance only prunes, so running it more than once changes nothing.
+        await TorrentTestUtility.AdvanceUntilAsync(
+            _timeProvider,
+            () => (int)txDictType.GetProperty("Count")!.GetValue(txDict)! == 0,
+            TimeSpan.FromSeconds(16),
+            "expired transactions to be pruned");
 
         var count = (int)txDictType.GetProperty("Count")!.GetValue(txDict)!;
         Assert.Equal(0, count);
@@ -633,8 +638,11 @@ public class DhtManagerTests
         }
 
         // Trigger maintenance
-        _timeProvider.Advance(TimeSpan.FromSeconds(16));
-        await Task.Delay(100);
+        await TorrentTestUtility.AdvanceUntilAsync(
+            _timeProvider,
+            () => (int)peersType.GetProperty("Count")!.GetValue(peers)! == 0,
+            TimeSpan.FromSeconds(16),
+            "expired peers to be pruned");
 
         count = (int)peersType.GetProperty("Count")!.GetValue(peers)!;
         Assert.Equal(0, count);
@@ -659,8 +667,11 @@ public class DhtManagerTests
         addMethod.Invoke(recent, ["fresh-key-1", _timeProvider.GetUtcNow()]);
 
         // Trigger maintenance
-        _timeProvider.Advance(TimeSpan.FromSeconds(16));
-        await Task.Delay(100);
+        await TorrentTestUtility.AdvanceUntilAsync(
+            _timeProvider,
+            () => (int)recentType.GetProperty("Count")!.GetValue(recent)! == 1,
+            TimeSpan.FromSeconds(16),
+            "the stale entry to be pruned");
 
         var count = (int)recentType.GetProperty("Count")!.GetValue(recent)!;
         // Old entry cleaned, fresh entry kept
@@ -691,8 +702,11 @@ public class DhtManagerTests
         Assert.Equal(10001, countBefore);
 
         // Trigger maintenance — hard cap (>10000) path fires
-        _timeProvider.Advance(TimeSpan.FromSeconds(16));
-        await Task.Delay(200);
+        await TorrentTestUtility.AdvanceUntilAsync(
+            _timeProvider,
+            () => (int)recentType.GetProperty("Count")!.GetValue(recent)! < countBefore,
+            TimeSpan.FromSeconds(16),
+            "the hard cap to prune entries");
 
         var countAfter = (int)recentType.GetProperty("Count")!.GetValue(recent)!;
         Assert.True(countAfter < countBefore, $"Expected entries to be pruned, got {countAfter}");

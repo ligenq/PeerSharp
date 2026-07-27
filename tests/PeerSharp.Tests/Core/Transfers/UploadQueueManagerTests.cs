@@ -106,6 +106,11 @@ public class UploadQueueManagerTests
         manager.Cancel(peer, 1, 0); // cancel while pump is blocked on item 0
         gate.SetResult();
 
+        // Two claims in one assertion. Wait for the part that must happen, because how quickly the
+        // pump gets there is the runner's business; keep the settle for the part that must not,
+        // because only elapsed time can establish that something has not occurred.
+        await TorrentTestUtility.WaitUntilAsync(
+            () => executed.Count >= 1, 10000, "the pump to execute the first item");
         await Task.Delay(200);
 
         Assert.Equal([0], executed);
@@ -135,6 +140,11 @@ public class UploadQueueManagerTests
         manager.Cancel(peer, 1, 0);
         gate.SetResult();
 
+        // Two claims in one assertion. Wait for the part that must happen, because how quickly the
+        // pump gets there is the runner's business; keep the settle for the part that must not,
+        // because only elapsed time can establish that something has not occurred.
+        await TorrentTestUtility.WaitUntilAsync(
+            () => executed.Count >= 1, 10000, "the pump to execute the first item");
         await Task.Delay(200);
         Assert.Equal([0], executed);
     }
@@ -223,6 +233,11 @@ public class UploadQueueManagerTests
         manager.RemovePeer(peer); // cancels peer's CTS — pump will stop after current item
         gate.SetResult();          // unblock current execute
 
+        // Two claims in one assertion. Wait for the part that must happen, because how quickly the
+        // pump gets there is the runner's business; keep the settle for the part that must not,
+        // because only elapsed time can establish that something has not occurred.
+        await TorrentTestUtility.WaitUntilAsync(
+            () => executed.Count >= 1, 10000, "the pump to execute the first item");
         await Task.Delay(200);
 
         // Item 0 was already executing when RemovePeer was called; item 1 was not started

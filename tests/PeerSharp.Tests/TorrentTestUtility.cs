@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
@@ -31,6 +32,71 @@ internal static class TorrentTestUtility
         }
 
         Assert.Fail($"Timed out after {timeoutMs}ms waiting for condition{(because == null ? "" : $": {because}")}");
+    }
+
+    /// <summary>
+    /// Steps a <see cref="FakeTimeProvider"/> forward until <paramref name="condition"/> holds.
+    ///
+    /// <para>
+    /// Advancing a fake clock once and then sleeping a fixed amount of real time loses two ways, and
+    /// both have failed in CI. If the code under test has not yet reached its <c>Task.Delay</c>, the
+    /// advance moves the clock past a deadline that does not exist yet and the tick is lost entirely -
+    /// no subsequent wait can recover it. And if it has, the continuation still has to be picked up off
+    /// the thread pool, which on a loaded runner takes longer than a short sleep allows.
+    /// </para>
+    ///
+    /// <para>
+    /// Advancing repeatedly and re-checking covers both: a lost tick is caught by the next advance, a
+    /// late continuation by the next poll. Use this instead of <c>Advance</c> followed by
+    /// <c>Task.Delay</c> whenever the thing being waited for is driven by the fake clock.
+    /// </para>
+    /// </summary>
+    /// <param name="timeProvider">The clock to step.</param>
+    /// <param name="condition">What is being waited for.</param>
+    /// <param name="step">How far to move the clock each round.</param>
+    /// <param name="because">Described in the failure message.</param>
+    /// <param name="timeoutMs">Real-time budget before giving up.</param>
+    public static async Task AdvanceUntilAsync(
+        FakeTimeProvider timeProvider,
+        Func<bool> condition,
+        TimeSpan step,
+        string? because = null,
+        int timeoutMs = 20000)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            timeProvider.Advance(step);
+
+            // Poll rather than sleeping a fixed amount, so this returns as soon as the continuation has
+            // run instead of always paying the worst case.
+            for (int i = 0; i < 20 && !condition(); i++)
+            {
+                await Task.Delay(10);
+            }
+        }
+
+        Assert.Fail($"Timed out after {timeoutMs}ms advancing the clock{(because == null ? "" : $" waiting for {because}")}.");
+    }
+
+    /// <summary>
+    /// Steps a <see cref="FakeTimeProvider"/> forward until <paramref name="task"/> completes, for the
+    /// common case where the thing being waited for is a task rather than a predicate.
+    /// </summary>
+    public static async Task AdvanceUntilCompleteAsync(
+        FakeTimeProvider timeProvider,
+        Task task,
+        TimeSpan step,
+        string? because = null,
+        int timeoutMs = 20000)
+    {
+        await AdvanceUntilAsync(timeProvider, () => task.IsCompleted, step, because, timeoutMs);
+        await task;
     }
 
     internal class MockBandwidthManager : IBandwidthManager
