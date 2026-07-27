@@ -783,7 +783,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             // Connection timeout (not explicit cancellation via CloseAsync()) - expected in BitTorrent
             int elapsedMs = GetConnectionElapsedMs();
-            _logger.LogDebug(ex, "Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms", ip, port, elapsedMs);
+            _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, ex.GetType().Name);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
@@ -791,28 +791,28 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             // OS-level connection timeout (timeoutMs > OS timeout)
             int elapsedMs = GetConnectionElapsedMs();
-            _logger.LogDebug(ex, "Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms", ip, port, elapsedMs);
+            _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, ex.GetType().Name);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (OperationCanceledException ex)
         {
             // Explicit cancellation via CloseAsync()
-            _logger.LogDebug(ex, "Connect cancelled {Ip}:{Port}", ip, port);
+            _logger.LogDebug("Connect cancelled {Ip}:{Port}", ip, port);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (SocketException ex)
         {
             // Expected network errors - log without stack trace at Debug level
-            _logger.LogDebug(ex, "Connect failed {Ip}:{Port} - {Message}", ip, port, ex.Message);
+            _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, ex.Message);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (IOException ex) when (ex.InnerException is SocketException)
         {
             // Expected network errors wrapped in IOException - log without stack trace
-            _logger.LogDebug(ex, "Connect failed {Ip}:{Port} - {Message}", ip, port, ex.InnerException.Message);
+            _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, ex.InnerException.Message);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
@@ -1566,7 +1566,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
         catch (IOException ex)
         {
-            _logger.LogDebug(ex, "Incoming handshake I/O error for {PeerName}", Name);
+            _logger.LogDebug("Incoming handshake I/O error for {PeerName} - {Message}", Name, ex.Message);
             await CloseAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1596,7 +1596,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
         catch (IOException ex)
         {
-            _logger.LogDebug(ex, "Outgoing connected handshake I/O error for {PeerName}", Name);
+            _logger.LogDebug("Outgoing connected handshake I/O error for {PeerName} - {Message}", Name, ex.Message);
             await CloseAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1641,7 +1641,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
                 catch (OperationCanceledException ex)
                 {
-                    _logger.LogDebug(ex, "Encryption handshake timeout for {PeerName}", Name);
+                    _logger.LogDebug("Encryption handshake timeout for {PeerName}", Name);
                     return EncryptionHandshakeResult.Failed;
                 }
 
@@ -1716,12 +1716,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // pairs in two minutes, roughly 3% of all connection attempts.
         catch (SocketException ex)
         {
-            _logger.LogDebug(ex, "Encryption handshake failed for {PeerName} - {Message}", Name, ex.Message);
+            _logger.LogDebug("Encryption handshake failed for {PeerName} - {Message}", Name, ex.Message);
             return EncryptionHandshakeResult.ConnectionClosed;
         }
         catch (IOException ex)
         {
-            _logger.LogDebug(ex, "Encryption handshake I/O failure for {PeerName} - {Message}", Name, ex.Message);
+            _logger.LogDebug("Encryption handshake I/O failure for {PeerName} - {Message}", Name, ex.Message);
             return EncryptionHandshakeResult.ConnectionClosed;
         }
         catch (ObjectDisposedException ex)
