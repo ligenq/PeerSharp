@@ -69,6 +69,26 @@ public class LocalSwarmTests : IDisposable
         var downloadedInfo = leecherTorrent.GetFileInfo(0);
         byte[] downloadedData = await ReadAllBytesSharedAsync(Path.Combine(_pathB, downloadedInfo.Path));
         Assert.Equal(dummyData, downloadedData);
+
+        // Stated from the seeder's side as well, not just inferred from the leecher finishing. A real
+        // run raised the alarm that no peer ever received a byte from us, and the serving path had no
+        // assertion of its own to answer it with - the data arriving was only ever implied.
+        var servedPeers = seedTorrent.Peers.GetConnectedPeers();
+        Assert.True(
+            servedPeers.Sum(static peer => peer.Uploaded) >= dummyData.Length,
+            "The seeder finished the transfer without recording the bytes it served. Either the upload " +
+            "accounting is wrong or the leecher was fed by something other than this peer. Peers: " +
+            string.Join(
+                ", ",
+                servedPeers.Select(static peer => $"{peer.EndPoint} up={peer.Uploaded} down={peer.Downloaded}")));
+
+        // The leecher reported what it held, so a consumer can tell it apart from one that said nothing.
+        Assert.All(
+            leecherTorrent.Peers.GetConnectedPeers(),
+            peer => Assert.True(
+                peer.HasReportedPieces,
+                $"Peer {peer.EndPoint} completed a transfer without ever reporting its pieces, which " +
+                "leaves consumers unable to distinguish it from a peer that holds nothing."));
     }
 
     [Fact(Timeout = 30000)]

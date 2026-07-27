@@ -18,7 +18,10 @@ namespace PeerSharp.Core;
 /// <param name="PeerInterested">Whether the peer is interested in the local client.</param>
 /// <param name="IsUtp">Whether the connection is using uTP (UDP) or TCP.</param>
 /// <param name="IsEncrypted">Whether the connection is encrypted.</param>
-/// <param name="Progress">The peer's download progress (0.0 to 1.0).</param>
+/// <param name="Progress">
+/// The peer's download progress (0.0 to 1.0). Only meaningful when <see cref="PeerInfo.HasReportedPieces"/>
+/// is true; a peer that has not said what it holds also reports zero.
+/// </param>
 /// <param name="RttMs">The estimated round-trip time (RTT) to the peer in milliseconds.</param>
 public sealed record PeerInfo(
     IPEndPoint EndPoint,
@@ -35,5 +38,23 @@ public sealed record PeerInfo(
     bool IsUtp = false,
     bool IsEncrypted = false,
     float Progress = 0,
-    int RttMs = 0);
+    int RttMs = 0)
+{
+    /// <summary>
+    /// Whether the peer has told us which pieces it holds, by bitfield, have, have-all or have-none.
+    ///
+    /// <para>
+    /// Read this before drawing a conclusion from <see cref="Progress"/>. A peer that has said nothing
+    /// and a peer that holds nothing both report zero, and they mean opposite things: the second wants
+    /// everything we have, the first tells us nothing at all. Most connections on a busy swarm end
+    /// before the peer gets round to saying anything.
+    /// </para>
+    ///
+    /// <para>
+    /// An init-only property rather than a positional parameter, so that adding it does not change the
+    /// primary constructor or <c>Deconstruct</c> and break already-compiled consumers.
+    /// </para>
+    /// </summary>
+    public bool HasReportedPieces { get; init; }
+}
 

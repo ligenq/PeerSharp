@@ -691,7 +691,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 peer.UtpStream != null,
                 peer.Stream is EncryptedStream,
                 peer.PeerPieces.ReceivedCount / (float)Math.Max(1, _torrent.Pieces.Count),
-                peer.SmoothedRttMs));
+                peer.SmoothedRttMs)
+            {
+                HasReportedPieces = peer.HasReportedPieces
+            });
         }
         return result.AsReadOnly();
     }

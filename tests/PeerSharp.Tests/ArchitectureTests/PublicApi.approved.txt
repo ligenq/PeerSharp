@@ -350,6 +350,7 @@ sealed class PeerSharp.Core.PeerInfo
     Boolean AmInterested { get; init; }
     Boolean Equals(Object obj)
     Boolean Equals(PeerSharp.Core.PeerInfo other)
+    Boolean HasReportedPieces { get; init; }
     Boolean IsEncrypted { get; init; }
     Boolean IsUtp { get; init; }
     Boolean PeerChoking { get; init; }
