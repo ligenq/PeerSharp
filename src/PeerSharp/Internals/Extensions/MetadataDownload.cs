@@ -505,12 +505,15 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             return null;
         }
 
-        if (_activePeers.Count == 1)
+        // Prefer a peer that has declared a metadata size, for the same reason the redundant requests
+        // do: a peer that speaks the extension but holds nothing can never answer.
+        var candidates = EligibleMetadataPeers(exclude: null);
+        if (candidates.Count == 0)
         {
-            return _activePeers[0];
+            return _activePeers[Random.Shared.Next(_activePeers.Count)];
         }
 
-        return _activePeers[Random.Shared.Next(_activePeers.Count)];
+        return candidates[Random.Shared.Next(candidates.Count)];
     }
 
     private void FillMissingRequests(IPeerCommunication? preferredPeer = null)
@@ -627,28 +630,59 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     /// </summary>
     private void AskAdditionalPeers(int pieceIndex, IPeerCommunication alreadyAsked)
     {
-        int sent = 0;
+        var candidates = EligibleMetadataPeers(alreadyAsked);
+        if (candidates.Count == 0)
+        {
+            return;
+        }
+
+        // Draw without replacement rather than walking the list. Taking the first matches sends every
+        // round to the same two peers, so if those are silent the redundancy buys nothing at all -
+        // which is the mistake this replaces, and the same one that made GetAlternatePeer ping-pong.
+        int wanted = Math.Min(MetadataRequestRedundancy - 1, candidates.Count);
+        for (int i = 0; i < wanted; i++)
+        {
+            int pick = Random.Shared.Next(i, candidates.Count);
+            (candidates[i], candidates[pick]) = (candidates[pick], candidates[i]);
+            candidates[i].UtMetadata.SendRequest(pieceIndex);
+        }
+
+        _logger.LogDebug(
+            "Also asked {Count} other peer(s) for metadata piece {PieceIndex}", wanted, pieceIndex);
+    }
+
+    /// <summary>
+    /// Peers worth asking, preferring those that told us how large the metadata is.
+    ///
+    /// <para>
+    /// Advertising ut_metadata only says a peer speaks the extension; the size in its handshake is what
+    /// says it actually holds the data. Asking a peer that has none is a request that can never be
+    /// answered, and a magnet has nothing else to do meanwhile. libtorrent gates its requests on the
+    /// same signal, relaxing it on a timer so a peer is not written off forever - hence the fallback
+    /// here to anyone at all when nobody has declared a size.
+    /// </para>
+    /// </summary>
+    private List<IPeerCommunication> EligibleMetadataPeers(IPeerCommunication? exclude)
+    {
+        var withMetadata = new List<IPeerCommunication>();
+        var anySpeaker = new List<IPeerCommunication>();
+
         foreach (var candidate in _activePeers)
         {
-            if (sent >= MetadataRequestRedundancy - 1)
-            {
-                break;
-            }
-
-            if (candidate == alreadyAsked || candidate.UtMetadata.RemoteMessageId == null)
+            if (candidate == exclude || candidate.UtMetadata.RemoteMessageId == null)
             {
                 continue;
             }
 
-            candidate.UtMetadata.SendRequest(pieceIndex);
-            sent++;
+            anySpeaker.Add(candidate);
+
+            if (candidate.RemoteExtensions?.MetadataSize is > 0)
+            {
+                withMetadata.Add(candidate);
+            }
         }
 
-        if (sent > 0)
-        {
-            _logger.LogDebug(
-                "Also asked {Count} other peer(s) for metadata piece {PieceIndex}", sent, pieceIndex);
-        }
+        return withMetadata.Count > 0 ? withMetadata : anySpeaker;
     }
 
     private IPeerCommunication? GetAlternatePeer(IPeerCommunication? current)

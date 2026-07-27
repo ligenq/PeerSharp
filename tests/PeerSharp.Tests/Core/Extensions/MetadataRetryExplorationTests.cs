@@ -158,6 +158,113 @@ public class MetadataRetryExplorationTests
     }
 
     /// <summary>
+    /// The redundant requests must spread out too, not always land on the same neighbours.
+    ///
+    /// <para>
+    /// Taking the first entries that are not the peer just asked sends every round to the same two, so
+    /// if those are silent the redundancy buys nothing - the same mistake that made the alternate-peer
+    /// choice ping-pong, reintroduced in the code that was meant to fix it.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void RedundantRequestsDoNotAlwaysGoToTheSamePeers()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 1;
+
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        var peers = Enumerable.Range(0, 12).Select(_ => MakePeer()).ToList();
+        foreach (var peer in peers)
+        {
+            InjectActivePeer(download, peer);
+        }
+
+        download.InitializeMetadataBuffer(PieceSize);
+
+        for (int round = 0; round < 20; round++)
+        {
+            var holder = PendingPeer(download, piece: 0) ?? peers[0];
+            StalePendingRequest(download, piece: 0, peer: holder);
+            download.Update();
+        }
+
+        // Coverage alone does not show this, because the tracked peer is already chosen at random and
+        // drags a few others in with it. The skew does: walking the list in order sends nearly every
+        // redundant request to whichever peers sit at the front of it.
+        var counts = peers
+            .Select(p => ((MockUtMetadata)p.UtMetadata).RequestedPieces.Count)
+            .OrderByDescending(n => n)
+            .ToList();
+
+        int total = counts.Sum();
+        int topTwo = counts[0] + counts[1];
+
+        Assert.True(
+            total > 0 && topTwo < total / 2,
+            $"The two most-asked peers took {topTwo} of {total} requests. Walking the list in order sends " +
+            "every redundant request to the same neighbours, so silent peers at the front are asked over " +
+            $"and over while the rest of the pool is barely tried. Distribution: {string.Join(",", counts)}");
+    }
+
+    /// <summary>
+    /// A peer that speaks ut_metadata but has not said how large the metadata is cannot answer, so it
+    /// should not be chosen while peers that declared a size are available.
+    /// </summary>
+    [Fact]
+    public void PeersThatActuallyHoldTheMetadataArePreferred()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 1;
+
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        // Ten that only speak the extension, two that hold the data.
+        var empty = Enumerable.Range(0, 10).Select(_ => MakePeer(metadataSize: null)).ToList();
+        var holders = Enumerable.Range(0, 2).Select(_ => MakePeer()).ToList();
+        foreach (var peer in empty.Concat(holders))
+        {
+            InjectActivePeer(download, peer);
+        }
+
+        download.InitializeMetadataBuffer(PieceSize);
+
+        int askedHolders = holders.Count(p => ((MockUtMetadata)p.UtMetadata).RequestedPieces.Count > 0);
+        int askedEmpty = empty.Count(p => ((MockUtMetadata)p.UtMetadata).RequestedPieces.Count > 0);
+
+        Assert.True(
+            askedHolders > 0 && askedEmpty == 0,
+            $"Asked {askedEmpty} peer(s) holding no metadata and {askedHolders} that do. A peer that has " +
+            "not declared a size cannot answer, and a magnet has nothing else to wait on.");
+    }
+
+    /// <summary>
+    /// When nobody has declared a size there is still nothing to lose by asking, so the preference must
+    /// not become a refusal - that would stall a magnet whose peers simply never sent the field.
+    /// </summary>
+    [Fact]
+    public void PeersAreStillAskedWhenNobodyDeclaredASize()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 1;
+
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        var peers = Enumerable.Range(0, 4).Select(_ => MakePeer(metadataSize: null)).ToList();
+        foreach (var peer in peers)
+        {
+            InjectActivePeer(download, peer);
+        }
+
+        download.InitializeMetadataBuffer(PieceSize);
+
+        Assert.Contains(peers, p => ((MockUtMetadata)p.UtMetadata).RequestedPieces.Contains(0));
+    }
+
+    /// <summary>
     /// The single-peer case must still retry that peer, or a torrent with one metadata source stalls
     /// permanently rather than merely slowly.
     /// </summary>
@@ -182,12 +289,12 @@ public class MetadataRetryExplorationTests
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    private static MockPeerCommunication MakePeer()
+    private static MockPeerCommunication MakePeer(int? metadataSize = PieceSize)
     {
         var peer = new MockPeerCommunication
         {
             RemoteSupportsExtensions = true,
-            RemoteExtensions = new ExtensionHandshake { MetadataSize = PieceSize },
+            RemoteExtensions = new ExtensionHandshake { MetadataSize = metadataSize },
             UtMetadata = new MockUtMetadata { RemoteMessageId = 1 },
             PeerId = [.. Guid.NewGuid().ToByteArray(), .. new byte[4]],
         };
