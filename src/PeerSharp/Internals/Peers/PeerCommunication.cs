@@ -239,6 +239,20 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private int _peerInterested;
     private byte[]? _plaintextBuffer;
     private byte[] _preReadHandshake = [];
+
+    /// <summary>
+    /// Bytes that arrived after the handshake but were pulled off the socket along with it.
+    ///
+    /// <para>
+    /// Peers routinely send their handshake and the messages that follow in one segment, so reading a
+    /// fixed 68 bytes tends to take the start of the next message too. These are kept separate from
+    /// <see cref="_preReadHandshake"/>, which holds the handshake itself: both used to live in that one
+    /// field, so <see cref="SetHandshakeReceivedAsync"/> overwrote these moments after they were saved.
+    /// The message stream then began mid-message, which is why the first decode on an otherwise healthy
+    /// encrypted connection failed with a negative length.
+    /// </para>
+    /// </summary>
+    private byte[] _bufferedAfterHandshake = [];
     private int _receiveLoopState = 0;
 
     // These tasks are awaited during Close() to ensure proper cleanup
@@ -571,11 +585,19 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         bool wasConnected = Interlocked.Exchange(ref _connected, 0) == 1;
 
-        // Capturing a stack trace is expensive; only pay for it when Debug logging is actually on
-        if (wasConnected && _logger.IsEnabled(LogLevel.Debug))
+        // Who called CloseAsync is a question for someone debugging a specific teardown, so it is gated
+        // on Trace rather than Debug. Debug is the level a consumer turns on to investigate something,
+        // which made this fire exactly when it hurt most: closing connections is the most common event
+        // on a public swarm, and at roughly thirty frames apiece these traces were 4,848 of the 8,872
+        // lines in a ninety-second log. Walking the stack is not free either, and it ran on every close.
+        if (wasConnected && _logger.IsEnabled(LogLevel.Trace))
         {
             var stack = new StackTrace();
-            _logger.LogDebug("Closing connection to {PeerName}. wasConnected=true. Trace: {Trace}", Name, stack.ToString());
+            _logger.LogTrace("Closing connection to {PeerName}. wasConnected=true. Trace: {Trace}", Name, stack.ToString());
+        }
+        else if (wasConnected)
+        {
+            _logger.LogDebug("Closing connection to {PeerName}", Name);
         }
 
         await CleanupResourcesAsync().ConfigureAwait(false);
@@ -1525,6 +1547,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 int toCopy = Math.Min(_plaintextBuffer.Length, 68);
                 Array.Copy(_plaintextBuffer, 0, hBuffer, 0, toCopy);
                 read = toCopy;
+
+                // Anything past the handshake belongs to the message stream. Dropping it here left the
+                // receive loop starting mid-message.
+                if (_plaintextBuffer.Length > 68)
+                {
+                    _bufferedAfterHandshake = _plaintextBuffer.AsSpan(68).ToArray();
+                }
                 _plaintextBuffer = null;
             }
 
@@ -1973,7 +2002,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
                 if (_plaintextBuffer.Length > 68)
                 {
-                    _preReadHandshake = _plaintextBuffer.AsSpan(68).ToArray();
+                    _bufferedAfterHandshake = _plaintextBuffer.AsSpan(68).ToArray();
                 }
                 _plaintextBuffer = null;
             }
@@ -2050,7 +2079,19 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
-        var pipeReader = PipeReader.Create(Stream);
+        // Anything read off the socket along with the handshake has to be seen before the socket itself,
+        // or the message stream starts part way through a message.
+        // Anything read off the socket along with the handshake has to be seen before the socket itself,
+        // or the message stream starts part way through a message.
+        var source = _bufferedAfterHandshake.Length > 0
+            ? new PrefixedStream(_bufferedAfterHandshake, Stream, leaveInnerOpen: true)
+            : Stream;
+        _bufferedAfterHandshake = [];
+
+        // leaveOpen: the connection stream is owned by CleanupResourcesAsync, which disposes it to close
+        // the connection. Letting the reader dispose it as well was harmless only because that path
+        // already tolerated a double dispose.
+        var pipeReader = PipeReader.Create(source, new StreamPipeReaderOptions(leaveOpen: true));
         bool handshakeReceived = _handshakePreRead;
 
         try
