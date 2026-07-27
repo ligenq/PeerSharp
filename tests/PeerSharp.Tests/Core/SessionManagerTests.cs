@@ -19,38 +19,70 @@ public class SessionManagerTests
         _sessionManager = new SessionManager(_persistence, _registry, _timeProvider, NullLogger<SessionManager>.Instance);
     }
 
-    [Fact]
+    /// <summary>
+    /// The auto-save loop wakes on its interval and writes resume data.
+    ///
+    /// <para>
+    /// Two races make this awkward to observe, and waiting a fixed moment of real time loses to both.
+    /// The loop is started as a task, so advancing the fake clock before it reaches its
+    /// <c>Task.Delay</c> registers nothing and that tick is simply missed - no amount of subsequent
+    /// waiting would produce a save. And once the timer does fire, the continuation still has to be
+    /// picked up off the thread pool, which on a loaded CI machine takes longer than the fifty
+    /// milliseconds this used to allow. It failed in CI for the second reason.
+    /// </para>
+    ///
+    /// <para>
+    /// Advancing repeatedly until the save appears covers both: a missed tick is caught by the next
+    /// advance, and a late continuation by the next poll. Repeats are harmless here because the double
+    /// keys entries by hash, so saving the same torrent twice leaves one entry.
+    /// </para>
+    /// </summary>
+    [Fact(Timeout = 30000)]
     public async Task InitializeAutoSaveAsync_StartsLoopAndSavesPeriodically()
     {
-        // Setup
         var torrent = TorrentTestUtility.CreateMinimal();
         _registry.Add(torrent);
         const int intervalSeconds = 10;
 
-        // Act
         await _sessionManager.InitializeAutoSaveAsync(intervalSeconds);
 
-        // Assert - Initial state (no save yet)
+        // Nothing is written before the first interval elapses.
         Assert.Empty(_persistence.SavedEntries);
 
-        // Act - Advance time by interval
-        _timeProvider.Advance(TimeSpan.FromSeconds(intervalSeconds + 1));
+        await AdvanceUntilAsync(
+            () => _persistence.SavedEntries.Count > 0,
+            TimeSpan.FromSeconds(intervalSeconds + 1),
+            "the auto-save loop to write resume data");
 
-        // Wait for async task to process (using simple delay/yield as the loop runs on task pool)
-        // Since we are using FakeTimeProvider, the delay task completes synchronously, 
-        // but the loop continuation is scheduled.
-        await Task.Delay(50);
-
-        // Assert - Should have saved once
         Assert.Single(_persistence.SavedEntries);
         Assert.Equal(torrent.Hash, _persistence.SavedEntries[0].Hash);
+    }
 
-        // Act - Advance time again
-        _timeProvider.Advance(TimeSpan.FromSeconds(intervalSeconds));
-        await Task.Delay(50);
+    /// <summary>
+    /// Advances the fake clock in <paramref name="step"/> increments until <paramref name="condition"/>
+    /// holds, giving the loop's continuation real time to run between advances.
+    /// </summary>
+    private async Task AdvanceUntilAsync(Func<bool> condition, TimeSpan step, string because)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
 
-        // Assert - Should have saved again (mock just adds/updates)
-        // Our mock implementation below will likely just store by hash, so count remains 1 but updated.
+            _timeProvider.Advance(step);
+
+            // Poll rather than sleeping a fixed amount: this returns as soon as the continuation has
+            // run, instead of always paying the worst case.
+            for (int i = 0; i < 20 && !condition(); i++)
+            {
+                await Task.Delay(10);
+            }
+        }
+
+        Assert.Fail($"Timed out waiting for {because}.");
     }
 
     [Fact]
