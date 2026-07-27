@@ -584,7 +584,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             // engine shutdown indefinitely.
             try
             {
-                await Task.WhenAll(announcesToDrain).WaitAsync(StopAnnounceTimeout).ConfigureAwait(false);
+                await Task.WhenAll(announcesToDrain).WaitAsync(StopAnnounceTimeout, _timeProvider).ConfigureAwait(false);
             }
             catch (TimeoutException ex)
             {
@@ -600,13 +600,20 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             }
         }
 
-        Task[] stopAnnounces = [.. toStop.Select(SendStoppedAnnounceAsync)];
+        Task[] stopAnnounces = [.. toStop.Select(info => SendStoppedAnnounceAsync(info, _timeProvider))];
         Task[] removals = [.. _removalTasks.Keys];
         await Task.WhenAll(stopAnnounces.Concat(removals)).ConfigureAwait(false);
         _removalTasks.Clear();
     }
 
-    private static async Task SendStoppedAnnounceAsync(TrackerInfo info)
+    /// <summary>
+    /// Sends the courtesy Stopped announce, bounded so a tracker that ignores its token cannot hold up
+    /// shutdown. The bound runs on the injected clock like every other wait here, which is what lets a
+    /// test drive it rather than measure it - the previous version used the system clock, so its test
+    /// could only assert that a wall-clock stopwatch landed in a range, and a busy CI machine put it
+    /// outside that range.
+    /// </summary>
+    private static async Task SendStoppedAnnounceAsync(TrackerInfo info, TimeProvider timeProvider)
     {
         // BEP 31: "never send this query again" includes the courtesy Stopped announce.
         if (info.RetryDisabled)
@@ -614,7 +621,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             return;
         }
 
-        using var timeoutCts = new CancellationTokenSource(StopAnnounceTimeout);
+        using var timeoutCts = new CancellationTokenSource(StopAnnounceTimeout, timeProvider);
         try
         {
             await info.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token).ConfigureAwait(false);

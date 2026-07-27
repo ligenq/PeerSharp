@@ -87,7 +87,7 @@ public class DhtManagerTests
         Assert.Equal(dht, _listener.Receiver);
     }
 
-    [Fact]
+    [Fact(Timeout = 30000)]
     public async Task StopAsync_CancelsBlockedBootstrapDnsResolution()
     {
         _settings.Dht.BootstrapNodes = [new DhtBootstrapNode("blocked.invalid", 6881)];
@@ -97,10 +97,13 @@ public class DhtManagerTests
 
         await dht.StopAsync();
 
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1), $"DHT stop took {stopwatch.Elapsed}.");
+        // Generous on purpose. What this distinguishes is "returned" from "blocked on the hung
+        // dependency", and blocking there is unbounded - so a threshold only has to be clear of
+        // how long a loaded CI runner can stall, which has been measured at several seconds.
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(15), $"DHT stop took {stopwatch.Elapsed}.");
     }
 
-    [Fact]
+    [Fact(Timeout = 30000)]
     public async Task StopAsync_DoesNotWaitForDnsResolutionThatIgnoresCancellation()
     {
         _settings.Dht.BootstrapNodes = [new DhtBootstrapNode("blocked.invalid", 6881)];
@@ -111,7 +114,10 @@ public class DhtManagerTests
 
         await dht.StopAsync();
 
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1), $"DHT stop took {stopwatch.Elapsed}.");
+        // Generous on purpose. What this distinguishes is "returned" from "blocked on the hung
+        // dependency", and blocking there is unbounded - so a threshold only has to be clear of
+        // how long a loaded CI runner can stall, which has been measured at several seconds.
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(15), $"DHT stop took {stopwatch.Elapsed}.");
         resolver.Complete();
     }
 
