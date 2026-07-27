@@ -611,10 +611,17 @@ public sealed class TransferSettings
     public int MetadataRequestPipeline { get; set; } = 8;
 
     /// <summary>
-    /// Timeout for metadata piece requests in seconds.
-    /// Default is 10.
+    /// How long to wait for a metadata piece before asking someone else. Default is 3.
+    ///
+    /// <para>
+    /// A metadata piece is at most 16 KiB and a magnet cannot start without it, so this trades a little
+    /// duplicate traffic for latency. It was 10, which meant one unresponsive peer held a magnet up for
+    /// ten seconds at a time - measured against real swarms, three torrents took between thirty-six
+    /// seconds and never to acquire metadata while over a hundred willing peers stayed connected
+    /// throughout. libtorrent uses the same three-second interval before re-asking for a piece.
+    /// </para>
     /// </summary>
-    public int MetadataRequestTimeoutSeconds { get; set; } = 10;
+    public int MetadataRequestTimeoutSeconds { get; set; } = 3;
 
     /// <summary>
     /// Maximum retry attempts per metadata piece request.
