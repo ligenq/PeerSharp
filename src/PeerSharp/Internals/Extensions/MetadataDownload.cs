@@ -12,6 +12,12 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private readonly ILogger<MetadataDownload> _logger;
     private readonly ILoggerFactory _loggerFactory;
     /// <summary>
+    /// How many peers to ask for the same metadata piece at once. A piece is at most 16 KiB, so the
+    /// redundancy is negligible next to being held up by one unresponsive peer.
+    /// </summary>
+    private const int MetadataRequestRedundancy = 3;
+
+    /// <summary>
     /// How many random draws to make when looking for a peer other than the one that just failed.
     /// A handful is enough to miss the current peer with high probability on any realistic pool, and
     /// bounds the work when the pool is tiny.
@@ -587,10 +593,61 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 attempts);
             _logger.LogInformation("Requesting metadata piece {PieceIndex} from {PeerId} (attempt={Attempt})", pieceIndex, peer.PeerId, attempts);
             peer.UtMetadata.SendRequest(pieceIndex);
+
+            AskAdditionalPeers(pieceIndex, peer);
         }
         else
         {
             _logger.LogInformation("No metadata peers available for piece {PieceIndex}", pieceIndex);
+        }
+    }
+
+    /// <summary>
+    /// Asks a few more peers for the same piece, without tracking them.
+    ///
+    /// <para>
+    /// Metadata is the whole download for a magnet and a piece is at most 16 KiB, so latency matters
+    /// enormously and bandwidth does not matter at all. Asking one peer and waiting for a timeout makes
+    /// the transfer only as fast as the slowest peer we happened to pick: three torrents in a live
+    /// session took between thirty-six seconds and never, with over a hundred willing peers connected
+    /// the whole time. Asking several means the fastest answer wins.
+    /// </para>
+    ///
+    /// <para>
+    /// Only the first peer is recorded in <c>_pendingRequests</c>, because that entry exists to drive
+    /// the timeout and one timer per piece is enough. The extra replies are still accepted -
+    /// <see cref="MetadataPieceReceivedAsync"/> judges a piece on its own merits rather than on whether
+    /// it was expected - and a duplicate is discarded by the already-received check.
+    /// </para>
+    ///
+    /// <para>
+    /// libtorrent goes further and lets every peer hold its own outstanding requests, throttled only by
+    /// not re-asking for the same piece within three seconds.
+    /// </para>
+    /// </summary>
+    private void AskAdditionalPeers(int pieceIndex, IPeerCommunication alreadyAsked)
+    {
+        int sent = 0;
+        foreach (var candidate in _activePeers)
+        {
+            if (sent >= MetadataRequestRedundancy - 1)
+            {
+                break;
+            }
+
+            if (candidate == alreadyAsked || candidate.UtMetadata.RemoteMessageId == null)
+            {
+                continue;
+            }
+
+            candidate.UtMetadata.SendRequest(pieceIndex);
+            sent++;
+        }
+
+        if (sent > 0)
+        {
+            _logger.LogDebug(
+                "Also asked {Count} other peer(s) for metadata piece {PieceIndex}", sent, pieceIndex);
         }
     }
 

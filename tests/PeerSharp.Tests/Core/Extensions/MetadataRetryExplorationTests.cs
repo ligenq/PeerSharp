@@ -99,6 +99,65 @@ public class MetadataRetryExplorationTests
     }
 
     /// <summary>
+    /// A piece is asked of several peers at once, so one slow peer cannot hold up the whole magnet.
+    ///
+    /// <para>
+    /// Metadata is at most 16 KiB a piece and nothing can start without it, so the duplicate traffic is
+    /// irrelevant next to the latency. Asking one peer and waiting made a magnet only as fast as
+    /// whichever peer was picked first.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void APieceIsAskedOfSeveralPeersAtOnce()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 1;
+
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        var peers = Enumerable.Range(0, 6).Select(_ => MakePeer()).ToList();
+        foreach (var peer in peers)
+        {
+            InjectActivePeer(download, peer);
+        }
+
+        download.InitializeMetadataBuffer(PieceSize); // Triggers the first request.
+
+        int asked = peers.Count(p => ((MockUtMetadata)p.UtMetadata).RequestedPieces.Contains(0));
+
+        Assert.True(
+            asked > 1,
+            $"Piece 0 was asked of {asked} peer(s). A single outstanding request means the magnet waits " +
+            "on whichever peer happened to be chosen, however many others are connected.");
+    }
+
+    /// <summary>
+    /// Redundancy is bounded. Asking every connected peer would turn a large swarm into a broadcast.
+    /// </summary>
+    [Fact]
+    public void TheNumberOfPeersAskedIsBounded()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 1;
+
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        var peers = Enumerable.Range(0, 40).Select(_ => MakePeer()).ToList();
+        foreach (var peer in peers)
+        {
+            InjectActivePeer(download, peer);
+        }
+
+        download.InitializeMetadataBuffer(PieceSize);
+
+        int asked = peers.Count(p => ((MockUtMetadata)p.UtMetadata).RequestedPieces.Contains(0));
+
+        Assert.InRange(asked, 2, 8);
+    }
+
+    /// <summary>
     /// The single-peer case must still retry that peer, or a torrent with one metadata source stalls
     /// permanently rather than merely slowly.
     /// </summary>
