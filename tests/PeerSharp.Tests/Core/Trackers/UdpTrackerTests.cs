@@ -42,6 +42,34 @@ public class UdpTrackerTests
             tcs?.TrySetResult(response);
         }
 
+        /// <summary>
+        /// Waits until the tracker is actually blocked on a receive.
+        ///
+        /// <para>
+        /// TriggerTimeout and TriggerSocketException do nothing when no receive is pending, so firing
+        /// one early is silently lost and the tracker then waits for a response that will never come.
+        /// Sleeping a fixed moment first only makes that unlikely; this makes it impossible.
+        /// </para>
+        /// </summary>
+        public async Task WaitForPendingReceiveAsync(TimeSpan timeout)
+        {
+            long deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+            while (Environment.TickCount64 < deadline)
+            {
+                lock (_receiveLock)
+                {
+                    if (_receiveTcs != null)
+                    {
+                        return;
+                    }
+                }
+
+                await Task.Delay(5);
+            }
+
+            Assert.Fail("Timed out waiting for the tracker to start receiving; a trigger here would be lost.");
+        }
+
         public void TriggerTimeout()
         {
             TaskCompletionSource<UdpReceiveResult>? tcs;
@@ -265,12 +293,11 @@ public class UdpTrackerTests
 
         // 1. First Connect - Trigger timeout
         await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(5));
-        await Task.Delay(50, TestContext.Current.CancellationToken); // Ensure task reached await
+        await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(10));
         _socketFactory.LastSocket.TriggerTimeout();
 
         // 2. Wait for retry delay (1s)
-        await Task.Delay(50, TestContext.Current.CancellationToken);
-        _timeProvider.Advance(TimeSpan.FromSeconds(1));
+        await AdvanceUntilNextPacketAsync(TimeSpan.FromSeconds(1));
 
         // 3. Second Connect attempt
         var req2 = await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(5));
@@ -999,11 +1026,10 @@ public class UdpTrackerTests
 
         // attempt 0: connect packet sent, then receive errors out with SocketException
         await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
-        await Task.Delay(50, TestContext.Current.CancellationToken);
+        await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(10));
         _socketFactory.LastSocket.TriggerSocketException(SocketError.ConnectionReset);
 
-        await Task.Delay(50, TestContext.Current.CancellationToken);
-        _timeProvider.Advance(TimeSpan.FromSeconds(1));
+        await AdvanceUntilNextPacketAsync(TimeSpan.FromSeconds(1));
 
         // attempt 1: succeed
         await CompleteConnectAsync(packetIndex: 1, connectionId: 0xFEED);
@@ -1032,7 +1058,11 @@ public class UdpTrackerTests
                 // Advance until the retry is actually sent, rather than sleeping a fixed moment and
                 // hoping the retry timer has been registered by then. Advancing first moves the clock
                 // past a deadline that does not exist yet, and the retry then never fires at all.
-                await AdvanceUntilPacketAsync(attempt + 1, TimeSpan.FromMilliseconds(retryDelaysMs[attempt]));
+                await TorrentTestUtility.AdvanceUntilAsync(
+                    _timeProvider,
+                    () => _socketFactory.LastSocket.SentPackets.Count > attempt + 1,
+                    TimeSpan.FromMilliseconds(retryDelaysMs[attempt]),
+                    $"retry {attempt + 1} to be sent");
             }
         }
 
@@ -1141,11 +1171,10 @@ public class UdpTrackerTests
         // attempt 0: connect succeeds, then scrape times out
         await CompleteConnectAsync(packetIndex: 0, connectionId: 0x1234);
         await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
-        await Task.Delay(50, TestContext.Current.CancellationToken);
+        await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(10));
         _socketFactory.LastSocket.TriggerTimeout();
 
-        await Task.Delay(50, TestContext.Current.CancellationToken);
-        _timeProvider.Advance(TimeSpan.FromSeconds(1));
+        await AdvanceUntilNextPacketAsync(TimeSpan.FromSeconds(1));
 
         // attempt 1: fresh connect + scrape success
         await CompleteConnectAsync(packetIndex: 2, connectionId: 0x5678);
@@ -1178,13 +1207,12 @@ public class UdpTrackerTests
         for (int attempt = 0; attempt < 4; attempt++)
         {
             await _socketFactory.LastSocket.WaitForPacketAsync(attempt, TimeSpan.FromSeconds(5));
-            await Task.Delay(50, TestContext.Current.CancellationToken);
+            await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(10));
             _socketFactory.LastSocket.TriggerTimeout();
 
             if (attempt < 3)
             {
-                await Task.Delay(50, TestContext.Current.CancellationToken);
-                _timeProvider.Advance(TimeSpan.FromMilliseconds(retryDelaysMs[attempt]));
+                await AdvanceUntilNextPacketAsync(TimeSpan.FromMilliseconds(retryDelaysMs[attempt]));
             }
         }
 
@@ -1207,11 +1235,10 @@ public class UdpTrackerTests
 
         // attempt 0: timeout on connect
         await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
-        await Task.Delay(50, TestContext.Current.CancellationToken);
+        await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(10));
         _socketFactory.LastSocket.TriggerTimeout();
 
-        await Task.Delay(50, TestContext.Current.CancellationToken);
-        _timeProvider.Advance(TimeSpan.FromSeconds(1));
+        await AdvanceUntilNextPacketAsync(TimeSpan.FromSeconds(1));
 
         // attempt 1: connect + scrape success
         await CompleteConnectAsync(packetIndex: 1, connectionId: 0x9999);
@@ -1244,12 +1271,11 @@ public class UdpTrackerTests
         for (int attempt = 0; attempt < 4; attempt++)
         {
             await _socketFactory.LastSocket.WaitForPacketAsync(attempt, TimeSpan.FromSeconds(5));
-            await Task.Delay(50, TestContext.Current.CancellationToken);
+            await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(10));
             _socketFactory.LastSocket.TriggerTimeout();
             if (attempt < 3)
             {
-                await Task.Delay(50, TestContext.Current.CancellationToken);
-                _timeProvider.Advance(TimeSpan.FromMilliseconds(retryDelaysMs[attempt]));
+                await AdvanceUntilNextPacketAsync(TimeSpan.FromMilliseconds(retryDelaysMs[attempt]));
             }
         }
 
@@ -1310,12 +1336,11 @@ public class UdpTrackerTests
         for (int attempt = 0; attempt < 4; attempt++)
         {
             await _socketFactory.LastSocket.WaitForPacketAsync(attempt, TimeSpan.FromSeconds(5));
-            await Task.Delay(50, TestContext.Current.CancellationToken);
+            await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(10));
             _socketFactory.LastSocket.TriggerTimeout();
             if (attempt < 3)
             {
-                await Task.Delay(50, TestContext.Current.CancellationToken);
-                _timeProvider.Advance(TimeSpan.FromMilliseconds(retryDelaysMs[attempt]));
+                await AdvanceUntilNextPacketAsync(TimeSpan.FromMilliseconds(retryDelaysMs[attempt]));
             }
         }
 
@@ -1387,6 +1412,25 @@ public class UdpTrackerTests
     }
 
     // ---------- Helpers ----------
+
+    /// <summary>
+    /// Advances the clock until the tracker sends its next packet.
+    ///
+    /// <para>
+    /// Replaces sleeping a fixed moment and then advancing once. The retry deadline is registered from
+    /// a continuation, so advancing first moves the clock past a deadline that does not exist yet and
+    /// the retry never fires at all - which is how this file failed in CI.
+    /// </para>
+    /// </summary>
+    private Task AdvanceUntilNextPacketAsync(TimeSpan step)
+    {
+        int seen = _socketFactory.LastSocket.SentPackets.Count;
+        return TorrentTestUtility.AdvanceUntilAsync(
+            _timeProvider,
+            () => _socketFactory.LastSocket.SentPackets.Count > seen,
+            step,
+            $"packet {seen} to be followed by a retry");
+    }
 
     private async Task CompleteConnectAsync(int packetIndex, long connectionId)
     {
@@ -1489,36 +1533,7 @@ public class UdpTrackerTests
         Assert.Equal(98, packet.Length);
     }
 
-    /// <summary>
-    /// Steps the fake clock forward until the socket has sent packet <paramref name="index"/>.
-    ///
-    /// <para>
-    /// The tracker registers its retry timer from a continuation, so a single advance timed by a fixed
-    /// real-time sleep can land before that timer exists - and then nothing fires, because the deadline
-    /// is set relative to a clock that has already moved past it. Advancing repeatedly and checking
-    /// removes the guess.
-    /// </para>
-    /// </summary>
-    private async Task AdvanceUntilPacketAsync(int index, TimeSpan step)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(20);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (_socketFactory.LastSocket.SentPackets.Count > index)
-            {
-                return;
-            }
 
-            _timeProvider.Advance(step);
-
-            for (int i = 0; i < 20 && _socketFactory.LastSocket.SentPackets.Count <= index; i++)
-            {
-                await Task.Delay(10);
-            }
-        }
-
-        Assert.Fail($"Timed out waiting for packet {index} to be sent.");
-    }
 
 }
 

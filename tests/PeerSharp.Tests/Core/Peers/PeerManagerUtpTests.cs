@@ -270,8 +270,9 @@ public class PeerManagerUtpTests
 
         await manager.AddIncomingPeerAsync(stream, handshake, new IPEndPoint(IPAddress.Loopback, 12345));
 
-        // Allow time for the background handshake loop to process
-        await Task.Delay(100);
+        // Wait for the handshake to be counted rather than guessing how long the background loop needs.
+        await TorrentTestUtility.WaitUntilAsync(
+            () => manager.ConnectedCount == 1, 10000, "the incoming handshake to be counted");
 
         Assert.Equal(1, manager.ConnectedCount);
 

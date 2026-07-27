@@ -410,16 +410,18 @@ public class FileTransferTests
         // MaxBackgroundTaskRestarts = 3  →  4 attempts total, 3 waits of 1000 ms each
         for (int i = 1; i <= 3; i++)
         {
-            // Wait until the i-th call has been registered (background task threw)
-            var deadline = DateTime.UtcNow.AddMilliseconds(2000);
-            while (Volatile.Read(ref callCount) < i && DateTime.UtcNow < deadline)
-            {
-                await Task.Delay(1);
-            }
+            int attempt = i;
+            await TorrentTestUtility.WaitUntilAsync(
+                () => Volatile.Read(ref callCount) >= attempt, 10000, $"attempt {attempt} to throw");
 
-            // Give background task time to reach Task.Delay before advancing fake clock
-            await Task.Delay(20);
-            _timeProvider.Advance(TimeSpan.FromSeconds(2));
+            // Advance until the retry actually happens rather than sleeping first and advancing once.
+            // The retry delay is registered from a continuation, so a single advance can land before
+            // that deadline exists - and then it never fires at all.
+            await TorrentTestUtility.AdvanceUntilAsync(
+                _timeProvider,
+                () => Volatile.Read(ref callCount) > attempt,
+                TimeSpan.FromSeconds(2),
+                $"attempt {attempt + 1} to start");
         }
 
         await runTask.WaitAsync(TimeSpan.FromSeconds(5));
@@ -444,14 +446,15 @@ public class FileTransferTests
         var runTask = Task.Run(() => InvokePrivateAsync(_fileTransfer, "RunBackgroundTaskAsync", failOnceThenSucceed, "test"));
 
         // Wait for 1st failure, then advance time past the 1000ms retry delay
-        var deadline = DateTime.UtcNow.AddMilliseconds(2000);
-        while (Volatile.Read(ref callCount) < 1 && DateTime.UtcNow < deadline)
-        {
-            await Task.Delay(1);
-        }
+        await TorrentTestUtility.WaitUntilAsync(
+            () => Volatile.Read(ref callCount) >= 1, 10000, "the first attempt to throw");
 
-        await Task.Delay(20);
-        _timeProvider.Advance(TimeSpan.FromSeconds(2));
+        // Advance until the retry runs, for the same reason as above.
+        await TorrentTestUtility.AdvanceUntilAsync(
+            _timeProvider,
+            () => Volatile.Read(ref callCount) > 1,
+            TimeSpan.FromSeconds(2),
+            "the retry to start");
 
         await runTask.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(_fileTransfer.HasBackgroundTaskFailure);
