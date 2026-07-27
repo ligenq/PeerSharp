@@ -584,47 +584,53 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         }
     }
 
+    /// <summary>
+    /// Serves a block a peer asked for, or refuses it.
+    ///
+    /// <para>
+    /// Every refusal names its reason. This path used to be entirely silent, which made "why did we
+    /// never upload to anyone?" unanswerable from a log - the question could not even be narrowed to
+    /// whether requests were arriving. Refusals are rare on a healthy connection, so Debug is the right
+    /// level; if they are not rare, that is the finding.
+    /// </para>
+    /// </summary>
     public async Task BlockRequestedAsync(PeerCommunication peer, PeerMessage msg)
     {
-        bool reject = false;
+        string? rejectReason = null;
+
         if (peer.AmChoking && !peer.IsAllowedFast(msg.PieceIndex))
         {
-            reject = true;
+            rejectReason = "we are choking this peer and the piece is not allowed-fast";
         }
-
-        if (!_torrent.Pieces.HasPiece(msg.PieceIndex))
+        else if (!_torrent.Pieces.HasPiece(msg.PieceIndex))
         {
-            reject = true;
+            rejectReason = "we do not have that piece";
         }
         // BEP 16: In superseed mode, only allow requests for assigned pieces
-        if (!reject && !_torrent.SuperSeedManager.ShouldAllowRequest(peer, msg.PieceIndex))
+        else if (!_torrent.SuperSeedManager.ShouldAllowRequest(peer, msg.PieceIndex))
         {
-            reject = true;
+            rejectReason = "super-seed mode has not assigned that piece to this peer";
+        }
+        else if (msg.BlockLength <= 0 || msg.BlockLength > BlockSize)
+        {
+            rejectReason = "requested length is out of range";
+        }
+        else if (msg.BlockOffset < 0)
+        {
+            rejectReason = "requested offset is negative";
+        }
+        else if (!IsValidUploadRequest(msg))
+        {
+            rejectReason = "request does not describe a real block of that piece";
         }
 
-        if (msg.BlockLength <= 0 || msg.BlockLength > BlockSize)
+        if (rejectReason is not null)
         {
-            reject = true;
-        }
+            Logger.LogDebug(
+                "Refused request {PieceIndex}:{Offset} ({Length}B) from {PeerName}: {Reason}",
+                msg.PieceIndex, msg.BlockOffset, msg.BlockLength, peer.Name, rejectReason);
 
-        if (msg.BlockOffset < 0)
-        {
-            reject = true;
-        }
-
-        if (!IsValidUploadRequest(msg))
-        {
-            reject = true;
-        }
-
-        if (reject)
-        {
-            await peer.SendRejectAsync(new BlockRequest
-            {
-                PieceIndex = msg.PieceIndex,
-                Offset = msg.BlockOffset,
-                Length = msg.BlockLength
-            }).ConfigureAwait(false);
+            await SendRejectAsync(peer, msg).ConfigureAwait(false);
             return;
         }
 
@@ -632,13 +638,22 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         if (!_uploadQueueManager.TryEnqueue(peer, item))
         {
             // Upload queue full — reject so peer can retry
-            await peer.SendRejectAsync(new BlockRequest
-            {
-                PieceIndex = msg.PieceIndex,
-                Offset = msg.BlockOffset,
-                Length = msg.BlockLength
-            }).ConfigureAwait(false);
+            Logger.LogDebug(
+                "Refused request {PieceIndex}:{Offset} ({Length}B) from {PeerName}: upload queue is full",
+                msg.PieceIndex, msg.BlockOffset, msg.BlockLength, peer.Name);
+
+            await SendRejectAsync(peer, msg).ConfigureAwait(false);
         }
+    }
+
+    private static Task SendRejectAsync(PeerCommunication peer, PeerMessage msg)
+    {
+        return peer.SendRejectAsync(new BlockRequest
+        {
+            PieceIndex = msg.PieceIndex,
+            Offset = msg.BlockOffset,
+            Length = msg.BlockLength
+        });
     }
 
     private async Task ExecuteUploadItemAsync(PeerCommunication peer, UploadQueueItem item, CancellationToken ct)

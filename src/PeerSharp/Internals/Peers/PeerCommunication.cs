@@ -333,6 +333,19 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public PiecesProgress PeerPieces { get; private set; }
 
     /// <summary>
+    /// Whether the peer has told us which pieces it holds, by any of bitfield, have, have-all or
+    /// have-none.
+    ///
+    /// <para>
+    /// Without this, a peer that has said nothing is indistinguishable from one that holds nothing:
+    /// both report zero pieces. The two call for opposite conclusions - a peer holding nothing wants
+    /// everything we have, while a silent peer tells us nothing at all - and conflating them makes an
+    /// ordinary swarm look full of peers we are failing to serve.
+    /// </para>
+    /// </summary>
+    public bool HasReportedPieces { get; private set; }
+
+    /// <summary>
     /// BEP 40: Canonical peer priority. Higher values indicate more preferred peers.
     /// </summary>
     public uint Priority { get; set; }
@@ -1798,20 +1811,24 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             case MessageId.Have:
                 PeerPieces.AddPiece(msg.HavePieceIndex);
+                HasReportedPieces = true;
                 break;
 
             case MessageId.Bitfield:
                 PeerPieces.FromBitfield(msg.Data.Length > 0 ? msg.Data : msg.Payload.Span);
+                HasReportedPieces = true;
                 _logger.LogDebug("{PeerName} sent bitfield: {Count} pieces", Name, PeerPieces.ReceivedCount);
                 break;
 
             case MessageId.HaveAll:
                 PeerPieces.SetHaveAll();
+                HasReportedPieces = true;
                 _logger.LogDebug("{PeerName} has ALL pieces (FastExt)", Name);
                 break;
 
             case MessageId.HaveNone:
                 PeerPieces.SetHaveNone();
+                HasReportedPieces = true;
                 _logger.LogDebug("{PeerName} has NO pieces (FastExt)", Name);
                 break;
 
