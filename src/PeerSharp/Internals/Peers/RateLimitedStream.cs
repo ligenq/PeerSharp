@@ -80,6 +80,11 @@ internal sealed class RateLimitedStream : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        if (_disposal.IsDisposed)
+        {
+            return 0;
+        }
+
         int toRead = Math.Min(buffer.Length, ChunkSize);
 
         if (_reservedDownloadBandwidth < toRead)
@@ -106,8 +111,19 @@ internal sealed class RateLimitedStream : Stream
 
         int canRead = Math.Min(toRead, _reservedDownloadBandwidth);
 
-        // Cancellation is not caught here: the reservation stays tracked and is returned on disposal.
-        int read = await _inner.ReadAsync(buffer[..canRead], cancellationToken).ConfigureAwait(false);
+        int read;
+        try
+        {
+            // Cancellation is not caught here: the reservation stays tracked and is returned on disposal.
+            read = await _inner.ReadAsync(buffer[..canRead], cancellationToken).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Closed while waiting for quota. Zero is how a stream reports end of input, and every
+            // caller already treats it as the connection being gone.
+            return 0;
+        }
+
         if (read > 0)
         {
             _reservedDownloadBandwidth -= read;
@@ -137,6 +153,11 @@ internal sealed class RateLimitedStream : Stream
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (_disposal.IsDisposed)
+            {
+                return;
+            }
+
             int remaining = buffer.Length - sent;
 
             if (_reservedUploadBandwidth < remaining)
@@ -163,7 +184,20 @@ internal sealed class RateLimitedStream : Stream
             int canSend = Math.Min(remaining, _reservedUploadBandwidth);
             int toSend = Math.Min(canSend, ChunkSize);
 
-            await _inner.WriteAsync(buffer.Slice(sent, toSend), cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await _inner.WriteAsync(buffer.Slice(sent, toSend), cancellationToken).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // The connection was torn down while this write was waiting for quota. Nothing is left
+                // to write to, and the peer is already being closed by whoever disposed it, so this is
+                // an ordinary end rather than a failure to report.
+                //
+                // Reserving bandwidth mid-write is what makes this reachable at all: the gap between
+                // deciding to send and sending grows with how throttled the connection is.
+                return;
+            }
 
             _reservedUploadBandwidth -= toSend;
             sent += toSend;

@@ -317,7 +317,39 @@ internal class BandwidthManager : IBandwidthManager
         }
     }
 
+    /// <summary>
+    /// Timer callback that replenishes quota and hands it out.
+    ///
+    /// <para>
+    /// Wrapped because this runs on a timer thread with nothing above it: an exception escaping a timer
+    /// callback is unhandled, and in most hosts that ends the process. Bandwidth accounting is not
+    /// worth taking an application down for, so a failed tick is logged and the next one carries on.
+    /// The disposal check keeps a callback already in flight when Dispose ran from touching torn down
+    /// state.
+    /// </para>
+    /// </summary>
     internal void Update(object? state)
+    {
+        if (_disposal.IsDisposed)
+        {
+            return;
+        }
+
+        try
+        {
+            UpdateCore();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Raced shutdown; the timer is on its way out.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Bandwidth update tick failed; quota accounting will resume on the next tick");
+        }
+    }
+
+    private void UpdateCore()
     {
         long now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
         int dt = (int)(now - _lastTick);
