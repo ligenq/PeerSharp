@@ -485,12 +485,16 @@ internal class UtpStream : Stream
 
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        // Validate stream state before writing
+        // A peer that went away before this write started is an I/O condition, not a caller mistake, and
+        // the identical check inside the send loop below has always reported it that way. Throwing
+        // InvalidOperationException here meant the same event arrived as two different types depending on
+        // how far the write had got, and callers that swallow disconnects catch IOException - so the
+        // entry case sailed through those handlers and was logged as a fault.
         lock (_lock)
         {
             if (_state != UtpState.Connected)
             {
-                throw new InvalidOperationException($"Cannot write: stream is in state {_state}, expected Connected");
+                throw new IOException($"Cannot write: connection is in state {_state}, expected Connected");
             }
         }
 

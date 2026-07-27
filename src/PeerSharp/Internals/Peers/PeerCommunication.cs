@@ -1032,6 +1032,15 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return;
             }
 
+            // Closed rather than full: the connection is going away and this message is never going to be
+            // sent. Waiting on it only to be handed ChannelClosedException tells us nothing we do not
+            // already know, and shutdown is exactly when the largest batch of messages takes this path.
+            if (_sendQueue.IsCompleted)
+            {
+                msg.Dispose();
+                return;
+            }
+
             // Use WriteAsync with timeout to prevent indefinite blocking if send loop is stuck
             using var timeoutCts = new CancellationTokenSource(SendQueueTimeoutMs);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ConnectionToken);
@@ -2392,6 +2401,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             if (_sendQueue.TryEnqueue(msg))
             {
                 return true;
+            }
+
+            // See SendMessageAsync: closed is a known outcome, not an exceptional one.
+            if (_sendQueue.IsCompleted)
+            {
+                msg.Dispose();
+                return false;
             }
 
             using var timeoutCts = new CancellationTokenSource(timeoutMs);
