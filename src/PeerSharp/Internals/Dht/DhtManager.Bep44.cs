@@ -452,8 +452,9 @@ internal partial class DhtManager
     }
 
     /// <summary>
-    /// Sends a query and waits for the matching reply. Returns null on timeout or cancellation;
-    /// an unresponsive node is ordinary in a DHT and not worth an exception.
+    /// Sends a query and waits for the matching reply. Returns null when the node does not answer,
+    /// which is ordinary in a DHT and not worth an exception. Cancellation by the caller is not that,
+    /// and propagates.
     /// </summary>
     private async Task<BDict?> SendCorrelatedQueryAsync(BDict query, string transactionId, IPEndPoint endpoint, CancellationToken cancellationToken)
     {
@@ -472,8 +473,15 @@ internal partial class DhtManager
         {
             return null;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
+            // Cancelled by something other than the caller - treat it as an unanswered node.
+            //
+            // The caller's own cancellation must not land here. Swallowing it turned "you cancelled"
+            // into "no such record", and the two mean opposite things to a BEP 46 resolve: one is the
+            // caller's own doing, the other says the publisher key names nothing. The enclosing loop
+            // re-checks the token each round, so this only escaped when cancellation landed during the
+            // final round or the candidates ran out straight after - rare, and silent when it happened.
             return null;
         }
         finally
