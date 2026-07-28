@@ -1,0 +1,203 @@
+# Future Improvements
+
+Work that was identified, measured, and deliberately not done. Everything here is a known gap rather
+than a suspicion: each entry says what was observed, why it was left, and what would settle it.
+
+This is not a roadmap and nothing here is a defect in the sense of producing wrong results. The README
+describes what PeerSharp does; this describes where it is known to be leaving something on the table.
+
+**Before acting on any of these, measure first.** Several entries below exist because an earlier
+assumption about where time was going turned out to be wrong when a log was actually read — the
+metadata rebuild cost was attributed to peer teardown for a while, and it was the tracker announce.
+
+---
+
+## Peer connections are discarded when a magnet's metadata arrives
+
+**Observed.** When metadata completes, `Torrent.ReinitializeAfterMetadataAsync` stops the torrent,
+rebuilds its internals and starts again. `Initialize()` constructs a new `PeerManager`, so every
+connection established while waiting for metadata is closed. A live magnet had roughly ten handshaked
+peers at that moment, all discarded and re-dialled.
+
+**Why it was left.** The connections cannot simply be kept. Before metadata exists the piece count is
+zero, so `PeerPieces` is empty and incoming `Have` messages are dropped
+(`PeerManager.MessageReceivedAsync`, the `!_torrent.HasMetadata` branch). A bitfield is only ever sent
+once, immediately after the handshake, and there is no protocol message to ask for it again — so a
+preserved peer would be one whose contents we can never learn. Keeping it would be worse than
+reconnecting.
+
+**What would settle it.** libtorrent solves this by storing the raw bitfield before the picker exists
+and replaying it afterwards (`peer_connection::incoming_bitfield`, the `!t->ready_for_connections()`
+branch: `m_have_piece = bits`). Doing the same means retaining the bytes in `PeerCommunication`,
+re-basing `PeerPieces` once the piece count is known, and having the rebuild adopt the existing
+connections rather than construct a fresh `PeerManager`. That last part is the risky half.
+
+**Measure first.** The rebuild's *latency* cost has already been removed — it was the tracker stop
+announce, not the teardown, and the peers close in about fifteen milliseconds. What remains is a
+throughput question: whether re-dialling delays the first block. A log showing the gap between metadata
+completing and the first block arriving would say whether this is worth the work.
+
+---
+
+## Metadata requests are piece-driven rather than peer-driven
+
+**Observed.** `MetadataDownload` drives requests from a timer over the pieces it still needs. libtorrent
+drives them from the peers: `maybe_send_request()` runs whenever a peer becomes available, each peer
+independently picks the least-requested piece (`std::min_element` over `num_requests`) and may hold two
+outstanding, throttled only by not re-asking for the same piece within three seconds.
+
+**Why it matters.** With a hundred metadata-capable peers, libtorrent can have hundreds of requests in
+flight for a payload measured in kilobytes. PeerSharp asks three peers per piece and waits for a
+timeout. The difference is latency at the only moment when a magnet has nothing else to do.
+
+**Why it was left.** The current model is now fast enough that the remaining gap is unmeasured. Moving
+to peer-driven requests means restructuring `_pendingRequests` from one entry per piece to per-peer
+tracking, which touches roughly every method in the class.
+
+---
+
+## A newly-connected peer usually gets nothing to do
+
+**Observed.** `MetadataDownload.PeerConnected` does route every case into the request path, but that
+path is `FillMissingRequests`, which only requests pieces that are not already pending. The request
+pipeline is 8 and metadata is typically 2-8 pieces, so by the time a second peer arrives every piece
+already has an outstanding request and the new peer is added to the pool with nothing asked of it. It
+then waits for a timeout before being considered.
+
+**Why it matters.** The peers that arrive early are the ones most likely to answer quickly, and they are
+precisely the ones left idle. libtorrent has no such gap because its requests are per-peer: a new peer
+picks the *least-requested* piece whether or not that piece is already outstanding, so it always has
+something to do.
+
+**Why it was left.** Fixing it properly is the peer-driven restructure above. A narrower version -
+letting a newly-arrived peer duplicate an already-pending piece - would capture much of the benefit for
+much less work, and is the first thing to try.
+
+---
+
+## End game duplicate requests are unbounded
+
+**Observed.** `StandardBlockRequestStrategy` caps concurrent requests per block at two.
+`EndGameBlockRequestStrategy` has no cap by design — broad duplication is the whole strategy when only
+a few blocks remain.
+
+**Why it was left.** Deliberate, and matching convention. But the cost was never measured: a cancel sent
+when the first copy arrives cannot overtake data already on the wire, and end game is exactly when the
+most peers are asked at once. Before the cap existed, duplicate delivery across a whole session was
+10.6% of everything downloaded.
+
+**What would settle it.** Count blocks received that were already held, during end game specifically. If
+it is a meaningful fraction, a cap of three or four would still finish the torrent.
+
+---
+
+## Consumers cannot observe a peer's final transfer totals
+
+**Observed.** `AlertId` has no peer-level entries — the alerts are all torrent, metadata or config
+scoped. Per-peer byte counts exist only on `PeerInfo`, which is a snapshot of *currently connected*
+peers.
+
+**Why it matters.** Anything a peer transferred is unobservable if that peer disconnects between polls.
+This caused a real false alarm: a diagnostic reported that no Transmission peer had ever received a
+byte, while the engine had in fact sent one 512 KiB — the peer unchoked, transferred and hung up inside
+a single two-second interval. The consumer has no way to see that; only the engine's own running total
+revealed it.
+
+**What would settle it.** A `PeerDisconnected` alert carrying the endpoint, client name and final
+byte counts. Additive to `AlertId`, so it does not disturb existing consumers.
+
+---
+
+## Adaptive connection timeouts are keyed by address, not endpoint
+
+**Observed.** `AdaptiveTimeout.GetEndpointKey` returns `endpoint.Address.ToString()`, deliberately
+ignoring the port, on the reasoning that one host has one latency.
+
+**Why it may not hold.** Peers behind carrier-grade NAT or a seedbox share an address while being
+entirely different peers, and a busy host can have many ports with very different behaviour. Success
+statistics from one are applied to all of them.
+
+**What would settle it.** Compare connect success rates keyed by address against keyed by endpoint over
+a soak run. Cheap to measure, since both keys can be tracked at once.
+
+---
+
+## Nothing distinguishes a poisoned swarm from a client fault
+
+**Observed.** One magnet never acquired metadata across a full session while three siblings in the same
+process completed in eight to sixteen seconds. Its six metadata-capable peers all advertised a correct
+and consistent size, were asked roughly 110 times over 111 seconds, and answered nothing. Its
+connections also failed before the BitTorrent handshake at 3.5 times the rate of the others.
+
+**Why it was left.** No client-side change helps against peers that complete a handshake and then lie —
+libtorrent would fare no better, since its `m_request_limit` backoff only triggers on an explicit
+`dont_have` or a failed hash check, never on silence.
+
+**What would help.** The engine knows "six peers claim to hold metadata, 110 requests sent, none
+answered" and surfaces none of it. A warning after a metadata download has been asking healthy-looking
+peers for some time with nothing to show would turn a silent stall into a diagnosis. This is reporting,
+not a fix.
+
+---
+
+## Per-peer transport and encryption preferences are not persisted
+
+**Observed.** `PeerHistory` learns whether a peer speaks uTP (`UtpSupported`) and whether it accepts an
+encrypted handshake (`OfferEncryptionNext`). Neither survives a restart — the cache is in memory only.
+
+**Why it matters.** Every session relearns the same facts about the same peers, and relearning
+`OfferEncryptionNext` costs a failed connection each time. Session persistence already stores DHT state
+and resume data, so the machinery exists.
+
+**Why it was left.** Unmeasured. The alternation costs at most one extra attempt per peer per session,
+which may be lost in the noise of ordinary churn.
+
+---
+
+## `MetadataRequestRedundancy` is a constant, not a setting
+
+**Observed.** How many peers are asked for the same metadata piece is a private `const` in
+`MetadataDownload`, while its neighbours (`MetadataRequestPipeline`, `MetadataRequestTimeoutSeconds`,
+`MetadataMaxRequestAttempts`) are all settings.
+
+**Why it was left.** It is a protocol-tuning detail rather than something a consumer should reach for,
+and adding public API is not free. Worth revisiting only if someone has a reason to change it.
+
+---
+
+## BEP 38 and BEP 45
+
+Identified as conditional during the BEP audit and never implemented.
+
+- **BEP 38** (`similar` / `collections`) — lets a torrent point at content it shares data with, so a
+  client can seed from files it already has. Valuable only to consumers managing related torrents.
+- **BEP 45** (multiple-address DHT announce) — matters for hosts with several public addresses.
+
+Neither has a consumer asking for it.
+
+---
+
+## Test-suite residue
+
+**One unidentified flake.** During the CI stabilisation work, one run in twenty-four failed and the
+output captured only the summary line, not the test name. Eighteen consecutive runs passed afterwards
+and the sweep that followed removed every fixed-duration wait in the CI-run subset, so it may already be
+gone. If CI flakes again, `TestResults/*.trx` names the test even when console verbosity is minimal.
+
+**Deliberate sleeps that remain.** Several tests still call `Task.Delay` before asserting — every one
+asserts a *negative* (`Assert.False(task.IsCompleted)` and similar). Only elapsed time can establish
+that something has not happened, and a slow machine makes those assertions stricter rather than
+flakier. They are correct as written and should not be converted.
+
+---
+
+## Interop question that remains open
+
+Whether PeerSharp serves Transmission peers correctly at scale is still unproven. It has been shown to
+serve *some* — one received 512 KiB — and the general serving path is sound: the shortfall in a live
+session was swarm composition, with 2,283 of 2,466 peers that reported state holding everything already.
+A seed will never ask for data however well the client behaves.
+
+Settling it needs a swarm with actual leechers: a torrent seeded locally with a Transmission instance
+pointed at it, rather than a mature Linux ISO swarm where nearly every peer is complete. The
+`Seeding_HowRealClientsRequestFromUs` soak test is the harness for it; it needs the right swarm.
