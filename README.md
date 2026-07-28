@@ -512,6 +512,13 @@ bytes. It is on by default because the alternative is a silent failure — a pas
 a working socket and no peers. Set `Settings.SendUdpTrackerUrlData = false` if a particular tracker
 rejects the longer packet.
 
+## Known Gaps
+
+[FUTURE_IMPROVEMENTS.md](FUTURE_IMPROVEMENTS.md) records work that was identified and measured but
+deliberately not done — where PeerSharp is known to leave something on the table, what was observed,
+and what would settle each question. Nothing there produces wrong results; it is the difference between
+what the engine does and what it could do.
+
 ## Architecture
 
 PeerSharp is designed with a modular, interface-driven architecture:
