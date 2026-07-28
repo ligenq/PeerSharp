@@ -287,6 +287,44 @@ public class MetadataRetryExplorationTests
         Assert.Contains(0, ((MockUtMetadata)only.UtMetadata).RequestedPieces);
     }
 
+    /// <summary>
+    /// A probe sent before the size was known is released once a peer declares one.
+    ///
+    /// <para>
+    /// With nothing to go on, piece 0 is asked of whoever turned up first - possibly a peer that never
+    /// declared a size and may hold nothing. That request occupies the piece's only pending slot, and a
+    /// piece with a pending request is skipped when new peers arrive, so nobody else is asked until it
+    /// times out. Measured live: piece 0 sat on a non-declaring peer for 3.3 seconds while six peers
+    /// that had the metadata connected unused, then arrived 0.3 seconds after being asked properly.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void AProbeToAPeerWithoutTheMetadataIsReplacedOnceTheSizeIsKnown()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 8;
+
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        // The first peer to arrive declares nothing, so piece 0 is probed blind.
+        var blind = MakePeer(metadataSize: null);
+        InjectActivePeer(download, blind);
+        download.PeerConnected(blind);
+
+        Assert.Contains(0, ((MockUtMetadata)blind.UtMetadata).RequestedPieces);
+
+        // Now a peer that actually has the metadata turns up.
+        var holder = MakePeer();
+        InjectActivePeer(download, holder);
+        download.PeerConnected(holder);
+
+        Assert.True(
+            ((MockUtMetadata)holder.UtMetadata).RequestedPieces.Contains(0),
+            "Piece 0 was left with the blind probe holding its only pending slot, so the peer that " +
+            "declared the metadata was never asked for it and the piece waits out a timeout instead.");
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private static MockPeerCommunication MakePeer(int? metadataSize = PieceSize)
