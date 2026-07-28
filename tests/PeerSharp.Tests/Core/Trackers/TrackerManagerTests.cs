@@ -456,6 +456,76 @@ public class TrackerManagerTests
         await TorrentTestUtility.AdvanceUntilCompleteAsync(_timeProvider, stop, TimeSpan.FromSeconds(5));
     }
 
+    /// <summary>
+    /// A real stop tells the trackers, as BEP 3 asks.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task StopAsync_StoppingForReal_AnnouncesStopped()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://real-stop.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(5));
+
+        await manager.StopAsync();
+
+        Assert.Equal(TrackerEvent.Stopped, tracker.LastEvent);
+    }
+
+    /// <summary>
+    /// Rebuilding the torrent is not stopping it, and must not say so.
+    ///
+    /// <para>
+    /// When a magnet's metadata arrives the torrent is torn down and built again, but the info hash was
+    /// just verified against that metadata - the tracker session is unchanged and a started announce
+    /// follows within milliseconds. Claiming to have stopped in between is untrue, and it is not free:
+    /// the announce is bounded by StopAnnounceTimeout, so one unresponsive UDP tracker costs the full
+    /// two seconds. On a real magnet that was 2.5 of the 5.75 seconds between the last metadata byte
+    /// and the first block being requested.
+    /// </para>
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task StopAsync_Rebuilding_DoesNotAnnounceStopped()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://rebuild.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(5));
+        var beforeStop = tracker.LastEvent;
+
+        await manager.StopAsync(sendStoppedAnnounce: false);
+
+        Assert.NotEqual(TrackerEvent.Stopped, tracker.LastEvent);
+        Assert.Equal(beforeStop, tracker.LastEvent);
+    }
+
+    /// <summary>
+    /// The point of skipping it: an unresponsive tracker cannot hold a rebuild up, because nothing is
+    /// sent for it to fail to answer. The clock never moves here, so anything waiting on a timeout
+    /// would wait forever.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task StopAsync_Rebuilding_IsNotDelayedByAnUnresponsiveTracker()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://unresponsive-rebuild.example/announce";
+        manager.AddTracker(url);
+        await manager.StartAsync();
+
+        var tracker = _factory.Trackers[url];
+        await tracker.WaitAnnounceAsync(TimeSpan.FromSeconds(5));
+
+        tracker.AnnounceHandler = (evt, ct) => Task.Delay(Timeout.InfiniteTimeSpan, ct);
+
+        await manager.StopAsync(sendStoppedAnnounce: false).WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     [Fact(Timeout = 30000)]
     public async Task CircuitBreaker_OpensAfterThreeFailures()
     {

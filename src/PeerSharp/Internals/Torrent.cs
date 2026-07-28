@@ -508,7 +508,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public async Task ReinitializeAfterMetadataAsync(CancellationToken ct = default)
     {
         bool wasStarted = Started;
-        await StopAsync(ct).ConfigureAwait(false);
+
+        // Not a stop, a rebuild: the info hash was verified against the metadata we just received, so
+        // the tracker session is still valid and a started announce follows immediately. Sending the
+        // courtesy stopped announce here would claim otherwise, and it is bounded by a timeout that one
+        // unresponsive UDP tracker runs out in full - 2.5 of the 5.75 seconds a real magnet spent
+        // between its last metadata byte and its first block.
+        await StopInternalAsync(disposing: false, sendStoppedAnnounce: false, ct).ConfigureAwait(false);
         Initialize();
         await ApplyPendingSelectOnlyFileIndicesAsync(ct).ConfigureAwait(false);
         if (wasStarted && !StopAfterMetadata)
@@ -1291,7 +1297,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
-    private async Task StopInternalAsync(bool disposing, CancellationToken ct = default)
+    private Task StopInternalAsync(bool disposing, CancellationToken ct = default)
+        => StopInternalAsync(disposing, sendStoppedAnnounce: true, ct);
+
+    private async Task StopInternalAsync(bool disposing, bool sendStoppedAnnounce, CancellationToken ct = default)
     {
         if (!disposing)
         {
@@ -1323,7 +1332,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 }
                 if (TrackerManager != null)
                 {
-                    await TrackerManager.StopAsync().ConfigureAwait(false);
+                    await TrackerManager.StopAsync(sendStoppedAnnounce).ConfigureAwait(false);
                 }
                 // Deliberately uncancellable, like the rest of this block: once the stop has
                 // begun, aborting it midway would leave some transports running while the

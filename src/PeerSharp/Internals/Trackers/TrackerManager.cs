@@ -511,7 +511,18 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         return Task.CompletedTask;
     }
 
-    public async Task StopAsync()
+    /// <summary>
+    /// Stops announcing and drains anything in flight.
+    /// </summary>
+    /// <param name="sendStoppedAnnounce">
+    /// Whether to send the BEP 3 courtesy <c>stopped</c> announce. False when the torrent is only being
+    /// rebuilt rather than actually stopped - after metadata arrives, for instance, where the info hash
+    /// is unchanged and a <c>started</c> announce follows immediately. Saying we stopped and then that
+    /// we started, milliseconds apart, is untrue and not free: the announce is bounded by
+    /// StopAnnounceTimeout, so one unresponsive UDP tracker costs the full two seconds. Measured on a
+    /// real magnet, 2.5 of the 5.75 seconds between the last metadata byte and the first block.
+    /// </param>
+    public async Task StopAsync(bool sendStoppedAnnounce = true)
     {
         List<TrackerInfo> toStop;
         List<CancellationTokenSource> ctsToCancel = [];
@@ -600,7 +611,9 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             }
         }
 
-        Task[] stopAnnounces = [.. toStop.Select(info => SendStoppedAnnounceAsync(info, _timeProvider))];
+        Task[] stopAnnounces = sendStoppedAnnounce
+            ? [.. toStop.Select(info => SendStoppedAnnounceAsync(info, _timeProvider))]
+            : [];
         Task[] removals = [.. _removalTasks.Keys];
         await Task.WhenAll(stopAnnounces.Concat(removals)).ConfigureAwait(false);
         _removalTasks.Clear();
