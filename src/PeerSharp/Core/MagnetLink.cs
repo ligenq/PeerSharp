@@ -500,11 +500,20 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// A BEP 46 link is addressed by its publisher key and salt, not by an info hash - a
+    /// <c>magnet:?xs=urn:btpk:...</c> carries no <c>btih</c> at all. Comparing only the hashes therefore
+    /// made every self-updating link equal to every other, whatever it pointed at, and since the hash
+    /// code came from the same two fields they collided in any set or dictionary too. The salt matters
+    /// as much as the key: BEP 46 exists so one publisher can address several records by salt.
+    /// </remarks>
     public bool Equals(MagnetLink? other)
     {
         return other is not null &&
         InfoHash.Equals(other.InfoHash) &&
-        InfoHashV2.Equals(other.InfoHashV2);
+        InfoHashV2.Equals(other.InfoHashV2) &&
+        PublicKey.Span.SequenceEqual(other.PublicKey.Span) &&
+        Salt.Span.SequenceEqual(other.Salt.Span);
     }
 
     /// <inheritdoc />
@@ -516,7 +525,14 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
     /// <inheritdoc />
     public override int GetHashCode()
     {
-        return HashCode.Combine(InfoHash, InfoHashV2);
+        // Must cover everything Equals does, or self-updating links that differ only by key or salt
+        // land in the same bucket and one silently replaces another.
+        var hash = new HashCode();
+        hash.Add(InfoHash);
+        hash.Add(InfoHashV2);
+        hash.AddBytes(PublicKey.Span);
+        hash.AddBytes(Salt.Span);
+        return hash.ToHashCode();
     }
 
     /// <inheritdoc />
