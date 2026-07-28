@@ -146,10 +146,14 @@ public class WebSeedManagerErrorTests
         await WaitForRequestCount(mockHttp, 1, timeProvider);
         Assert.True(mockHttp.RequestedUrls.Count >= 1, $"Expected at least 1 request but got {mockHttp.RequestedUrls.Count}");
 
-        // Wait for the state being asserted rather than a fixed moment: the download task and its
-        // continuation have to finish first, and how long that takes is the runner's business.
-        await TorrentTestUtility.WaitUntilAsync(
-            () => manager.GetStats().TotalSources == 1, 10000, "the web seed to be registered");
+        // Advance while waiting, not merely poll. The registration itself is not scheduled on the clock,
+        // but anything in this manager might be, and a poll that cannot make progress spends its whole
+        // budget before failing rather than failing fast. Advancing here is harmless.
+        await TorrentTestUtility.AdvanceUntilAsync(
+            timeProvider,
+            () => manager.GetStats().TotalSources == 1,
+            TimeSpan.FromSeconds(1),
+            "the web seed to be registered");
 
         var stats = manager.GetStats();
         Assert.Equal(1, stats.TotalSources);
@@ -177,19 +181,20 @@ public class WebSeedManagerErrorTests
 
         manager.Start();
 
-        // Wait until seed2 receives at least one request (means seed1 was exhausted)
-        var deadline = Environment.TickCount64 + 10000;
-        while (!mockHttp.RequestedUrls.Any(u => u.Contains("seed2.com")) && Environment.TickCount64 < deadline)
-        {
-            timeProvider.Advance(TimeSpan.FromSeconds(1));
-            await Task.Delay(20);
-        }
-        // Wait for the condition being asserted rather than a fixed settle: seed1 is expected to have
-        // been tried exactly MaxRetries times before it was taken out of service.
-        await TorrentTestUtility.WaitUntilAsync(
+        // Both waits have to move the clock, because the retries they are waiting for are scheduled on
+        // it. Polling alone can only succeed if the work already happened - which is how an earlier
+        // version of this test burned its whole budget waiting for a retry that could never fire.
+        await TorrentTestUtility.AdvanceUntilAsync(
+            timeProvider,
             () => mockHttp.RequestedUrls.Count(u => u.Contains("seed1.com")) >= 3,
-            10000,
-            "seed1 to be exhausted");
+            TimeSpan.FromSeconds(1),
+            "seed1 to be tried its full MaxRetries times");
+
+        await TorrentTestUtility.AdvanceUntilAsync(
+            timeProvider,
+            () => mockHttp.RequestedUrls.Any(u => u.Contains("seed2.com")),
+            TimeSpan.FromSeconds(1),
+            "seed2 to pick up after seed1 was exhausted");
 
         var seed1Requests = mockHttp.RequestedUrls.Count(u => u.Contains("seed1.com"));
         var seed2Requests = mockHttp.RequestedUrls.Count(u => u.Contains("seed2.com"));
