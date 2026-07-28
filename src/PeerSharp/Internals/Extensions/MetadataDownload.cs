@@ -130,6 +130,8 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             _receivedPieces = new BitArray((size + UtMetadata.PieceSize - 1) / UtMetadata.PieceSize, false);
             _logger.LogInformation("Initialized metadata buffer for size: {Size}", size);
 
+            ReleaseSpeculativeRequests();
+
             if (Active && _activePeers.Count > 0)
             {
                 FillMissingRequests();
@@ -662,6 +664,42 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     /// here to anyone at all when nobody has declared a size.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Drops pending requests that were guesses, now that there is something better to go on.
+    ///
+    /// <para>
+    /// Before the metadata size is known there is nothing to do but probe piece 0 from whoever turned
+    /// up first, including peers that never declared a size and may hold nothing at all. Once a peer
+    /// does declare one, that probe is a stale guess occupying the piece's only pending slot - and
+    /// because a piece with a pending request is skipped, nobody else is asked until it times out. In a
+    /// live run that left piece 0 parked on a non-declaring peer for 3.3 seconds while six peers that
+    /// had the metadata connected and were never asked; re-asked properly, it arrived in 0.3 seconds.
+    /// </para>
+    /// </summary>
+    private void ReleaseSpeculativeRequests()
+    {
+        if (_pendingRequests.Count == 0)
+        {
+            return;
+        }
+
+        var speculative = _pendingRequests
+            .Where(entry => entry.Value.Peer?.RemoteExtensions?.MetadataSize is not > 0)
+            .Select(entry => entry.Key)
+            .ToList();
+
+        foreach (var piece in speculative)
+        {
+            _pendingRequests.Remove(piece);
+        }
+
+        if (speculative.Count > 0)
+        {
+            _logger.LogDebug(
+                "Released {Count} speculative metadata request(s) now that the size is known", speculative.Count);
+        }
+    }
+
     private List<IPeerCommunication> EligibleMetadataPeers(IPeerCommunication? exclude)
     {
         var withMetadata = new List<IPeerCommunication>();
