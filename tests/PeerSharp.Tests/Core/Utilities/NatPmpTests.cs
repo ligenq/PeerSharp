@@ -66,7 +66,7 @@ public sealed class NatPmpTests
         Assert.Equal(2, received[0][1]); // TCP opCode = 2
     }
 
-    [Fact(Timeout = 10000)]
+    [Fact(Timeout = 60000)]
     public async Task UnmapAllAsync_AfterMapping_SendsUnmapPackets()
     {
         var received = new List<byte[]>();
@@ -104,7 +104,7 @@ public sealed class NatPmpTests
         await mapper.UnmapAllAsync(CancellationToken.None);
     }
 
-    [Fact(Timeout = 10000)]
+    [Fact(Timeout = 60000)]
     public async Task UnmapAllAsync_ClearsInternalMappings_SubsequentCallSendsNothing()
     {
         var received = new List<byte[]>();
@@ -125,7 +125,7 @@ public sealed class NatPmpTests
         Assert.Equal(countAfterFirst, server.CapturedCount);
     }
 
-    [Fact(Timeout = 10000)]
+    [Fact(Timeout = 60000)]
     public async Task MultipleGateways_MapAndUnmapEveryGateway()
     {
         var received = new List<byte[]>();
@@ -182,12 +182,29 @@ public sealed class NatPmpTests
         public Task WaitForPacketAsync(TimeSpan timeout) =>
             _packetSignal.WaitAsync(timeout).ContinueWith(_ => { });
 
+        /// <summary>
+        /// Waits for <paramref name="count"/> packets to arrive.
+        ///
+        /// <para>
+        /// These tests exchange real UDP over loopback, which a loaded runner can drop or delay. The
+        /// enclosing test timeout is generous for that reason - it exists to catch a genuine hang, not
+        /// to bound how fast the machine is - so this reports which wait gave up rather than surfacing
+        /// a bare cancellation that says nothing about where the test got to.
+        /// </para>
+        /// </summary>
         public async Task WaitForPacketCountAsync(int count, TimeSpan timeout)
         {
             using var cts = new CancellationTokenSource(timeout);
-            while (CapturedCount < count)
+            try
             {
-                await _packetSignal.WaitAsync(cts.Token).ConfigureAwait(false);
+                while (CapturedCount < count)
+                {
+                    await _packetSignal.WaitAsync(cts.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                Assert.Fail($"Timed out waiting for {count} NAT-PMP packets; {CapturedCount} arrived.");
             }
         }
 
