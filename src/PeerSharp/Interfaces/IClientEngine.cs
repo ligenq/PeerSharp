@@ -45,16 +45,28 @@ public interface IClientEngine : IAsyncDisposable
 
     /// <summary>
     /// Downloads only the metadata for a magnet link and returns it as a
-    /// <see cref="TorrentFile"/>, without starting (or keeping) a download. Internally a
-    /// transient torrent is added to fetch the metadata from the swarm and removed again
-    /// before this method returns. Use the result to preview the file list, then add it via
-    /// AddTorrentAsync with file selections; persist <see cref="TorrentFile.RawData"/> to
-    /// skip the metadata download for the same magnet in the future.
+    /// <see cref="TorrentFile"/>, without starting (or keeping) a download. Use the result to
+    /// preview the file list, then add it via AddTorrentAsync with file selections; persist
+    /// <see cref="TorrentFile.RawData"/> to skip the metadata download for the same magnet in
+    /// the future.
+    ///
+    /// <para>
+    /// A torrent is added internally to do the fetch, but it is invisible to the caller and stays
+    /// that way. It does not appear in <see cref="GetTorrents"/> or <see cref="GetTorrent"/>, emits
+    /// no alerts, takes no session entry, and does not participate in the queue. It also makes no
+    /// claim on the info hash: fetching metadata for a hash already added is allowed, and adding
+    /// that hash while a fetch is in flight is not blocked by it.
+    /// </para>
+    ///
+    /// <para>
+    /// The consequence of that silence is that the fetch's progress is not observable either -
+    /// there is no <see cref="AlertId.MetadataProgressChanged"/> for it. A caller wanting a
+    /// progress indicator has only the fact that this task has not completed yet.
+    /// </para>
     /// </summary>
     /// <param name="magnetLink">The magnet link to resolve.</param>
     /// <param name="cancellationToken">Cancellation token; use a timeout-based token to bound the fetch.</param>
     /// <exception cref="ArgumentNullException">Thrown when magnetLink is null.</exception>
-    /// <exception cref="TorrentAlreadyExistsException">Thrown when a torrent with the same hash is already added.</exception>
     /// <exception cref="OperationCanceledException">Thrown when the token is cancelled before metadata arrives.</exception>
     Task<TorrentFile> GetMagnetMetadataAsync(MagnetLink magnetLink, CancellationToken cancellationToken = default);
 

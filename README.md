@@ -106,7 +106,9 @@ APIs support that without downloading any file data:
 
 ```csharp
 // Option 1: Fetch only the metadata and get a TorrentFile back.
-// A transient torrent fetches the metadata and is removed again automatically.
+// The torrent that does the fetching is invisible: it never appears in GetTorrents(),
+// emits no alerts, takes no session entry, and does not reserve the info hash - so
+// previewing a magnet you already hold, or adding it mid-preview, both work.
 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 var torrentFile = await engine.GetMagnetMetadataAsync(magnet, cts.Token);
 

@@ -400,7 +400,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             return null;
         }
 
-        _registry.TryGet(hash, out var torrent);
+        _registry.TryGetForRouting(hash, out var torrent);
         return torrent;
     }
 
@@ -600,7 +600,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             null);
     }
 
-    private Torrent AddMagnetInternal(MagnetLink magnetLink, ITorrentEvents? events = null, TorrentResumeData? resumeData = null)
+    private Torrent AddMagnetInternal(MagnetLink magnetLink, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false)
     {
         _disposal.ThrowIfDisposed(this);
 
@@ -636,7 +636,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
 
         var fsm = new FileSelectionManager(metadata);
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, _alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
+        var alerts = transient ? NullAlertsManager.Instance : _alerts;
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
 
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
@@ -644,7 +645,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         torrent.Blocklist = Blocklist;
         torrent.MetadataDownload = new MetadataDownload(torrent, _loggerFactory);
         torrent.MetadataDownload.Start();
-        torrent.Events = WrapMagnetEvents(torrent.Events);
+
+        // A transient torrent never reaches the session, so the proxy that would register it there
+        // has nothing to do.
+        if (!transient)
+        {
+            torrent.Events = WrapMagnetEvents(torrent.Events);
+        }
 
         if (magnetLink.Peers.Count > 0)
         {
@@ -658,26 +665,44 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             }
         }
 
-        _registry.Add(torrent);
+        Register(torrent, transient);
 
         return torrent;
     }
 
-    private Torrent AddTorrentInternal(TorrentFileMetadata metadata, ITorrentEvents? events = null, TorrentResumeData? resumeData = null)
+    private Torrent AddTorrentInternal(TorrentFileMetadata metadata, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false)
     {
         _disposal.ThrowIfDisposed(this);
 
         var fsm = new FileSelectionManager(metadata);
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, _alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
+        var alerts = transient ? NullAlertsManager.Instance : _alerts;
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
 
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
         torrent.Blocklist = Blocklist;
 
-        _registry.Add(torrent);
+        Register(torrent, transient);
 
         return torrent;
+    }
+
+    /// <summary>
+    /// Puts a newly built torrent into the registry. A transient one goes into the side list, so it
+    /// stays resolvable for inbound connections without joining the caller's torrent list or
+    /// tripping the duplicate guard against a hash they may already hold.
+    /// </summary>
+    private void Register(Torrent torrent, bool transient)
+    {
+        if (transient)
+        {
+            _registry.AddTransient(torrent);
+        }
+        else
+        {
+            _registry.Add(torrent);
+        }
     }
 
     private ITorrentEvents? WrapMagnetEvents(ITorrentEvents? events)
@@ -1083,7 +1108,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         else if (!string.IsNullOrEmpty(entry.MagnetLink))
         {
             var magnet = MagnetLink.Parse(entry.MagnetLink);
-            torrent = await AddMagnetCoreAsync(magnet, options, persistToDisk: false, rebalanceQueue: false, cancellationToken).ConfigureAwait(false);
+            torrent = await AddMagnetCoreAsync(magnet, options, persistToDisk: false, rebalanceQueue: false, transient: false, cancellationToken).ConfigureAwait(false);
 
             // Store magnet for future persistence
             _sessionManager?.RegisterTorrentData(torrent.Hash, null, entry.MagnetLink);
@@ -1227,13 +1252,14 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         MagnetLink magnetLink,
         AddTorrentOptions? options = null,
         CancellationToken cancellationToken = default)
-        => AddMagnetCoreAsync(magnetLink, options, persistToDisk: true, rebalanceQueue: true, cancellationToken);
+        => AddMagnetCoreAsync(magnetLink, options, persistToDisk: true, rebalanceQueue: true, transient: false, cancellationToken);
 
     private async Task<ITorrent> AddMagnetCoreAsync(
         MagnetLink magnetLink,
         AddTorrentOptions? options,
         bool persistToDisk,
         bool rebalanceQueue,
+        bool transient,
         CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
@@ -1249,11 +1275,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             if (fetched != null)
             {
                 torrentBytes = fetched.Value.Bytes;
-                torrent = AddTorrentInternal(fetched.Value.Metadata, options?.Events, options?.ResumeData);
+                torrent = AddTorrentInternal(fetched.Value.Metadata, options?.Events, options?.ResumeData, transient);
             }
         }
 
-        torrent ??= AddMagnetInternal(magnetLink, options?.Events, options?.ResumeData);
+        torrent ??= AddMagnetInternal(magnetLink, options?.Events, options?.ResumeData, transient);
 
         // The torrent is registered above, so from here on any failure - most commonly the
         // caller's token tripping during StartAsync - has to unregister it again. Leaving a
@@ -1319,13 +1345,15 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
         catch
         {
-            await DiscardFailedAddAsync(torrent).ConfigureAwait(false);
+            await DiscardFailedAddAsync(torrent, transient).ConfigureAwait(false);
             throw;
         }
 
         // Save to session persistence if enabled.
         // During restore, only re-register in memory and skip the redundant disk write-back.
-        if (_sessionManager != null)
+        // A transient torrent is not the caller's and must not outlive the operation, so it is
+        // kept out of the session entirely - including the in-memory registration.
+        if (_sessionManager != null && !transient)
         {
             var magnetString = magnetLink.OriginalString;
             _sessionManager.RegisterTorrentData(torrent.Hash, torrentBytes, magnetString);
@@ -1357,13 +1385,21 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         ArgumentNullException.ThrowIfNull(magnetLink);
 
         // Transient fetch: add the magnet in preview mode, wait for its metadata, export it
-        // as a TorrentFile, and remove the transient torrent again. The caller can then show
+        // as a TorrentFile, and discard the transient torrent again. The caller can then show
         // a file-selection UI and add the returned TorrentFile like a regular .torrent
         // (its RawData can also be cached to skip the metadata download entirely next time).
-        var torrent = await AddMagnetAsync(magnetLink, new AddTorrentOptions
-        {
-            StopAfterMetadata = true
-        }, cancellationToken).ConfigureAwait(false);
+        //
+        // The add is transient in the engine's own sense: no alerts, no session entry, no queue
+        // participation, and no claim on the hash. A caller watching the alert stream sees nothing
+        // happen, and one that already holds this hash - or adds it while the fetch is running -
+        // is unaffected.
+        var torrent = (Torrent)await AddMagnetCoreAsync(
+            magnetLink,
+            new AddTorrentOptions { StopAfterMetadata = true },
+            persistToDisk: false,
+            rebalanceQueue: false,
+            transient: true,
+            cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -1372,16 +1408,29 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
         finally
         {
-            // Always remove the transient torrent, including on cancellation/timeout, so a
-            // later AddTorrentAsync for the same hash does not hit the duplicate guard.
-            try
-            {
-                await RemoveTorrentAsync(torrent, RemoveOptions.None, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to remove transient metadata-fetch torrent {Hash}", torrent.Hash);
-            }
+            await DiscardTransientAsync(torrent).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Tears down a torrent the engine added for its own purposes. Deliberately not
+    /// <see cref="RemoveTorrentAsync(ITorrent, RemoveOptions, CancellationToken)"/>: that resolves by hash, raises
+    /// <see cref="AlertId.TorrentRemoved"/> and deletes a session entry, none of which are correct
+    /// for a torrent the caller was never shown. Runs uncancellably so a cancelled fetch still
+    /// cleans up after itself.
+    /// </summary>
+    private async Task DiscardTransientAsync(Torrent torrent)
+    {
+        try
+        {
+            _registry.RemoveTransient(torrent);
+            await torrent.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            _bandwidth.RemoveTorrentChannels(torrent);
+            await torrent.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to discard transient metadata-fetch torrent {Hash}", torrent.Hash);
         }
     }
 
@@ -1390,11 +1439,21 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     /// leaves the engine exactly as it found it. Runs uncancellably and never throws: the
     /// original add failure is what the caller needs to see.
     /// </summary>
-    private async Task DiscardFailedAddAsync(Torrent torrent)
+    private async Task DiscardFailedAddAsync(Torrent torrent, bool transient = false)
     {
         try
         {
-            _registry.Remove(torrent.Hash, out _);
+            // By identity for a transient one: removing by hash could take a real torrent the
+            // caller holds for the same hash.
+            if (transient)
+            {
+                _registry.RemoveTransient(torrent);
+            }
+            else
+            {
+                _registry.Remove(torrent.Hash, out _);
+            }
+
             _bandwidth.RemoveTorrentChannels(torrent);
             await torrent.DisposeAsync().ConfigureAwait(false);
         }

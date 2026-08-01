@@ -177,46 +177,28 @@ Neither has a consumer asking for it.
 
 ---
 
-## Transient metadata fetches use the ordinary torrent lifecycle
+## A metadata fetch cannot report its progress
 
-**Observed.** `ClientEngine.GetMagnetMetadataAsync` calls the public `AddMagnetAsync`, waits for
-metadata, and removes the torrent. The public add path persists the magnet to the session, rebalances
-the queue, and emits the same `TorrentAdded`, `MetadataInitialized` and `TorrentRemoved` alerts as a
-user-owned download. A consumer such as Peerfluence, which drives its torrent list and notifications
-from those alerts, can therefore briefly display a metadata-preview torrent and announce that its
-metadata is ready even though the operation was intended to be invisible and transient.
+**Observed.** `ClientEngine.GetMagnetMetadataAsync` now runs its torrent transiently: no lifecycle
+alerts, no session entry, no queue participation, no claim on the info hash, and absent from
+`GetTorrents`. That was the fix for a consumer seeing preview torrents appear in its download list
+and announce themselves as ready. It also removed the only channel through which the fetch's
+progress was visible, because `MetadataProgressChanged` came from the same silenced torrent.
 
-**Why it matters.** The dedicated API successfully owns cleanup and avoids a second engine, but it
-does not isolate the operation from the rest of the application's lifecycle. Consumers cannot filter
-the alerts reliably: neither the torrent nor the alert says that it belongs to a transient metadata
-fetch. The API also has no operation-scoped progress callback, so the global
-`MetadataProgressChanged` stream is the only place to obtain progress and has the same ambiguity.
+**Why it matters.** Fetching metadata for a cold magnet is the one moment a user is asked to wait on
+something with no feedback. The stream previously carried progress, but ambiguously - a consumer
+could not tell a preview's metadata progress from a real download's. Now it carries nothing, which
+is the more honest of the two and the less useful. A caller has only "the task has not completed".
 
-**What would settle it.** Give metadata fetching an internal transient add path that skips session
-persistence and queue rebalancing and suppresses ordinary lifecycle alerts. If progress is useful to
-callers, expose it directly on `GetMagnetMetadataAsync` through an `IProgress` parameter, callback, or
-operation object rather than making callers identify the transient torrent in the global alert
-stream.
+**Why it was left.** The ambiguity was the reported defect and the silence resolves it. Adding
+progress back needs a channel scoped to the operation rather than the engine, which is a small API
+design question rather than a mechanical change: an `IProgress<MetadataProgress>` parameter is the
+obvious shape, but an operation object returning both the task and its progress composes better if
+the fetch ever grows other observable state.
 
-**Registry membership is not free, as this entry previously assumed.** Peerfluence has since built the
-consumer-side workaround, and it turned up a consequence beyond the cosmetic ones above. Because the
-transient torrent occupies the registry slot for its hash, a *user-initiated* add of that same hash
-while a preview is in flight fails with `TorrentAlreadyExistsException` — the add dialogue's own
-"Add" button, pressed before the preview it started has finished. Cancelling the fetch does not fix
-it: cancellation only begins the unwind, and `RemoveTorrentAsync` runs uncancellably afterwards, so a
-caller who cancels and adds immediately still collides. The only reliable ordering available to a
-caller is to hold the fetch's `Task` and await it before adding, which means the visible cost of a
-"cancelled" preview is however long the removal takes. So invisibility does require bypassing the
-duplicate-protection invariant for transient adds, or at least giving the fetch a way to hand its
-registry slot to a real add rather than making the caller wait for it to let go.
-
-**What the workaround costs, as a measure of the gap.** Suppressing the alerts consumer-side needs a
-hash-keyed registry of in-flight fetches consulted on every alert, and it cannot be released when the
-fetch completes: alerts are polled on a 100 ms interval, so a short fetch's alerts are still queued
-when its scope closes. Releasing on the fetch's own `TorrentRemoved` is exact, but an add that throws
-before registering produces no alerts at all and therefore no removal to release on, which forces a
-time-based fallback. None of that is knowable from the public API — it is all inference about what
-`GetMagnetMetadataAsync` does internally, and it breaks silently if the internals change.
+**What would settle it.** A consumer that actually wants the indicator. Peerfluence shows an
+indeterminate "fetching metadata" state and has not asked for more, so the shape of the API should
+follow a real requirement rather than a guess at one.
 
 ---
 

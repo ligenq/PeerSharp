@@ -12,6 +12,18 @@ internal sealed class TorrentRegistry
     private readonly List<Torrent> _torrents = [];
     private readonly Dictionary<string, Torrent> _torrentsByHash = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Torrents the engine added on its own behalf - a metadata fetch - rather than the caller's.
+    ///
+    /// <para>
+    /// They are kept apart from the real ones on purpose. They must be resolvable by hash, because
+    /// that is how an inbound connection finds the torrent it is for, but they must not appear in
+    /// <see cref="GetAll"/>, must not block a caller from adding that hash for real, and must be
+    /// removed by identity so that tearing one down cannot take a real torrent with it.
+    /// </para>
+    /// </summary>
+    private readonly List<Torrent> _transient = [];
+
     public int Count
     {
         get
@@ -35,6 +47,28 @@ internal sealed class TorrentRegistry
 
             _torrents.Add(torrent);
             _torrentsByHash[hashKey] = torrent;
+        }
+    }
+
+    /// <summary>
+    /// Registers a torrent the engine owns for the duration of one operation. Deliberately not
+    /// subject to the duplicate guard: a metadata fetch for a hash the caller already holds is a
+    /// legitimate thing to do, and the fetch must not be able to fail a caller's own add either.
+    /// </summary>
+    public void AddTransient(Torrent torrent)
+    {
+        lock (_lock)
+        {
+            _transient.Add(torrent);
+        }
+    }
+
+    /// <summary>Removes a transient torrent by identity. Returns false if it was already gone.</summary>
+    public bool RemoveTransient(Torrent torrent)
+    {
+        lock (_lock)
+        {
+            return _transient.Remove(torrent);
         }
     }
 
@@ -72,11 +106,35 @@ internal sealed class TorrentRegistry
         }
     }
 
+    /// <summary>
+    /// Resolves a hash to a torrent the caller owns. Transient torrents are deliberately invisible
+    /// here: this backs the public lookup, and handing back a torrent the caller never added would
+    /// let them stop, mutate or remove one.
+    /// </summary>
     public bool TryGet(InfoHash hash, [NotNullWhen(true)] out Torrent? torrent)
     {
         lock (_lock)
         {
             torrent = _torrents.FirstOrDefault(t => t.Hash == hash || t.HashV2 == hash);
+            return torrent != null;
+        }
+    }
+
+    /// <summary>
+    /// Resolves a hash for the engine's own plumbing - inbound handshakes, DHT peer results, tracker
+    /// callbacks - where a metadata fetch in progress does need to receive what arrives for it.
+    ///
+    /// <para>
+    /// Real torrents win. If the caller holds this hash, an inbound peer belongs to their torrent,
+    /// not to a fetch that happens to be running for the same one.
+    /// </para>
+    /// </summary>
+    public bool TryGetForRouting(InfoHash hash, [NotNullWhen(true)] out Torrent? torrent)
+    {
+        lock (_lock)
+        {
+            torrent = _torrents.FirstOrDefault(t => t.Hash == hash || t.HashV2 == hash)
+                ?? _transient.FirstOrDefault(t => t.Hash == hash || t.HashV2 == hash);
             return torrent != null;
         }
     }

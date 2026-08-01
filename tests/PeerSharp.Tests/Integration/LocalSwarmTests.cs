@@ -223,11 +223,10 @@ public class LocalSwarmTests : IDisposable
         var seedEndpoint = new IPEndPoint(IPAddress.Loopback, portListener.Port);
         while (!fetchTask.IsCompleted && !cts.IsCancellationRequested)
         {
-            if (leecherEngine.GetTorrent(torrentFile.InfoHash) != null)
-            {
-                leecherEngine.OnPeersFound(torrentFile.InfoHash, [seedEndpoint]);
-            }
-
+            // Offered unconditionally: the fetch torrent is deliberately invisible to GetTorrent,
+            // so there is nothing to probe for. OnPeersFound resolves through the engine's own
+            // routing, which does see it, and no-ops until it exists.
+            leecherEngine.OnPeersFound(torrentFile.InfoHash, [seedEndpoint]);
             await Task.Delay(100);
         }
 
@@ -262,6 +261,65 @@ public class LocalSwarmTests : IDisposable
 
         // The transient torrent must be cleaned up even on cancellation
         Assert.Empty(engine.GetTorrents());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetMagnetMetadata_IsInvisibleToTheCallerWhileItRuns()
+    {
+        // The fetch adds a real torrent to do its work. Everything a caller can observe - the
+        // torrent list, the alert stream, a lookup by hash - must not show it.
+        await using var engine = await CreateEngineAsync(_pathB);
+        engine.Alerts.RegisterAlerts((uint)AlertCategory.Torrent | (uint)AlertCategory.Metadata);
+
+        var infoHash = InfoHash.FromHex(new string('b', 40));
+        string magnet = $"magnet:?xt=urn:btih:{infoHash.ToHexString()}";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        var fetchTask = engine.GetMagnetMetadataAsync(magnet, cts.Token);
+
+        await Task.Delay(300);
+
+        Assert.Empty(engine.GetTorrents());
+        Assert.Null(engine.GetTorrent(infoHash));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetchTask);
+
+        Assert.Empty(engine.GetTorrents());
+        Assert.Empty(engine.Alerts.PopAlerts());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetMagnetMetadata_DoesNotBlockTheCallerFromAddingTheSameHash()
+    {
+        // The fetch used to occupy the registry slot for its hash, so a caller adding that hash
+        // while a preview was running got TorrentAlreadyExistsException for no reason of their own.
+        const string fileName = "concurrent.bin";
+        byte[] data = new byte[16_384];
+        Random.Shared.NextBytes(data);
+
+        var torrentFile = new ApiTorrentFileBuilder()
+            .WithName(fileName)
+            .WithPieceLength(16_384)
+            .AddFile(fileName, data)
+            .Build();
+
+        await using var engine = await CreateEngineAsync(_pathB);
+
+        string magnet = $"magnet:?xt=urn:btih:{torrentFile.InfoHash.ToHexString()}";
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var fetchTask = engine.GetMagnetMetadataAsync(magnet, cts.Token);
+        await Task.Delay(300);
+
+        var added = await engine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
+
+        Assert.Equal(torrentFile.InfoHash, added.Hash);
+        Assert.Same(added, Assert.Single(engine.GetTorrents()));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetchTask);
+
+        // Discarding the fetch must not take the caller's torrent with it: the old teardown
+        // resolved by hash, which would have removed exactly this one.
+        Assert.Same(added, Assert.Single(engine.GetTorrents()));
+        Assert.NotNull(engine.GetTorrent(torrentFile.InfoHash));
     }
 
     [Fact(Timeout = 30000)]
