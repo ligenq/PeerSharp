@@ -286,34 +286,44 @@ reading a slow first block as a fault.
 
 ---
 
-## Serving to Transmission is an order of magnitude slower than serving to ourselves
+## Leeching from Transmission runs at a fraction of every other path
 
-**Observed.** Same loopback, same 256 MiB payload, same engine. To Transmission: 7.7 MiB/s, and
-flat - 7.8 to 7.9 for the entire transfer, never ramping, never varying. Between two PeerSharp
-engines: 108 MiB/s plaintext and 234 MiB/s encrypted.
+**Observed.** Four measurements, same machine, same loopback, same 256 MiB payload of random bytes,
+same MSE-encrypted connection, and in every Transmission case PeerSharp is the side that dials, so
+the TCP direction and the encryption handshake are held constant:
 
-**MSE is not the cause.** That was the standing suspicion, and this is the measurement that was
-missing for it: the encrypted control arm is the *faster* of the two PeerSharp runs, so the
-encrypted send path sustains hundreds of MiB/s. A cost confined to the MSE layer would have shown
-up here and did not.
+| Path | Rate |
+| --- | --- |
+| PeerSharp seeds, PeerSharp leeches, plaintext | 108 MiB/s |
+| PeerSharp seeds, PeerSharp leeches, encrypted | 234 MiB/s |
+| PeerSharp seeds, **Transmission leeches** | 7.7 MiB/s |
+| **Transmission seeds**, PeerSharp leeches | 0.3 MiB/s |
 
-**What is known about the shape.** Transmission sizes its request pipeline from its own measured
-rate: `max_available_reqs` computes `rate * RequestBufSecs / BlockSize`, clamped to a floor of 32
-and a ceiling of the `reqq` the peer advertised, or 500 if it advertised none. PeerSharp advertises
-no `reqq` at all - the string does not appear in the source - so the ceiling is 500, and at the
-observed rate the estimate is far above that. So the pipeline should be pinned at its ceiling of 500
-blocks, which is 8 MiB in flight against a measured 7.9 MiB/s: roughly one second to service a full
-window. Whether that second is ours, Transmission's, or the round trip between them is exactly what
-is not yet known.
+**What that isolates.** The ceiling does not follow the data: reversing which side sends made it
+twenty-five times *worse*, not better. So this is not our send path, which serves 234 MiB/s to a
+PeerSharp leecher and 7.7 to Transmission. Nor is it our receive path in general, because the
+control arm has PeerSharp leeching too, at 234 MiB/s. Nor is it MSE, which the encrypted control
+already exonerated by being the faster of the two PeerSharp runs. What is left is an interaction:
+something Transmission does while seeding that we handle badly while receiving.
 
-**Why it was left.** The flatness is the interesting part and it does not fit a pipelining
-explanation, which would fluctuate. It looks like a cadence somewhere, but guessing which one is how
-the earlier metadata-rebuild misattribution happened, and the harness now exists to answer it
-properly instead.
+**Why it matters more than the seeding number.** Downloading is the case that matters, Transmission
+is one of the three implementations worth interoperating with, and 0.3 MiB/s is not a degradation -
+it is unusable. A real swarm mixes clients, so this would be masked by whichever peers are not
+Transmission rather than being obvious.
 
-**What would settle it.** Reverse the direction first - Transmission seeding, PeerSharp leeching -
-because that separates our send path from our request path in one run. If the ceiling follows the
-direction, it is ours; if it stays with Transmission, it is theirs or the connection's. After that,
-a packet capture of the encrypted arm timestamped against our own send loop would locate the second.
-Advertising a `reqq` is worth doing regardless - not as a fix, since 500 is already generous, but
-because a peer that can take a deeper queue currently has no way to say so.
+**What was seen but not explained.** Progress arrives in steps of roughly one to two MiB separated
+by stalls of several seconds, rather than flowing. Early in a run the connected-peer count
+alternates between one and zero on a several-second cycle, which settles later. Both point at
+something cyclic - a choke/unchoke rotation, or requests timing out and being reissued - rather than
+at a bandwidth limit. Our pipelining is adaptive (`InitialPipelineDepth` 16, `MaxRequestsPerPeer`
+128) and works against a PeerSharp seed, so the depth alone does not explain it.
+
+**What would settle it.** The harness is `TransmissionInteropTests.Leeching_FromTransmission_ReceivesTheWholeFile`,
+which reproduces it in about four minutes at 64 MiB. Transmission's peer log at `message-level` 4
+and our own request/timeout tracing on the same run, aligned on the stalls, should say whether we
+stop asking or it stops answering. Do that before touching the request strategy: the pipelining
+entries above are plausible-looking neighbours and would be easy to blame wrongly.
+
+**Caveat on the numbers.** One machine, one Transmission version (4.1.3), loopback, and one run per
+arm. Loopback RTT is far below anything a heuristic tuned for real networks expects, so the absolute
+figures are not a benchmark. The ordering across the four arms is the result, not the values.

@@ -173,6 +173,141 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// The same connection, carrying data the other way: Transmission seeds and we leech.
+    ///
+    /// <para>
+    /// We still dial Transmission, so the TCP direction and the encryption negotiation are exactly
+    /// as they were when we were seeding - only which side sends the pieces changes. If the ceiling
+    /// measured while seeding follows the data, it belongs to our send path; if it stays put, it
+    /// belongs to Transmission or to the connection between us.
+    /// </para>
+    /// </summary>
+    [Fact(Timeout = 900_000)]
+    public async Task Leeching_FromTransmission_ReceivesTheWholeFile()
+    {
+        RequireEnabled();
+        string exe = Environment.GetEnvironmentVariable(ExeVariable) ?? DefaultExe;
+        if (!File.Exists(exe))
+        {
+            Assert.Skip($"Transmission not found at {exe}. Set {ExeVariable} to its path.");
+        }
+
+        int sizeMiB = IntFromEnvironment("PEERSHARP_TRANSMISSION_SIZE_MIB", 64);
+        var encryption = Enum.TryParse<Encryption>(
+            Environment.GetEnvironmentVariable("PEERSHARP_TRANSMISSION_ENCRYPTION"), out var parsed)
+            ? parsed
+            : Encryption.Allow;
+
+        var configDir = Path.Combine(_root, "config");
+        var transmissionDir = Path.Combine(_root, "transmission-seed");
+        var leechDir = Path.Combine(_root, "leech");
+        Directory.CreateDirectory(configDir);
+        Directory.CreateDirectory(transmissionDir);
+        Directory.CreateDirectory(leechDir);
+
+        // The payload goes where Transmission will look for it, so adding the torrent turns it into
+        // a seed rather than a second leecher.
+        const string fileName = "reverse-payload.bin";
+        var payload = new byte[sizeMiB * 1024 * 1024];
+        RandomNumberGenerator.Fill(payload);
+        await File.WriteAllBytesAsync(Path.Combine(transmissionDir, fileName), payload);
+        var expectedHash = Convert.ToHexString(SHA256.HashData(payload));
+
+        var torrentFile = new ApiTorrentFileBuilder()
+            .WithName(fileName)
+            .WithPieceLength(256 * 1024)
+            .AddFileFromPath(Path.Combine(transmissionDir, fileName), fileName)
+            .Build();
+
+        var torrentPath = Path.Combine(_root, "reverse.torrent");
+        await File.WriteAllBytesAsync(torrentPath, torrentFile.RawData.ToArray());
+
+        _output.WriteLine($"Payload    : {sizeMiB} MiB, {torrentFile.PieceCount} pieces of {torrentFile.PieceSize} B");
+        _output.WriteLine($"Direction  : Transmission seeds, PeerSharp leeches (PeerSharp still dials)");
+        _output.WriteLine($"Encryption : PeerSharp={encryption}, Transmission=preferred");
+
+        await StartTransmissionAsync(exe, configDir, transmissionDir);
+        await AddTorrentToTransmissionAsync(torrentPath, transmissionDir);
+        await WaitForTransmissionToSeedAsync();
+
+        await using var engine = await CreateSeedEngineAsync(leechDir, encryption);
+        var leechTorrent = await engine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = true });
+
+        var transmissionEndpoint = new IPEndPoint(IPAddress.Loopback, TransmissionPeerPort);
+        var overall = Stopwatch.StartNew();
+        var timeout = TimeSpan.FromMinutes(IntFromEnvironment("PEERSHARP_TRANSMISSION_TIMEOUT_MINUTES", 10));
+        Stopwatch? transferring = null;
+        var lastLog = TimeSpan.Zero;
+
+        while (overall.Elapsed < timeout && leechTorrent.Progress < 1.0f)
+        {
+            engine.OnPeersFound(torrentFile.InfoHash, [transmissionEndpoint]);
+
+            if (transferring == null && leechTorrent.Progress > 0)
+            {
+                transferring = Stopwatch.StartNew();
+                _output.WriteLine($"  [{overall.Elapsed.TotalSeconds,6:F1}s] first data received");
+            }
+
+            if (overall.Elapsed - lastLog > TimeSpan.FromSeconds(5))
+            {
+                lastLog = overall.Elapsed;
+                _output.WriteLine(
+                    $"  [{overall.Elapsed.TotalSeconds,5:F0}s] {leechTorrent.Progress,7:P1} " +
+                    $"peers={leechTorrent.Peers.ConnectedCount}");
+            }
+
+            await Task.Delay(250);
+        }
+
+        ReportPeerSharpView(leechTorrent);
+
+        Assert.True(
+            leechTorrent.Progress >= 1.0f,
+            $"PeerSharp stalled at {leechTorrent.Progress:P1} after {overall.Elapsed.TotalSeconds:F0}s.");
+
+        var received = Path.Combine(leechDir, fileName);
+        Assert.True(File.Exists(received), $"Reported complete but {received} is missing.");
+        Assert.Equal(expectedHash, Convert.ToHexString(SHA256.HashData(await ReadAllBytesSharedAsync(received))));
+
+        double mib = payload.Length / 1024d / 1024d;
+        var elapsed = transferring?.Elapsed ?? overall.Elapsed;
+        _output.WriteLine(
+            $"REVERSE: {mib:F0} MiB from Transmission in {elapsed.TotalSeconds:F1}s " +
+            $"({mib / elapsed.TotalSeconds:F1} MiB/s), content verified.");
+    }
+
+    /// <summary>
+    /// Waits until Transmission has verified the payload and is seeding it. Adding a torrent whose
+    /// files are already present makes it check them first, and it has nothing to serve until that
+    /// finishes.
+    /// </summary>
+    private async Task WaitForTransmissionToSeedAsync()
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            var torrents = (await RpcAsync("torrent-get", new { fields = new[] { "percentDone", "status" } }))
+                .GetProperty("arguments").GetProperty("torrents");
+
+            if (torrents.GetArrayLength() > 0)
+            {
+                var t = torrents[0];
+                // 6 is TR_STATUS_SEED; anything lower is still stopped, queued or verifying.
+                if (t.GetProperty("percentDone").GetDouble() >= 1.0 && t.GetProperty("status").GetInt32() == 6)
+                {
+                    _output.WriteLine("Transmission is seeding the payload");
+                    return;
+                }
+            }
+
+            await Task.Delay(500);
+        }
+
+        throw new InvalidOperationException("Transmission did not finish verifying and start seeding.");
+    }
+
+    /// <summary>
     /// The control for the run above: the same payload between two PeerSharp engines on the same
     /// loopback. Comparing the two rates says whether a throughput ceiling belongs to our send
     /// path or to something about the Transmission connection, which is otherwise unattributable.
