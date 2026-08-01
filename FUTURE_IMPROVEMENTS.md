@@ -313,8 +313,24 @@ moves data.
 
 **Why it is still recorded.** Transmission is one of the three implementations worth interoperating
 with, and 0.3 MiB/s from it is unusable rather than merely slow. A real swarm mixes clients, so this
-would surface as "sometimes slow" rather than as anything pointing at a cause. It is worth knowing
-about even though it is not, on this evidence, ours to fix.
+would surface as "sometimes slow" rather than as anything pointing at a cause.
+
+**The control that would finish this was attempted and not obtained.** Two readings survive the table
+above: Transmission is slow with everyone on this machine, or Transmission is slow with *us*
+specifically. Every arm involving PeerSharp is consistent with both, and only Transmission and
+qBittorrent transferring to each other separates them. That run was built and did not work. Neither
+client offers a usable peer-injection route in these builds - Transmission's RPC has no add-peer,
+qBittorrent's WebUI does not start in the GUI build whatever the config says, and LSD does not carry
+between two processes on this host. A throwaway loopback HTTP tracker did introduce them: both
+announced and each was handed the other's endpoint, verified in the tracker's own log as
+`127.0.0.1:51999` and `127.0.0.1:52999`, with Transmission seeding. They still never connected -
+`peersConnected` stayed at zero for minutes. Whether that is the hand-rolled tracker, a firewall
+prompt, or something about the pairing was not established.
+
+**So the honest scope of the conclusion.** What is measured is that PeerSharp moves data correctly and
+quickly with two independent counterparties, which rules out a general fault in our send or request
+paths or in MSE. What is *not* measured is Transmission transferring with anything other than us. Do
+not read this entry as proof that Transmission is at fault - only that we are not obviously so.
 
 **What was seen but not explained.** Against Transmission, progress arrives in one-to-two MiB steps
 separated by multi-second stalls rather than flowing, and early in a run the connected-peer count
