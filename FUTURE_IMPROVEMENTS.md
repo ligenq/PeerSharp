@@ -267,13 +267,53 @@ flakier. They are correct as written and should not be converted.
 
 ---
 
-## Interop question that remains open
+## Serving to Transmission: answered
 
-Whether PeerSharp serves Transmission peers correctly at scale is still unproven. It has been shown to
-serve *some* — one received 512 KiB — and the general serving path is sound: the shortfall in a live
-session was swarm composition, with 2,283 of 2,466 peers that reported state holding everything already.
-A seed will never ask for data however well the client behaves.
+**Settled.** PeerSharp serves a real Transmission correctly. `TransmissionInteropTests` drives
+Transmission 4.1.3 as the only leecher for a locally generated torrent, and it takes the whole
+payload - 64 MiB and 256 MiB runs, content verified by SHA-256 on the receiving side, over an
+MSE-encrypted connection that Transmission chose. Transmission identifies us as `PeerSharp`,
+becomes interested, unchokes and requests normally. The earlier live-session result stands
+explained: the shortfall was swarm composition, not our serving.
 
-Settling it needs a swarm with actual leechers: a torrent seeded locally with a Transmission instance
-pointed at it, rather than a mature Linux ISO swarm where nearly every peer is complete. The
-`Seeding_HowRealClientsRequestFromUs` soak test is the harness for it; it needs the right swarm.
+**Time to first byte is Transmission's, not ours.** A peer connecting to a freshly started
+Transmission torrent waits about ten seconds before Transmission expresses interest. That is
+`RechokePeriod = 10s` in its peer manager: `rechokeSoon()` shortens the timer to 100 ms but is called
+only from `tr_swarm::on_torrent_started`, so a peer arriving after that start waits out the full
+period. Measured, not inferred: delaying our introduction by six seconds moved the connection but
+left interest at the same absolute +10.2 s. Nothing to fix here, but it is worth knowing before
+reading a slow first block as a fault.
+
+---
+
+## Serving to Transmission is an order of magnitude slower than serving to ourselves
+
+**Observed.** Same loopback, same 256 MiB payload, same engine. To Transmission: 7.7 MiB/s, and
+flat - 7.8 to 7.9 for the entire transfer, never ramping, never varying. Between two PeerSharp
+engines: 108 MiB/s plaintext and 234 MiB/s encrypted.
+
+**MSE is not the cause.** That was the standing suspicion, and this is the measurement that was
+missing for it: the encrypted control arm is the *faster* of the two PeerSharp runs, so the
+encrypted send path sustains hundreds of MiB/s. A cost confined to the MSE layer would have shown
+up here and did not.
+
+**What is known about the shape.** Transmission sizes its request pipeline from its own measured
+rate: `max_available_reqs` computes `rate * RequestBufSecs / BlockSize`, clamped to a floor of 32
+and a ceiling of the `reqq` the peer advertised, or 500 if it advertised none. PeerSharp advertises
+no `reqq` at all - the string does not appear in the source - so the ceiling is 500, and at the
+observed rate the estimate is far above that. So the pipeline should be pinned at its ceiling of 500
+blocks, which is 8 MiB in flight against a measured 7.9 MiB/s: roughly one second to service a full
+window. Whether that second is ours, Transmission's, or the round trip between them is exactly what
+is not yet known.
+
+**Why it was left.** The flatness is the interesting part and it does not fit a pipelining
+explanation, which would fluctuate. It looks like a cadence somewhere, but guessing which one is how
+the earlier metadata-rebuild misattribution happened, and the harness now exists to answer it
+properly instead.
+
+**What would settle it.** Reverse the direction first - Transmission seeding, PeerSharp leeching -
+because that separates our send path from our request path in one run. If the ceiling follows the
+direction, it is ours; if it stays with Transmission, it is theirs or the connection's. After that,
+a packet capture of the encrypted arm timestamped against our own send loop would locate the second.
+Advertising a `reqq` is worth doing regardless - not as a fix, since 500 is already generous, but
+because a peer that can take a deeper queue currently has no way to say so.
