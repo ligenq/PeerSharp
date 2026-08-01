@@ -177,6 +177,100 @@ Neither has a consumer asking for it.
 
 ---
 
+## Transient metadata fetches use the ordinary torrent lifecycle
+
+**Observed.** `ClientEngine.GetMagnetMetadataAsync` calls the public `AddMagnetAsync`, waits for
+metadata, and removes the torrent. The public add path persists the magnet to the session, rebalances
+the queue, and emits the same `TorrentAdded`, `MetadataInitialized` and `TorrentRemoved` alerts as a
+user-owned download. A consumer such as Peerfluence, which drives its torrent list and notifications
+from those alerts, can therefore briefly display a metadata-preview torrent and announce that its
+metadata is ready even though the operation was intended to be invisible and transient.
+
+**Why it matters.** The dedicated API successfully owns cleanup and avoids a second engine, but it
+does not isolate the operation from the rest of the application's lifecycle. Consumers cannot filter
+the alerts reliably: neither the torrent nor the alert says that it belongs to a transient metadata
+fetch. The API also has no operation-scoped progress callback, so the global
+`MetadataProgressChanged` stream is the only place to obtain progress and has the same ambiguity.
+
+**What would settle it.** Give metadata fetching an internal transient add path that skips session
+persistence and queue rebalancing and suppresses ordinary lifecycle alerts. If progress is useful to
+callers, expose it directly on `GetMagnetMetadataAsync` through an `IProgress` parameter, callback, or
+operation object rather than making callers identify the transient torrent in the global alert
+stream.
+
+**Registry membership is not free, as this entry previously assumed.** Peerfluence has since built the
+consumer-side workaround, and it turned up a consequence beyond the cosmetic ones above. Because the
+transient torrent occupies the registry slot for its hash, a *user-initiated* add of that same hash
+while a preview is in flight fails with `TorrentAlreadyExistsException` — the add dialogue's own
+"Add" button, pressed before the preview it started has finished. Cancelling the fetch does not fix
+it: cancellation only begins the unwind, and `RemoveTorrentAsync` runs uncancellably afterwards, so a
+caller who cancels and adds immediately still collides. The only reliable ordering available to a
+caller is to hold the fetch's `Task` and await it before adding, which means the visible cost of a
+"cancelled" preview is however long the removal takes. So invisibility does require bypassing the
+duplicate-protection invariant for transient adds, or at least giving the fetch a way to hand its
+registry slot to a real add rather than making the caller wait for it to let go.
+
+**What the workaround costs, as a measure of the gap.** Suppressing the alerts consumer-side needs a
+hash-keyed registry of in-flight fetches consulted on every alert, and it cannot be released when the
+fetch completes: alerts are polled on a 100 ms interval, so a short fetch's alerts are still queued
+when its scope closes. Releasing on the fetch's own `TorrentRemoved` is exact, but an add that throws
+before registering produces no alerts at all and therefore no removal to release on, which forces a
+time-based fallback. None of that is knowable from the public API — it is all inference about what
+`GetMagnetMetadataAsync` does internally, and it breaks silently if the internals change.
+
+---
+
+## A magnet's peers are lost when its metadata is added as a torrent file
+
+**Observed.** The intended flow for `GetMagnetMetadataAsync` is to show the returned `TorrentFile` to
+the user and then add *that* rather than the magnet, so the metadata download is not repeated. The
+exported file carries the magnet's trackers — `AddMagnetInternal` seeds `AnnounceList` from
+`MagnetLink.Trackers` and `TorrentFileSerializer` writes them back out — but not its peers.
+`MagnetLink.Peers` (BEP 9 `x.pe`) is applied inside `AddMagnetCoreAsync`, and `AddTorrentOptions` has
+no equivalent field, so the second add starts with no peer hints. `SelectOnlyFileIndices` (BEP 53) is
+lost the same way, though a caller showing a file-selection UI supersedes it anyway.
+
+**Why it matters.** `x.pe` exists to skip discovery latency on a fresh magnet. A caller following the
+documented preview flow silently gives that up, and gives it up precisely in the case the flow is for:
+the user has just waited for metadata and is now waiting again for peers.
+
+**Why it was left.** Unmeasured. `x.pe` is uncommon in the wild, and the peers a magnet carries are
+often stale by the time a user has read a file list and clicked Add — the discarded hints may be worth
+nothing. The metadata fetch also had live peers for this swarm moments earlier, which is a larger
+prize than the magnet's static list and a separate question from this one.
+
+**What would settle it.** A run comparing time-to-first-block for a magnet with `x.pe` added directly
+against the same magnet previewed and then added as a `TorrentFile`. If the gap is real, an
+`AdditionalPeers` field on `AddTorrentOptions` matching the existing `AdditionalTrackers` is the small
+version of the fix.
+
+---
+
+## BEP 51 duplicate suppression hides discovery confidence
+
+**Observed.** `DhtInfoHashCrawler` keeps a `HashSet<InfoHash>` and yields only the first sighting of
+each hash. `DiscoveredInfoHash.Source` therefore identifies one reporting node, but the consumer can
+never learn that later, independent nodes sampled the same hash. `SourceTotalInfoHashes` is the size
+of that node's whole sample population, not a count for the discovered torrent.
+
+**Why it matters.** A consumer building a discovery surface cannot fetch metadata for every sampled
+hash cheaply. Independent sightings would provide a useful prioritisation signal: resolve hashes seen
+from several nodes before one-off results. It is not proof of popularity, availability or safety—a
+malicious operator can run several nodes—but discarding the signal entirely leaves consumers with no
+better ordering than arrival time.
+
+**Why it was left.** Distinct output is simple, bounds the public stream by `MaxInfoHashes`, and avoids
+making duplicate handling every consumer's problem. Changing the existing semantics would also make
+the limit ambiguous: unique hashes and emitted sightings are different quantities.
+
+**What would settle it.** Preserve the distinct stream as the default, but optionally expose repeat
+sightings or aggregated updates. This could be a `ReturnDuplicateSightings` option, a separate
+sampling API, or a result carrying a source count that can be updated through another event stream.
+Keep the unique-hash memory limit separate from any emitted-sighting limit, and document that source
+count is an untrusted ranking heuristic only.
+
+---
+
 ## Test-suite residue
 
 **One unidentified flake.** During the CI stabilisation work, one run in twenty-four failed and the
