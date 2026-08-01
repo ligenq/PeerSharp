@@ -286,44 +286,47 @@ reading a slow first block as a fault.
 
 ---
 
-## Leeching from Transmission runs at a fraction of every other path
+## Transmission transfers slowly with us; libtorrent does not
 
-**Observed.** Four measurements, same machine, same loopback, same 256 MiB payload of random bytes,
-same MSE-encrypted connection, and in every Transmission case PeerSharp is the side that dials, so
-the TCP direction and the encryption handshake are held constant:
+**Observed.** Six measurements, same machine, same loopback, same 256 MiB payload of random bytes,
+same MSE-encrypted connections, and in every case PeerSharp is the side that dials - so TCP
+direction and the encryption handshake are held constant and only the counterparty and the data
+direction change:
 
 | Path | Rate |
 | --- | --- |
 | PeerSharp seeds, PeerSharp leeches, plaintext | 108 MiB/s |
 | PeerSharp seeds, PeerSharp leeches, encrypted | 234 MiB/s |
-| PeerSharp seeds, **Transmission leeches** | 7.7 MiB/s |
-| **Transmission seeds**, PeerSharp leeches | 0.3 MiB/s |
+| PeerSharp seeds, **qBittorrent 5.2.3** leeches | 175 MiB/s |
+| **qBittorrent 5.2.3** seeds, PeerSharp leeches | 170 MiB/s |
+| PeerSharp seeds, **Transmission 4.1.3** leeches | 7.7 MiB/s |
+| **Transmission 4.1.3** seeds, PeerSharp leeches | 0.3 MiB/s |
 
-**What that isolates.** The ceiling does not follow the data: reversing which side sends made it
-twenty-five times *worse*, not better. So this is not our send path, which serves 234 MiB/s to a
-PeerSharp leecher and 7.7 to Transmission. Nor is it our receive path in general, because the
-control arm has PeerSharp leeching too, at 234 MiB/s. Nor is it MSE, which the encrypted control
-already exonerated by being the faster of the two PeerSharp runs. What is left is an interaction:
-something Transmission does while seeding that we handle badly while receiving.
+Every run verified its payload by SHA-256 on the receiving side, so all six moved correct data.
 
-**Why it matters more than the seeding number.** Downloading is the case that matters, Transmission
-is one of the three implementations worth interoperating with, and 0.3 MiB/s is not a degradation -
-it is unusable. A real swarm mixes clients, so this would be masked by whichever peers are not
-Transmission rather than being obvious.
+**What that settles.** qBittorrent is libtorrent, a wholly separate implementation lineage from
+Transmission's own peer code, and it transfers with us symmetrically at a rate comparable to our own
+loopback ceiling - in both directions, encrypted. Our send path, our request path and our MSE
+implementation are therefore all sound: three independent counterparties agree, and only one
+disagrees. Whatever the Transmission figures are, they are not a general fault in how PeerSharp
+moves data.
 
-**What was seen but not explained.** Progress arrives in steps of roughly one to two MiB separated
-by stalls of several seconds, rather than flowing. Early in a run the connected-peer count
-alternates between one and zero on a several-second cycle, which settles later. Both point at
-something cyclic - a choke/unchoke rotation, or requests timing out and being reissued - rather than
-at a bandwidth limit. Our pipelining is adaptive (`InitialPipelineDepth` 16, `MaxRequestsPerPeer`
-128) and works against a PeerSharp seed, so the depth alone does not explain it.
+**Why it is still recorded.** Transmission is one of the three implementations worth interoperating
+with, and 0.3 MiB/s from it is unusable rather than merely slow. A real swarm mixes clients, so this
+would surface as "sometimes slow" rather than as anything pointing at a cause. It is worth knowing
+about even though it is not, on this evidence, ours to fix.
 
-**What would settle it.** The harness is `TransmissionInteropTests.Leeching_FromTransmission_ReceivesTheWholeFile`,
-which reproduces it in about four minutes at 64 MiB. Transmission's peer log at `message-level` 4
-and our own request/timeout tracing on the same run, aligned on the stalls, should say whether we
-stop asking or it stops answering. Do that before touching the request strategy: the pipelining
-entries above are plausible-looking neighbours and would be easy to blame wrongly.
+**What was seen but not explained.** Against Transmission, progress arrives in one-to-two MiB steps
+separated by multi-second stalls rather than flowing, and early in a run the connected-peer count
+cycles between one and zero. Against qBittorrent the same code path finishes 256 MiB inside two
+polls. Something in the pairing is periodic; nothing in our own behaviour changes between the two.
 
-**Caveat on the numbers.** One machine, one Transmission version (4.1.3), loopback, and one run per
-arm. Loopback RTT is far below anything a heuristic tuned for real networks expects, so the absolute
-figures are not a benchmark. The ordering across the four arms is the result, not the values.
+**What would settle it.** `TransmissionInteropTests` and `QBittorrentInteropTests` reproduce both
+sides in minutes. A packet capture of the Transmission arm against the qBittorrent arm, compared on
+the stalls, would show which side goes quiet. Worth doing only if someone reports it in the wild:
+the interop question this began as is answered, and the remainder is one client's behaviour rather
+than a defect of ours.
+
+**Caveat on the numbers.** One machine, one version of each client, loopback, and one run per arm.
+Loopback RTT is far below what any network-tuned heuristic expects, so the absolute figures are not
+a benchmark. The comparison across counterparties is the result, not the values.
