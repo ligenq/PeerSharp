@@ -286,63 +286,69 @@ reading a slow first block as a fault.
 
 ---
 
-## Transmission transfers slowly with us; libtorrent does not
+## Leeching from Transmission is broken, and it is ours
 
-**Observed.** Six measurements, same machine, same loopback, same 256 MiB payload of random bytes,
-same MSE-encrypted connections, and in every case PeerSharp is the side that dials - so TCP
-direction and the encryption handshake are held constant and only the counterparty and the data
-direction change:
+**Observed.** Eight measurements on one machine. The six PeerSharp arms are automated
+(`TransmissionInteropTests`, `QBittorrentInteropTests`) on loopback with a 256 MiB payload of random
+bytes over MSE-encrypted connections, PeerSharp always the side that dials. The two third-party arms
+were run by hand with a 512 MiB payload, because neither client will act on a tracker-supplied peer
+on loopback and so that pairing cannot be automated here - see the note at the end.
 
-| Path | Rate |
+| Seeder → Leecher | Rate |
 | --- | --- |
-| PeerSharp seeds, PeerSharp leeches, plaintext | 108 MiB/s |
-| PeerSharp seeds, PeerSharp leeches, encrypted | 234 MiB/s |
-| PeerSharp seeds, **qBittorrent 5.2.3** leeches | 175 MiB/s |
-| **qBittorrent 5.2.3** seeds, PeerSharp leeches | 170 MiB/s |
-| PeerSharp seeds, **Transmission 4.1.3** leeches | 7.7 MiB/s |
-| **Transmission 4.1.3** seeds, PeerSharp leeches | 0.3 MiB/s |
+| PeerSharp → PeerSharp, encrypted | 234 MiB/s |
+| PeerSharp → qBittorrent 5.2.3 | 175 MiB/s |
+| qBittorrent → PeerSharp | 170 MiB/s |
+| PeerSharp → PeerSharp, plaintext | 108 MiB/s |
+| Transmission 4.1.3 → qBittorrent | ~39 MiB/s *(by hand)* |
+| qBittorrent → Transmission | >17 MiB/s *(by hand)* |
+| PeerSharp → Transmission | 7.7 MiB/s |
+| **Transmission → PeerSharp** | **0.3 MiB/s** |
 
-Every run verified its payload by SHA-256 on the receiving side, so all six moved correct data.
+Every automated run verified its payload by SHA-256 on the receiving side, so all of them moved
+correct data - this is a rate problem, not a correctness one.
 
-**What that settles.** qBittorrent is libtorrent, a wholly separate implementation lineage from
-Transmission's own peer code, and it transfers with us symmetrically at a rate comparable to our own
-loopback ceiling - in both directions, encrypted. Our send path, our request path and our MSE
-implementation are therefore all sound: three independent counterparties agree, and only one
-disagrees. Whatever the Transmission figures are, they are not a general fault in how PeerSharp
-moves data.
+**What it settles, and it is not what the earlier version of this entry said.** Transmission's upload
+path is fine: it feeds qBittorrent at ~39 MiB/s. It feeds us at 0.3. That is a factor of about 130
+between two leechers taking from the same seeder on the same machine, and no amount of "Transmission
+is slow here" accounts for it. Transmission being generally slower than libtorrent is real and
+visible - both its arms sit well under the 170-234 the libtorrent pairings reach - but it is a factor
+of four to ten, not a hundred and thirty. **The remaining gap is a defect in our request path when
+the peer is Transmission.**
 
-**Why it is still recorded.** Transmission is one of the three implementations worth interoperating
-with, and 0.3 MiB/s from it is unusable rather than merely slow. A real swarm mixes clients, so this
-would surface as "sometimes slow" rather than as anything pointing at a cause.
+The earlier reading was that our two fast counterparties exonerated us. They do not. They rule out a
+*general* fault in how we move data - our send path serves qBittorrent at 175 MiB/s and our receive
+path takes from qBittorrent at 170 - but a fault specific to one peer implementation survives that
+argument untouched, and this is one.
 
-**The control that would finish this was attempted and not obtained.** Two readings survive the table
-above: Transmission is slow with everyone on this machine, or Transmission is slow with *us*
-specifically. Every arm involving PeerSharp is consistent with both, and only Transmission and
-qBittorrent transferring to each other separates them. That run was built and did not work. Neither
-client offers a usable peer-injection route in these builds - Transmission's RPC has no add-peer,
-qBittorrent's WebUI does not start in the GUI build whatever the config says, and LSD does not carry
-between two processes on this host. A throwaway loopback HTTP tracker did introduce them: both
-announced and each was handed the other's endpoint, verified in the tracker's own log as
-`127.0.0.1:51999` and `127.0.0.1:52999`, with Transmission seeding. They still never connected -
-`peersConnected` stayed at zero for minutes. Whether that is the hand-rolled tracker, a firewall
-prompt, or something about the pairing was not established.
+**The seeding direction is a much smaller question.** We feed Transmission at 7.7 MiB/s against
+qBittorrent's >17. Both are far below what either client manages with libtorrent on the other end, so
+most of that is Transmission-as-leecher being slow. A factor of two on top of that is worth a look
+but is not the same class of problem, and the hand-timed >17 is a lower bound rather than a
+measurement.
 
-**So the honest scope of the conclusion.** What is measured is that PeerSharp moves data correctly and
-quickly with two independent counterparties, which rules out a general fault in our send or request
-paths or in MSE. What is *not* measured is Transmission transferring with anything other than us. Do
-not read this entry as proof that Transmission is at fault - only that we are not obviously so.
+**The shape of the failure, and a hypothesis that has not been tested.** Against Transmission,
+progress arrives in one-to-two MiB steps separated by multi-second stalls rather than flowing, and
+early in a run our connected-peer count cycles between one and zero. Transmission rechokes on a
+fixed ten-second pulse (`RechokePeriod` in its peer manager, with the fast path only on torrent
+start - see the entry above). If something is causing our connection to drop and re-establish, every
+reconnect would then wait out most of a rechoke period before data resumes, which would produce
+exactly the observed staircase. That is a hypothesis built from two observations that fit, not a
+diagnosis: it does not explain *why* the connection would drop, and the drop is the thing to find.
 
-**What was seen but not explained.** Against Transmission, progress arrives in one-to-two MiB steps
-separated by multi-second stalls rather than flowing, and early in a run the connected-peer count
-cycles between one and zero. Against qBittorrent the same code path finishes 256 MiB inside two
-polls. Something in the pairing is periodic; nothing in our own behaviour changes between the two.
+**What would settle it.** `TransmissionInteropTests.Leeching_FromTransmission_ReceivesTheWholeFile`
+reproduces it in about four minutes at 64 MiB. The first question is whether our connection is being
+closed and by whom - our own peer logging on that run, against Transmission's log at
+`message-level` 4, aligned on the stalls. Resist starting from the request-strategy entries above;
+they are the plausible-looking neighbours, and the same instinct is what attributed the metadata
+rebuild cost to peer teardown when it was the tracker announce.
 
-**What would settle it.** `TransmissionInteropTests` and `QBittorrentInteropTests` reproduce both
-sides in minutes. A packet capture of the Transmission arm against the qBittorrent arm, compared on
-the stalls, would show which side goes quiet. Worth doing only if someone reports it in the wild:
-the interop question this began as is answered, and the remainder is one client's behaviour rather
-than a defect of ours.
-
-**Caveat on the numbers.** One machine, one version of each client, loopback, and one run per arm.
-Loopback RTT is far below what any network-tuned heuristic expects, so the absolute figures are not
-a benchmark. The comparison across counterparties is the result, not the values.
+**Why the third-party arms are hand-run.** Automating them needs the two clients introduced to each
+other, and on one host there is no route: Transmission's RPC has no add-peer, qBittorrent's WebUI
+does not start in the GUI build whatever the config says, and LSD does not carry between two
+processes. A loopback HTTP tracker was built and verified in isolation - a second announce is handed
+the first peer, correct BEP 23 compact encoding, both clients in one swarm - and neither client
+dials the peer it is given, which is ordinary bogus-peer filtering of loopback addresses. Adding the
+peer by hand in qBittorrent works because explicit user intent bypasses that filter. Binding both
+clients to a LAN address instead of loopback would likely lift the filter and make the pairing
+automatable, at the cost of putting the run on a real network.
