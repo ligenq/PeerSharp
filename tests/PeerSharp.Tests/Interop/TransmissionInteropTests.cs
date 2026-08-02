@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
@@ -75,6 +76,12 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         _transmission?.Dispose();
         _http.Dispose();
 
+        if (Environment.GetEnvironmentVariable("PEERSHARP_TRANSMISSION_KEEP") == "1")
+        {
+            _output.WriteLine($"Kept working directory: {_root}");
+            return;
+        }
+
         try
         {
             if (Directory.Exists(_root))
@@ -135,6 +142,7 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         _output.WriteLine($"Payload    : {sizeMiB} MiB, {torrentFile.PieceCount} pieces of {torrentFile.PieceSize} B");
         _output.WriteLine($"Info hash  : {torrentFile.InfoHash}");
         _output.WriteLine($"Encryption : PeerSharp={encryption}, Transmission=preferred");
+        ReportNetworkInterfaces();
 
         await StartTransmissionAsync(exe, configDir, downloadDir);
         var session = await RpcAsync("session-get");
@@ -225,12 +233,30 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         _output.WriteLine($"Payload    : {sizeMiB} MiB, {torrentFile.PieceCount} pieces of {torrentFile.PieceSize} B");
         _output.WriteLine($"Direction  : Transmission seeds, PeerSharp leeches (PeerSharp still dials)");
         _output.WriteLine($"Encryption : PeerSharp={encryption}, Transmission=preferred");
+        ReportNetworkInterfaces();
 
         await StartTransmissionAsync(exe, configDir, transmissionDir);
         await AddTorrentToTransmissionAsync(torrentPath, transmissionDir);
         await WaitForTransmissionToSeedAsync();
 
-        await using var engine = await CreateSeedEngineAsync(leechDir, encryption);
+        // Opt-in: the log is large and only wanted when investigating the stalls.
+        using var logProvider = Environment.GetEnvironmentVariable("PEERSHARP_TRANSMISSION_LOG") == "1"
+            ? new TimestampedFileLoggerProvider(Path.Combine(_root, "peersharp.log"))
+            : null;
+        using var loggerFactory = logProvider is null
+            ? null
+            : LoggerFactory.Create(builder =>
+            {
+                builder.AddProvider(logProvider);
+                builder.SetMinimumLevel(LogLevel.Trace);
+            });
+
+        if (loggerFactory is not null)
+        {
+            _output.WriteLine($"Engine log : {Path.Combine(_root, "peersharp.log")}");
+        }
+
+        await using var engine = await CreateSeedEngineAsync(leechDir, encryption, loggerFactory);
         var leechTorrent = await engine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = true });
 
         var transmissionEndpoint = new IPEndPoint(IPAddress.Loopback, TransmissionPeerPort);
@@ -508,6 +534,22 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         return string.Join(", ", described);
     }
 
+    /// <summary>
+    /// Records what the machine's network looked like. Interop rates are environment-sensitive, and
+    /// a run whose conditions were not written down cannot be compared with one taken later - a VPN
+    /// tunnel that comes up at boot is exactly the kind of thing nobody remembers afterwards.
+    /// </summary>
+    private void ReportNetworkInterfaces()
+    {
+        var addresses = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+            .Where(nic => nic.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up)
+            .SelectMany(nic => nic.GetIPProperties().UnicastAddresses
+                .Where(a => a.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                .Select(a => $"{nic.Name}={a.Address}"));
+
+        _output.WriteLine($"Interfaces : {string.Join(", ", addresses)}");
+    }
+
     private void ReportPeerSharpView(ITorrent seedTorrent)
     {
         var peers = seedTorrent.Peers.GetConnectedPeers();
@@ -520,7 +562,10 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         }
     }
 
-    private async Task<ClientEngine> CreateSeedEngineAsync(string seedDir, Encryption encryption)
+    private async Task<ClientEngine> CreateSeedEngineAsync(
+        string seedDir,
+        Encryption encryption,
+        ILoggerFactory? loggerFactory = null)
     {
         var settings = new Settings
         {
@@ -540,7 +585,7 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
 
         var engine = ClientEngine.Create(new TorrentClientOptions
         {
-            LoggerFactory = NullLoggerFactory.Instance,
+            LoggerFactory = loggerFactory ?? NullLoggerFactory.Instance,
             Settings = settings
         });
 
@@ -571,7 +616,9 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
             ["encryption"] = 1,
             ["start-added-torrents"] = true,
             ["blocklist-enabled"] = false,
-            ["message-level"] = 3
+            // 4 is debug. The whole point of an investigation run is seeing what the other side
+            // thought was happening at the moment ours went quiet.
+            ["message-level"] = IntFromEnvironment("PEERSHARP_TRANSMISSION_MESSAGE_LEVEL", 3)
         };
 
         await File.WriteAllTextAsync(

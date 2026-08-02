@@ -286,69 +286,81 @@ reading a slow first block as a fault.
 
 ---
 
-## Leeching from Transmission is broken, and it is ours
+## The MSE receive path desynchronises against Transmission
 
-**Observed.** Eight measurements on one machine. The six PeerSharp arms are automated
-(`TransmissionInteropTests`, `QBittorrentInteropTests`) on loopback with a 256 MiB payload of random
-bytes over MSE-encrypted connections, PeerSharp always the side that dials. The two third-party arms
-were run by hand with a 512 MiB payload, because neither client will act on a tracker-supplied peer
-on loopback and so that pairing cannot be automated here - see the note at the end.
+**Diagnosed, not yet located.** This began as "leeching from Transmission runs at 0.3 MiB/s against
+170 from qBittorrent". The rate was a symptom. The fault is that our inbound RC4 stream loses
+synchronisation part way through a transfer, after which every subsequent read is garbage.
 
-| Seeder → Leecher | Rate |
+**The mechanism, end to end.** A run downloads normally at full speed for one to seven MiB, then
+`PeerProtocol.TryDecodeMessage` reads a length prefix of nonsense - `-1194345294`, `1431301195` -
+and throws. `PeerCommunication` closes the connection, `PeerManager` records
+`downloaded=1572864B, uploaded=0B, strikes=0`, and we redial immediately. The reconnect then waits
+out most of Transmission's ten-second rechoke period before it is unchoked again (see the entry
+above), transfers another burst, and desynchronises again. The observed staircase - roughly 1.5 MiB
+of progress every ten seconds, with the connected-peer count flicking between one and zero - is
+that cycle, and the ten-second spacing is Transmission's clock rather than anything of ours.
+
+**It is decryption, not framing.** The two are indistinguishable from a bad length alone, so the
+bytes at the failure were dumped and searched for in the plaintext payload the seeder was serving.
+They do not appear in it, at any offset, while a control sequence taken from the payload is found
+immediately. Bytes that were never plaintext cannot be a misparse of correctly-decrypted data: the
+keystream is out of step with the stream.
+
+**What bounds the fault.**
+
+| Arm | Result |
 | --- | --- |
-| PeerSharp → PeerSharp, encrypted | 234 MiB/s |
-| PeerSharp → qBittorrent 5.2.3 | 175 MiB/s |
-| qBittorrent → PeerSharp | 170 MiB/s |
-| PeerSharp → PeerSharp, plaintext | 108 MiB/s |
-| Transmission 4.1.3 → qBittorrent | ~39 MiB/s *(by hand)* |
-| qBittorrent → Transmission | >17 MiB/s *(by hand)* |
-| PeerSharp → Transmission | 7.7 MiB/s |
-| **Transmission → PeerSharp** | **0.3 MiB/s** |
+| Transmission, MSE encrypted | desynchronises every 1-7 MiB |
+| Transmission, `Encryption.Refuse` (plaintext) | 16 MiB in one connection, no drops |
+| qBittorrent 5.2.3, MSE encrypted | 256 MiB at 170 MiB/s, no drops |
+| PeerSharp to PeerSharp, MSE encrypted | 256 MiB at 234 MiB/s, no drops |
 
-Every automated run verified its payload by SHA-256 on the receiving side, so all of them moved
-correct data - this is a rate problem, not a correctness one.
+So the decrypt path is not simply broken - it carries hundreds of MiB against two other
+counterparties - and the connection is not simply unreliable, because plaintext to the same
+Transmission is clean. It is an interaction: something in how Transmission writes to the socket
+puts our reader into a state the other two never produce.
 
-**What it settles, and it is not what the earlier version of this entry said.** Transmission's upload
-path is fine: it feeds qBittorrent at ~39 MiB/s. It feeds us at 0.3. That is a factor of about 130
-between two leechers taking from the same seeder on the same machine, and no amount of "Transmission
-is slow here" accounts for it. Transmission being generally slower than libtorrent is real and
-visible - both its arms sit well under the 170-234 the libtorrent pairings reach - but it is a factor
-of four to ten, not a hundred and thirty. **The remaining gap is a defect in our request path when
-the peer is Transmission.**
+**Where it is not.** `PeerProtocol.TryDecodeMessage` always advances by `4 + length`, including for
+message IDs it does not recognise, so an unhandled message type cannot shift the framing.
+`ProtocolEncryption.Decrypt` holds a lock around `RC4In`, and `EncryptedStream.ReadAsync` decrypts
+exactly the byte count the inner read returned. Those were the three obvious candidates and none of
+them accounts for a fault that appears only after megabytes of correct traffic.
 
-The earlier reading was that our two fast counterparties exonerated us. They do not. They rule out a
-*general* fault in how we move data - our send path serves qBittorrent at 175 MiB/s and our receive
-path takes from qBittorrent at 170 - but a fault specific to one peer implementation survives that
-argument untouched, and this is one.
+**Where to look next.** A keystream slips mid-stream if bytes are decrypted twice, decrypted zero
+times, or decrypted out of order. The last of those is the shape that fits a fault appearing only
+under one peer's write pattern. Worth examining in order: whether any read can leave bytes in the
+buffer that are not passed to `Decrypt` - a cancelled or timed-out read that has already moved data
+is the classic form; whether `RateLimitedStream` beneath it can ever return a count that differs
+from what it wrote; and the handshake seam, where `TrailingData` is decrypted directly through
+`RC4In` rather than through the lock, and `_bufferedAfterHandshake` is replayed ahead of the socket.
 
-**The seeding direction is a much smaller question.** We feed Transmission at 7.7 MiB/s against
-qBittorrent's >17. Both are far below what either client manages with libtorrent on the other end, so
-most of that is Transmission-as-leecher being slow. A factor of two on top of that is worth a look
-but is not the same class of problem, and the hand-timed >17 is a lower bound rather than a
-measurement.
+**Reproduction.** `TransmissionInteropTests.Leeching_FromTransmission_ReceivesTheWholeFile` with
+`PEERSHARP_TRANSMISSION_LOG=1 PEERSHARP_TRANSMISSION_KEEP=1 PEERSHARP_TRANSMISSION_SIZE_MIB=16`
+fails within a minute and leaves a timestamped engine log beside Transmission's own. Setting
+`PEERSHARP_TRANSMISSION_ENCRYPTION=Refuse` makes it pass, which is the cheapest confirmation that a
+change has addressed the cause rather than moved it.
 
-**The shape of the failure, and a hypothesis that has not been tested.** Against Transmission,
-progress arrives in one-to-two MiB steps separated by multi-second stalls rather than flowing, and
-early in a run our connected-peer count cycles between one and zero. Transmission rechokes on a
-fixed ten-second pulse (`RechokePeriod` in its peer manager, with the fast path only on torrent
-start - see the entry above). If something is causing our connection to drop and re-establish, every
-reconnect would then wait out most of a rechoke period before data resumes, which would produce
-exactly the observed staircase. That is a hypothesis built from two observations that fit, not a
-diagnosis: it does not explain *why* the connection would drop, and the drop is the thing to find.
+**Why this matters more than the rate suggested.** A desynchronised peer stream is a correctness
+fault that happens to present as slowness. Every completed run still verified its payload by
+SHA-256, because the pieces that did arrive were hash-checked and the corrupt reads were discarded
+with the connection - but on a real swarm this is peers being dropped mid-transfer for no reason the
+user can see, against one of the three implementations that matter.
 
-**What would settle it.** `TransmissionInteropTests.Leeching_FromTransmission_ReceivesTheWholeFile`
-reproduces it in about four minutes at 64 MiB. The first question is whether our connection is being
-closed and by whom - our own peer logging on that run, against Transmission's log at
-`message-level` 4, aligned on the stalls. Resist starting from the request-strategy entries above;
-they are the plausible-looking neighbours, and the same instinct is what attributed the metadata
-rebuild cost to peer teardown when it was the tracker announce.
+---
 
-**Why the third-party arms are hand-run.** Automating them needs the two clients introduced to each
-other, and on one host there is no route: Transmission's RPC has no add-peer, qBittorrent's WebUI
-does not start in the GUI build whatever the config says, and LSD does not carry between two
-processes. A loopback HTTP tracker was built and verified in isolation - a second announce is handed
-the first peer, correct BEP 23 compact encoding, both clients in one swarm - and neither client
-dials the peer it is given, which is ordinary bogus-peer filtering of loopback addresses. Adding the
-peer by hand in qBittorrent works because explicit user intent bypasses that filter. Binding both
-clients to a LAN address instead of loopback would likely lift the filter and make the pairing
-automatable, at the cost of putting the run on a real network.
+## Seeding to Transmission is somewhat slower than libtorrent manages
+
+**Observed.** We feed Transmission at 7.7 MiB/s; qBittorrent feeds it at more than 17. Both are far
+below what either client reaches with libtorrent on the other end, so most of the gap is
+Transmission being slow to receive rather than anything of ours.
+
+**Why it was left.** A factor of two, measured once, against a hand-timed figure that is a lower
+bound rather than a measurement. It is not the same class of problem as the entry above and should
+be re-measured after that one is fixed - a receive-path fault this severe makes every other number
+from these runs worth repeating.
+
+**Caveat on all of these numbers.** One machine, one version of each client, loopback, and a Mullvad
+tunnel up throughout - the interop tests now record the machine's interfaces at the start of each
+run for exactly that reason. Loopback RTT is far below what any network-tuned heuristic expects, so
+the absolute figures are not a benchmark. The comparison across counterparties is the result.

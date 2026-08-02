@@ -36,12 +36,14 @@ internal static class PeerProtocol
 
         if (length < 0)
         {
-            throw new InvalidDataException($"Invalid negative message length: {length}");
+            throw new InvalidDataException(
+                $"Invalid negative message length: {length}. First bytes: {DescribeHead(buffer)}");
         }
 
         if (length > MaxMessageSize)
         {
-            throw new InvalidDataException($"Message size {length} exceeds limit {MaxMessageSize}");
+            throw new InvalidDataException(
+                $"Message size {length} exceeds limit {MaxMessageSize}. First bytes: {DescribeHead(buffer)}");
         }
 
         if (buffer.Length < 4 + length)
@@ -166,6 +168,27 @@ internal static class PeerProtocol
 
         buffer = buffer.Slice(bytesConsumed);
         return true;
+    }
+
+    /// <summary>
+    /// Renders the head of the buffer for a framing failure. A desynchronised stream and a
+    /// misparsed message look the same in a length alone; the bytes say which it is.
+    /// </summary>
+    private static string DescribeHead(ReadOnlySequence<byte> buffer)
+    {
+        int take = (int)Math.Min(32, buffer.Length);
+        Span<byte> head = stackalloc byte[take];
+        buffer.Slice(0, take).CopyTo(head);
+
+        var hex = new System.Text.StringBuilder(take * 3);
+        var ascii = new System.Text.StringBuilder(take);
+        foreach (var b in head)
+        {
+            hex.Append(b.ToString("x2")).Append(' ');
+            ascii.Append(b is >= 32 and < 127 ? (char)b : '.');
+        }
+
+        return $"{hex.ToString().TrimEnd()} | {ascii}";
     }
 
     public static int WriteMessage(PeerMessage msg, Span<byte> destination)
