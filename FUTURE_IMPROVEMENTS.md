@@ -321,19 +321,50 @@ counterparties - and the connection is not simply unreliable, because plaintext 
 Transmission is clean. It is an interaction: something in how Transmission writes to the socket
 puts our reader into a state the other two never produce.
 
-**Where it is not.** `PeerProtocol.TryDecodeMessage` always advances by `4 + length`, including for
-message IDs it does not recognise, so an unhandled message type cannot shift the framing.
-`ProtocolEncryption.Decrypt` holds a lock around `RC4In`, and `EncryptedStream.ReadAsync` decrypts
-exactly the byte count the inner read returned. Those were the three obvious candidates and none of
-them accounts for a fault that appears only after megabytes of correct traffic.
+**Where it is not.** Each of these was tested rather than reasoned about, and each is now excluded.
 
-**Where to look next.** A keystream slips mid-stream if bytes are decrypted twice, decrypted zero
-times, or decrypted out of order. The last of those is the shape that fits a fault appearing only
-under one peer's write pattern. Worth examining in order: whether any read can leave bytes in the
-buffer that are not passed to `Decrypt` - a cancelled or timed-out read that has already moved data
-is the classic form; whether `RateLimitedStream` beneath it can ever return a count that differs
-from what it wrote; and the handshake seam, where `TrailingData` is decrypted directly through
-`RC4In` rather than through the lock, and `_bufferedAfterHandshake` is replayed ahead of the socket.
+*The cipher.* `EncryptedStreamRoundTripTests` encrypts eight MiB through `RC4` in one call and in
+randomly sized chunks and gets identical output, then round-trips eight MiB through two live
+`EncryptedStream` instances over a pipe with the reader taking different sized bites than the writer
+produced. Both pass. RC4 here is chunk-independent and the stream wrapper is correct over megabytes.
+
+*The reads.* The receive path was instrumented with a re-entrancy counter, a cancellation hook and a
+running decrypted-byte total. Across a failing run there were zero concurrent reads, one cancelled
+read a full minute *after* the first failure during teardown, and a completely uniform sequence -
+`n=4096 asked=4096 bufferLen=4096` with the total advancing by exactly 4096 each time, no gaps and no
+zero-length reads, right up to the byte the framing broke on.
+
+*A second connection.* One `Connecting to` line precedes the first failure and no inbound connection
+is ever accepted, so the test's repeated `OnPeersFound` is not producing a duplicate peer whose bytes
+could be mixed in.
+
+*Pooled-buffer aliasing.* The decoder rents from `MemoryPool<byte>.Shared`, which .NET backs with
+`ArrayPool<byte>.Shared`, the same pool the `PipeReader` draws from - so a buffer returned while
+still in use could overwrite the pipe's unread bytes. Giving the reader a private, always-allocating
+pool changes nothing: it still desynchronises.
+
+*Framing.* Every four-byte window of the bytes at the failure was searched for in the plaintext the
+seeder was serving and none appears, while a control sequence taken from that payload is found
+immediately.
+
+*The decoder.* `TryDecodeMessage` always advances by `4 + length`, including for message ids it does
+not recognise, so an unhandled message type cannot shift the framing.
+
+**It is a race, not a data-dependent bug.** The failure offset differs on every run - 1540096,
+1556480, 1572864, 2871743, 7225344 - so it is not a value in the stream that trips it.
+
+**What that leaves.** Our reads are correct and our decryption of what we read is correct, so the
+ciphertext arriving is not encrypted with the keystream position we are at. Two ways that happens:
+bytes are taken off the socket by something that does not advance our keystream, or Transmission's
+outbound keystream advances when ours does not. The first is the one to chase, and the search is
+narrow now - anything holding the socket or the `RateLimitedStream` beneath the decryptor and reading
+from it directly, rather than through `EncryptedStream`. The synchronous `Read` overrides are the
+obvious candidates: `RateLimitedStream.Read` deliberately bypasses the limiter and reads the inner
+stream, and any caller reaching it would consume ciphertext without decrypting it.
+
+**A cheap next measurement.** Transmission reports `uploadedEver` over RPC. Comparing it against our
+running decrypted total at the moment of failure would say directly whether bytes went missing
+between the two, which distinguishes the two remaining explanations without reading any more code.
 
 **Reproduction.** `TransmissionInteropTests.Leeching_FromTransmission_ReceivesTheWholeFile` with
 `PEERSHARP_TRANSMISSION_LOG=1 PEERSHARP_TRANSMISSION_KEEP=1 PEERSHARP_TRANSMISSION_SIZE_MIB=16`
