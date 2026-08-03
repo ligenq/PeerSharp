@@ -386,6 +386,35 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     public System.Net.IPEndPoint? RemoteListenEndPoint { get; internal set; }
 
+    /// <summary>
+    /// Whether this peer has let a request expire without answering it, and has sent us nothing since.
+    ///
+    /// <para>
+    /// A snubbed peer is not punished - it keeps its requests and its slot. It is only steered away
+    /// from rare pieces, because a stalled peer sitting on the one copy of a piece nobody else has is
+    /// what holds a download at 99%. Cleared the moment any block arrives from it.
+    /// </para>
+    /// </summary>
+    public bool IsSnubbed { get; private set; }
+
+    internal void MarkSnubbed()
+    {
+        if (!IsSnubbed)
+        {
+            IsSnubbed = true;
+            _logger.LogDebug("Peer {PeerName} snubbed: a request expired unanswered", Name);
+        }
+    }
+
+    internal void ClearSnubbed()
+    {
+        if (IsSnubbed)
+        {
+            IsSnubbed = false;
+            _logger.LogDebug("Peer {PeerName} no longer snubbed: data received", Name);
+        }
+    }
+
     public bool RemoteSupportsExtensions { get; private set; }
 
     /// <summary>
@@ -560,6 +589,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public void AddDownloaded(long bytes)
     {
         Interlocked.Add(ref _downloaded, bytes);
+
+        // Any data at all clears the snub: the peer answered, so whatever stalled it has passed.
+        ClearSnubbed();
     }
 
     public void AddUploaded(long bytes)

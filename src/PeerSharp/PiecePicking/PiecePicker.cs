@@ -271,6 +271,25 @@ internal class PiecePicker : IDisposable
             currentPieces = _sortedPieces;
         }
 
+        // A peer that has let a request expire walks the same rarest-first ordering backwards, so it
+        // is offered the most common pieces instead of the rarest. Two reasons, both about not letting
+        // one slow peer decide when the download finishes: a rare piece handed to a stalled peer may
+        // have no other source, and steering every snubbed peer to the same end of the list makes them
+        // converge on the same pieces rather than each tying up a different one.
+        if (peer.IsSnubbed)
+        {
+            for (int i = currentPieces.Count - 1; i >= 0; i--)
+            {
+                if (CanPick(currentPieces[i], peer, selection))
+                {
+                    pieceIndex = currentPieces[i];
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         foreach (int i in currentPieces)
         {
             if (CanPick(i, peer, selection))

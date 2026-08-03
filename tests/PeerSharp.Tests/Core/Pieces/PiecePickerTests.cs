@@ -48,6 +48,8 @@ public class PiecePickerTests
     {
         public HashSet<int> Pieces { get; } = [];
         public bool IsChoking { get; set; }
+
+        public bool IsSnubbed { get; set; }
         public HashSet<int> AllowedFastPieces { get; } = [];
         public List<int> SuggestedPieces { get; } = [];
 
@@ -70,6 +72,76 @@ public class PiecePickerTests
 
     private readonly FakeTimeProvider _timeProvider = new();
     private readonly Random _random = new(42);
+
+    [Fact]
+    public void PickNextPiece_SnubbedPeer_IsGivenTheMostCommonPieceInstead()
+    {
+        // A peer that has let a request expire should not be handed the rarest piece: it may be the
+        // only source for it, and a stalled peer sitting on it is what holds a download at 99%.
+        var ctx = new MockContext { PieceCount = 5 };
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+
+        // Piece 0 is the most common, piece 4 the rarest.
+        for (int i = 0; i < 4; i++)
+        {
+            picker.IncrementAvailability(0);
+        }
+
+        for (int i = 0; i < 3; i++)
+        {
+            picker.IncrementAvailability(1);
+        }
+
+        picker.IncrementAvailability(2);
+        picker.IncrementAvailability(2);
+        picker.IncrementAvailability(3);
+        picker.IncrementAvailability(4);
+
+        var healthy = new MockPeer();
+        var snubbed = new MockPeer { IsSnubbed = true };
+        for (int i = 0; i < 5; i++)
+        {
+            healthy.Pieces.Add(i);
+            snubbed.Pieces.Add(i);
+        }
+
+        Assert.True(picker.PickNextPiece(healthy, out int rarest));
+        Assert.True(picker.PickNextPiece(snubbed, out int common));
+
+        Assert.Equal(3, rarest);
+        Assert.Equal(0, common);
+    }
+
+    [Fact]
+    public void PickNextPiece_SnubbedPeersConvergeOnTheSamePiece()
+    {
+        // Steering every snubbed peer to the same end of the ordering makes them ask for the same
+        // pieces rather than each tying up a different one.
+        var ctx = new MockContext { PieceCount = 4 };
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+
+        for (int i = 0; i < 4; i++)
+        {
+            picker.IncrementAvailability(0);
+        }
+
+        picker.IncrementAvailability(1);
+        picker.IncrementAvailability(1);
+        picker.IncrementAvailability(2);
+
+        var first = new MockPeer { IsSnubbed = true };
+        var second = new MockPeer { IsSnubbed = true };
+        for (int i = 0; i < 4; i++)
+        {
+            first.Pieces.Add(i);
+            second.Pieces.Add(i);
+        }
+
+        Assert.True(picker.PickNextPiece(first, out int a));
+        Assert.True(picker.PickNextPiece(second, out int b));
+
+        Assert.Equal(a, b);
+    }
 
     [Fact]
     public void PickNextPiece_RarestFirst_PicksLeastCommon()
