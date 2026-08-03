@@ -67,10 +67,11 @@ public class UploadQueueManagerTests
         manager.TryEnqueue(peer, new UploadQueueItem(0, 0, 16384));
         Assert.True(await pumpOnFirst.WaitAsync(TimeSpan.FromSeconds(5)));
 
-        // Fill the queue by enqueuing until TryEnqueue returns false (queue full).
-        // Count how many items were accepted to confirm the limit is respected.
+        // Fill the queue by enqueuing past capacity, counting what was accepted. Derived from the
+        // constant rather than written out, so raising the depth cannot silently invalidate this.
+        const int overshoot = 50;
         int accepted = 0;
-        for (int i = 1; i <= 500; i++)
+        for (int i = 1; i <= UploadQueueManager.MaxQueueDepthPerPeer + overshoot; i++)
         {
             if (manager.TryEnqueue(peer, new UploadQueueItem(i, 0, 16384)))
             {
@@ -78,8 +79,8 @@ public class UploadQueueManagerTests
             }
         }
 
-        // Exactly MaxQueueDepthPerPeer (250) items should fit; the rest are dropped.
-        Assert.Equal(250, accepted);
+        // Exactly the queue depth fits; the overshoot is refused.
+        Assert.Equal(UploadQueueManager.MaxQueueDepthPerPeer, accepted);
 
         gate.SetResult();
     }

@@ -48,13 +48,22 @@ internal static class ProtocolConstants
     /// </para>
     ///
     /// <para>
-    /// The depth also bounds how much work one peer can have outstanding with us: at
-    /// <see cref="BlockSize"/> per request this is the in-flight ceiling for a single connection, which
-    /// is what limits throughput on a link with any real latency. Raising it is a memory tradeoff
-    /// across a whole swarm and wants a many-peer measurement first.
+    /// The depth also bounds how much work one peer can have outstanding with us, which is what limits
+    /// throughput against a peer that only refills its request window on a timer - Transmission 4.1.3
+    /// does so every 500ms, so at 250 we answered a batch in about 20ms and then sat idle for the rest
+    /// of the pulse. Raising this to 2000 took seeding to Transmission from 7.4 to 31.6 MiB/s.
+    /// </para>
+    ///
+    /// <para>
+    /// It is cheap, which is not obvious and was worth measuring: the queue is a bounded channel of
+    /// 12-byte descriptors and block data is read lazily as each is served, so depth buys descriptors
+    /// rather than buffers - about 23 KiB per peer here, or 4 MiB across two hundred of them. In-flight
+    /// block data is bounded by the send queue instead, independently of this. <c>ManyPeerSoakTests</c>
+    /// is the harness for re-checking that if this changes again; at 24 peers, 250 and 2000 are
+    /// indistinguishable in both throughput and heap.
     /// </para>
     /// </summary>
-    public const int MaxOutstandingRequestsPerPeer = 250;
+    public const int MaxOutstandingRequestsPerPeer = 2000;
 
     #endregion Block and Message Sizes
 

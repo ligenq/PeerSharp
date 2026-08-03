@@ -340,20 +340,43 @@ produced a mix of signs. Correct observation, wrong inference.
 
 ---
 
-## Seeding to Transmission is slower than it should be
+## Seeding to Transmission: settled
 
-**The one open PeerSharp-side performance question, and it survived the Transmission fix.** We feed
-Transmission at 7.4 MiB/s while every other pairing runs one to two orders of magnitude faster. The
-obvious hypothesis once the send-buffer bug was found was that it explained this too - Transmission's
-requests to us travel the same broken send path, so discarded requests would starve our upload. It
-does not: against a patched daemon the figure is 7.5 MiB/s, unchanged. Whatever this is, it is not
-that.
+**It was our request queue depth against Transmission's refill timer.** Not a general ceiling on our
+send path, and nothing to do with the Windows send-buffer bug above.
 
-**What it still needs.** A reference client seeding to the same Transmission, to say how much of the
-gap is Transmission's receive path rather than our send path. The only reference figure on hand is
-hand-timed - a person watching qBittorrent feed Transmission and calling it "less than 30 seconds" for
-512 MiB - which is a lower bound someone eyeballed, not a measurement. The MonoTorrent arm runs the
-wrong way round to help; extending it to seed is the work this question actually needs.
+Transmission 4.1.3 only generates new block requests inside its bandwidth pulse, which runs every
+500ms (`BandwidthTimerPeriod`, with `pulse()` calling `update_desired_request_count()` and
+`maybe_send_block_requests()`). We answered an accepted batch in roughly 10-20ms and then had nothing
+left to do, so the connection sat idle for the rest of the half second. The arithmetic matches what we
+measured: 250 requests times 16 KiB over 500ms is about 8 MiB/s, and we measured 7.4.
+
+Two things compounded it. Our queue held 250, and we were not advertising `reqq`, so Transmission
+applied its default assumption of 500 (`peer_reqq_.value_or(PeerReqQDefault)`) and everything above
+250 came back rejected - a traced 16 MiB seed sent 1,525 requests for 1,024 blocks with 501 refused.
+MonoTorrent advertises 256 and hits the same ~7.5 MiB/s ceiling for the same reason, which is the
+cleanest confirmation available that this was never specific to us.
+
+**Fixed on both counts.** We advertise `reqq` now, and the depth is 2000 - matching what libtorrent
+advertises, and enough that one pulse's worth of requests takes longer to drain than the pulse itself:
+
+| Depth | Seeding to Transmission, 64 MiB | Requests refused |
+| --- | --- | --- |
+| 250, not advertising | 7.4 MiB/s | 501 per 16 MiB |
+| 2000, advertising | 31.6 MiB/s | 0 |
+
+**The depth is cheaper than it looks, which is why 2000 is defensible.** The obvious worry is that
+2000 outstanding requests means 2000 blocks buffered per peer, or about 31 MiB, multiplied across a
+swarm. It does not: the queue is a bounded channel of 12-byte descriptors and `ExecuteUploadItemAsync`
+reads each block lazily as it is served, so the depth costs about 23 KiB per peer, or 4 MiB across two
+hundred. In-flight block data is bounded by the send queue instead, which is unchanged. `ManyPeerSoak`
+measures this: at 24 peers, 250 and 2000 are indistinguishable in both aggregate throughput and heap
+high-water mark.
+
+**Transmission fixes its side on main too.** `peer-msgs.cc` there refills the request window as soon as
+piece data arrives rather than waiting for the pulse, so this ceiling disappears against any client
+built from main regardless of what we do. Both halves are worth having: theirs removes the timer, ours
+removes the guessing.
 
 ---
 
@@ -368,12 +391,14 @@ All arms: 64 MiB of random data, MSE encryption, loopback, one machine, Mullvad 
 | Seeder to leecher | Rate | Notes |
 | --- | --- | --- |
 | Transmission to MonoTorrent | 252.6 MiB/s | control arm, one connection, zero drops |
-| PeerSharp to qBittorrent | 108.8 MiB/s | |
-| qBittorrent to PeerSharp | 63.1 MiB/s | |
-| PeerSharp to PeerSharp | 57.4 MiB/s | both engines in one process |
-| PeerSharp to Transmission | 7.4 MiB/s | the open question above |
+| PeerSharp to qBittorrent | 108.2 MiB/s | |
+| qBittorrent to PeerSharp | 64.0 MiB/s | |
+| PeerSharp to PeerSharp | 58.0 MiB/s | both engines in one process |
+| PeerSharp to Transmission | 31.6 MiB/s | was 7.4 before reqq and the deeper queue |
 | Transmission to PeerSharp, patched | 196.5 MiB/s | one connection, zero framing failures |
 | Transmission to PeerSharp, stock 4.1.3 | 0.5 MiB/s | measures the Windows send-buffer bug, not us |
+
+**Many peers.** `ManyPeerSoakTests` covers what these single-connection numbers cannot: 24 leechers against one seeder complete in 12.2s at 31.4 MiB/s aggregate. It reports heap against peer count rather than asserting a threshold, because the right ceiling depends on the deployment.
 
 **Two things worth not misreading.** The PeerSharp-to-PeerSharp control arm is *slower* than talking to
 qBittorrent because both engines share one process and compete for the same cores; it is a harness
