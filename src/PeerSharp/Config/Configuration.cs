@@ -50,6 +50,18 @@ public sealed class ConnectionSettings
     public int ConnectionsPerSecond { get; set; } = 18;
 
     /// <summary>
+    /// How often, at most, one peer is told about swarm changes over ut_pex (BEP 11).
+    ///
+    /// <para>
+    /// Sixty seconds by default, matching libtorrent. Sending faster than peers expect is what gets a
+    /// client throttled or ignored, so raising the rate is rarely useful; the reason this is adjustable
+    /// at all is that a minute is a long time to wait to observe an exchange, in a test or otherwise.
+    /// Peer exchange is skipped entirely for private torrents regardless of this value.
+    /// </para>
+    /// </summary>
+    public TimeSpan PexInterval { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
     /// Enable adaptive connection timeouts based on network performance. Default is true.
     /// Dynamically adjusts how long to wait for peers based on latency and success rate.
     /// </summary>
