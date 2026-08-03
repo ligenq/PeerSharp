@@ -275,12 +275,13 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
                 _output.WriteLine($"  [{overall.Elapsed.TotalSeconds,6:F1}s] first data received");
             }
 
-            if (overall.Elapsed - lastLog > TimeSpan.FromSeconds(5))
+            if (overall.Elapsed - lastLog > TimeSpan.FromSeconds(2))
             {
                 lastLog = overall.Elapsed;
                 _output.WriteLine(
-                    $"  [{overall.Elapsed.TotalSeconds,5:F0}s] {leechTorrent.Progress,7:P1} " +
-                    $"peers={leechTorrent.Peers.ConnectedCount}");
+                    $"  [{overall.Elapsed.TotalSeconds,5:F1}s] {leechTorrent.Progress,7:P1} " +
+                    $"peers={leechTorrent.Peers.ConnectedCount} " +
+                    $"transmissionUploadedEver={await TransmissionUploadedEverAsync()}");
             }
 
             await Task.Delay(250);
@@ -304,10 +305,168 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// The same leech, run by MonoTorrent instead of us.
+    ///
+    /// <para>
+    /// Every other measurement of the MSE desynchronisation has been PeerSharp-internal, which can
+    /// establish that our side is self-consistent but not that it is correct. MonoTorrent is an
+    /// independent, mature .NET MSE implementation - and, judging by the shared <c>Skip(1024)</c>,
+    /// the identical RC4 inner loop and the near-identical "Invalid message length" wording, the one
+    /// ours descends from. Pointing it at the same Transmission seeder splits the last hypothesis:
+    /// if it also desynchronises the fault is Transmission's and we are exonerated, and if it does
+    /// not the fault is definitively ours and the diff between the two receive paths is short.
+    /// </para>
+    ///
+    /// <para>
+    /// The leecher is an external process so that this repository carries no dependency on a
+    /// research checkout. Point <c>PEERSHARP_MONOTORRENT_LEECHER</c> at the built executable; the
+    /// test skips without it.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public async Task Leeching_FromTransmission_WithMonoTorrent_ControlArm()
+    {
+        RequireEnabled();
+        string exe = Environment.GetEnvironmentVariable(ExeVariable) ?? DefaultExe;
+        if (!File.Exists(exe))
+        {
+            Assert.Skip($"Transmission not found at {exe}. Set {ExeVariable} to its path.");
+        }
+
+        string? leecher = Environment.GetEnvironmentVariable("PEERSHARP_MONOTORRENT_LEECHER");
+        if (string.IsNullOrWhiteSpace(leecher) || !File.Exists(leecher))
+        {
+            Assert.Skip("Set PEERSHARP_MONOTORRENT_LEECHER to the built MonoTorrent leecher executable.");
+        }
+
+        int sizeMiB = IntFromEnvironment("PEERSHARP_TRANSMISSION_SIZE_MIB", 64);
+        int timeoutMinutes = IntFromEnvironment("PEERSHARP_TRANSMISSION_TIMEOUT_MINUTES", 10);
+
+        var configDir = Path.Combine(_root, "config");
+        var transmissionDir = Path.Combine(_root, "transmission-seed");
+        var leechDir = Path.Combine(_root, "monotorrent-leech");
+        Directory.CreateDirectory(configDir);
+        Directory.CreateDirectory(transmissionDir);
+        Directory.CreateDirectory(leechDir);
+
+        // Byte-for-byte the same setup as the PeerSharp arm, so the only variable is the leecher.
+        const string fileName = "reverse-payload.bin";
+        var payload = new byte[sizeMiB * 1024 * 1024];
+        RandomNumberGenerator.Fill(payload);
+        await File.WriteAllBytesAsync(Path.Combine(transmissionDir, fileName), payload);
+        var expectedHash = Convert.ToHexString(SHA256.HashData(payload));
+
+        var torrentFile = new ApiTorrentFileBuilder()
+            .WithName(fileName)
+            .WithPieceLength(256 * 1024)
+            .AddFileFromPath(Path.Combine(transmissionDir, fileName), fileName)
+            .Build();
+
+        var torrentPath = Path.Combine(_root, "reverse.torrent");
+        await File.WriteAllBytesAsync(torrentPath, torrentFile.RawData.ToArray());
+
+        _output.WriteLine($"Payload    : {sizeMiB} MiB, {torrentFile.PieceCount} pieces of {torrentFile.PieceSize} B");
+        _output.WriteLine("Direction  : Transmission seeds, MonoTorrent leeches (control arm)");
+        _output.WriteLine("Encryption : MonoTorrent=RC4Full only, Transmission=preferred");
+        _output.WriteLine($"Leecher    : {leecher}");
+        ReportNetworkInterfaces();
+
+        await StartTransmissionAsync(exe, configDir, transmissionDir);
+        await AddTorrentToTransmissionAsync(torrentPath, transmissionDir);
+        await WaitForTransmissionToSeedAsync();
+
+        var start = new ProcessStartInfo(leecher!)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            WorkingDirectory = _root
+        };
+        start.ArgumentList.Add(torrentPath);
+        start.ArgumentList.Add(leechDir);
+        start.ArgumentList.Add($"127.0.0.1:{TransmissionPeerPort}");
+        start.ArgumentList.Add((timeoutMinutes * 60).ToString());
+
+        using var process = Process.Start(start)
+            ?? throw new InvalidOperationException("Could not start the MonoTorrent leecher.");
+
+        var stdout = new List<string>();
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is null)
+            {
+                return;
+            }
+
+            lock (stdout)
+            {
+                stdout.Add(e.Data);
+            }
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is not null)
+            {
+                lock (stdout)
+                {
+                    stdout.Add("ERR: " + e.Data);
+                }
+            }
+        };
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        var clock = Stopwatch.StartNew();
+        await process.WaitForExitAsync(new CancellationTokenSource(
+            TimeSpan.FromMinutes(timeoutMinutes + 2)).Token);
+        clock.Stop();
+
+        lock (stdout)
+        {
+            foreach (var line in stdout)
+            {
+                _output.WriteLine(line);
+            }
+        }
+
+        _output.WriteLine($"Transmission uploadedEver: {await TransmissionUploadedEverAsync()}");
+
+        Assert.True(
+            process.ExitCode == 0,
+            $"MonoTorrent did not complete: exit {process.ExitCode} after {clock.Elapsed.TotalSeconds:F0}s.");
+
+        var received = Path.Combine(leechDir, fileName);
+        Assert.True(File.Exists(received), $"Reported complete but {received} is missing.");
+        Assert.Equal(expectedHash, Convert.ToHexString(SHA256.HashData(await ReadAllBytesSharedAsync(received))));
+        _output.WriteLine("Content verified.");
+    }
+
+    /// <summary>
     /// Waits until Transmission has verified the payload and is seeding it. Adding a torrent whose
     /// files are already present makes it check them first, and it has nothing to serve until that
     /// finishes.
     /// </summary>
+    /// <summary>
+    /// What the seeder believes it has sent us. Compared with our own decrypted total it says
+    /// whether bytes went missing between the two, which is the other half of the byte audit.
+    /// </summary>
+    private async Task<string> TransmissionUploadedEverAsync()
+    {
+        try
+        {
+            var torrents = (await RpcAsync("torrent-get", new { fields = new[] { "uploadedEver" } }))
+                .GetProperty("arguments").GetProperty("torrents");
+            return torrents.GetArrayLength() > 0
+                ? torrents[0].GetProperty("uploadedEver").GetInt64().ToString()
+                : "n/a";
+        }
+        catch (Exception)
+        {
+            return "n/a";
+        }
+    }
+
     private async Task WaitForTransmissionToSeedAsync()
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(5);
@@ -627,6 +786,22 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
 
         var info = new ProcessStartInfo(exe) { UseShellExecute = false };
         info.EnvironmentVariables["TRANSMISSION_HOME"] = configDir;
+
+        // transmission-daemon needs telling not to fork, and it is the only build that writes the log
+        // queue to a file: both it and transmission-qt enable queuing, but only the daemon drains the
+        // queue to disk, where the Qt client keeps it in memory for its Message Log window. At
+        // message-level 6 that log records every protocol message Transmission sends, immediately
+        // before it hands the bytes to its encryption filter - which is the record this investigation
+        // needs and cannot get from the shipped GUI build.
+        if (Path.GetFileNameWithoutExtension(exe).Contains("daemon", StringComparison.OrdinalIgnoreCase))
+        {
+            var logPath = Path.Combine(_root, "transmission.log");
+            info.ArgumentList.Add("--foreground");
+            info.ArgumentList.Add("--logfile");
+            info.ArgumentList.Add(logPath);
+            _output.WriteLine($"Transmission log: {logPath}");
+        }
+
         _transmission = Process.Start(info) ?? throw new InvalidOperationException("Failed to start Transmission.");
 
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
