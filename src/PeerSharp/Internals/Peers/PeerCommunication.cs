@@ -493,6 +493,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
 
         string hash = _torrent.Hash.ToHexStringUpper();
+
         return new RateLimitedStream(
             stream,
             this,
@@ -2120,7 +2121,20 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // leaveOpen: the connection stream is owned by CleanupResourcesAsync, which disposes it to close
         // the connection. Letting the reader dispose it as well was harmless only because that path
         // already tolerated a double dispose.
-        var pipeReader = PipeReader.Create(source, new StreamPipeReaderOptions(leaveOpen: true));
+        //
+        // The reader's default buffer is 4 KiB, but the unit this protocol moves is a 16 KiB block plus
+        // a 13 byte header, so every block cost at least five reads and five decrypt calls. Holding
+        // several whole blocks lets each read take as much as the layers below permit, which they cap
+        // at one block.
+        //
+        // This is a throughput change and nothing more. It was first tried as a mitigation for the
+        // Transmission fault in FUTURE_IMPROVEMENTS.md, on the theory that draining a peer faster would
+        // keep its send backlog below the size that trips it. One run came back clean and that turned
+        // out to be an outlier: repeated runs show the failure rate unchanged within noise. It is kept
+        // only because reading at the protocol's natural size is right regardless of that bug.
+        var pipeReader = PipeReader.Create(
+            source,
+            new StreamPipeReaderOptions(bufferSize: 4 * ProtocolConstants.BlockSize, leaveOpen: true));
         bool handshakeReceived = _handshakePreRead;
 
         try
