@@ -37,6 +37,9 @@ internal sealed record Options
     /// public network.</summary>
     public bool NoDht { get; init; }
 
+    /// <summary>Peers to try in addition to discovery, as host:port.</summary>
+    public IReadOnlyList<string> Peers { get; init; } = [];
+
     public static Options? Parse(string[] args, TextWriter error)
     {
         string? source = null;
@@ -47,6 +50,7 @@ internal sealed record Options
         bool lsd = false;
         bool recheck = false;
         bool noDht = false;
+        var peers = new List<string>();
         var interval = TimeSpan.FromSeconds(5);
         int? down = null;
         int? up = null;
@@ -78,6 +82,16 @@ internal sealed record Options
 
                 case "--no-dht":
                     noDht = true;
+                    break;
+
+                case "--peer":
+                    if (!TryTake(args, ref i, out var peer))
+                    {
+                        error.WriteLine("--peer needs an address as host:port.");
+                        return null;
+                    }
+
+                    peers.Add(peer);
                     break;
 
                 case "--out" or "-o":
@@ -152,6 +166,7 @@ internal sealed record Options
             LocalDiscovery = lsd,
             Recheck = recheck,
             NoDht = noDht,
+            Peers = peers,
             ReportInterval = interval,
             DownloadLimitBytesPerSecond = down,
             UploadLimitBytesPerSecond = up
@@ -172,6 +187,7 @@ internal sealed record Options
                   --lsd            discover peers on the local network (BEP 14)
                   --recheck        hash-check existing files first, to seed what is already there
                   --no-dht         disable the DHT, isolating a run from the public network
+                  --peer <ip:port> try this peer as well as any found by discovery (repeatable)
                   --interval <s>   seconds between reports (default: 5)
                   --down <KiB/s>   download rate limit
                   --up <KiB/s>     upload rate limit

@@ -11,7 +11,10 @@ internal enum PeerSourceKind
     Resume = 4,
     Ltep = 5,
     WebTorrent = 6,
-    Unknown = 7
+    Unknown = 7,
+
+    /// <summary>Added by the application, rather than discovered.</summary>
+    Manual = 8
 }
 
 /// <summary>

@@ -172,6 +172,19 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private readonly record struct ConnectionRequest(string Ip, int Port, bool ForceUtp);
     public int ConnectedCount => _connectedPeersCount;
 
+    /// <inheritdoc />
+    public int Add(IEnumerable<IPEndPoint> endpoints)
+    {
+        ArgumentNullException.ThrowIfNull(endpoints);
+
+        // Counted before and after rather than reported by AddPeersInternal, because "accepted" means
+        // "is now a candidate we did not already know", which is what the caller can act on. A peer
+        // already in the list, blocked, or filtered out is not a failure worth distinguishing.
+        int before = _knownPeersCache.Count;
+        AddPeers(endpoints, PeerSourceKind.Manual);
+        return Math.Max(0, _knownPeersCache.Count - before);
+    }
+
     public Task AddIncomingPeerAsync(System.Net.Sockets.TcpClient client, byte[] handshake)
     {
         return AddIncomingTcpPeerCoreAsync(client, handshake, encryption: null);

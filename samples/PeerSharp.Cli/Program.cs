@@ -89,6 +89,27 @@ if (options.UploadLimitBytesPerSecond is { } up)
     torrent.UploadLimitBytesPerSecond = up;
 }
 
+if (options.Peers.Count > 0)
+{
+    var endpoints = new List<System.Net.IPEndPoint>();
+    foreach (var raw in options.Peers)
+    {
+        if (System.Net.IPEndPoint.TryParse(raw, out var endpoint))
+        {
+            endpoints.Add(endpoint);
+        }
+        else
+        {
+            Console.Error.WriteLine($"Ignoring unparseable peer address: {raw}");
+        }
+    }
+
+    // Offered, not forced: these go through the same blocklist, limits and duplicate checks as a
+    // peer from any other source, so "accepted" is not the same as "connected".
+    int accepted = torrent.Peers.Add(endpoints);
+    Console.WriteLine($"Peers added    : {accepted} of {endpoints.Count} accepted as candidates");
+}
+
 // Ctrl+C should stop the engine rather than kill the process, so a run ends with its files closed
 // and its final numbers printed.
 using var stopping = new CancellationTokenSource();

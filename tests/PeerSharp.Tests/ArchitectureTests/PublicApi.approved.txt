@@ -697,6 +697,7 @@ interface PeerSharp.Interfaces.IPeerTransportHost
     Task AttachPeerTransportAsync(IO.Stream stream, Boolean initiator, CancellationToken cancellationToken = default)
 interface PeerSharp.Interfaces.IPeers
     IReadOnlyList<PeerSharp.Core.PeerInfo> GetConnectedPeers()
+    Int32 Add(IEnumerable<Net.IPEndPoint> endpoints)
     Int32 ConnectedCount { get; }
     Int32[] GetPieceAvailability()
 interface PeerSharp.Interfaces.ISessionPersistence
