@@ -286,85 +286,74 @@ reading a slow first block as a fault.
 
 ---
 
-## Transmission serves its own send buffer out of order (upstream bug, root cause found)
+## Transmission on Windows discards its send buffer on EWOULDBLOCK (upstream bug, fixed and verified)
 
-**What it is.** Under a large unsent backlog, Transmission's `tr_peerIo` puts bytes on the wire that
-belong to a completely different position in its own output stream. It is not corruption and not an
-encryption fault: the bytes are intact ciphertext, just delivered at the wrong offset. Everything we
-decrypt after that point is garbage, we drop the connection, redial, wait out Transmission's
-ten-second rechoke, and repeat - which is the whole of the 0.3 MiB/s staircase.
+**The defect.** `tr-buffer.h`'s `to_socket` compares a signed `send()` result against an unsigned
+literal:
 
-**The proof.** A debug `transmission-daemon` was built at the exact commit of the installed client
-(4.1.3, `838877323f`) with one added log line in `tr_peerIo::write_bytes`, recording the running output
-offset and the first bytes of ciphertext straight out of `filter_.encrypt`. Paired with a byte-level
-capture of the same socket taken below every layer on our side:
+```cpp
+if (auto const n_sent = send(sockfd, ..., n_bytes, 0); n_sent >= 0U)
+{
+    drain(n_sent);
+    return n_sent;
+}
+```
 
-| Wire offset | Carries the ciphertext of the write queued at | Delta |
-| --- | --- | --- |
-| 1624022 | 2230711 | +606689 |
-| 1509334 | 2050435 | +541101 |
-| 1050057 | 1197630 | +147573 |
-| 1263304 | 1591244 | +327940 |
-| 1640246 | 1968186 | +327940 |
+On Windows `send()` returns `int`. `int` against `unsigned int` triggers the usual arithmetic
+conversions, so a failed send of `-1` becomes `4294967295` and passes the test. Transmission then
+treats the failure as a success, calls `drain(-1)` - which is `SIZE_MAX`, and `drain` does
+`begin_pos_ += std::min(n_bytes, size())`, so it empties the *entire* output buffer - and reports
+`SIZE_MAX` bytes written. Everything queued and unsent is silently thrown away, while its RC4 engine
+has already advanced over all of it.
 
-Every write before the splice matches the wire byte for byte - 105, 98, 70, 83 and 106 consecutive
-writes on the five failing connections - and the one connection that never failed matched all 86 of
-its writes. Transmission's message layer is blameless: its own trace log shows the next thing it sent
-at each break was an ordinary, correctly sequenced piece block (`piece[16, 180224]` then
-`piece[16, 196608]`, and so on). The fault is strictly between `filter_.encrypt` and the socket.
+**It is Windows-only.** On POSIX `send()` returns `ssize_t`, which is wider than `unsigned int`, so the
+literal promotes to signed and the comparison is correct. Only the LLP64 case, where `int` and
+`unsigned int` are the same width, converts the -1. That is presumably why it has survived: it cannot
+happen on Transmission's primary platforms.
 
-**Why it looked unexplainable from our side.** The spliced-in bytes come from hundreds of kilobytes
-away, so no keystream offset decrypts them - which is why sliding our inbound engine across the entire
-stream found nothing, and why trying the outbound engine found nothing either. Every byte counter on
-our side balanced perfectly throughout, because nothing on our side was ever wrong.
+**What it does to a peer.** The discarded bytes are a hole in the encrypted stream. Our RC4 keeps
+counting, so from the hole onward every byte decrypts to nonsense, `TryDecodeMessage` reads a garbage
+length and we drop the connection. Reconnecting costs most of Transmission's ten second rechoke period,
+which is the 0.3 MiB/s staircase. `WSAEWOULDBLOCK` is what triggers it, so it needs a full socket
+buffer - a peer that drains slower than Transmission fills.
 
-**Why only us.** The bug needs a large backlog: Transmission had queued 2.5 MB while only 1.6 MB had
-reached us. MonoTorrent never triggers it because it drains 128 MiB in 0.3s and the backlog never
-builds. That is the whole of the difference between the two clients, and it is not something we are
-doing wrong.
+**Verified by patching it.** Changing `n_sent >= 0U` to `n_sent >= 0` in a 4.1.3 build:
 
-**Attempted mitigation, and why it is not in the code.** Reading at the protocol's natural size rather
-than 4 KiB was tried, on the theory that draining faster would keep the backlog under the threshold.
-One 32 MiB run came back clean at 6.1 MiB/s and that was an outlier - repeated runs at 32 and 64 MiB,
-against both the daemon and the shipped Qt client, show nine to twenty framing failures and no rate
-improvement beyond noise. The larger read buffer was kept because it is correct on its own merits; the
-widened read cap was reverted because it coarsens bandwidth reservation granularity for nothing. There
-is no reliable mitigation from this end, and per-client special cases are out of scope by decision.
+| Build | Payload | Time | Rate | Framing failures | Connections |
+| --- | --- | --- | --- | --- | --- |
+| stock 4.1.3 | 64 MiB | 140.6s | 0.5 MiB/s | 14 | many |
+| patched | 64 MiB | 0.3s | 196.5 MiB/s | 0 | 1 |
+| patched | 8 MiB | 0.5s | 15.6 MiB/s | 0 | 1 |
 
-**What to do with it.** This belongs upstream. A report wants: the version (4.1.3), the shape (queued
-output emitted out of order once the unsent backlog reaches roughly a megabyte), the one-line patch to
-`write_bytes` that makes it visible, and the observation that a slow-draining peer is all it takes to
-reproduce. `Leeching_FromTransmission_ReceivesTheWholeFile` reproduces it in under a minute at 8 MiB,
-and `Leeching_FromTransmission_WithMonoTorrent_ControlArm` shows a third-party client on the same
-machine against the same seeder that does not trip it.
+**Already fixed upstream, incidentally.** `main` carries the signed comparison in
+`peer-socket-tcp.cc`, introduced by the socket refactor in commit `a919d47`, along with an explicit
+`static_cast<int>` of the length for Win32. So the upstream action is a 4.1.x backport plus a
+regression test, not a new fix.
 
-**Reproduction.** `TransmissionInteropTests.Leeching_FromTransmission_ReceivesTheWholeFile` with
-`PEERSHARP_TRANSMISSION_LOG=1 PEERSHARP_TRANSMISSION_KEEP=1 PEERSHARP_TRANSMISSION_SIZE_MIB=8`. Set
-`PEERSHARP_TRANSMISSION_EXE` to a locally built `transmission-daemon` and
-`PEERSHARP_TRANSMISSION_MESSAGE_LEVEL=6` to get Transmission's own trace log, which the harness passes
-`--foreground --logfile` for - the shipped Qt client keeps its log in memory and cannot be read this
-way. Setting `PEERSHARP_TRANSMISSION_ENCRYPTION=Refuse` makes the transfer clean, because a plaintext
-stream has no keystream to lose sync with; the misordering presumably still happens and simply cannot
-be detected.
-
-**Correctness note.** Every completed run still verified its payload by SHA-256. Pieces that arrived
-were hash-checked and the misordered reads were discarded with the connection, so this costs speed and
-connection churn rather than data integrity.
+**A correction to the earlier entry in this file.** This was first written up here as Transmission
+serving its output buffer *out of order*, on the strength of finding that the wire carried ciphertext
+belonging to a write queued 147 to 606 KB later. That observation was right and the mechanism was
+wrong: a discard produces exactly the same measurement, because dropping queued bytes makes the wire
+fall behind the queue, so a given wire offset then holds data queued later. The tell was in the data
+and was missed - every one of the five deltas was positive, where genuine reordering would have
+produced a mix of signs. Correct observation, wrong inference.
 
 ---
 
 ## Seeding to Transmission is slower than it should be
 
-**The one open PeerSharp-side performance question.** We feed Transmission at 7.4 MiB/s while every
-other pairing runs one to two orders of magnitude faster. It is the only number in the table that
-looks like ours rather than someone else's.
+**The one open PeerSharp-side performance question, and it survived the Transmission fix.** We feed
+Transmission at 7.4 MiB/s while every other pairing runs one to two orders of magnitude faster. The
+obvious hypothesis once the send-buffer bug was found was that it explained this too - Transmission's
+requests to us travel the same broken send path, so discarded requests would starve our upload. It
+does not: against a patched daemon the figure is 7.5 MiB/s, unchanged. Whatever this is, it is not
+that.
 
-**What is not yet known** is how much of that is Transmission's receive path. The comparison it needs
-is a reference client seeding to the same Transmission, and the only reference figure on hand is
+**What it still needs.** A reference client seeding to the same Transmission, to say how much of the
+gap is Transmission's receive path rather than our send path. The only reference figure on hand is
 hand-timed - a person watching qBittorrent feed Transmission and calling it "less than 30 seconds" for
-512 MiB. That is a lower bound someone eyeballed, not a measurement, and it is not sound to conclude
-anything from it. The MonoTorrent arm runs the wrong way round to help: it leeches, and extending it to
-seed is the work this question actually needs.
+512 MiB - which is a lower bound someone eyeballed, not a measurement. The MonoTorrent arm runs the
+wrong way round to help; extending it to seed is the work this question actually needs.
 
 ---
 
@@ -383,7 +372,8 @@ All arms: 64 MiB of random data, MSE encryption, loopback, one machine, Mullvad 
 | qBittorrent to PeerSharp | 63.1 MiB/s | |
 | PeerSharp to PeerSharp | 57.4 MiB/s | both engines in one process |
 | PeerSharp to Transmission | 7.4 MiB/s | the open question above |
-| Transmission to PeerSharp | 0.5 MiB/s | 14 framing failures; upstream fault, see above |
+| Transmission to PeerSharp, patched | 196.5 MiB/s | one connection, zero framing failures |
+| Transmission to PeerSharp, stock 4.1.3 | 0.5 MiB/s | measures the Windows send-buffer bug, not us |
 
 **Two things worth not misreading.** The PeerSharp-to-PeerSharp control arm is *slower* than talking to
 qBittorrent because both engines share one process and compete for the same cores; it is a harness
