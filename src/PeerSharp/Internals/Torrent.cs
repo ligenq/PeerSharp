@@ -245,6 +245,41 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public int UploadLimitBytesPerSecond { get => Configuration.UploadLimitBytesPerSecond; set => Configuration.UploadLimitBytesPerSecond = value; }
     public IUtpManager? UtpManager { get => Network.Utp; set => Network.Utp = value; }
 
+    /// <summary>
+    /// The peer ids we have presented on outgoing connections and not yet finished with.
+    ///
+    /// <para>
+    /// A connection that loops back to us - a tracker handing us our own address, PEX echoing us,
+    /// local discovery - arrives at our listener carrying the id we just sent. Recognising it is the
+    /// only reliable way to tell ourselves apart from a stranger, because the address alone does not:
+    /// behind NAT our external address is not one we can compare against.
+    /// </para>
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _outgoingPeerIds = new();
+
+    /// <summary>Issues a fresh peer id for one outgoing connection and remembers it.</summary>
+    public byte[] IssueOutgoingPeerId()
+    {
+        var id = ProtocolConstants.GeneratePeerId();
+        _outgoingPeerIds[Convert.ToHexString(id)] = 0;
+        return id;
+    }
+
+    /// <summary>Forgets an issued id once its connection is done, so the set cannot grow unbounded.</summary>
+    public void ReleaseOutgoingPeerId(byte[]? id)
+    {
+        if (id is { Length: 20 })
+        {
+            _outgoingPeerIds.TryRemove(Convert.ToHexString(id), out _);
+        }
+    }
+
+    /// <summary>Whether this id is one we presented on an outgoing connection, meaning it is us.</summary>
+    public bool IsOurOutgoingPeerId(ReadOnlySpan<byte> id)
+    {
+        return id.Length == 20 && _outgoingPeerIds.ContainsKey(Convert.ToHexString(id));
+    }
+
     /// <summary>Where we accept peer connections, or null when we are not listening.</summary>
     public IPortListener? PortListener { get => Network.PortListener; set => Network.PortListener = value; }
 

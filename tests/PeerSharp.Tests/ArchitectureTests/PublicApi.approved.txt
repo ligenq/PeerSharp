@@ -20,6 +20,7 @@ sealed class PeerSharp.Config.AddTorrentOptions
     String DownloadPath { get; set; }
 sealed class PeerSharp.Config.ConnectionSettings
     .ctor()
+    Boolean AllowMultipleConnectionsPerIp { get; set; }
     Boolean EnableAdaptiveTimeouts { get; set; }
     Boolean EnableLsd { get; set; }
     Boolean EnableTcpIn { get; set; }
