@@ -502,6 +502,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         var r = new BDict();
         r.Dict["id"] = new BString(NodeId.ToArray());
 
+        // BEP 32: which address families this querier wants back. Defaults to the family the query
+        // arrived over, which is what a node that predates the extension expects.
+        var (wantV4, wantV6) = ReadWant(a, remote);
+
         if (q == "ping")
         {
             SendResponse(t, r, remote);
@@ -515,12 +519,12 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 // BEP 32: Include both nodes (IPv4) and nodes6 (IPv6) in response
                 var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
                 var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
-                if (nodesV4.Length > 0)
+                if (wantV4 && nodesV4.Length > 0)
                 {
                     r.Dict["nodes"] = new BString(nodesV4);
                 }
 
-                if (nodesV6.Length > 0)
+                if (wantV6 && nodesV6.Length > 0)
                 {
                     r.Dict["nodes6"] = new BString(nodesV6);
                 }
@@ -560,14 +564,14 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                     var valuesV4 = DhtCompactPeerCodec.Encode(endpoints, ipv6: false);
                     var valuesV6 = DhtCompactPeerCodec.Encode(endpoints, ipv6: true);
 
-                    if (valuesV4.Count > 0)
+                    if (wantV4 && valuesV4.Count > 0)
                     {
                         var values = new BList();
                         values.List.AddRange(valuesV4.Select(value => new BString(value)));
                         r.Dict["values"] = values;
                     }
 
-                    if (valuesV6.Count > 0)
+                    if (wantV6 && valuesV6.Count > 0)
                     {
                         var values = new BList();
                         values.List.AddRange(valuesV6.Select(value => new BString(value)));
@@ -589,12 +593,12 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                     var nodes = _table.FindClosest(infoHash.Value.Span, 8);
                     var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
                     var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
-                    if (nodesV4.Length > 0)
+                    if (wantV4 && nodesV4.Length > 0)
                     {
                         r.Dict["nodes"] = new BString(nodesV4);
                     }
 
-                    if (nodesV6.Length > 0)
+                    if (wantV6 && nodesV6.Length > 0)
                     {
                         r.Dict["nodes6"] = new BString(nodesV6);
                     }
@@ -1182,10 +1186,67 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         var a = new BDict();
         a.Dict["id"] = new BString(NodeId.ToArray());
         a.Dict["target"] = new BString(target.Span.ToArray());
+        AddWant(a);
         dict.Dict["a"] = a;
 
         RegisterTransaction(tid, "find_node", target, depth: depth);
         SendPacket(dict, ep, DhtToken);
+    }
+
+    /// <summary>
+    /// BEP 32 <c>want</c>: the address families we would like back.
+    ///
+    /// <para>
+    /// A node answering a query is entitled to return only the family the query arrived over unless
+    /// told otherwise, so a v4 socket that never asks may simply never be given IPv6 nodes and its
+    /// v6 routing table stays empty. We ask for both whenever IPv6 is available to us.
+    /// </para>
+    /// </summary>
+    private static void AddWant(BDict a)
+    {
+        var want = new BList();
+        want.List.Add(new BString("n4"u8.ToArray()));
+
+        if (System.Net.Sockets.Socket.OSSupportsIPv6)
+        {
+            want.List.Add(new BString("n6"u8.ToArray()));
+        }
+
+        a.Dict["want"] = want;
+    }
+
+    /// <summary>
+    /// Which families a querier asked for. Absent <c>want</c>, BEP 32 says to answer with the family
+    /// the query arrived over, which is what a node that does not understand the extension expects -
+    /// sending it the other family is bytes it will discard.
+    /// </summary>
+    private static (bool WantV4, bool WantV6) ReadWant(BDict? a, IPEndPoint remote)
+    {
+        if (a?.Get("want") is BList want)
+        {
+            bool v4 = false;
+            bool v6 = false;
+            foreach (var entry in want.List.OfType<BString>())
+            {
+                var text = System.Text.Encoding.ASCII.GetString(entry.Value.Span);
+                if (string.Equals(text, "n4", StringComparison.Ordinal))
+                {
+                    v4 = true;
+                }
+                else if (string.Equals(text, "n6", StringComparison.Ordinal))
+                {
+                    v6 = true;
+                }
+            }
+
+            if (v4 || v6)
+            {
+                return (v4, v6);
+            }
+        }
+
+        bool arrivedOverV6 = remote.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
+        return (!arrivedOverV6, arrivedOverV6);
     }
 
     private void RotateSecret()
@@ -1352,6 +1413,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             a.Dict["scrape"] = new BNumber(1);
         }
 
+        AddWant(a);
         dict.Dict["a"] = a;
 
         RegisterTransaction(tid, "get_peers", infoHash, announce, port, scrape);

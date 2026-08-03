@@ -35,10 +35,15 @@ internal sealed class DhtLoopbackFixture : IAsyncDisposable
         /// <summary>When set, packets are counted and discarded instead of delivered.</summary>
         public bool Blackhole { get; set; }
 
+        /// <summary>Observes each outgoing datagram, for tests that assert on what went on the wire.</summary>
+        public Action<ReadOnlyMemory<byte>>? OnSend { get; set; }
+
         public void RegisterReceiver(IUdpReceiver receiver) => _receiver = receiver;
 
         public Task SendAsync(ReadOnlyMemory<byte> data, IPEndPoint endpoint, CancellationToken ct = default)
         {
+            OnSend?.Invoke(data);
+
             if (Blackhole || Peer?._receiver is null)
             {
                 DroppedPackets++;
