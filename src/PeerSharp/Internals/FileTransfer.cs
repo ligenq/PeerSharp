@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
+using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
 using PeerSharp.PiecePicking;
 using System.Collections.Concurrent;
@@ -490,6 +491,30 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessIncomingBlocksAsync, "ProcessIncomingBlocks"));
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessPeerEvaluationsAsync, "ProcessPeerEvaluations"));
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessPieceQueueAsync, "ProcessPieceQueue"));
+
+        // BEP 11 the other way round: we have always consumed ut_pex without ever sending any.
+        // Private torrents are excluded inside the broadcaster rather than here, so a torrent that
+        // learns it is private only once metadata arrives is still covered.
+        _pexBroadcaster = new PexBroadcaster(
+            () => _torrent.InfoFile.Info.IsPrivate,
+            () => _torrent.PeersInternal.GetConnectedPeersInternal(),
+            loggerFactory.CreateLogger<PexBroadcaster>());
+        _backgroundTasks.Add(RunBackgroundTaskAsync(BroadcastPexAsync, "BroadcastPex"));
+    }
+
+    private readonly PexBroadcaster _pexBroadcaster;
+
+    /// <summary>
+    /// Offers each peer the swarm changes it has not been told about yet. The broadcaster decides who
+    /// is due; this only has to wake up often enough to notice, and never faster than peers expect.
+    /// </summary>
+    private async Task BroadcastPexAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10), _timeProvider, ct).ConfigureAwait(false);
+            _pexBroadcaster.Broadcast(_timeProvider.GetUtcNow());
+        }
     }
 
     long IFileTransfer.Downloaded => Downloader.Downloaded;
