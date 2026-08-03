@@ -23,7 +23,7 @@ if (options is null)
 using var loggerFactory = LoggerFactory.Create(builder =>
 {
     builder.AddSimpleConsole(o => o.SingleLine = true);
-    builder.SetMinimumLevel(options.Verbose ? LogLevel.Debug : LogLevel.Warning);
+    builder.SetMinimumLevel(options.Verbose ? LogLevel.Trace : LogLevel.Warning);
 });
 
 Directory.CreateDirectory(options.DownloadPath);
