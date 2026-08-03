@@ -8,7 +8,15 @@ internal interface IDhtManager : IAsyncDisposable
 
     void Announce(InfoHash infoHash, int port);
 
-    void FindPeers(InfoHash infoHash);
+    /// <summary>
+    /// Asks the nodes nearest this hash who is in the swarm.
+    /// </summary>
+    /// <returns>
+    /// How many nodes were queried. Zero means the routing table had nothing to ask - which is the
+    /// normal state for the first seconds after start - and the caller should try again rather than
+    /// treat the lookup as done.
+    /// </returns>
+    int FindPeers(InfoHash infoHash);
 
     void Ping(IPEndPoint ep);
 

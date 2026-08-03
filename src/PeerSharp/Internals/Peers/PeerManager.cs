@@ -1669,6 +1669,47 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return (now - _stableSpeedSince) >= TimeSpan.FromSeconds(stableSeconds);
     }
 
+    /// <summary>How long to wait before asking the DHT again once it has actually been reachable.</summary>
+    private const int DhtLookupIntervalSeconds = 900;
+
+    /// <summary>How soon to try again while the routing table still has nobody to ask.</summary>
+    private const int DhtLookupRetrySeconds = 15;
+
+    private int _nextDhtLookupTick;
+
+    /// <summary>
+    /// Asks the DHT for peers and re-announces us, and says how many seconds to wait before doing it
+    /// again - a short retry while the routing table is empty, the full interval once it is not.
+    /// </summary>
+    private int RunDhtLookup()
+    {
+        if (_torrent.DhtManager is not { } dht || _torrent.InfoFile.Info.IsPrivate || !_torrent.Started)
+        {
+            return DhtLookupIntervalSeconds;
+        }
+
+        var hash = _torrent.InfoFile.Info.GetTrackerInfoHash();
+        int queried = dht.FindPeers(hash);
+
+        if (queried == 0)
+        {
+            _logger.LogTrace("DHT has no nodes to ask yet; retrying in {Seconds}s", DhtLookupRetrySeconds);
+            return DhtLookupRetrySeconds;
+        }
+
+        // Announce where we actually listen. The configured port may be zero, meaning "any", in which
+        // case only the listener knows what was bound - announcing the configured value would publish
+        // an address nobody can reach.
+        int port = _torrent.PortListener?.Port ?? _settings.Connection.TcpPort;
+        if (port > 0)
+        {
+            dht.Announce(hash, port);
+        }
+
+        _logger.LogDebug("DHT lookup asked {Count} nodes for peers, announced on port {Port}", queried, port);
+        return DhtLookupIntervalSeconds;
+    }
+
     private async Task MainLoopAsync(CancellationToken cancellationToken)
     {
         int tickCount = 0;
@@ -1688,6 +1729,23 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 {
                     try { await CheckPeerHealthAsync().ConfigureAwait(false); }
                     catch (Exception ex) { _logger.LogError(ex, "CheckPeerHealth error"); }
+                }
+
+                // DHT peer lookup. This has to repeat, and the reason is a race that used to make it
+                // useless: the torrent starts moments after the DHT is told to bootstrap, so the
+                // routing table is still empty, FindPeers has nobody to ask, and nothing ever asked
+                // again. A torrent whose tracker returns few peers - which is the normal case, since
+                // most trackers hand out a handful and expect the DHT to do the rest - then sat at
+                // zero peers forever. Retrying quickly until the table has someone in it, then
+                // settling into the ordinary interval, is what makes the DHT actually contribute.
+                if (tickCount >= _nextDhtLookupTick)
+                {
+                    try { _nextDhtLookupTick = tickCount + RunDhtLookup(); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "DHT lookup error");
+                        _nextDhtLookupTick = tickCount + DhtLookupRetrySeconds;
+                    }
                 }
 
                 // UnchokePeers - interval configurable (default 10s)

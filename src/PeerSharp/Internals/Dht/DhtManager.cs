@@ -161,19 +161,24 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         GC.SuppressFinalize(this);
     }
 
-    public void FindPeers(InfoHash infoHash)
+    /// <inheritdoc />
+    public int FindPeers(InfoHash infoHash)
     {
         _disposal.ThrowIfDisposed(this);
         if (!_running)
         {
-            return;
+            return 0;
         }
 
         var nodes = _table.FindClosest(infoHash.Span, 8);
+        int queried = 0;
         foreach (var node in nodes)
         {
             SendGetPeers(node.EndPoint, infoHash);
+            queried++;
         }
+
+        return queried;
     }
 
     /// <summary>
