@@ -340,6 +340,130 @@ public class UtpExhaustiveTests
         Assert.True(cwndFinal < cwndBefore, $"cwnd should decrease in CA. Before: {cwndBefore}, Final: {cwndFinal}");
     }
 
+    /// <summary>Matches UtpStream's CurDelaySize: the depth of the current-delay ring.</summary>
+    private const int CurDelaySamples = 3;
+
+    [Fact(Timeout = 30000)]
+    public async Task BaseDelay_SurvivesCongestionLongerThanTwoMinutes()
+    {
+        // The yardstick queuing is measured against must outlive a congestion episode. With the old
+        // ten-second slots the whole thirteen-slot history was about two minutes, so a path congested
+        // for longer relearned its congested delay as "normal" and the controller stopped yielding.
+        var stream = await ConnectStream();
+        var data = new byte[100];
+
+        await SendAndAck(stream, data, 50_000);
+
+        // Five minutes of nothing but congested samples - well past the old window, inside the new one.
+        for (int minute = 0; minute < 5; minute++)
+        {
+            _time.Advance(TimeSpan.FromSeconds(60));
+            await SendAndAck(stream, data, 250_000);
+        }
+
+        var hist = (uint[])typeof(UtpStream)
+            .GetField("_delayBaseHist", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(stream)!;
+
+        Assert.Contains(hist, sample => sample == 50_000);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task BaseDelay_ShiftsWhenThePeersOwnBaseDelayDrops()
+    {
+        // Neither clock runs at the other's rate. libutp reads a fall in the peer's base delay as
+        // drift rather than a faster path, and moves its own base by the same amount.
+        //
+        // Driven directly rather than through two acks: the peer's delay is derived from a real
+        // microsecond clock, so the milliseconds that pass between two acks in a test swamp the
+        // millisecond-scale drop being induced.
+        var stream = await ConnectStream();
+        await SendAndAck(stream, new byte[100], 60_000);
+
+        var observe = typeof(UtpStream).GetMethod("ObserveTheirDelay", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var hist = (uint[])typeof(UtpStream)
+            .GetField("_delayBaseHist", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(stream)!;
+
+        observe.Invoke(stream, [40_000u]);
+        uint before = hist.Where(v => v > 0).Min();
+
+        // Their view of us improves by 5ms, which is drift rather than a faster path.
+        observe.Invoke(stream, [35_000u]);
+        uint after = hist.Where(v => v > 0).Min();
+
+        Assert.Equal(before + 5_000u, after);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task BaseDelay_IgnoresAnImplausiblyLargeDrop()
+    {
+        // A correction larger than libutp's ten millisecond cap is more likely a bad sample than
+        // drift, and applying it would move the yardstick further than the thing being measured.
+        var stream = await ConnectStream();
+        await SendAndAck(stream, new byte[100], 60_000);
+
+        var observe = typeof(UtpStream).GetMethod("ObserveTheirDelay", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var hist = (uint[])typeof(UtpStream)
+            .GetField("_delayBaseHist", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(stream)!;
+
+        observe.Invoke(stream, [90_000u]);
+        uint before = hist.Where(v => v > 0).Min();
+
+        observe.Invoke(stream, [10_000u]);
+
+        Assert.Equal(before, hist.Where(v => v > 0).Min());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task QueuingEstimate_IsNotAllowedToExceedTheRoundTrip()
+    {
+        // A queue cannot hold a packet for longer than the whole round trip took. An estimate that
+        // does means the base is too low, and left alone it reads as permanent congestion for the
+        // life of the connection.
+        var stream = await ConnectStream();
+
+        // A small base first, so the later sample produces an absurd queuing estimate.
+        await SendAndAck(stream, new byte[100], 1_000);
+
+        // The fake clock never advances, so no real round trip is ever sampled; give it one.
+        typeof(UtpStream).GetField("_minRtt", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(stream, 20_000u);
+
+        // The current-delay estimate is the minimum of the last three samples, so one outlier cannot
+        // move it - the whole ring has to be congested before the estimate rises.
+        for (int i = 0; i < CurDelaySamples; i++)
+        {
+            await SendAndAck(stream, new byte[100], 5_000_000);
+        }
+
+        var hist = (uint[])typeof(UtpStream)
+            .GetField("_delayBaseHist", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(stream)!;
+
+        Assert.True(
+            hist.Where(v => v > 0).Min() > 1_000,
+            "Base delay should have been corrected upward once the estimate exceeded the round trip.");
+    }
+
+    /// <summary>As <see cref="SendAndAck"/>, but also controls the peer's own send timestamp, which is
+    /// what drives our view of <em>their</em> delay.</summary>
+    private async Task SendAndAckWithTheirTimestamp(
+        UtpStream stream,
+        byte[] data,
+        uint delayMicro,
+        uint theirTimestampAgo)
+    {
+        await stream.WriteAsync(data);
+        Assert.True(_listener.SentPackets.TryDequeue(out var pkt));
+        var h = ParseHeader(pkt.Data);
+        byte[] ack = CreatePacket(2, 0, GetRecvId(stream), (ushort)(h.SeqNr + 1), h.SeqNr);
+        UtpManager.WriteUInt32BigEndian(ack, 4, Utils.TimestampMicro() - theirTimestampAgo);
+        UtpManager.WriteUInt32BigEndian(ack, 8, delayMicro);
+        _listener.SimulateReceive(ack, _remoteParams);
+    }
+
     private async Task SendAndAck(UtpStream stream, byte[] data, uint delayMicro)
     {
         await stream.WriteAsync(data);
