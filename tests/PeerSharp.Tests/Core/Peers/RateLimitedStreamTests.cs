@@ -106,7 +106,10 @@ public class RateLimitedStreamTests
         await using var stream = Create(inner, manager);
 
         await Assert.ThrowsAsync<IOException>(async () =>
-            await stream.ReadAsync(new byte[payload.Length], TestContext.Current.CancellationToken));
+        {
+            int read = await stream.ReadAsync(new byte[payload.Length], TestContext.Current.CancellationToken);
+            Assert.Fail($"Expected the denial to be reported, but the read returned {read}.");
+        });
 
         Assert.Equal(0, inner.Position);
     }

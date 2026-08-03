@@ -156,9 +156,10 @@ internal sealed class RateLimitedStream : Stream
     /// This used to give up quietly in three places - disposal mid-loop, a zero bandwidth grant, and
     /// an <see cref="ObjectDisposedException"/> from the socket - each returning normally with bytes
     /// left unsent. That breaks the <see cref="Stream"/> contract, and on an encrypted connection it
-    /// corrupts the peer. <see cref="EncryptedStream.WriteAsync"/> sits directly above this and has
-    /// already advanced RC4 over the <em>entire</em> buffer before handing it down, because a stream
-    /// cipher has to encrypt before it can write. Dropping the tail therefore leaves the remote's
+    /// corrupts the peer.
+    /// <see cref="EncryptedStream.WriteAsync(ReadOnlyMemory{byte}, CancellationToken)"/> sits directly
+    /// above this and has already advanced RC4 over the <em>entire</em> buffer before handing it down,
+    /// because a stream cipher has to encrypt before it can write. Dropping the tail leaves the remote's
     /// inbound keystream permanently offset by exactly the number of bytes we swallowed, and every
     /// message it reads from us afterwards is garbage.
     /// </para>
