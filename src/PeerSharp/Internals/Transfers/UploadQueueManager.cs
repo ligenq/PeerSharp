@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
@@ -7,7 +8,11 @@ namespace PeerSharp.Internals.Transfers;
 
 internal sealed class UploadQueueManager : IAsyncDisposable
 {
-    private const int MaxQueueDepthPerPeer = 250;
+    /// <summary>
+    /// What we will hold from one peer, and exactly what we advertise as <c>reqq</c>. Internal rather
+    /// than private so a test can assert the two have not drifted apart.
+    /// </summary>
+    internal const int MaxQueueDepthPerPeer = ProtocolConstants.MaxOutstandingRequestsPerPeer;
 
     private readonly ConcurrentDictionary<PeerCommunication, PeerUploadQueue> _queues = new();
     private readonly Func<PeerCommunication, UploadQueueItem, CancellationToken, Task> _execute;
