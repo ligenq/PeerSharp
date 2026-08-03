@@ -93,30 +93,36 @@ public class RateLimitedStreamTests
     }
 
     [Fact]
-    public async Task ReadAsync_WhenNoQuotaIsGranted_ReadsNothing()
+    public async Task ReadAsync_WhenNoQuotaIsGranted_DoesNotReportEndOfStream()
     {
-        // A denial must not be mistaken for end of stream by reading anyway; returning 0 lets the peer
-        // loop retry once quota is replenished.
+        // This used to return 0 so the peer loop could retry once quota was replenished, but zero from
+        // a read is how a stream reports end of input - the PipeReader above completes on it and the
+        // connection is torn down, which is the opposite of retrying. A denial has to be distinguishable
+        // from EOF, and nothing must be consumed from the inner stream.
         byte[] payload = new byte[100];
 
         await using var inner = new MemoryStream(payload);
         var manager = new TestBandwidthManager { GrantAmount = 0 };
         await using var stream = Create(inner, manager);
 
-        int read = await stream.ReadAsync(new byte[payload.Length], TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await stream.ReadAsync(new byte[payload.Length], TestContext.Current.CancellationToken));
 
-        Assert.Equal(0, read);
         Assert.Equal(0, inner.Position);
     }
 
     [Fact]
-    public async Task WriteAsync_WhenNoQuotaIsGranted_WritesNothing()
+    public async Task WriteAsync_WhenNoQuotaIsGranted_ReportsRatherThanTruncating()
     {
+        // Writing less than asked without saying so corrupts an encrypted peer: EncryptedStream sits
+        // above this and has already advanced RC4 over the whole buffer, so swallowed bytes leave the
+        // remote's keystream permanently offset. Nothing may be written, and the caller must be told.
         await using var inner = new MemoryStream();
         var manager = new TestBandwidthManager { GrantAmount = 0 };
         await using var stream = Create(inner, manager);
 
-        await stream.WriteAsync(new byte[100], TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await stream.WriteAsync(new byte[100], TestContext.Current.CancellationToken));
 
         Assert.Empty(inner.ToArray());
     }

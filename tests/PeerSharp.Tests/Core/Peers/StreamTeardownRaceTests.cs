@@ -29,7 +29,7 @@ public class StreamTeardownRaceTests
     }
 
     [Fact]
-    public async Task WriteToAStreamDisposedMidTransfer_EndsQuietly()
+    public async Task WriteToAStreamDisposedMidTransfer_ReportsRatherThanTruncating()
     {
         var inner = new MemoryStream();
         var manager = new TestBandwidthManager();
@@ -39,7 +39,12 @@ public class StreamTeardownRaceTests
         // handed the buffer but before the bytes reach the socket.
         inner.Dispose();
 
-        await stream.WriteAsync(new byte[1024], TestContext.Current.CancellationToken);
+        // This used to return quietly. It cannot: EncryptedStream above has already advanced RC4 over
+        // the whole buffer, so a write that stops early without saying so desynchronises the remote's
+        // keystream for the rest of the connection. IOException is what the peer loops already treat
+        // as an ordinary close, so teardown stays quiet without the write lying about what it did.
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await stream.WriteAsync(new byte[1024], TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -58,7 +63,7 @@ public class StreamTeardownRaceTests
     }
 
     [Fact]
-    public async Task WriteAfterTheWrapperItselfIsDisposed_EndsQuietly()
+    public async Task WriteAfterTheWrapperItselfIsDisposed_ReportsRatherThanTruncating()
     {
         var inner = new MemoryStream();
         var manager = new TestBandwidthManager();
@@ -66,7 +71,10 @@ public class StreamTeardownRaceTests
 
         stream.Dispose();
 
-        await stream.WriteAsync(new byte[512], TestContext.Current.CancellationToken);
+        // Same reasoning as above: nothing is written, and the caller is told rather than left to
+        // assume 512 bytes went out.
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await stream.WriteAsync(new byte[512], TestContext.Current.CancellationToken));
         Assert.Empty(inner.ToArray());
     }
 
