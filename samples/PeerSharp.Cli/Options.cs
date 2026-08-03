@@ -40,6 +40,12 @@ internal sealed record Options
     /// <summary>Peers to try in addition to discovery, as host:port.</summary>
     public IReadOnlyList<string> Peers { get; init; } = [];
 
+    /// <summary>
+    /// Stop the torrent after this many seconds and keep reporting, which is how you see whether
+    /// stopping actually gives memory back.
+    /// </summary>
+    public int? StopAfterSeconds { get; init; }
+
     public static Options? Parse(string[] args, TextWriter error)
     {
         string? source = null;
@@ -51,6 +57,7 @@ internal sealed record Options
         bool recheck = false;
         bool noDht = false;
         var peers = new List<string>();
+        int? stopAfter = null;
         var interval = TimeSpan.FromSeconds(5);
         int? down = null;
         int? up = null;
@@ -82,6 +89,16 @@ internal sealed record Options
 
                 case "--no-dht":
                     noDht = true;
+                    break;
+
+                case "--stop-after":
+                    if (!TryTake(args, ref i, out var rawStop) || !int.TryParse(rawStop, out int stopSeconds) || stopSeconds <= 0)
+                    {
+                        error.WriteLine("--stop-after needs a positive number of seconds.");
+                        return null;
+                    }
+
+                    stopAfter = stopSeconds;
                     break;
 
                 case "--peer":
@@ -167,6 +184,7 @@ internal sealed record Options
             Recheck = recheck,
             NoDht = noDht,
             Peers = peers,
+            StopAfterSeconds = stopAfter,
             ReportInterval = interval,
             DownloadLimitBytesPerSecond = down,
             UploadLimitBytesPerSecond = up
@@ -188,6 +206,7 @@ internal sealed record Options
                   --recheck        hash-check existing files first, to seed what is already there
                   --no-dht         disable the DHT, isolating a run from the public network
                   --peer <ip:port> try this peer as well as any found by discovery (repeatable)
+                  --stop-after <s> stop the torrent after this long and keep reporting
                   --interval <s>   seconds between reports (default: 5)
                   --down <KiB/s>   download rate limit
                   --up <KiB/s>     upload rate limit

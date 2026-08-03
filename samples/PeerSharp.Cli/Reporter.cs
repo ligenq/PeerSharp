@@ -84,6 +84,35 @@ internal sealed class Reporter(IClientEngine engine, ITorrent torrent, Options o
             $"workingSet={Bytes(Environment.WorkingSet)}");
     }
 
+    /// <summary>
+    /// Heap after a full blocking collection. Everything else here deliberately avoids forcing one,
+    /// but telling a leak from a heap that simply has not been collected needs exactly that.
+    /// </summary>
+    public void ReportSettledHeap(string label)
+    {
+        long before = GC.GetTotalMemory(forceFullCollection: false);
+        long committedBefore = GC.GetGCMemoryInfo().TotalCommittedBytes;
+        long workingBefore = Environment.WorkingSet;
+
+        // Compacting, and compacting the large object heap with it. A plain collection frees objects
+        // but leaves the segments committed, which is the difference between "the heap shrank" and
+        // "the process gave memory back to the operating system" - and the second is what anyone
+        // watching Task Manager after pressing stop is actually looking at.
+        System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+            System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+
+        long after = GC.GetTotalMemory(forceFullCollection: true);
+        var info = GC.GetGCMemoryInfo();
+
+        Console.WriteLine(
+            $"  {label}: heap {Bytes(before)} -> {Bytes(after)}, " +
+            $"committed {Bytes(committedBefore)} -> {Bytes(info.TotalCommittedBytes)}, " +
+            $"working set {Bytes(workingBefore)} -> {Bytes(Environment.WorkingSet)}");
+    }
+
     public void ReportFinal()
     {
         Console.WriteLine();

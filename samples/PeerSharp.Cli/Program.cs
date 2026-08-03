@@ -123,12 +123,28 @@ Console.CancelKeyPress += (_, e) =>
 
 var reporter = new Reporter(engine, torrent, options);
 bool announcedCompletion = false;
+bool stopped = false;
+var startedAt = DateTimeOffset.UtcNow;
 
 try
 {
     while (!stopping.IsCancellationRequested)
     {
         reporter.ReportOnce();
+
+        if (options.StopAfterSeconds is { } stopAfter
+            && !stopped
+            && (DateTimeOffset.UtcNow - startedAt).TotalSeconds >= stopAfter)
+        {
+            stopped = true;
+            reporter.ReportSettledHeap("before stop");
+            Console.WriteLine("Stopping the torrent...");
+            await torrent.StopAsync();
+
+            // Give teardown a moment to finish before asking what is still held.
+            await Task.Delay(TimeSpan.FromSeconds(3), stopping.Token);
+            reporter.ReportSettledHeap("after stop ");
+        }
 
         if (torrent.Finished && !announcedCompletion)
         {
