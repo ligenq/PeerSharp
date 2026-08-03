@@ -322,7 +322,15 @@ internal static class TorrentTestUtility
         public void ReleasePendingSlot() { }
     }
 
-    public static Torrent CreateMinimal(TorrentFileMetadata? metadata = null, string? downloadPath = null)
+    /// <param name="trackerFactory">
+    /// Overrides the default factory, which returns null for every URL - fine for a torrent whose
+    /// trackers are beside the point, but it means the tracker manager registers nothing at all. Pass
+    /// one that returns a tracker when the test is about which trackers a torrent ends up with.
+    /// </param>
+    public static Torrent CreateMinimal(
+        TorrentFileMetadata? metadata = null,
+        string? downloadPath = null,
+        ITrackerFactory? trackerFactory = null)
     {
         metadata ??= new TorrentFileMetadata();
         if (metadata.Info.PieceSize == 0)
@@ -342,7 +350,7 @@ internal static class TorrentTestUtility
             new MockAlertsManager(),
             new MockFileSelectionManager(),
             new MockPeerCommunicationFactory(),
-            new MockTrackerFactory(),
+            trackerFactory ?? new MockTrackerFactory(),
             new MockGeoIpService(),
             new MockFileHandleCache(),
             new MockConnectionGovernor(),

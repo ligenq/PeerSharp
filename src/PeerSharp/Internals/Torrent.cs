@@ -1312,12 +1312,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         {
             if (!string.IsNullOrEmpty(InfoFile.Announce))
             {
-                TrackerManager.AddTracker(InfoFile.Announce);
+                TrackerManager.AddTrackerFromMetadata(InfoFile.Announce);
             }
 
             foreach (var t in InfoFile.AnnounceList)
             {
-                TrackerManager.AddTracker(t);
+                TrackerManager.AddTrackerFromMetadata(t);
             }
         }
 
