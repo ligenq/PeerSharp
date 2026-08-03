@@ -83,6 +83,10 @@ internal partial class DhtManager
         a.Dict["id"] = new BString(NodeId.ToArray());
         a.Dict["target"] = new BString(target.Span.ToArray());
 
+        // BEP 32: sample_infohashes above deliberately does not carry this - want governs which
+        // address families of *nodes* come back, which is a find_node/get_peers concern.
+        AddWant(a);
+
         var reply = await SendCorrelatedQueryAsync(
             BuildQuery("find_node", a, out var transactionId),
             transactionId,

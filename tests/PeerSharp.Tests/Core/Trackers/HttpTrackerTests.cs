@@ -109,6 +109,77 @@ public class HttpTrackerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_EchoesTrackerIdOnTheNextAnnounce()
+    {
+        // BEP 3: a tracker that issues a session token expects to see it again. One that never gets it
+        // back has no way to tie our announces together and may treat each as a new session.
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["interval"] = new BNumber(1800);
+        dict.Dict["tracker id"] = new BString(System.Text.Encoding.UTF8.GetBytes("s/42=x"));
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.Equal("s/42=x", _callback.AnnounceResponse?.TrackerId);
+        Assert.DoesNotContain("trackerid=", _mockHttp.LastUrl);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        // Percent-encoded, because the value is opaque and may contain reserved characters.
+        // Percent-encoded: the value is opaque and may contain characters that would otherwise
+        // be read as query syntax.
+        Assert.Contains("trackerid=s%2F42%3Dx", _mockHttp.LastUrl);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_ResponseWithoutTrackerId_DoesNotForgetTheOldOne()
+    {
+        // A response that simply omits the key is not the tracker withdrawing it.
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var withId = new BDict();
+        withId.Dict["interval"] = new BNumber(1800);
+        withId.Dict["tracker id"] = new BString(System.Text.Encoding.UTF8.GetBytes("abc"));
+        _mockHttp.ResponseBytes = BencodeWriter.Write(withId);
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        var without = new BDict();
+        without.Dict["interval"] = new BNumber(1800);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(without);
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.Contains("trackerid=abc", _mockHttp.LastUrl);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_WarningMessage_IsSurfacedWithoutFailingTheAnnounce()
+    {
+        // BEP 3 distinguishes a warning from a failure: the response is valid and its peers usable.
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+
+        var dict = new BDict();
+        dict.Dict["interval"] = new BNumber(1800);
+        dict.Dict["warning message"] = new BString(System.Text.Encoding.UTF8.GetBytes("unregistered"));
+        dict.Dict["peers"] = new BString([65, 65, 65, 65, 65, 65]);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(dict);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.True(_callback.Success);
+        Assert.Equal("unregistered", _callback.AnnounceResponse?.WarningMessage);
+        Assert.Single(_callback.AnnounceResponse!.Peers);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_HttpError_RaisesFailure()
     {
         // Arrange

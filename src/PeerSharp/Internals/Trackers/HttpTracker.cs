@@ -37,6 +37,12 @@ internal class HttpTracker : TrackerBase, IDisposable
             var responseBytes = await GetResponseBytesAsync(url, ct).ConfigureAwait(false);
             var response = ParseResponse(responseBytes);
 
+            // BEP 3: hold on to the session token for the next announce to this tracker.
+            if (!string.IsNullOrEmpty(response.TrackerId))
+            {
+                _trackerId = response.TrackerId;
+            }
+
             RaiseAnnounceResult(true, response);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -250,6 +256,18 @@ internal class HttpTracker : TrackerBase, IDisposable
                 resp.MinInterval = (uint)minInterval.Value;
             }
 
+            // BEP 3: an opaque session token. A tracker that issues one expects to see it again, and
+            // one that never does may treat every announce as a fresh session.
+            var trackerId = dict.GetString("tracker id");
+            if (!string.IsNullOrEmpty(trackerId))
+            {
+                resp.TrackerId = trackerId;
+            }
+
+            // BEP 3: a tracker can complain and still answer. Kept apart from failure reason, because
+            // the peers in this response are perfectly good.
+            resp.WarningMessage = dict.GetString("warning message");
+
             // BEP 24: the tracker may report the address it saw us announce from, as a bare 4 byte
             // (IPv4) or 16 byte (IPv6) binary address with no port.
             var externalIp = dict.GetBytes("external ip");
@@ -430,6 +448,13 @@ internal class HttpTracker : TrackerBase, IDisposable
         return Torrent.HasMetadata && Torrent.SelectionFinished && Torrent.DataLeft > 0;
     }
 
+    /// <summary>
+    /// BEP 3 <c>tracker id</c>, remembered across announces to this tracker. Never cleared once set:
+    /// the spec has trackers issue it to be quoted back, and a response that omits it is not a
+    /// withdrawal.
+    /// </summary>
+    private string? _trackerId;
+
     private string BuildUrl(TrackerEvent evt)
     {
         // Build query manually to avoid double-encoding of percent-encoded info_hash/peer_id
@@ -456,6 +481,14 @@ internal class HttpTracker : TrackerBase, IDisposable
         AppendParam("compact", "1");
         AppendParam("ipv6", "1"); // BEP 7: Request IPv6 peers
         AppendParam("numwant", Torrent.Settings.MaxPeersPerTrackerRequest.ToString());
+
+        // BEP 3: quote back whatever this tracker last gave us, so it can tie our announces together.
+        // Percent-encoded because the value is opaque and nothing stops it containing reserved
+        // characters.
+        if (!string.IsNullOrEmpty(_trackerId))
+        {
+            AppendParam("trackerid", Uri.EscapeDataString(_trackerId));
+        }
 
         // BEP 21: a partial seed "MUST send an event=paused parameter in every announce while it is a
         // partial seed". Applied only where we would otherwise send no event - started, completed and
