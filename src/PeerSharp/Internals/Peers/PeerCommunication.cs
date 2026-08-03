@@ -2350,7 +2350,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             var handshake = new ExtensionHandshake
             {
-                Client = "PeerSharp"
+                Client = "PeerSharp",
+
+                // Tell the peer what we will actually take. Left unsaid, clients assume their own
+                // default - Transmission 500, libtorrent 2000 - and everything above our real depth
+                // comes back rejected.
+                RequestQueueDepth = ProtocolConstants.MaxOutstandingRequestsPerPeer
             };
             handshake.MessageIds[UtMetadata.Name] = 1;
             UtMetadata.SetLocalMessageId(1);

@@ -148,7 +148,17 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         var session = await RpcAsync("session-get");
         _output.WriteLine($"Transmission: {session.GetProperty("arguments").GetProperty("version").GetString()}");
 
-        await using var engine = await CreateSeedEngineAsync(seedDir, encryption);
+        // Counts the one thing this arm asserts beyond delivery: that advertising reqq stopped the
+        // peer overshooting our queue. Transmission assumes 500 when a peer stays silent, so before we
+        // advertised it every run rejected the excess.
+        var rejections = new RejectionCountingLoggerProvider();
+        using var rejectionFactory = LoggerFactory.Create(builder =>
+        {
+            builder.AddProvider(rejections);
+            builder.SetMinimumLevel(LogLevel.Debug);
+        });
+
+        await using var engine = await CreateSeedEngineAsync(seedDir, encryption, rejectionFactory);
         var seedTorrent = await engine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
         int valid = await seedTorrent.ForceRecheckAsync();
         Assert.Equal(torrentFile.PieceCount, valid);
@@ -174,10 +184,53 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         var actualHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(downloaded)));
         Assert.Equal(expectedHash, actualHash);
 
+        // We advertise reqq, so a well-behaved peer never sends more than we will hold. A rejection
+        // here means either the advertisement is not reaching the peer or it does not match the queue.
+        _output.WriteLine($"Requests refused for a full queue: {rejections.Count}");
+        Assert.True(
+            rejections.Count == 0,
+            $"Refused {rejections.Count} requests because the upload queue was full, despite " +
+            $"advertising reqq={ProtocolConstants.MaxOutstandingRequestsPerPeer}.");
+
         double mib = payload.Length / 1024d / 1024d;
         _output.WriteLine(
             $"RESULT: {mib:F0} MiB in {result.Elapsed.TotalSeconds:F1}s " +
             $"({mib / result.Elapsed.TotalSeconds:F1} MiB/s), content verified.");
+    }
+
+    /// <summary>Counts the "upload queue is full" refusals the transfer logged, and nothing else.</summary>
+    private sealed class RejectionCountingLoggerProvider : ILoggerProvider
+    {
+        private int _count;
+
+        public int Count => Volatile.Read(ref _count);
+
+        public ILogger CreateLogger(string categoryName) => new Counter(this);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class Counter(RejectionCountingLoggerProvider owner) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Debug;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                if (formatter(state, exception).Contains("upload queue is full", StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref owner._count);
+                }
+            }
+        }
     }
 
     /// <summary>

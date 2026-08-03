@@ -1,5 +1,7 @@
 using PeerSharp.Internals.Extensions;
 using PeerSharp.BEncoding;
+using PeerSharp.Internals.Transfers;
+using PeerSharp.Internals;
 using System.Text;
 
 namespace PeerSharp.Tests.Core.Extensions;
@@ -86,6 +88,49 @@ public class ExtensionHandshakeTests
         Assert.Equal(string.Empty, handshake.Client);
         Assert.Null(handshake.MetadataSize);
         Assert.Null(handshake.YourIp);
+        Assert.Null(handshake.RequestQueueDepth);
+    }
+
+    [Fact]
+    public void Reqq_RoundTrips()
+    {
+        var handshake = new ExtensionHandshake { RequestQueueDepth = 250 };
+
+        var parsed = ExtensionHandshake.Parse(handshake.ToBencode());
+
+        Assert.Equal(250, parsed.RequestQueueDepth);
+    }
+
+    [Fact]
+    public void Reqq_IsOmittedWhenUnset()
+    {
+        // A peer that has nothing to say must not say zero: clients read a missing key as "assume your
+        // own default" and an explicit zero as "accepts nothing".
+        var dict = new ExtensionHandshake().ToBencode();
+
+        Assert.False(dict.Dict.ContainsKey("reqq"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Reqq_NonPositiveIsIgnored(long value)
+    {
+        // No client means "I accept no requests", and believing one that said so would stall us.
+        var dict = new BDict();
+        dict.Dict["reqq"] = new BNumber(value);
+
+        Assert.Null(ExtensionHandshake.Parse(dict).RequestQueueDepth);
+    }
+
+    [Fact]
+    public void AdvertisedReqq_MatchesWhatTheUploadQueueWillAccept()
+    {
+        // The whole point of advertising is that the number is true. If these ever diverge we are
+        // telling peers to send more than we will take, which is worse than saying nothing.
+        Assert.Equal(
+            ProtocolConstants.MaxOutstandingRequestsPerPeer,
+            UploadQueueManager.MaxQueueDepthPerPeer);
     }
 }
 

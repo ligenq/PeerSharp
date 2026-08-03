@@ -10,6 +10,13 @@ internal class ExtensionHandshake
     public byte[]? YourIp { get; set; }
 
     /// <summary>
+    /// BEP 10: <c>reqq</c>, "the number of outstanding request messages this client supports without
+    /// dropping any". Null when the peer did not say, which is not the same as zero - a peer that stays
+    /// silent is telling us nothing, and every client picks its own assumption in that case.
+    /// </summary>
+    public int? RequestQueueDepth { get; set; }
+
+    /// <summary>
     /// BEP 21: <c>upload_only</c>. "Setting the value of this key to 1 indicates that this peer is not
     /// interested in downloading anything" - a seed, or a partial seed that has everything it selected.
     /// </summary>
@@ -37,6 +44,13 @@ internal class ExtensionHandshake
         // ignored - the intent is unambiguous and this is a hint, not a security boundary.
         handshake.IsUploadOnly = (dict.GetLong("upload_only") ?? 0) != 0;
 
+        // Only a positive depth means anything. Zero or negative is a peer saying it accepts no
+        // requests, which no client means and which would stall us if we believed it.
+        if (dict.GetLong("reqq") is > 0 and var reqq)
+        {
+            handshake.RequestQueueDepth = (int)Math.Min(reqq, int.MaxValue);
+        }
+
         return handshake;
     }
 
@@ -63,6 +77,11 @@ internal class ExtensionHandshake
         if (YourIp != null)
         {
             dict.Dict["yourip"] = new BString(YourIp);
+        }
+
+        if (RequestQueueDepth.HasValue)
+        {
+            dict.Dict["reqq"] = new BNumber(RequestQueueDepth.Value);
         }
 
         // Only emitted when set: BEP 21 defines the presence of the key with value 1, and a peer that

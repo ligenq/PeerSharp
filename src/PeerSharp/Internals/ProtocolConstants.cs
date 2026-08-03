@@ -36,6 +36,26 @@ internal static class ProtocolConstants
     /// </summary>
     public const int UploadBatchSize = 64 * 1024; // 64KB
 
+    /// <summary>
+    /// How many block requests we will hold from one peer before rejecting the rest, and the value we
+    /// advertise as <c>reqq</c> in the BEP 10 extended handshake. These must be the same number: the
+    /// point of advertising is to tell the peer what we will actually accept.
+    ///
+    /// <para>
+    /// A peer that is not told assumes something. Transmission assumes 500 and libtorrent advertises
+    /// 2000, so staying silent means most peers send more than we will take and we reject the excess -
+    /// a wasted round trip per rejected request, against every client rather than any particular one.
+    /// </para>
+    ///
+    /// <para>
+    /// The depth also bounds how much work one peer can have outstanding with us: at
+    /// <see cref="BlockSize"/> per request this is the in-flight ceiling for a single connection, which
+    /// is what limits throughput on a link with any real latency. Raising it is a memory tradeoff
+    /// across a whole swarm and wants a many-peer measurement first.
+    /// </para>
+    /// </summary>
+    public const int MaxOutstandingRequestsPerPeer = 250;
+
     #endregion Block and Message Sizes
 
     #region Connection Timeouts
