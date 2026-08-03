@@ -50,7 +50,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private const int MainLoopIntervalMs = 1000;
 
     private const int PendingConnectionTimeoutMs = 10000;
-    private const int PexIntervalSeconds = 60;
+    /// <summary>
+    /// Floor for how often peer exchange runs. The configured interval is honoured above this; the
+    /// tick loop cannot notice anything finer than a second.
+    /// </summary>
+    private const int MinPexIntervalSeconds = 1;
 
     // 1 second base loop
     private const int WatchdogIntervalSeconds = 5;
@@ -1689,7 +1693,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 }
 
                 // BroadcastPex - every 60 seconds
-                if (tickCount % PexIntervalSeconds == 0)
+                int pexIntervalSeconds = Math.Max(
+                    MinPexIntervalSeconds,
+                    (int)_settings.Connection.PexInterval.TotalSeconds);
+                if (tickCount % pexIntervalSeconds == 0)
                 {
                     try { BroadcastPex(); }
                     catch (Exception ex) { _logger.LogError(ex, "BroadcastPex error"); }

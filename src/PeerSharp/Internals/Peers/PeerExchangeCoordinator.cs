@@ -46,18 +46,28 @@ internal sealed class PeerExchangeCoordinator
         var peers = connectedPeers.ToList();
         foreach (var peer in peers)
         {
-            if (peer.RemoteEndPoint == null)
+            // BEP 10 'p'. The endpoint a connection arrived on carries an ephemeral source port, so
+            // gossiping it would put addresses in the swarm that nobody can connect to - and every
+            // recipient would then waste attempts on them. Peers that have not told us where they
+            // listen are left out rather than guessed at.
+            var shareable = peer.RemoteListenEndPoint;
+            if (shareable == null)
             {
+                if (peer.RemoteEndPoint != null)
+                {
+                    connectedEndpoints.Add(peer.RemoteEndPoint);
+                }
+
                 continue;
             }
 
-            connectedEndpoints.Add(peer.RemoteEndPoint);
+            connectedEndpoints.Add(shareable);
             byte flags = 0;
             if (peer.PeerPieces != null && peer.PeerPieces.ReceivedCount == peer.PeerPieces.Count) flags |= (byte)UtPex.Peer.Seed;
             if (peer.UtpStream != null) flags |= (byte)UtPex.Peer.Utp;
             if (peer.Stream is EncryptedStream) flags |= (byte)UtPex.Peer.Encryption;
             if (peer.RemoteExtensions?.MessageIds.ContainsKey(UtHolepunch.Name) == true) flags |= (byte)UtPex.Peer.Holepunch;
-            peerData.Add((peer.RemoteEndPoint, flags));
+            peerData.Add((shareable, flags));
         }
 
         var knownCandidates = new List<IPEndPoint>();
@@ -85,7 +95,14 @@ internal sealed class PeerExchangeCoordinator
                 filteredPeers.Clear();
                 foreach (var candidate in allPeers)
                 {
-                    if (!candidate.Item1.Equals(peer.RemoteEndPoint)) filteredPeers.Add(candidate);
+                    // Never tell a peer about itself, under either of the addresses we might know it by.
+                    if (candidate.Item1.Equals(peer.RemoteListenEndPoint)
+                        || candidate.Item1.Equals(peer.RemoteEndPoint))
+                    {
+                        continue;
+                    }
+
+                    filteredPeers.Add(candidate);
                 }
                 peer.UtPex.Update(filteredPeers);
             }

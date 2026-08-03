@@ -14,14 +14,47 @@ public class PeerExchangeCoordinatorTests
     {
         var torrent = TorrentTestUtility.CreateMinimal();
         var coordinator = new PeerExchangeCoordinator(torrent, new ConcurrentDictionary<IPEndPoint, PeerHistory>(), NullLogger.Instance);
-        var first = new PexPeer(torrent) { RemoteEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1000) };
-        var second = new PexPeer(torrent) { RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000) };
+        // The port a connection arrived on is ephemeral; what gets shared is where the peer listens.
+        var first = new PexPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 40001),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1000)
+        };
+        var second = new PexPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 40002),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000)
+        };
 
         coordinator.Broadcast([first, second]);
 
-        Assert.Contains(first.Pex.Updates.Single(), peer => peer.Endpoint.Equals(second.RemoteEndPoint));
-        Assert.DoesNotContain(first.Pex.Updates.Single(), peer => peer.Endpoint.Equals(first.RemoteEndPoint));
-        Assert.Contains(second.Pex.Updates.Single(), peer => peer.Endpoint.Equals(first.RemoteEndPoint));
+        Assert.Contains(first.Pex.Updates.Single(), peer => peer.Endpoint.Equals(second.RemoteListenEndPoint));
+        Assert.DoesNotContain(first.Pex.Updates.Single(), peer => peer.Endpoint.Equals(first.RemoteListenEndPoint));
+        Assert.Contains(second.Pex.Updates.Single(), peer => peer.Endpoint.Equals(first.RemoteListenEndPoint));
+
+        // And never the connection endpoints, which nobody could connect back to.
+        Assert.DoesNotContain(first.Pex.Updates.Single(), peer => peer.Endpoint.Equals(second.RemoteEndPoint));
+    }
+
+    [Fact]
+    public void Broadcast_SkipsPeersThatHaveNotSaidWhereTheyListen()
+    {
+        // Without BEP 10 'p' all we have is an ephemeral source port. Sharing it would put an address
+        // in the swarm that every recipient then wastes connection attempts on.
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var coordinator = new PeerExchangeCoordinator(torrent, new ConcurrentDictionary<IPEndPoint, PeerHistory>(), NullLogger.Instance);
+        var silent = new PexPeer(torrent) { RemoteEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 40001) };
+        var recipient = new PexPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 40002),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000)
+        };
+
+        coordinator.Broadcast([silent, recipient]);
+
+        // An update is still offered - UtPex.Update decides for itself whether anything changed - but
+        // it must carry nothing, because the only other peer had no shareable address.
+        Assert.Empty(recipient.Pex.Updates.Single());
     }
 
     [Fact]
