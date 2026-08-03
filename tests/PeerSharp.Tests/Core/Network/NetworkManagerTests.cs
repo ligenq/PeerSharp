@@ -26,7 +26,9 @@ public class NetworkManagerTests
         public void ReportExternalIp(System.Net.IPAddress address) { }
         public static void AddNode(System.Net.IPEndPoint endpoint) { }
         public void SetCallback(IDhtCallback callback) { }
-        public void FindPeers(InfoHash hash) { }
+        public int FindPeers(InfoHash hash) {
+    return 0;
+    }
         public void ScrapeInfoHash(InfoHash hash) { }
         public InfoHash NodeId => InfoHash.Empty;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

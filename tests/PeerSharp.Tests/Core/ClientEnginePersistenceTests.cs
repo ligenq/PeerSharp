@@ -59,7 +59,9 @@ public class ClientEnginePersistenceTests
         public DhtState? StateToReturn { get; set; }
         public InfoHash NodeId { get; } = new InfoHash(new byte[20]);
         public void Announce(InfoHash infoHash, int port) { }
-        public void FindPeers(InfoHash infoHash) { }
+        public int FindPeers(InfoHash infoHash) {
+    return 0;
+    }
         public void Ping(IPEndPoint ep) { }
         public void ReportExternalIp(IPAddress address) { }
         public void ScrapeInfoHash(InfoHash infoHash) { }
