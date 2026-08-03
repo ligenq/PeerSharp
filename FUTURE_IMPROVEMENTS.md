@@ -380,6 +380,50 @@ removes the guessing.
 
 ---
 
+## Allocation churn during transfers, measured and not yet attributed
+
+**The numbers, reproducible with the sample.** One instance seeds, another leeches by address with
+the DHT and local discovery off, rate limited so the transfer lasts long enough to sample:
+
+| Path | Allocated per byte moved | Per 16 KiB block |
+| --- | --- | --- |
+| Leeching | 0.30 | about 4.9 KiB |
+| Seeding | 0.18 | about 2.9 KiB |
+
+```
+peersharp-cli torrent --out seed --seed --recheck --no-dht --diagnostics
+peersharp-cli torrent --out leech --no-dht --peer 127.0.0.1:55125 --down 6144 --diagnostics
+```
+
+**There is no memory problem.** The heap is flat across a 512 MiB transfer - 24.6 to 27.2 MiB, back
+to 18.5 on completion - working set holds near 79 MiB, and nothing leaks. A heap snapshot mid transfer
+is 12.3 MiB, three quarters of it the 562 pooled 16 KiB block buffers doing their job. Reducing the
+churn would buy less GC pressure, not a smaller footprint, which is a much weaker reason to touch a
+working transfer path.
+
+**Four hypotheses tested and eliminated**, each by changing one thing and re-measuring:
+
+- The reader's buffer size. At 16 KiB rather than four blocks the ratio goes to 0.32, marginally worse
+  and nowhere near explaining it.
+- The piece buffer pool's depth. `maxArraysPerBucket: 4` looked like a strong candidate, since a fifth
+  concurrent piece allocates a fresh 256 KiB buffer and 0.3 x 2048 pieces x 256 KiB lands almost
+  exactly on the measured total. Raising it to 32 changed nothing: 0.318.
+- The DHT, which an earlier entry wrongly blamed for a startup spike and which was retracted.
+- A single hotspot at all. Both directions allocate in proportion to blocks moved, which is what rules
+  this out: a hotspot in the receive path could not also account for the seeder's 0.18.
+
+**What it would take to go further.** Allocation-tick attribution. `dotnet-trace --profile gc-verbose`
+collects the events but its speedscope export is a time-based call tree and drops the byte weights, so
+the analysis needs PerfView or something built on TraceEvent. Guessing at candidates and re-measuring
+has now cost four rounds for four negatives, and the shape of the result - a few KiB per block on both
+paths, heap flat - looks like ordinary per-message overhead spread across async state machines,
+message objects and pooled-buffer bookkeeping rather than one thing worth cutting out.
+
+**Recommendation: leave it.** Revisit only with real attribution data, and only if GC pause time shows
+up as a problem on a machine that matters.
+
+---
+
 ## Interop baseline
 
 Re-measured after the session that found the Transmission fault. Every earlier figure in this file was
