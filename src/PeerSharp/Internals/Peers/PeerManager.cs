@@ -1669,17 +1669,36 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return (now - _stableSpeedSince) >= TimeSpan.FromSeconds(stableSeconds);
     }
 
-    /// <summary>How long to wait before asking the DHT again once it has actually been reachable.</summary>
+    /// <summary>How long to wait before asking the DHT again once the torrent is in a working swarm.</summary>
     private const int DhtLookupIntervalSeconds = 900;
 
     /// <summary>How soon to try again while the routing table still has nobody to ask.</summary>
     private const int DhtLookupRetrySeconds = 15;
 
+    /// <summary>How soon to try again while the torrent still has too few peers to make progress.</summary>
+    private const int DhtLookupHungrySeconds = 60;
+
+    /// <summary>
+    /// Below this many connected peers a torrent counts as still looking, and keeps asking the DHT on
+    /// the short interval. Well above what a transfer needs to run: the point is not to reach a target
+    /// but to stop hammering the DHT for a torrent that has clearly found its swarm.
+    /// </summary>
+    private const int DhtHealthyPeerCount = 10;
+
     private int _nextDhtLookupTick;
 
     /// <summary>
     /// Asks the DHT for peers and re-announces us, and says how many seconds to wait before doing it
-    /// again - a short retry while the routing table is empty, the full interval once it is not.
+    /// again.
+    ///
+    /// <para>
+    /// The interval is keyed on whether the torrent still needs peers rather than on whether the last
+    /// lookup worked, because those are not the same question. A lookup that reached somebody has not
+    /// necessarily found anybody: from a cold routing table the first one reaches a handful of nodes
+    /// and comes back with almost nothing, which is precisely when asking again soon matters most. A
+    /// magnet counts as hungry until its metadata arrives however many peers it has, since a peer that
+    /// cannot serve metadata leaves it no way to start.
+    /// </para>
     /// </summary>
     private int RunDhtLookup()
     {
@@ -1706,8 +1725,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             dht.Announce(hash, port);
         }
 
-        _logger.LogDebug("DHT lookup asked {Count} nodes for peers, announced on port {Port}", queried, port);
-        return DhtLookupIntervalSeconds;
+        bool hungry = !_torrent.HasMetadata || ConnectedCount < DhtHealthyPeerCount;
+        int nextIn = hungry ? DhtLookupHungrySeconds : DhtLookupIntervalSeconds;
+
+        _logger.LogDebug(
+            "DHT lookup asked {Count} nodes for peers, announced on port {Port}, {Peers} peers connected, next in {Seconds}s",
+            queried,
+            port,
+            ConnectedCount,
+            nextIn);
+
+        return nextIn;
     }
 
     private async Task MainLoopAsync(CancellationToken cancellationToken)
