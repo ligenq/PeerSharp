@@ -20,6 +20,12 @@ internal interface IPeerPieceInfo
     bool IsChoking { get; }
 
     /// <summary>
+    /// Gets whether the peer has let a request expire unanswered. Such a peer is steered towards
+    /// common pieces rather than rare ones - see <see cref="PiecePicker"/>.
+    /// </summary>
+    bool IsSnubbed { get; }
+
+    /// <summary>
     /// Gets suggested pieces from the peer.
     /// </summary>
     IEnumerable<int> GetSuggestedPieces();
@@ -234,6 +240,8 @@ internal class PeerCommunicationAdapter : IPeerPieceInfo
     public int Count => _peer.PeerPieces.Count;
 
     public bool IsChoking => _peer.PeerChoking;
+
+    public bool IsSnubbed => _peer.IsSnubbed;
 
     public IEnumerable<int> GetSuggestedPieces()
     {

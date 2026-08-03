@@ -116,6 +116,8 @@ public class PiecePickerBenchmarks
         public int Count => pieceCount;
         public bool IsChoking => false;
 
+        public bool IsSnubbed { get; set; }
+
         public IEnumerable<int> GetSuggestedPieces() => [];
 
         public bool HasPiece(int pieceIndex) => _bitfield[pieceIndex];

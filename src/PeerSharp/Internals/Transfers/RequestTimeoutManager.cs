@@ -51,6 +51,11 @@ internal sealed class RequestTimeoutManager
             {
                 _removeBlockRequest(req.PieceIndex, req.Offset, peer);
 
+                // A peer that lets a request expire is steered towards common pieces until it sends
+                // something. It keeps its slot and its other requests; this only stops a stalled peer
+                // from sitting on a rare piece that may have no other source.
+                peer.MarkSnubbed();
+
                 if (req.Attempts >= _maxRequestAttempts && !endGameMode)
                 {
                     _logger.LogDebug("Request for piece {PieceIndex} offset {Offset} gave up after {Attempts} attempts", req.PieceIndex, req.Offset, req.Attempts);
