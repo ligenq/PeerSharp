@@ -174,7 +174,7 @@ internal class EncryptedStream : Stream
     }
 }
 
-internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IPexPeer, IAsyncDisposable
+internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDisposable
 {
     // Default connection timeout in milliseconds (used if adaptive timeout not provided)
     private const int DefaultConnectionTimeoutMs = 10000;
@@ -384,54 +384,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IPexPeer,
     /// and null for a peer that says it is not listening. Distinct from <see cref="RemoteEndPoint"/>,
     /// whose port is whatever the connection happened to come from.
     /// </summary>
-    public System.Net.IPEndPoint? RemoteListenEndPoint { get; private set; }
-
-    /// <summary>Whether this connection negotiated MSE, for the ut_pex encryption flag.</summary>
-    public bool IsEncrypted => _encryptionHandshakeComplete;
-
-    /// <inheritdoc />
-    public bool SupportsPex => UtPex.RemoteMessageId.HasValue;
-
-    /// <summary>
-    /// How this peer is described to others over ut_pex, using the bits libtorrent defines: 0x01
-    /// encryption, 0x02 seed, 0x04 uTP, 0x08 holepunch. Only positive claims are made, since a missing
-    /// bit means "not known to support" rather than "does not".
-    /// </summary>
-    public byte PexFlags
-    {
-        get
-        {
-            byte flags = 0;
-
-            if (IsEncrypted)
-            {
-                flags |= 0x01;
-            }
-
-            if (PeerPieces?.IsFull == true)
-            {
-                flags |= 0x02;
-            }
-
-            if (UtpStream is not null)
-            {
-                flags |= 0x04;
-            }
-
-            if (UtHolepunch.RemoteMessageId.HasValue)
-            {
-                flags |= 0x08;
-            }
-
-            return flags;
-        }
-    }
-
-    /// <inheritdoc />
-    public void SendPex(List<System.Net.IPEndPoint> added, List<byte> addedFlags, List<System.Net.IPEndPoint> dropped)
-    {
-        UtPex.SendPex(added, addedFlags, dropped);
-    }
+    public System.Net.IPEndPoint? RemoteListenEndPoint { get; internal set; }
 
     public bool RemoteSupportsExtensions { get; private set; }
 

@@ -50,12 +50,14 @@ public class PeerManagerPexTests
         // Setup 2 peers
         var p1 = new MockPeer(torrent)
         {
-            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1000)
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 40001),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1000)
         };
 
         var p2 = new MockPeer(torrent)
         {
-            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000)
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 40002),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000)
         };
 
         manager.AddConnectedPeerForTesting(p1);
@@ -64,14 +66,13 @@ public class PeerManagerPexTests
         // Act
         manager.BroadcastPex();
 
-        // Assert
-        // P1 should receive P2
+        // Assert: each is told where the other listens, not the ephemeral port it connected from.
         Assert.Single(p1.Pex.Updates);
-        Assert.Contains(p1.Pex.Updates[0], x => x.Item1.Equals(p2.RemoteEndPoint));
+        Assert.Contains(p1.Pex.Updates[0], x => x.Item1.Equals(p2.RemoteListenEndPoint));
+        Assert.DoesNotContain(p1.Pex.Updates[0], x => x.Item1.Equals(p2.RemoteEndPoint));
 
-        // P2 should receive P1
         Assert.Single(p2.Pex.Updates);
-        Assert.Contains(p2.Pex.Updates[0], x => x.Item1.Equals(p1.RemoteEndPoint));
+        Assert.Contains(p2.Pex.Updates[0], x => x.Item1.Equals(p1.RemoteListenEndPoint));
     }
 
     [Fact]
