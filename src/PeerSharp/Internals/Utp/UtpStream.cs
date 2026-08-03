@@ -23,10 +23,30 @@ internal class UtpStream : Stream
     // Current delay samples (last 3 samples for smoothing)
     private const int CurDelaySize = 3;
 
-    // Base delay history per libutp - 13 slots for 2 minutes of history
+    // Base delay history per libutp: 13 slots, one rotated per minute.
     private const int DelayBaseHistory = 13;
 
-    private const int DelayBaseUpdateInterval = 10000;
+    /// <summary>
+    /// How long one base-delay slot covers. libutp rotates every sixty seconds, so its thirteen slots
+    /// remember roughly thirteen minutes.
+    ///
+    /// <para>
+    /// This was ten seconds, giving about two minutes of memory - taken from a comment in libutp that
+    /// says "we update the delay_base every two minutes" directly above code that uses sixty seconds.
+    /// The window matters more than it looks: base delay is the yardstick queuing is measured against,
+    /// so a path that stays congested for longer than the history has its congested delay relearned as
+    /// the baseline. After that the queuing estimate reads near zero, the controller concludes the path
+    /// is idle, and uTP stops yielding - which is the one thing it exists to do.
+    /// </para>
+    /// </summary>
+    private const int DelayBaseUpdateInterval = 60000;
+
+    /// <summary>
+    /// The largest base-delay correction we will apply at once, matching libutp. A correction bigger
+    /// than this is more likely a bad sample than real clock drift, and applying it would move the
+    /// yardstick further than the thing being measured.
+    /// </summary>
+    private const int MaxDelayBaseShift = 10000;
 
     // SACK (Selective Acknowledgment) support for VPN packet reordering
     // Extension type 1 = SACK per BEP-29
@@ -51,6 +71,10 @@ internal class UtpStream : Stream
     private readonly uint[] _curDelayHist = new uint[CurDelaySize];
 
     private readonly uint[] _delayBaseHist = new uint[DelayBaseHistory];
+
+    // The same history, kept for the peer's measurements of us. Only its minimum is of interest: when
+    // that drops, the two clocks have drifted relative to each other rather than the path improving.
+    private readonly uint[] _theirDelayBaseHist = new uint[DelayBaseHistory];
     private readonly Lock _lock = new();
     private readonly ILogger<UtpStream> _logger;
     private readonly IUtpManager _manager;
@@ -90,6 +114,13 @@ internal class UtpStream : Stream
     private double _cwnd = 2600;
 
     private int _delayBaseIdx = 0;
+
+    private int _theirDelayBaseIdx = 0;
+
+    private DateTimeOffset _theirDelayBaseTime;
+
+    /// <summary>Smallest round trip seen, which bounds how large a queuing delay can plausibly be.</summary>
+    private uint _minRtt;
     private DateTimeOffset _delayBaseTime = DateTimeOffset.MinValue;
     private AtomicDisposal _disposal = new();
     private int _duplicateAckCount;
@@ -576,6 +607,9 @@ internal class UtpStream : Stream
             // Update timestamps and RTT
             uint now = Utils.TimestampMicro();
             _lastReplyDelay = now - header.TimestampMicroseconds;
+
+            // Their measurement of us, fed to its own history so clock drift can be spotted.
+            ObserveTheirDelay(_lastReplyDelay);
             // Protect against window inflation attacks by clamping to 4MB
             _wndSize = Math.Min(header.WndSize, MaxRemoteWndSize);
 
@@ -1554,6 +1588,18 @@ internal class UtpStream : Stream
         // Our delay = current delay - base delay (queuing delay only)
         long ourDelay = Math.Max(0, curDelay - (long)baseDelay);
 
+        // A queue cannot hold a packet for longer than the whole round trip took, so an estimate that
+        // exceeds the smallest RTT we have seen means the base is too low rather than the path being
+        // that congested. Raising the base by the difference corrects it, as libutp does; left alone
+        // it reads as permanent congestion and throttles us for the life of the connection.
+        if (_minRtt > 0 && ourDelay > _minRtt)
+        {
+            uint correction = (uint)(ourDelay - _minRtt);
+            ShiftDelayBase(correction);
+            baseDelay += correction;
+            ourDelay = _minRtt;
+        }
+
         // Update last decay time on successful ACK
         _lastDecayTime = now;
 
@@ -1641,6 +1687,86 @@ internal class UtpStream : Stream
         }
     }
 
+    /// <summary>
+    /// Records the peer's view of the delay from us to it, and corrects our own base delay when the
+    /// peer's drops.
+    ///
+    /// <para>
+    /// Neither clock runs at exactly the other's rate, so the delay samples carry a systematic error
+    /// that grows over a long connection. libutp reads a fall in the peer's base delay as evidence of
+    /// that drift rather than of a genuinely faster path, and shifts its own base by the same amount
+    /// in the opposite direction. Without it the error accumulates straight into the queuing estimate.
+    /// </para>
+    /// </summary>
+    private void ObserveTheirDelay(uint theirDelay)
+    {
+        if (theirDelay == 0)
+        {
+            return;
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        if (_theirDelayBaseTime == default)
+        {
+            _theirDelayBaseTime = now;
+            for (int i = 0; i < DelayBaseHistory; i++)
+            {
+                _theirDelayBaseHist[i] = theirDelay;
+            }
+        }
+
+        uint previousBase = MinimumOf(_theirDelayBaseHist);
+
+        if ((now - _theirDelayBaseTime).TotalMilliseconds >= DelayBaseUpdateInterval)
+        {
+            _theirDelayBaseIdx = (_theirDelayBaseIdx + 1) % DelayBaseHistory;
+            _theirDelayBaseHist[_theirDelayBaseIdx] = theirDelay;
+            _theirDelayBaseTime = now;
+        }
+        else if (theirDelay < _theirDelayBaseHist[_theirDelayBaseIdx] || _theirDelayBaseHist[_theirDelayBaseIdx] == 0)
+        {
+            _theirDelayBaseHist[_theirDelayBaseIdx] = theirDelay;
+        }
+
+        uint newBase = MinimumOf(_theirDelayBaseHist);
+
+        if (previousBase != 0 && newBase < previousBase)
+        {
+            uint drift = previousBase - newBase;
+            if (drift <= MaxDelayBaseShift)
+            {
+                ShiftDelayBase(drift);
+            }
+        }
+    }
+
+    /// <summary>Adds an offset to every base-delay sample, which is how a correction is applied.</summary>
+    private void ShiftDelayBase(uint offset)
+    {
+        for (int i = 0; i < DelayBaseHistory; i++)
+        {
+            if (_delayBaseHist[i] != 0)
+            {
+                _delayBaseHist[i] += offset;
+            }
+        }
+    }
+
+    /// <summary>The smallest non-zero sample, which is what a delay history is for.</summary>
+    private static uint MinimumOf(uint[] samples)
+    {
+        uint smallest = uint.MaxValue;
+        foreach (var sample in samples)
+        {
+            if (sample > 0 && sample < smallest)
+            {
+                smallest = sample;
+            }
+        }
+
+        return smallest == uint.MaxValue ? 0 : smallest;
+    }
+
     private void UpdateRtt(int rtt)
     {
         // RTT estimation per libutp following RFC 6298
@@ -1649,6 +1775,13 @@ internal class UtpStream : Stream
         if (rtt <= 0 || rtt > 60000)
         {
             return;
+        }
+
+        // In microseconds, to compare against delay samples.
+        uint rttMicros = (uint)rtt * 1000U;
+        if (_minRtt == 0 || rttMicros < _minRtt)
+        {
+            _minRtt = rttMicros;
         }
 
         if (_rtt == 0)
