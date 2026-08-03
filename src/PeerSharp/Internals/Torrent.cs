@@ -5,6 +5,7 @@ using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
+using System.Net;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Peers;
 using PeerSharp.PiecePicking;
@@ -243,6 +244,41 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public ITrackers Trackers => TrackerManager;
     public int UploadLimitBytesPerSecond { get => Configuration.UploadLimitBytesPerSecond; set => Configuration.UploadLimitBytesPerSecond = value; }
     public IUtpManager? UtpManager { get => Network.Utp; set => Network.Utp = value; }
+
+    /// <summary>Where we accept peer connections, or null when we are not listening.</summary>
+    public IPortListener? PortListener { get => Network.PortListener; set => Network.PortListener = value; }
+
+    /// <summary>
+    /// BEP 10 <c>yourip</c>: one peer's opinion of our external address.
+    ///
+    /// <para>
+    /// Joins the same vote pool as the DHT's own reports and BEP 24 tracker replies rather than being
+    /// believed outright. A single peer is not evidence - it can be misconfigured, behind a different
+    /// view of the network, or lying deliberately to move our node ID - and the existing threshold is
+    /// exactly the mechanism for that. Silently ignored when DHT is off, since the vote pool is where
+    /// the answer is kept.
+    /// </para>
+    /// </summary>
+    public void ReportExternalAddress(ReadOnlySpan<byte> addressBytes)
+    {
+        if (DhtManager is not { } dht)
+        {
+            return;
+        }
+
+        // Length was checked by the caller, but a malformed address still throws rather than parsing.
+        IPAddress parsed;
+        try
+        {
+            parsed = new IPAddress(addressBytes);
+        }
+        catch (ArgumentException)
+        {
+            return;
+        }
+
+        dht.ReportExternalIp(parsed);
+    }
     public WebSeedManager? WebSeedManager { get; private set; }
 
     // Internal Modules

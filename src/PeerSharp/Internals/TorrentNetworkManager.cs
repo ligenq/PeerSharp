@@ -13,4 +13,10 @@ internal sealed class TorrentNetworkManager
     public IDhtManager? Dht { get; set; }
     public ILsdManager? Lsd { get; set; }
     public IUtpManager? Utp { get; set; }
+
+    /// <summary>
+    /// The listener we actually bound, so peers can be told where to reach us. The configured port may
+    /// be zero, meaning "any", in which case only the listener knows the real answer.
+    /// </summary>
+    public IPortListener? PortListener { get; set; }
 }

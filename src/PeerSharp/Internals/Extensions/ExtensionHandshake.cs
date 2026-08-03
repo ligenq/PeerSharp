@@ -10,6 +10,13 @@ internal class ExtensionHandshake
     public byte[]? YourIp { get; set; }
 
     /// <summary>
+    /// BEP 10: <c>p</c>, "local TCP listen port". The port a connection arrives from is ephemeral and
+    /// says nothing about where that peer accepts connections, so without this we cannot reconnect to
+    /// an inbound peer later, or tell anyone else how to reach them.
+    /// </summary>
+    public int? ListenPort { get; set; }
+
+    /// <summary>
     /// BEP 10: <c>reqq</c>, "the number of outstanding request messages this client supports without
     /// dropping any". Null when the peer did not say, which is not the same as zero - a peer that stays
     /// silent is telling us nothing, and every client picks its own assumption in that case.
@@ -44,6 +51,13 @@ internal class ExtensionHandshake
         // ignored - the intent is unambiguous and this is a hint, not a security boundary.
         handshake.IsUploadOnly = (dict.GetLong("upload_only") ?? 0) != 0;
 
+        // A port of zero means "not listening", which is legitimate for a peer behind a NAT it cannot
+        // map, and is not the same as a peer that told us nothing.
+        if (dict.GetLong("p") is > 0 and <= 65535 and var port)
+        {
+            handshake.ListenPort = (int)port;
+        }
+
         // Only a positive depth means anything. Zero or negative is a peer saying it accepts no
         // requests, which no client means and which would stall us if we believed it.
         if (dict.GetLong("reqq") is > 0 and var reqq)
@@ -77,6 +91,11 @@ internal class ExtensionHandshake
         if (YourIp != null)
         {
             dict.Dict["yourip"] = new BString(YourIp);
+        }
+
+        if (ListenPort.HasValue)
+        {
+            dict.Dict["p"] = new BNumber(ListenPort.Value);
         }
 
         if (RequestQueueDepth.HasValue)

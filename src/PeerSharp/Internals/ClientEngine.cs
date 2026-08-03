@@ -642,6 +642,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
+        torrent.PortListener = _networkManager?.PortListener;
         torrent.Blocklist = Blocklist;
         torrent.MetadataDownload = new MetadataDownload(torrent, _loggerFactory);
         torrent.MetadataDownload.Start();
@@ -681,6 +682,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
+        torrent.PortListener = _networkManager?.PortListener;
         torrent.Blocklist = Blocklist;
 
         Register(torrent, transient);
