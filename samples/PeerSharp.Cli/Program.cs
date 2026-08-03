@@ -22,7 +22,15 @@ if (options is null)
 
 using var loggerFactory = LoggerFactory.Create(builder =>
 {
-    builder.AddSimpleConsole(o => o.SingleLine = true);
+    builder.AddSimpleConsole(o =>
+    {
+        o.SingleLine = true;
+
+        // Timestamped because the questions this harness gets pointed at are nearly always about
+        // when something happened rather than whether it did - how long until the first peer, how
+        // long that peer then sat there before it was asked for anything.
+        o.TimestampFormat = "HH:mm:ss.fff ";
+    });
     builder.SetMinimumLevel(options.Verbose ? LogLevel.Trace : LogLevel.Warning);
 });
 
@@ -46,13 +54,19 @@ await engine.InitializeAsync();
 Console.WriteLine($"Listening on   : TCP {engine.BoundTcpPort}, UDP {engine.BoundUdpPort}");
 Console.WriteLine($"Download path  : {options.DownloadPath}");
 
+var wallClock = System.Diagnostics.Stopwatch.StartNew();
+
 ITorrent torrent;
 if (options.Source.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
 {
     Console.WriteLine("Source         : magnet link");
     torrent = await engine.AddMagnetAsync(
         MagnetLink.Parse(options.Source),
-        new AddTorrentOptions { StartImmediately = !options.Recheck });
+        new AddTorrentOptions
+        {
+            StartImmediately = !options.Recheck,
+            StopAfterMetadata = options.MetadataOnly
+        });
 }
 else
 {
@@ -122,6 +136,39 @@ Console.CancelKeyPress += (_, e) =>
 };
 
 var reporter = new Reporter(engine, torrent, options);
+
+if (options.MetadataOnly)
+{
+    if (torrent.HasMetadata)
+    {
+        Console.WriteLine("Metadata       : already present, nothing to fetch");
+        return 0;
+    }
+
+    // Report while waiting rather than blocking silently: when this is slow, the interesting part
+    // is what the peer count was doing meanwhile - metadata that takes thirty seconds with a
+    // hundred peers connected is a different fault from one that takes thirty seconds to find any.
+    var metadataWait = torrent.WaitForMetadataAsync(stopping.Token);
+    while (!metadataWait.IsCompleted && !stopping.IsCancellationRequested)
+    {
+        reporter.ReportOnce();
+        await Task.WhenAny(metadataWait, Task.Delay(options.ReportInterval, stopping.Token))
+            .ConfigureAwait(false);
+    }
+
+    await metadataWait.ConfigureAwait(false);
+
+    Console.WriteLine();
+    Console.WriteLine($"Metadata in    : {wallClock.Elapsed.TotalSeconds:F2}s");
+    Console.WriteLine($"Name           : {torrent.Name}");
+    Console.WriteLine($"Pieces         : {torrent.PieceCount}");
+    Console.WriteLine($"Peers at end   : {torrent.Peers.ConnectedCount}");
+
+    await torrent.StopAsync();
+    return 0;
+}
+
+
 bool announcedCompletion = false;
 bool stopped = false;
 var startedAt = DateTimeOffset.UtcNow;

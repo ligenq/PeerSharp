@@ -638,22 +638,39 @@ public sealed class TransferSettings
 
     /// <summary>
     /// Number of parallel metadata piece requests allowed (ut_metadata).
-    /// Default is 8 for faster magnet startup.
+    ///
+    /// <para>
+    /// Default is 32, the most the pipeline is clamped to, which covers metadata up to 512 KiB in a
+    /// single round. It was 8: enough for the 128 KiB that most torrents carry, but Ubuntu's is 254 KiB
+    /// and needed two rounds, and a round costs a full request-response across the internet whether it
+    /// carries one piece or thirty. Metadata is at most a few hundred KiB in total and is the only
+    /// thing a magnet can do until it arrives, so there is nothing to be gained by rationing it.
+    /// </para>
     /// </summary>
-    public int MetadataRequestPipeline { get; set; } = 8;
+    public int MetadataRequestPipeline { get; set; } = 32;
 
     /// <summary>
-    /// How long to wait for a metadata piece before asking someone else. Default is 3.
+    /// How long to wait for a metadata piece before asking someone else. Default is 1.
     ///
     /// <para>
     /// A metadata piece is at most 16 KiB and a magnet cannot start without it, so this trades a little
     /// duplicate traffic for latency. It was 10, which meant one unresponsive peer held a magnet up for
     /// ten seconds at a time - measured against real swarms, three torrents took between thirty-six
     /// seconds and never to acquire metadata while over a hundred willing peers stayed connected
-    /// throughout. libtorrent uses the same three-second interval before re-asking for a piece.
+    /// throughout.
+    /// </para>
+    ///
+    /// <para>
+    /// Three was then chosen to match libtorrent, but libtorrent applies it as a per-peer throttle - it
+    /// will not re-ask the same peer for the same piece inside three seconds, while remaining free to
+    /// ask a different one immediately. Here it is the interval between rounds, which makes it the clock
+    /// the whole download runs on. Traced against a real magnet, every piece arrived 100-400 ms after a
+    /// round fired and no peer ever sent a reject: peers are either prompt or silent, so the wait buys
+    /// nothing and the rounds, at 3 seconds plus a 1 second tick, were costing four seconds each. Ubuntu
+    /// took 50 seconds to collect sixteen pieces with 143 willing peers connected throughout.
     /// </para>
     /// </summary>
-    public int MetadataRequestTimeoutSeconds { get; set; } = 3;
+    public int MetadataRequestTimeoutSeconds { get; set; } = 1;
 
     /// <summary>
     /// Maximum retry attempts per metadata piece request.

@@ -264,12 +264,20 @@ public class MetadataDownloadTests
         download.PeerConnected(peer1);   // → requests piece 0 from peer1
         Assert.Contains(0, ((MockUtMetadata)peer1.UtMetadata).RequestedPieces);
 
-        download.PeerConnected(peer2);   // pipeline full, peer2 gets nothing yet
-        Assert.Empty(((MockUtMetadata)peer2.UtMetadata).RequestedPieces);
+        // Used to assert peer2 got nothing here, the pipeline being full. That was the bug: the
+        // pipeline caps distinct pieces in flight, not peers, so a peer arriving while every slot is
+        // held by someone who may never answer was left with nothing to do. It is now handed the
+        // outstanding request.
+        download.PeerConnected(peer2);
+        Assert.Contains(0, ((MockUtMetadata)peer2.UtMetadata).RequestedPieces);
+
+        int beforeReject = ((MockUtMetadata)peer2.UtMetadata).RequestedPieces.Count;
 
         download.MetadataRejectReceived(peer1, 0); // reject from peer1 → re-request from peer2
 
-        Assert.Contains(0, ((MockUtMetadata)peer2.UtMetadata).RequestedPieces);
+        Assert.True(
+            ((MockUtMetadata)peer2.UtMetadata).RequestedPieces.Count > beforeReject,
+            "A reject should hand the piece to another peer, not simply drop it.");
     }
 
     [Fact]

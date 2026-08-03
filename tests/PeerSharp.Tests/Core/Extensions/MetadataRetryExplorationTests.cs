@@ -361,8 +361,12 @@ public class MetadataRetryExplorationTests
         int attempts = dict.Contains(piece) ? ReadAttempts(dict[piece]!) : 1;
 
         var pendingType = typeof(MetadataDownload).GetNestedType("PendingMetadataRequest", BindingFlags.NonPublic)!;
+
+        // AskedCount is passed explicitly: reflection does not apply the parameter's default, so an
+        // argument per constructor parameter is required. One means "only the owning peer holds it",
+        // which is what a request injected for a single peer represents.
         dict[piece] = pendingType.GetConstructors()[0]
-            .Invoke([peer, DateTimeOffset.UtcNow.AddMinutes(-5), attempts]);
+            .Invoke([peer, DateTimeOffset.UtcNow.AddMinutes(-5), attempts, 1]);
     }
 
     private static int CurrentAttempts(MetadataDownload download, int piece)
