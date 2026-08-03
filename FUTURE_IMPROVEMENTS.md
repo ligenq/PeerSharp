@@ -380,6 +380,41 @@ removes the guessing.
 
 ---
 
+## Stopping a torrent does release memory, but not to the operating system
+
+**Reported as a leak, and it is not one.** Stopping a torrent looks in Task Manager as though nothing
+is given back. Measured with the sample - download 512 MiB at 6 MiB/s, stop at 40 seconds, then force
+a collection either side:
+
+| | heap | GC committed | working set |
+| --- | --- | --- | --- |
+| running | 13.2 MiB | 36.3 MiB | 80.5 MiB |
+| stopped, ordinary collection | 3.4 MiB | 16.8 MiB | 62.1 MiB |
+| stopped, compacting collection | 3.5 MiB | 4.0 MiB | 49.2 MiB |
+| baseline before the torrent | 1.2 MiB | - | 39.3 MiB |
+
+The managed heap returns to about 3.5 MiB either way, so nothing is retained that should not be: there
+is no leak in the library. What stays behind is *committed* memory. An ordinary collection frees the
+objects and leaves the segments committed, because the runtime expects to need them again - and
+committed segments are what a process monitor reports.
+
+**A compacting collection gives most of it back.** Setting
+`GCSettings.LargeObjectHeapCompactionMode = CompactOnce` and collecting gen2 with `compacting: true`
+takes committed memory from 16.8 MiB to 4.0 MiB and the working set from 62 to 49. The ten MiB still
+above the idle baseline is JIT-compiled code, loaded assemblies and thread stacks, which do not come
+back regardless.
+
+**Where that belongs.** Not in the library. A library that forces a blocking compacting collection is
+making a decision about the whole process on behalf of an application that may be doing something else
+at the time. The host knows when it is idle; PeerSharp does not. An application that wants the memory
+back after stopping should do it itself, and it is cheap here because the heap is small by then - a
+compacting gen2 over about 12 MiB.
+
+**Reproducing it.** `--stop-after <seconds>` in the sample stops the torrent, keeps reporting, and
+prints heap, committed and working set either side of a forced collection.
+
+---
+
 ## Allocation churn during transfers, measured and not yet attributed
 
 **The numbers, reproducible with the sample.** One instance seeds, another leeches by address with
