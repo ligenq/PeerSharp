@@ -41,6 +41,13 @@ internal sealed record Options
     public IReadOnlyList<string> Peers { get; init; } = [];
 
     /// <summary>
+    /// Fetch a magnet's metadata, report how long it took, and stop without downloading anything.
+    /// Metadata is the whole of a magnet's startup latency, and it is worth being able to time it
+    /// on its own rather than inferring it from where a transfer appears to begin.
+    /// </summary>
+    public bool MetadataOnly { get; init; }
+
+    /// <summary>
     /// Stop the torrent after this many seconds and keep reporting, which is how you see whether
     /// stopping actually gives memory back.
     /// </summary>
@@ -56,6 +63,7 @@ internal sealed record Options
         bool lsd = false;
         bool recheck = false;
         bool noDht = false;
+        bool metadataOnly = false;
         var peers = new List<string>();
         int? stopAfter = null;
         var interval = TimeSpan.FromSeconds(5);
@@ -89,6 +97,10 @@ internal sealed record Options
 
                 case "--no-dht":
                     noDht = true;
+                    break;
+
+                case "--metadata-only":
+                    metadataOnly = true;
                     break;
 
                 case "--stop-after":
@@ -183,6 +195,7 @@ internal sealed record Options
             LocalDiscovery = lsd,
             Recheck = recheck,
             NoDht = noDht,
+            MetadataOnly = metadataOnly,
             Peers = peers,
             StopAfterSeconds = stopAfter,
             ReportInterval = interval,
@@ -205,6 +218,7 @@ internal sealed record Options
                   --lsd            discover peers on the local network (BEP 14)
                   --recheck        hash-check existing files first, to seed what is already there
                   --no-dht         disable the DHT, isolating a run from the public network
+                  --metadata-only  fetch a magnet's metadata, time it, and stop before downloading
                   --peer <ip:port> try this peer as well as any found by discovery (repeatable)
                   --stop-after <s> stop the torrent after this long and keep reporting
                   --interval <s>   seconds between reports (default: 5)

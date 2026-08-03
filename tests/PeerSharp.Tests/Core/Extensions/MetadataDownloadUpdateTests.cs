@@ -68,8 +68,12 @@ public class MetadataDownloadUpdateTests
     {
         var pendingType = typeof(MetadataDownload)
             .GetNestedType("PendingMetadataRequest", BindingFlags.NonPublic)!;
+
+        // AskedCount is passed explicitly: reflection does not apply the parameter's default, so an
+        // argument per constructor parameter is required. One means "only the owning peer holds it",
+        // which is what a request injected for a single peer represents.
         var pending = pendingType.GetConstructors()[0]
-            .Invoke([peer, timestamp, attempts]);
+            .Invoke([peer, timestamp, attempts, 1]);
 
         var field = typeof(MetadataDownload)
             .GetField("_pendingRequests", BindingFlags.NonPublic | BindingFlags.Instance)!;
