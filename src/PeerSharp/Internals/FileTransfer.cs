@@ -498,6 +498,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _pexBroadcaster = new PexBroadcaster(
             () => _torrent.InfoFile.Info.IsPrivate,
             () => _torrent.PeersInternal.GetConnectedPeersInternal(),
+            () => _torrent.Settings.Connection.PexInterval,
             loggerFactory.CreateLogger<PexBroadcaster>());
         _backgroundTasks.Add(RunBackgroundTaskAsync(BroadcastPexAsync, "BroadcastPex"));
     }
@@ -512,7 +513,9 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         while (!ct.IsCancellationRequested)
         {
-            await Task.Delay(TimeSpan.FromSeconds(10), _timeProvider, ct).ConfigureAwait(false);
+            var interval = _torrent.Settings.Connection.PexInterval;
+            var tick = interval < TimeSpan.FromSeconds(10) ? interval : TimeSpan.FromSeconds(10);
+            await Task.Delay(tick, _timeProvider, ct).ConfigureAwait(false);
             _pexBroadcaster.Broadcast(_timeProvider.GetUtcNow());
         }
     }

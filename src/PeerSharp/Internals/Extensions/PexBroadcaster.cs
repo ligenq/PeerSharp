@@ -20,11 +20,12 @@ namespace PeerSharp.Internals.Extensions;
 /// us where they listen are therefore left out entirely rather than guessed at.
 /// </para>
 /// </summary>
-internal sealed class PexBroadcaster(Func<bool> isPrivate, Func<IEnumerable<IPexPeer>> getPeers, ILogger logger)
+internal sealed class PexBroadcaster(
+    Func<bool> isPrivate,
+    Func<IEnumerable<IPexPeer>> getPeers,
+    Func<TimeSpan> interval,
+    ILogger logger)
 {
-    /// <summary>Matches libtorrent's ut_pex interval. Sending faster is what gets a client throttled.</summary>
-    private static readonly TimeSpan Interval = TimeSpan.FromSeconds(60);
-
     /// <summary>Caps the message size, as libtorrent's max_peer_entries does.</summary>
     private const int MaxEntriesPerMessage = 100;
 
@@ -66,7 +67,7 @@ internal sealed class PexBroadcaster(Func<bool> isPrivate, Func<IEnumerable<IPex
                 _sent[peer] = state;
             }
 
-            if (state.LastSent is { } last && now - last < Interval)
+            if (state.LastSent is { } last && now - last < interval())
             {
                 continue;
             }

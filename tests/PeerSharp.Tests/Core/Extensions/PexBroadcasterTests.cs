@@ -142,11 +142,13 @@ public class PexBroadcasterTests
     {
         private readonly List<FakePexPeer> _peers = [];
 
-        public PexHarness(bool isPrivate)
+        public PexHarness(bool isPrivate, TimeSpan? interval = null)
         {
+            var effective = interval ?? TimeSpan.FromSeconds(60);
             Broadcaster = new PexBroadcaster(
                 () => isPrivate,
                 () => _peers,
+                () => effective,
                 NullLogger.Instance);
         }
 
