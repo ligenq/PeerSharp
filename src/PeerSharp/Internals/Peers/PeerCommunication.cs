@@ -379,6 +379,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     public ExtensionHandshake? RemoteExtensions { get; private set; }
 
+    /// <summary>
+    /// Where this peer accepts connections, once it has told us via BEP 10 <c>p</c>. Null until then,
+    /// and null for a peer that says it is not listening. Distinct from <see cref="RemoteEndPoint"/>,
+    /// whose port is whatever the connection happened to come from.
+    /// </summary>
+    public System.Net.IPEndPoint? RemoteListenEndPoint { get; private set; }
+
     public bool RemoteSupportsExtensions { get; private set; }
 
     /// <summary>
@@ -1470,6 +1477,24 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     _logger.LogDebug("BEP 30: Peer {PeerName} supports ut_hash_piece (ID={Id})", Name, hashPieceId);
                 }
 
+                // BEP 10 'p': where this peer actually listens, which is not where it connected from.
+                if (RemoteExtensions.ListenPort is { } advertisedPort)
+                {
+                    RemoteListenEndPoint = RemoteEndPoint is null
+                        ? null
+                        : new System.Net.IPEndPoint(RemoteEndPoint.Address, advertisedPort);
+                    _logger.LogDebug(
+                        "Peer {PeerName} listens on {ListenEndPoint}", Name, RemoteListenEndPoint);
+                }
+
+                // BEP 10 'yourip': one peer's opinion of our external address. Treated as a vote rather
+                // than an answer - any single peer can be wrong or lying, and the tracker already
+                // resolves this by agreement.
+                if (RemoteExtensions.YourIp is { Length: 4 or 16 } reportedIp)
+                {
+                    _torrent.ReportExternalAddress(reportedIp);
+                }
+
                 _logger.LogDebug("{PeerName} supports extensions: {Extensions}", Name, string.Join(", ", RemoteExtensions.MessageIds.Keys));
                 try { await Listener.ExtendedHandshakeFinishedAsync(this, RemoteExtensions).ConfigureAwait(false); } catch (Exception ex) { _logger.LogError(ex, "ExtendedHandshakeFinished callback error"); }
             }
@@ -2355,7 +2380,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // Tell the peer what we will actually take. Left unsaid, clients assume their own
                 // default - Transmission 500, libtorrent 2000 - and everything above our real depth
                 // comes back rejected.
-                RequestQueueDepth = ProtocolConstants.MaxOutstandingRequestsPerPeer
+                RequestQueueDepth = ProtocolConstants.MaxOutstandingRequestsPerPeer,
+
+                // BEP 10 'p'. The configured port may be zero, meaning "any", so this has to come from
+                // the listener that knows what was actually bound. Without it a peer we dialled sees
+                // only our ephemeral source port and can neither reconnect to us nor tell anyone else
+                // how to reach us.
+                ListenPort = _torrent.PortListener?.Port is > 0 and var bound ? bound : null,
+
+                // BEP 10 'yourip'. The peer cannot see its own external address; we can, and telling it
+                // is how it learns. Costs four bytes and is the same courtesy we want in return.
+                YourIp = RemoteEndPoint?.Address.GetAddressBytes()
             };
             handshake.MessageIds[UtMetadata.Name] = 1;
             UtMetadata.SetLocalMessageId(1);

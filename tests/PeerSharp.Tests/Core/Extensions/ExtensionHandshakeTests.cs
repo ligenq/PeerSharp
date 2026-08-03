@@ -124,6 +124,35 @@ public class ExtensionHandshakeTests
     }
 
     [Fact]
+    public void ListenPort_RoundTrips()
+    {
+        var handshake = new ExtensionHandshake { ListenPort = 6881 };
+
+        Assert.Equal(6881, ExtensionHandshake.Parse(handshake.ToBencode()).ListenPort);
+    }
+
+    [Fact]
+    public void ListenPort_IsOmittedWhenUnset()
+    {
+        Assert.False(new ExtensionHandshake().ToBencode().Dict.ContainsKey("p"));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(65536)]
+    [InlineData(1L + int.MaxValue)]
+    public void ListenPort_OutOfRangeIsIgnored(long value)
+    {
+        // Zero is a peer saying it does not listen, and the rest cannot be ports at all. Accepting any
+        // of them would have us record an endpoint we can never connect to.
+        var dict = new BDict();
+        dict.Dict["p"] = new BNumber(value);
+
+        Assert.Null(ExtensionHandshake.Parse(dict).ListenPort);
+    }
+
+    [Fact]
     public void AdvertisedReqq_MatchesWhatTheUploadQueueWillAccept()
     {
         // The whole point of advertising is that the number is true. If these ever diverge we are
