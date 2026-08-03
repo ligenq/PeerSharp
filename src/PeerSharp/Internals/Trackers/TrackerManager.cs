@@ -126,7 +126,34 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         }
     }
 
+    /// <inheritdoc />
     public void AddTracker(string url)
+    {
+        // BEP 27: a private torrent announces only to the trackers named in its own metadata.
+        // Announcing it anywhere else publishes a swarm that is meant to stay closed, which is
+        // what private trackers ban accounts for - so refuse here rather than trust every caller
+        // to check the flag first. This is the same gate already applied to the DHT, PEX and LSD;
+        // the tracker path was the one way left to widen a private swarm from outside.
+        if (_torrent.InfoFile.Info.IsPrivate)
+        {
+            _logger.LogDebug(
+                "Refused tracker {Url}: {TorrentName} is a private torrent", url, _torrent.Name);
+            return;
+        }
+
+        AddTrackerFromMetadata(url);
+    }
+
+    /// <summary>
+    /// Adds a tracker that came from the torrent's own metadata.
+    ///
+    /// <para>
+    /// Deliberately not subject to the private-torrent check in <see cref="AddTracker"/>: these are
+    /// precisely the trackers a private torrent is supposed to use, so gating them too would leave it
+    /// with nowhere to announce at all.
+    /// </para>
+    /// </summary>
+    internal void AddTrackerFromMetadata(string url)
     {
         if (string.IsNullOrWhiteSpace(url))
         {
