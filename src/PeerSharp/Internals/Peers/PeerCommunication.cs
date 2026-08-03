@@ -386,6 +386,22 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     public System.Net.IPEndPoint? RemoteListenEndPoint { get; internal set; }
 
+    private byte[]? _ourPeerId;
+
+    /// <summary>
+    /// The peer id we present on this connection.
+    ///
+    /// <para>
+    /// Outgoing connections each get a fresh one, as libtorrent does. The eight byte client
+    /// fingerprint is kept so peers can still tell what we are; only the unique tail changes. A single
+    /// id reused everywhere lets anyone watching a swarm tie all of a client's connections together,
+    /// across torrents and across sessions, which is exactly how swarm monitoring works. The stable id
+    /// from settings is still what the tracker sees, since that is the identity a tracker session is
+    /// built on.
+    /// </para>
+    /// </summary>
+    public byte[] OurPeerId => _ourPeerId ??= _torrent.Settings.PeerId;
+
     /// <summary>
     /// Whether this peer has let a request expire without answering it, and has sent us nothing since.
     ///
@@ -1236,6 +1252,15 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         RemoteSupportsV2 = parsed.SupportsV2;
         _logger.LogDebug("Peer {PeerName} capabilities: extensions={RemoteSupportsExtensions}, fast={RemoteSupportsFastExtension}, v2={RemoteSupportsV2}", Name, RemoteSupportsExtensions, RemoteSupportsFastExtension, RemoteSupportsV2);
 
+        // A handshake carrying an id we issued on an outgoing connection is our own connection coming
+        // back to us. Keeping it would spend a slot on a peer that can never have anything we need.
+        if (_torrent.IsOurOutgoingPeerId(parsed.PeerId))
+        {
+            _logger.LogDebug("Dropping {PeerName}: it is our own connection looped back", Name);
+            await CloseAsync().ConfigureAwait(false);
+            return false;
+        }
+
         Array.Copy(parsed.PeerId, PeerId, 20);
         PeerPieces = new PiecesProgress(_torrent.Pieces.Count);
 
@@ -1289,6 +1314,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     public void StartAsInitiator(Stream stream)
     {
+        // We are dialling out, so this connection gets its own id and the torrent remembers it until
+        // the connection ends. An incoming handshake presenting it is our own dial coming back.
+        _ourPeerId = _torrent.IssueOutgoingPeerId();
+
         Stream = stream;
         _cts?.Dispose();
         _cts = new CancellationTokenSource();
@@ -1415,6 +1444,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private async Task CleanupResourcesAsync()
     {
+        // Nothing can loop back to a connection that is gone, and the set must not grow forever.
+        _torrent.ReleaseOutgoingPeerId(_ourPeerId);
+
         if (_cts != null)
         {
             await _cts.CancelAsync().ConfigureAwait(false);
@@ -1449,7 +1481,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private byte[] CreateHandshakeBuffer()
     {
-        return PeerHandshake.Create(_torrent.InfoFile.Info, _torrent.Settings.PeerId);
+        return PeerHandshake.Create(_torrent.InfoFile.Info, OurPeerId);
     }
 
     private int GetAdaptiveSendQueueLimit()

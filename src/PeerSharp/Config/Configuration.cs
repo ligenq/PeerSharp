@@ -50,6 +50,26 @@ public sealed class ConnectionSettings
     public int ConnectionsPerSecond { get; set; } = 18;
 
     /// <summary>
+    /// Whether more than one peer connection may share a single IP address. On by default, which is
+    /// the opposite of libtorrent's <c>allow_multiple_connections_per_ip</c>.
+    ///
+    /// <para>
+    /// The case for restricting it is that one host can otherwise hold as many slots as it has source
+    /// ports. The case against is that carrier-grade NAT puts large numbers of unrelated subscribers
+    /// behind one address, and refusing them costs real peers - as does running two clients on one
+    /// machine. libtorrent's default was set when shared addresses were rarer than they are now, and
+    /// the abuse it guards against is already bounded by the overall connection limit.
+    /// </para>
+    ///
+    /// <para>
+    /// Turning it off has a sharp edge worth knowing about: the check runs when a connection is
+    /// accepted, before any handshake, so a peer reconnecting from a new source port is refused
+    /// rather than recognised as the same peer and allowed to replace its own stale connection.
+    /// </para>
+    /// </summary>
+    public bool AllowMultipleConnectionsPerIp { get; set; } = true;
+
+    /// <summary>
     /// How often, at most, one peer is told about swarm changes over ut_pex (BEP 11).
     ///
     /// <para>

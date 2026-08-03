@@ -1757,7 +1757,41 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// </summary>
     private bool TryRegisterConnectedEndpoint(PeerCommunication peer)
     {
-        return peer.RemoteEndPoint == null || _connectedEndpoints.TryAdd(peer.RemoteEndPoint, peer);
+        if (peer.RemoteEndPoint == null)
+        {
+            return true;
+        }
+
+        if (!_connectedEndpoints.TryAdd(peer.RemoteEndPoint, peer))
+        {
+            return false;
+        }
+
+        // The endpoint gate above only stops the exact same address and port twice. One host dialling
+        // from a different source port each time gets past it, and can take as many slots as it likes.
+        // libtorrent matches on address alone for the same reason, and defaults to doing so.
+        if (!_settings.Connection.AllowMultipleConnectionsPerIp && SharesAddressWithAnotherPeer(peer))
+        {
+            _connectedEndpoints.TryRemove(KeyValuePair.Create(peer.RemoteEndPoint, peer));
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Whether some other live connection is already using this peer's address.</summary>
+    private bool SharesAddressWithAnotherPeer(PeerCommunication peer)
+    {
+        var address = peer.RemoteEndPoint!.Address;
+        foreach (var (endpoint, other) in _connectedEndpoints)
+        {
+            if (!ReferenceEquals(other, peer) && endpoint.Address.Equals(address))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
