@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Text;
 using PeerSharp.Interfaces;
@@ -13,7 +14,7 @@ namespace PeerSharp.Cli;
 /// from a process that is doing nothing else.
 /// </para>
 /// </summary>
-internal sealed class Reporter(IClientEngine engine, ITorrent torrent, Options options)
+internal sealed class Reporter(IClientEngine engine, ITorrent torrent, Options options, ILogger logger)
 {
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private long _lastDownloaded;
@@ -49,7 +50,13 @@ internal sealed class Reporter(IClientEngine engine, ITorrent torrent, Options o
         line.Append($"peers={torrent.Peers.ConnectedCount,3} ");
         line.Append($"down={Rate(downRate)} up={Rate(upRate)} ");
         line.Append($"state={torrent.State}");
-        Console.WriteLine(line.ToString());
+        var report = line.ToString();
+        Console.WriteLine(report);
+
+        // Into the log as well. A log file that records what the engine did but not how fast it was
+        // going cannot answer the question it exists for: the first one collected this way had every
+        // connection and request in it and no way to tell which ten seconds were the slow ones.
+        logger.LogInformation("REPORT {Report}", report);
 
         if (options.Diagnostics)
         {

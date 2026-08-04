@@ -725,8 +725,45 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (!_connectionQueue.Writer.TryWrite(new ConnectionRequest(ip, port, forceUtp)))
         {
             _pendingConnections.TryRemove(endpoint, out _);
-            _logger.LogDebug("Connection queue full, dropping request to {Ip}:{Port}", ip, port);
+            ReportConnectionQueueOverflow();
         }
+    }
+
+    private long _queueOverflowWindowStart = Environment.TickCount64;
+    private int _queueOverflowCount;
+
+    /// <summary>
+    /// Says the connection queue is overflowing, once a window rather than once a request.
+    ///
+    /// <para>
+    /// Discarding candidates when the queue is full is the right thing to do - the queue drains at a
+    /// fixed rate and a swarm can offer peers far faster than that - but a line each made this 55% of
+    /// a three minute log: 22,737 of 41,189 lines, 14,778 of them inside ten seconds while the DHT was
+    /// delivering. The rate is the interesting quantity, not the individual address, and a count says
+    /// it better than thousands of repetitions.
+    /// </para>
+    /// </summary>
+    private void ReportConnectionQueueOverflow()
+    {
+        long now = Environment.TickCount64;
+        long windowStart = Interlocked.Read(ref _queueOverflowWindowStart);
+        int dropped = Interlocked.Increment(ref _queueOverflowCount);
+
+        if (now - windowStart < 10000)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref _queueOverflowWindowStart, now, windowStart) != windowStart)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref _queueOverflowCount, 0);
+        _logger.LogDebug(
+            "Connection queue full: discarded {Count} candidate(s) in the last {Seconds}s - peers are arriving faster than they can be dialled",
+            dropped,
+            (now - windowStart) / 1000);
     }
 
     public async ValueTask DisposeAsync()

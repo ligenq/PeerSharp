@@ -165,7 +165,7 @@ Console.CancelKeyPress += (_, e) =>
     stopping.Cancel();
 };
 
-var reporter = new Reporter(engine, torrent, options);
+var reporter = new Reporter(engine, torrent, options, loggerFactory.CreateLogger("Report"));
 
 if (options.MetadataOnly)
 {
