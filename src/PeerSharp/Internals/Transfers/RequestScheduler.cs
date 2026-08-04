@@ -42,7 +42,7 @@ internal sealed class RequestScheduler
 
     public async Task EvaluateNextRequestsAsync(PeerCommunication peer, bool endGameMode, Func<bool> isQueueFull)
     {
-        if (isQueueFull())
+        if (peer.Connected == 0 || isQueueFull())
         {
             return;
         }
@@ -160,7 +160,7 @@ internal sealed class RequestScheduler
 
     private async Task<int> ProcessPieceForRequestsAsync(PieceState state, PeerCommunication peer, int maxToSend, IBlockRequestStrategy strategy)
     {
-        if (maxToSend <= 0 || state.IsWriting)
+        if (maxToSend <= 0 || state.IsWriting || peer.Connected == 0)
         {
             return 0;
         }
@@ -175,6 +175,15 @@ internal sealed class RequestScheduler
         // have left the piece unable to complete from anyone.
         if (!state.TryClaimForRetry(peer, now, RetryClaimTimeout))
         {
+            return 0;
+        }
+
+        // Disconnect cleanup releases retry claims, but an evaluation already in flight can race it:
+        // observe Connected before cleanup, claim after cleanup, and leave the dead peer as owner for
+        // another thirty seconds. Recheck after claiming and give it back immediately.
+        if (peer.Connected == 0)
+        {
+            state.ReleaseRetryClaim(peer);
             return 0;
         }
 
@@ -212,6 +221,10 @@ internal sealed class RequestScheduler
                         pending.TryRemove((pieceIndex, offset), out _);
                     }
                     _requestTracker.RemoveBlockRequest(pieceIndex, offset, peer);
+                    if (peer.Connected == 0)
+                    {
+                        state.ReleaseRetryClaim(peer);
+                    }
                     return sent;
                 }
 

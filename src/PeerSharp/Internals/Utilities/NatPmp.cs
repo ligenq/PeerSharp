@@ -221,20 +221,37 @@ internal class NatPmpPortMapping : IPortMapper
                 logger.LogWarning("NAT-PMP: Gateway {Gateway} returned error code {Result}", gateway, resultCode);
             }
         }
+        catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            // A gateway that does not answer is the ordinary case, not a fault: most consumer routers
+            // speak UPnP and not NAT-PMP. Do not print the identical cancellation trace per gateway.
+            #pragma warning disable S6667
+            logger.LogDebug(
+                "NAT-PMP: no mapping from {Gateway} ({Reason}: {Message})",
+                gateway,
+                ex.GetType().Name,
+                ex.Message);
+            #pragma warning restore S6667
+        }
+        catch (SocketException ex)
+        {
+            // An unreachable/refusing gateway is equally ordinary, but unexpected implementation or
+            // configuration failures still fall through to the traced catch below.
+            #pragma warning disable S6667
+            logger.LogDebug(
+                "NAT-PMP: no mapping from {Gateway} ({Reason}: {Message})",
+                gateway,
+                ex.SocketErrorCode,
+                ex.Message);
+            #pragma warning restore S6667
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Caller-requested shutdown.
+        }
         catch (Exception ex)
         {
-            if (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-            {
-                // A gateway that does not answer is the ordinary case, not a fault: most consumer
-                // routers speak UPnP and not NAT-PMP, and with a VPN up there are two gateways of which
-                // at least one is certain to stay silent. The type and message identify it; the stack
-                // trace is the same every time and four of them per attempt is most of what a reader
-                // sees.
-                #pragma warning disable S6667
-                logger.LogDebug(
-                    "NAT-PMP: no mapping from {Gateway} ({Reason})", gateway, ex.GetType().Name);
-                #pragma warning restore S6667
-            }
+            logger.LogDebug(ex, "NAT-PMP: unexpected mapping failure on {Gateway}", gateway);
         }
         return (false, null);
     }

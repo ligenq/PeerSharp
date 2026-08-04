@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Utilities;
 using System.Net;
 using System.Net.Sockets;
@@ -6,6 +7,30 @@ namespace PeerSharp.Tests.Core.Utilities;
 
 public sealed class NatPmpTests
 {
+    [Fact]
+    public async Task MapPortAsync_UnexpectedFailure_KeepsDiagnosticException()
+    {
+        var captured = new Interop.CapturingLoggerProvider(LogLevel.Debug);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Debug);
+            builder.AddProvider(captured);
+        });
+        var mapper = new NatPmpPortMapping(
+            () => [IPAddress.Loopback],
+            -1,
+            TimeProvider.System,
+            loggerFactory);
+        await mapper.StartAsync(CancellationToken.None);
+
+        Assert.False(await mapper.MapPortAsync(1234, "UDP", "test", CancellationToken.None));
+
+        var entry = Assert.Single(
+            captured.Summarise(),
+            item => item.Message.Contains("unexpected mapping failure", StringComparison.Ordinal));
+        Assert.Contains("[ArgumentOutOfRangeException]", entry.Message);
+    }
+
     [Fact]
     public async Task MapPortAsync_SucceedsWithValidResponse()
     {

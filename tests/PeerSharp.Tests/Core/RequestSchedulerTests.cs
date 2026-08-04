@@ -132,6 +132,22 @@ public class RequestSchedulerTests
         Assert.Equal(4, requests.Keys.Count(k => k.Piece == 0));
     }
 
+    [Fact]
+    public async Task EvaluateNextRequestsAsync_DisconnectedPeer_DoesNotReclaimFailedPiece()
+    {
+        var fixture = CreateSchedulerFixture(pieceCount: 1, blocksPerPiece: 1, maxActivePieces: 1, maxRequestsPerPeer: 1);
+        var state = new PieceState(0, 1);
+        state.RecordHashFailure();
+        Assert.True(fixture.PieceStateManager.TryAddPiece(state));
+        SetPrivateField(fixture.Peer, "_connected", 0);
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
+        var replacement = new PeerCommunication(fixture.Torrent, new MockPeerListener(), TimeProvider.System);
+        Assert.True(state.TryClaimForRetry(replacement, DateTimeOffset.UtcNow, TimeSpan.FromSeconds(30)));
+        Assert.False(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out _));
+    }
+
     private static void SetPrivateField(object target, string fieldName, int value)
     {
         var field = target.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);

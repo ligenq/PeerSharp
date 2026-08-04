@@ -23,6 +23,7 @@ namespace PeerSharp.Tests.Interop;
 /// <c>ConnectionSettings.PexInterval</c> being adjustable.
 /// </para>
 /// </summary>
+[Collection("LiveEngine")]
 public sealed class PexLiveExchangeTests : IAsyncLifetime
 {
     private readonly ITestOutputHelper _output;

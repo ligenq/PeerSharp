@@ -45,8 +45,15 @@ internal sealed class FileLoggerProvider : ILoggerProvider
             }
 
             _disposed = true;
-            _writer.Flush();
-            _writer.Dispose();
+            try
+            {
+                _writer.Dispose();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Logging must not turn an otherwise clean shutdown into a process failure.
+                ReportFailure(ex);
+            }
         }
     }
 
@@ -59,18 +66,41 @@ internal sealed class FileLoggerProvider : ILoggerProvider
                 return;
             }
 
-            _writer.Write(DateTime.Now.ToString("HH:mm:ss.fff"));
-            _writer.Write(' ');
-            _writer.Write(Abbreviate(level));
-            _writer.Write(": ");
-            _writer.Write(ShortCategory(category));
-            _writer.Write(" - ");
-            _writer.WriteLine(message);
-
-            if (exception is not null)
+            try
             {
-                _writer.WriteLine(exception.ToString());
+                _writer.Write(DateTime.Now.ToString("HH:mm:ss.fff"));
+                _writer.Write(' ');
+                _writer.Write(Abbreviate(level));
+                _writer.Write(": ");
+                _writer.Write(ShortCategory(category));
+                _writer.Write(" - ");
+                _writer.WriteLine(message);
+
+                if (exception is not null)
+                {
+                    _writer.WriteLine(exception.ToString());
+                }
             }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // A logger is diagnostic infrastructure. A full/unavailable log drive must not make
+                // a peer callback throw and destabilize the transfer it was meant to observe.
+                _disposed = true;
+                try { _writer.Dispose(); } catch (Exception disposeEx) when (disposeEx is IOException or UnauthorizedAccessException) { }
+                ReportFailure(ex);
+            }
+        }
+    }
+
+    private static void ReportFailure(Exception ex)
+    {
+        try
+        {
+            Console.Error.WriteLine($"Log file disabled after a write failure: {ex.Message}");
+        }
+        catch (Exception consoleEx) when (consoleEx is IOException or ObjectDisposedException)
+        {
+            // There is nowhere left to report it safely.
         }
     }
 

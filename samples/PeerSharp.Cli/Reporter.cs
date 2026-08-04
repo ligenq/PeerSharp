@@ -56,7 +56,10 @@ internal sealed class Reporter(IClientEngine engine, ITorrent torrent, Options o
         // Into the log as well. A log file that records what the engine did but not how fast it was
         // going cannot answer the question it exists for: the first one collected this way had every
         // connection and request in it and no way to tell which ten seconds were the slow ones.
-        logger.LogInformation("REPORT {Report}", report);
+        if (options.LogPath is not null)
+        {
+            logger.LogInformation("REPORT {Report}", report);
+        }
 
         if (options.Diagnostics)
         {
