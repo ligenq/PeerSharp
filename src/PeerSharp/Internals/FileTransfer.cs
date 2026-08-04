@@ -5,6 +5,7 @@ using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Peers;
 using PeerSharp.PiecePicking;
 using System.Collections.Concurrent;
+using System.Net;
 using System.Threading.Channels;
 using PeerSharp.Messages;
 using PeerSharp.Internals.Transfers;
@@ -44,6 +45,7 @@ internal sealed class PieceState : IDisposable
     private bool _isWriting;
     private int _receivedCount;
     private bool _disposed;
+    private bool _hasWebSeedContributor;
 
     public PieceState(int index, int blocksCount)
     {
@@ -56,6 +58,17 @@ internal sealed class PieceState : IDisposable
     public bool[] Blocks { get; }
     public HashSet<PeerCommunication> Contributors { get; } = [];
     public int Index { get; }
+
+    public bool HasWebSeedContributor
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _hasWebSeedContributor;
+            }
+        }
+    }
 
     private PeerCommunication? _retryOwner;
     private DateTimeOffset _retryClaimedAt;
@@ -216,6 +229,7 @@ internal sealed class PieceState : IDisposable
             Array.Clear(Blocks, 0, Blocks.Length);
             _receivedCount = 0;
             Contributors.Clear();
+            _hasWebSeedContributor = false;
             _isWriting = false;
 
             // A fresh attempt gets a fresh candidate. HashFailures is deliberately not cleared - it is
@@ -299,7 +313,7 @@ internal sealed class PieceState : IDisposable
             BlockData[blockIdx] = block;
             Blocks[blockIdx] = true;
             _receivedCount++;
-            // No contributor for web seeds
+            _hasWebSeedContributor = true;
             return true;
         }
     }
@@ -1478,7 +1492,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                         // bad data and none was ever dropped for it - the accounting existed, ran, and
                         // could not have had an effect.
                         var contributors = pieceToProcess.Contributors.ToArray();
-                        bool soleSupplier = contributors.Length == 1;
+                        // A web seed has no PeerCommunication object. If it supplied part of the
+                        // piece, one peer in Contributors was not the sole source and must not be
+                        // dropped as though attribution were certain.
+                        bool soleSupplier = contributors.Length == 1 && !pieceToProcess.HasWebSeedContributor;
 
                         pieceToProcess.RecordHashFailure();
                         pieceToProcess.Reset();
@@ -1488,6 +1505,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                             pieceToProcess.Index,
                             pieceToProcess.HashFailures);
 
+                        // The quarantine is keyed by IP address, so one failed piece must count once
+                        // per address as well. Multiple connections behind the same NAT can all have
+                        // contributed; incrementing once per connection would turn one ambiguous
+                        // failure into three strikes and ban the whole address immediately.
+                        var refusalByAddress = new Dictionary<IPAddress, bool>();
                         foreach (var p in contributors)
                         {
                             p.Strikes++;
@@ -1495,7 +1517,24 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                             // Counted against the address, not this connection. Strikes on the
                             // connection object are lost the moment the peer reconnects, so the same
                             // source could otherwise keep feeding bad data indefinitely.
-                            bool refuse = _torrent.PeersInternal.RecordHashFailure(p);
+                            bool refuse;
+                            if (p.RemoteEndPoint?.Address is { } address)
+                            {
+                                if (address.IsIPv4MappedToIPv6)
+                                {
+                                    address = address.MapToIPv4();
+                                }
+
+                                if (!refusalByAddress.TryGetValue(address, out refuse))
+                                {
+                                    refuse = _torrent.PeersInternal.RecordHashFailure(p);
+                                    refusalByAddress[address] = refuse;
+                                }
+                            }
+                            else
+                            {
+                                refuse = _torrent.PeersInternal.RecordHashFailure(p);
+                            }
 
                             // A piece nobody else contributed to leaves no doubt, so there is nothing
                             // to accumulate evidence for. This is what the retry restriction below is

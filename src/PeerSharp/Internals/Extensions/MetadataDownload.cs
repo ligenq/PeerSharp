@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
 using System.Collections;
 
@@ -179,6 +180,10 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             // valid request which is still in flight.
             RecordFor(peer).Answered++;
             _pendingRequests.Remove(pieceIndex);
+            if (peer is PeerCommunication communication)
+            {
+                communication.MarkUsefulDataExchanged();
+            }
 
             if (_receivedPieces[pieceIndex])
             {
@@ -321,6 +326,10 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             Array.Copy(_metadataBuffer, offset, data, 0, length);
 
             peer.UtMetadata.SendData(pieceIndex, data, _metadataBuffer.Length);
+            if (peer is PeerCommunication communication)
+            {
+                communication.MarkUsefulDataExchanged();
+            }
         }
     }
 

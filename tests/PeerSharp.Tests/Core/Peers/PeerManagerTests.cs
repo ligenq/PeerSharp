@@ -65,6 +65,60 @@ public class PeerManagerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task AddIncomingPeerAsync_BadDataAddress_ReleasesProvisionalSlot()
+    {
+        var ctx = CreateContext(new PeerCommunicationFactory());
+        var remote = new IPEndPoint(IPAddress.Parse("203.0.113.40"), 50000);
+        var offender = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = remote
+        };
+
+        Assert.False(ctx.Manager.RecordHashFailure(offender));
+        Assert.False(ctx.Manager.RecordHashFailure(offender));
+        Assert.True(ctx.Manager.RecordHashFailure(offender));
+
+        using var stream = new MemoryStream();
+        byte[] handshake = BuildHandshake(ctx.Torrent.InfoFile.Info.Hash.Span, ctx.Torrent.Settings.PeerId);
+        await ctx.Manager.AddIncomingPeerAsync(stream, handshake, remote);
+
+        Assert.Equal(0, ctx.Manager.ConnectedCount);
+        Assert.Equal(1, ctx.Governor.AcquiredConnections);
+        Assert.Equal(1, ctx.Governor.ReleasedConnections);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddIncomingTcpPeerAsync_BadDataAddress_IsRejectedBeforeTakingSlot()
+    {
+        var ctx = CreateContext(new PeerCommunicationFactory());
+        var offender = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 6881)
+        };
+
+        ctx.Manager.RecordHashFailure(offender);
+        ctx.Manager.RecordHashFailure(offender);
+        ctx.Manager.RecordHashFailure(offender);
+
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        using var serverClient = await listener.AcceptTcpClientAsync();
+
+        byte[] handshake = BuildHandshake(ctx.Torrent.InfoFile.Info.Hash.Span, ctx.Torrent.Settings.PeerId);
+        await ctx.Manager.AddIncomingPeerAsync(serverClient, handshake);
+
+        Assert.Equal(0, ctx.Manager.ConnectedCount);
+        Assert.Equal(0, ctx.Governor.AcquiredConnections);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task AddIncomingPeerAsync_InvalidHandshake_ReleasesSlot()
     {
         var ctx = CreateContext();
@@ -952,7 +1006,8 @@ public class PeerManagerTests
         {
             var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
             {
-                RemoteEndPoint = endpoint
+                RemoteEndPoint = endpoint,
+                IsOutgoing = true
             };
             connected.TryAdd(peer, 0);
             // The count is maintained alongside the dictionary by the registration path this bypasses,
@@ -993,7 +1048,8 @@ public class PeerManagerTests
 
         var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
         {
-            RemoteEndPoint = endpoint
+            RemoteEndPoint = endpoint,
+            IsOutgoing = true
         };
         SetPrivateField(peer, "_uploaded", 16384L);
         connected.TryAdd(peer, 0);
@@ -1005,6 +1061,64 @@ public class PeerManagerTests
         Assert.True(history.ExchangedData);
         Assert.Equal(0, history.FruitlessConnectionCount);
         Assert.Equal(DateTimeOffset.MinValue, history.NextConnectAttempt);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ConnectionClosed_AfterMetadataExchange_ClearsTheBackoff()
+    {
+        var ctx = CreateContext();
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.42"), 6881);
+        var known = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+        known[endpoint] = new PeerHistory
+        {
+            EndPoint = endpoint,
+            FruitlessConnectionCount = 3,
+            NextConnectAttempt = DateTimeOffset.UtcNow.AddMinutes(5)
+        };
+
+        var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = endpoint,
+            IsOutgoing = true
+        };
+        peer.MarkUsefulDataExchanged();
+        connected.TryAdd(peer, 0);
+        SetPrivateField(ctx.Manager, "_connectedPeersCount", 1);
+
+        await ctx.Manager.ConnectionClosedAsync(peer, 0);
+
+        Assert.Equal(0, known[endpoint].FruitlessConnectionCount);
+        Assert.Equal(DateTimeOffset.MinValue, known[endpoint].NextConnectAttempt);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ConnectionClosed_IncomingSourcePort_RemainsNonDialableWhenHistoryWasPruned()
+    {
+        var ctx = CreateContext();
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.41"), 50001);
+        var known = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+        var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = endpoint,
+            IsOutgoing = false
+        };
+
+        // Model cache pruning while the connection is alive: the close path must recreate the entry
+        // with the connection's provenance, not with GetOrAddKnownPeerHistory's dialable default.
+        connected.TryAdd(peer, 0);
+        SetPrivateField(ctx.Manager, "_connectedPeersCount", 1);
+
+        await ctx.Manager.ConnectionClosedAsync(peer, 0);
+
+        Assert.True(known.TryGetValue(endpoint, out var history));
+        Assert.False(history!.IsListenAddress);
+        Assert.Equal(0, history.FruitlessConnectionCount);
 
         await CleanupAsync(ctx);
     }
@@ -1093,7 +1207,7 @@ public class PeerManagerTests
         await manager.DisposeAsync();
     }
 
-    private static PeerManagerContext CreateContext()
+    private static PeerManagerContext CreateContext(IPeerCommunicationFactory? peerFactory = null)
     {
         var metadata = new TorrentFileMetadata();
         metadata.Info.Version = TorrentVersion.V1;
@@ -1107,7 +1221,12 @@ public class PeerManagerTests
         torrent.Settings.Connection.Encryption = Encryption.Refuse;
 
         var governor = new FakeConnectionGovernor();
-        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new RealPeerFactory(), TimeProvider.System, governor);
+        var manager = new PeerManager(
+            torrent,
+            new TorrentTestUtility.MockGeoIpService(),
+            peerFactory ?? new RealPeerFactory(),
+            TimeProvider.System,
+            governor);
 
         return new PeerManagerContext(torrent, manager, governor, path);
     }

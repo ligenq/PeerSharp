@@ -87,6 +87,136 @@ public class DhtManagerTests
         Assert.Equal(dht, _listener.Receiver);
     }
 
+    [Fact]
+    public async Task FindPeers_ReportsPacketsActuallySent_AndDoesNotSuppressAnnounceIntent()
+    {
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback);
+        await dht.StartAsync();
+
+        var nodeEndPoint = new IPEndPoint(IPAddress.Parse("192.0.2.50"), 6881);
+        var ping = new BDict();
+        ping.Dict["t"] = new BString("known"u8.ToArray());
+        ping.Dict["y"] = new BString("q"u8.ToArray());
+        ping.Dict["q"] = new BString("ping"u8.ToArray());
+        var arguments = new BDict();
+        arguments.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        ping.Dict["a"] = arguments;
+        dht.Receive(BencodeWriter.Write(ping), nodeEndPoint);
+        _listener.SentPackets.Clear();
+
+        var hash = InfoHash.CreateRandom();
+        Assert.Equal(1, dht.FindPeers(hash));
+
+        // The identical lookup is still inside the deduplication window, so reporting the routing
+        // table size here would claim a packet was sent when none was.
+        Assert.Equal(0, dht.FindPeers(hash));
+
+        // Announce begins with get_peers too, but it carries different transaction intent: when the
+        // token comes back it must send announce_peer. It must not be swallowed by the lookup above.
+        dht.Announce(hash, 51413);
+
+        Assert.Equal(2, _listener.SentPackets.Count);
+        Assert.All(_listener.SentPackets, packet =>
+        {
+            var query = Assert.IsType<BDict>(BencodeParser.Parse(packet.Data));
+            Assert.Equal("get_peers", query.GetString("q"));
+        });
+    }
+
+    /// <summary>
+    /// BEP 5 stores a peer on the nodes nearest the info hash, and eight is the number every
+    /// implementation uses. The announce rides along with an iterative lookup, so it inherits that
+    /// walk unless it is bounded - once announcing began working at all, a 100 second run against the
+    /// real DHT told 3688 distinct nodes to store us.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task Announce_TellsOnlyTheClosestNodes_NotEveryNodeTheLookupReaches()
+    {
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback);
+        await dht.StartAsync();
+
+        // Populate the routing table by letting a handful of nodes ping us.
+        for (int i = 1; i <= 8; i++)
+        {
+            var ping = new BDict();
+            ping.Dict["t"] = new BString([(byte)i]);
+            ping.Dict["y"] = new BString("q"u8.ToArray());
+            ping.Dict["q"] = new BString("ping"u8.ToArray());
+            var pingArgs = new BDict();
+            pingArgs.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+            ping.Dict["a"] = pingArgs;
+            dht.Receive(BencodeWriter.Write(ping), new IPEndPoint(IPAddress.Parse($"192.0.2.{i}"), 6881));
+        }
+
+        var hash = InfoHash.CreateRandom();
+        _listener.SentPackets.Clear();
+        dht.Announce(hash, 51413);
+
+        var nodesAsked = new HashSet<IPEndPoint>();
+        int announces = 0;
+
+        // Answer every get_peers with a token, as a cooperative node would. Each reply also drives the
+        // walk onward, which is exactly how the announce used to spread without limit.
+        for (int round = 0; round < 6; round++)
+        {
+            var queries = _listener.SentPackets.ToArray();
+            _listener.SentPackets.Clear();
+
+            foreach (var (data, endpoint) in queries)
+            {
+                var query = (BDict)BencodeParser.Parse(data);
+                if (query.GetString("q") == "announce_peer")
+                {
+                    announces++;
+                    continue;
+                }
+
+                if (query.GetString("q") != "get_peers")
+                {
+                    continue;
+                }
+
+                nodesAsked.Add(endpoint);
+
+                var response = new BDict();
+                response.Dict["t"] = new BString(query.GetBytes("t")!.Value.ToArray());
+                response.Dict["y"] = new BString("r"u8.ToArray());
+                var values = new BDict();
+                values.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+                values.Dict["token"] = new BString("tok!"u8.ToArray());
+
+                // Hand back a fresh node so the lookup keeps walking outward.
+                var contact = new byte[26];
+                InfoHash.CreateRandom().ToArray().CopyTo(contact, 0);
+                contact[20] = 198; contact[21] = 51; contact[22] = 100; contact[23] = (byte)(round + 1);
+                contact[24] = 0x1A; contact[25] = 0xE1;
+                values.Dict["nodes"] = new BString(contact);
+                response.Dict["r"] = values;
+
+                dht.Receive(BencodeWriter.Write(response), endpoint);
+            }
+        }
+
+        foreach (var (data, _) in _listener.SentPackets)
+        {
+            var sent = (BDict)BencodeParser.Parse(data);
+            if (sent.GetString("q") == "announce_peer")
+            {
+                announces++;
+            }
+        }
+
+        // Without this the assertion below would hold for the wrong reason - a walk that never got
+        // past eight nodes cannot demonstrate a bound at eight.
+        Assert.True(
+            nodesAsked.Count > 8,
+            $"The lookup must reach more than eight nodes for the budget to be what limits the announce; it reached {nodesAsked.Count}.");
+
+        Assert.InRange(announces, 1, 8);
+
+        await dht.DisposeAsync();
+    }
+
     [Fact(Timeout = 30000)]
     public async Task StopAsync_CancelsBlockedBootstrapDnsResolution()
     {
