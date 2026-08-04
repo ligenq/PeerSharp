@@ -45,6 +45,13 @@ internal sealed record Options
     /// </summary>
     public bool PortMap { get; init; }
 
+    /// <summary>
+    /// Where to write the full log. When set, the console keeps only the periodic report and anything
+    /// at warning or above, and the detail goes here - which is the only way to still have the start of
+    /// a run when something goes wrong several minutes in.
+    /// </summary>
+    public string? LogPath { get; init; }
+
     /// <summary>Peers to try in addition to discovery, as host:port.</summary>
     public IReadOnlyList<string> Peers { get; init; } = [];
 
@@ -73,6 +80,7 @@ internal sealed record Options
         bool noDht = false;
         bool metadataOnly = false;
         bool portMap = false;
+        string? logPath = null;
         var peers = new List<string>();
         int? stopAfter = null;
         var interval = TimeSpan.FromSeconds(5);
@@ -114,6 +122,16 @@ internal sealed record Options
 
                 case "--port-map":
                     portMap = true;
+                    break;
+
+                case "--log":
+                    if (!TryTake(args, ref i, out var rawLogPath))
+                    {
+                        error.WriteLine("--log needs a file path.");
+                        return null;
+                    }
+
+                    logPath = rawLogPath;
                     break;
 
                 case "--stop-after":
@@ -210,6 +228,7 @@ internal sealed record Options
             NoDht = noDht,
             MetadataOnly = metadataOnly,
             PortMap = portMap,
+            LogPath = logPath,
             Peers = peers,
             StopAfterSeconds = stopAfter,
             ReportInterval = interval,
@@ -234,6 +253,7 @@ internal sealed record Options
                   --no-dht         disable the DHT, isolating a run from the public network
                   --metadata-only  fetch a magnet's metadata, time it, and stop before downloading
                   --port-map       ask the router to forward the port (UPnP, NAT-PMP), for seeding
+                  --log <file>     write the full log here; the console keeps reports and warnings
                   --peer <ip:port> try this peer as well as any found by discovery (repeatable)
                   --stop-after <s> stop the torrent after this long and keep reporting
                   --interval <s>   seconds between reports (default: 5)
