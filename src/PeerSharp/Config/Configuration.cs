@@ -163,28 +163,31 @@ public sealed class ConnectionSettings
     public int MaxPeersPerTorrent { get; set; } = 50;
 
     /// <summary>
-    /// Maximum number of pending (half-open) outgoing connections. Default is 50.
+    /// Maximum number of pending (half-open) outgoing connections. Default is 200.
     ///
     /// <para>
-    /// It was 200, which never bound: dialling at <see cref="ConnectionsPerSecond"/> with a ten second
-    /// connect timeout settles at around 180 half-open connections all by itself, and that is what the
-    /// client did. The machine copes with it easily. What does not is everything between the machine
-    /// and the internet - a home router's connection tracking table, more so behind a VPN or a second
-    /// layer of NAT - and when that table fills, entries are evicted, which kills connections that were
-    /// working.
+    /// This was briefly lowered to 50, on the theory that the ~150 half-open connections the client
+    /// settles at were exhausting a home router's connection tracking table and getting working
+    /// connections evicted. The evidence for it was a correlation: a download was unstable while
+    /// half-open sat at 125-153 and steady once it fell to 38. Three things then contradicted it.
+    /// libtorrent does not limit half-open connections at all - its half_open_limit is deprecated, and
+    /// 30 attempts a second against a 15 second connect timeout implies more of them than this. The
+    /// median lifetime of a handshaked connection got worse after the cap, not better, which is the
+    /// opposite of what relieving that pressure would do. And once closes recorded which method caused
+    /// them, every one turned out to be the connect path failing or the peer hanging up - never
+    /// anything on this side dropping a working connection.
     /// </para>
     ///
     /// <para>
-    /// Traced on a real swarm, that is exactly what happened. Peers completed the handshake, announced
-    /// they had every piece, and were gone inside a second having transferred nothing, with no protocol
-    /// reason anywhere: 57 of 94 connections died within five seconds, median lifetime nine tenths of a
-    /// second. The download was unstable for ninety seconds while 125 to 153 connections were half-open,
-    /// and became rock steady at 11 MiB/s the moment that fell to 38 - same peers, same swarm, same
-    /// minute. Fifty is chosen from that measurement, being comfortably inside the range that was
-    /// stable, and it is roughly where the clients that behave well on the same network sit.
+    /// The correlation had a simpler reading: half-open is high while the client is still hunting for
+    /// peers, and the download is slow while the client is still hunting for peers. One cause, two
+    /// symptoms, no arrow between them. Meanwhile the cap did measurable harm - it bound 85% of the
+    /// time through the ramp, and in a swarm where 89% of advertised addresses never answer, dialling
+    /// is exactly what must not be throttled: finding twenty live peers takes around 170 attempts, which
+    /// is eleven seconds at 150 half-open and thirty-four at 50.
     /// </para>
     /// </summary>
-    public int MaxPendingConnections { get; set; } = 50;
+    public int MaxPendingConnections { get; set; } = 200;
 
     /// <summary>Minimum connection timeout in milliseconds. Default is 1000.</summary>
     public int MinConnectionTimeoutMs { get; set; } = 1000;
