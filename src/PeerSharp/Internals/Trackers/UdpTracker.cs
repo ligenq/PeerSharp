@@ -685,7 +685,8 @@ internal class UdpTracker : TrackerBase, IDisposable
             numwant = -1;
         }
         BinaryPrimitives.WriteInt32BigEndian(span[92..], numwant);
-        BinaryPrimitives.WriteUInt16BigEndian(span[96..], Torrent.Settings.Connection.TcpPort);
+        int listenPort = Torrent.PortListener?.Port ?? Torrent.Settings.Connection.TcpPort;
+        BinaryPrimitives.WriteUInt16BigEndian(span[96..], checked((ushort)listenPort));
 
         await SendPacketAsync(req, ct).ConfigureAwait(false);
 

@@ -17,28 +17,21 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     /// </summary>
     private const int MetadataRequestRedundancy = 3;
 
-    /// <summary>
-    /// How many random draws to make when looking for a peer other than the one that just failed.
-    /// A handful is enough to miss the current peer with high probability on any realistic pool, and
-    /// bounds the work when the pool is tiny.
-    /// </summary>
-    private const int AlternatePeerDrawAttempts = 4;
-
     private readonly Dictionary<int, PendingMetadataRequest> _pendingRequests = [];
 
     /// <summary>
-    /// How many unanswered requests a peer is given before it stops being a first choice. Low, because
-    /// the evidence is cheap to gather and the cost of being wrong is only that a peer is asked again
-    /// once everyone better has been exhausted.
+    /// How many timed-out requests a peer is given before it stops being a first choice. Requests which
+    /// are merely in flight do not count: metadata requests are deliberately sent in bursts, so
+    /// counting sends would demote a peer before it had any opportunity to reply.
     /// </summary>
     private const int UnansweredRequestsBeforeDemotion = 3;
 
     /// <summary>What a peer has done with the metadata requests sent to it.</summary>
     private sealed class MetadataPeerRecord
     {
-        public int Asked { get; set; }
-
         public int Answered { get; set; }
+
+        public int TimedOut { get; set; }
     }
 
     private readonly Dictionary<IPeerCommunication, MetadataPeerRecord> _peerRecords = [];
@@ -161,27 +154,35 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         bool finished = false;
         lock (_lock)
         {
-            // Credited before any of the checks below, including the duplicate one. The question this
-            // answers is whether the peer serves metadata when asked, and a piece that arrived too late
-            // to be useful proves that just as well as one that arrived first.
-            RecordFor(peer).Answered++;
-
-            _pendingRequests.Remove(pieceIndex);
-
             // Check _receivedPieces.Length > 0 to handle uninitialized state (empty BitArray)
             if (!Active || Finished || _metadataSize == 0 || _receivedPieces.Length == 0 ||
-                pieceIndex < 0 || pieceIndex >= _receivedPieces.Length || _receivedPieces[pieceIndex])
+                pieceIndex < 0 || pieceIndex >= _receivedPieces.Length)
             {
-                if (Active && !Finished && _metadataSize > 0)
-                {
-                    FillMissingRequests(peer);
-                }
                 return;
             }
 
             int offset = pieceIndex * UtMetadata.PieceSize;
-            if (offset + data.Length > _metadataBuffer.Length)
+            int expectedLength = Math.Min(UtMetadata.PieceSize, _metadataBuffer.Length - offset);
+            if (data.Length != expectedLength)
             {
+                _logger.LogWarning(
+                    "Ignoring metadata piece {PieceIndex} from {PeerId}: expected {ExpectedSize} bytes, received {ActualSize}",
+                    pieceIndex,
+                    peer.PeerId,
+                    expectedLength,
+                    data.Length);
+                return;
+            }
+
+            // A correctly sized duplicate still proves that this peer serves metadata. Validate it
+            // first, though: malformed or out-of-range messages must not promote a peer or cancel the
+            // valid request which is still in flight.
+            RecordFor(peer).Answered++;
+            _pendingRequests.Remove(pieceIndex);
+
+            if (_receivedPieces[pieceIndex])
+            {
+                FillMissingRequests(peer);
                 return;
             }
 
@@ -195,7 +196,17 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             if (_receivedPieces.Cast<bool>().All(b => b)) // All pieces received
             {
                 // Reconstruct TorrentFileMetadata from raw info dictionary bytes
-                var newMetadata = TorrentFileParser.ParseInfoBytes(_metadataBuffer, _loggerFactory);
+                TorrentFileMetadata newMetadata;
+                try
+                {
+                    newMetadata = TorrentFileParser.ParseInfoBytes(_metadataBuffer, _loggerFactory);
+                }
+                catch (FormatException ex)
+                {
+                    _logger.LogWarning(ex, "Downloaded metadata is not a valid info dictionary. Discarding metadata.");
+                    RejectCompletedMetadata();
+                    return;
+                }
 
                 // SECURITY: Verify the downloaded metadata hash matches the requested hash.
                 // Require at least one expected hash to be present: with no known hash we
@@ -215,9 +226,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 if (!hashMatches)
                 {
                     _logger.LogWarning("Downloaded metadata hash does not match expected hash. Discarding metadata.");
-                    _receivedPieces.SetAll(false);
-                    _pendingRequests.Clear();
-                    FillMissingRequests();
+                    RejectCompletedMetadata();
                     return;
                 }
 
@@ -461,9 +470,13 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
             foreach (var piece in timedOut)
             {
-                if (_pendingRequests.Remove(piece, out var pending) && pending.Attempts < MetadataMaxRequestAttempts)
+                if (_pendingRequests.Remove(piece, out var pending))
                 {
-                    RequestPiece(piece, GetAlternatePeer(pending.Peer), pending.Attempts);
+                    RecordFor(pending.Peer).TimedOut++;
+                    if (pending.Attempts < MetadataMaxRequestAttempts)
+                    {
+                        RequestPiece(piece, GetAlternatePeer(pending.Peer), pending.Attempts);
+                    }
                 }
             }
 
@@ -797,12 +810,11 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     }
 
     /// <summary>
-    /// Sends a metadata request and records that this peer was asked, which is what makes
-    /// <see cref="EligibleMetadataPeers"/> able to tell a willing peer from a silent one.
+    /// Sends a metadata request. Silence is recorded only if the request later times out; merely
+    /// sending one is not evidence against a peer because requests are deliberately issued in bursts.
     /// </summary>
-    private void SendMetadataRequest(IPeerCommunication peer, int pieceIndex)
+    private static void SendMetadataRequest(IPeerCommunication peer, int pieceIndex)
     {
-        RecordFor(peer).Asked++;
         peer.UtMetadata.SendRequest(pieceIndex);
     }
 
@@ -815,6 +827,27 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         }
 
         return record;
+    }
+
+    /// <summary>
+    /// Resets a completed but unauthentic metadata set and demotes the peers that supplied it.
+    /// A peer is promoted as soon as it serves a piece for latency reasons, but that evidence must not
+    /// trap every retry on the same corrupt suppliers once the complete info hash disproves the set.
+    /// </summary>
+    private void RejectCompletedMetadata()
+    {
+        foreach (var record in _peerRecords.Values)
+        {
+            if (record.Answered > 0)
+            {
+                record.Answered = 0;
+                record.TimedOut = Math.Max(record.TimedOut, UnansweredRequestsBeforeDemotion);
+            }
+        }
+
+        _receivedPieces.SetAll(false);
+        _pendingRequests.Clear();
+        FillMissingRequests();
     }
 
     /// <summary>
@@ -863,7 +896,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             {
                 proven.Add(candidate);
             }
-            else if (record is { Asked: >= UnansweredRequestsBeforeDemotion })
+            else if (record is { TimedOut: >= UnansweredRequestsBeforeDemotion })
             {
                 silent.Add(candidate);
             }
@@ -898,27 +931,13 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             return GetRandomMetadataPeer();
         }
 
-        // Pick at random rather than taking the first peer that is not the current one. Returning the
-        // first match makes consecutive retries alternate between _activePeers[0] and [1] and never
-        // reach anyone else: in a live run 302 peers advertised ut_metadata and only 9 were ever asked,
-        // the same two over and over, while three torrents sat without metadata for minutes.
-        for (int i = 0; i < AlternatePeerDrawAttempts; i++)
+        // Use the same evidence-based tiers as an initial request, while excluding the peer whose
+        // request just timed out. Random selection within the best tier avoids the old two-peer
+        // ping-pong without putting another known-silent peer ahead of an untried one.
+        var candidates = EligibleMetadataPeers(current);
+        if (candidates.Count > 0)
         {
-            var candidate = _activePeers[Random.Shared.Next(_activePeers.Count)];
-            if (candidate != current)
-            {
-                return candidate;
-            }
-        }
-
-        // Every draw landed on the current peer, which is possible with a short list. Take whoever else
-        // is there rather than asking the same one again.
-        foreach (var p in _activePeers)
-        {
-            if (p != current)
-            {
-                return p;
-            }
+            return candidates[Random.Shared.Next(candidates.Count)];
         }
 
         return GetRandomMetadataPeer();

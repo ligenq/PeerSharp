@@ -1,6 +1,7 @@
 using PeerSharp.Internals;
 using PeerSharp.Internals.Trackers;
 using PeerSharp.Internals.Framework;
+using PeerSharp.Internals.Network;
 using PeerSharp.BEncoding;
 using System.Net;
 using System.Text;
@@ -9,6 +10,14 @@ namespace PeerSharp.Tests.Core.Trackers;
 
 public class HttpTrackerTests
 {
+    private sealed class TestPortListener(int port) : IPortListener
+    {
+        public int Port { get; } = port;
+        public void Start(int port) { }
+        public void Stop() { }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private class MockHttpClient : IHttpClient
     {
         public byte[]? ResponseBytes { get; set; }
@@ -106,6 +115,21 @@ public class HttpTrackerTests
         Assert.Single(_callback.AnnounceResponse.Peers);
         Assert.Equal("65.65.65.65", _callback.AnnounceResponse.Peers[0].Address.ToString());
         Assert.Equal(16705, _callback.AnnounceResponse.Peers[0].Port);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_UsesTheActuallyBoundListenPort()
+    {
+        _torrent.Settings.Connection.TcpPort = 0;
+        _torrent.PortListener = new TestPortListener(23456);
+        var tracker = new HttpTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(new BDict());
+
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+
+        Assert.Contains("port=23456", _mockHttp.LastUrl);
     }
 
     [Fact(Timeout = 30000)]
@@ -780,7 +804,6 @@ public class HttpTrackerTests
         return count;
     }
 }
-
 
 
 

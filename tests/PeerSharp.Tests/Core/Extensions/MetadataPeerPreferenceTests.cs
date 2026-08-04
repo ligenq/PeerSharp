@@ -49,7 +49,7 @@ public class MetadataPeerPreferenceTests
         await download.MetadataPieceReceivedAsync(willing, 0, new byte[PieceSize]);
         foreach (var peer in silent)
         {
-            RecordAsked(download, peer, count: 5);
+            RecordTimedOut(download, peer, count: 5);
         }
 
         // Receiving a piece fills the pipeline again, so clear it or there is nothing left to assign.
@@ -79,7 +79,7 @@ public class MetadataPeerPreferenceTests
         InjectActivePeer(download, untried);
         InjectActivePeer(download, silent);
 
-        RecordAsked(download, silent, count: 5);
+        RecordTimedOut(download, silent, count: 5);
 
         download.Update();
 
@@ -101,7 +101,7 @@ public class MetadataPeerPreferenceTests
 
         var silent = MakePeer();
         InjectActivePeer(download, silent);
-        RecordAsked(download, silent, count: 20);
+        RecordTimedOut(download, silent, count: 20);
         ClearRequests(silent);
 
         download.Update();
@@ -162,10 +162,10 @@ public class MetadataPeerPreferenceTests
     }
 
     /// <summary>
-    /// Marks a peer as having been asked this many times without answering, which is the state the
-    /// selection is meant to react to and takes a live swarm several seconds to produce.
+    /// Marks a peer as having timed out this many times, which is the state the selection is meant to
+    /// react to and takes a live swarm several seconds to produce.
     /// </summary>
-    private static void RecordAsked(MetadataDownload download, IPeerCommunication peer, int count)
+    private static void RecordTimedOut(MetadataDownload download, IPeerCommunication peer, int count)
     {
         var field = typeof(MetadataDownload)
             .GetField("_peerRecords", BindingFlags.NonPublic | BindingFlags.Instance)!;
@@ -174,7 +174,7 @@ public class MetadataPeerPreferenceTests
         var recordType = typeof(MetadataDownload)
             .GetNestedType("MetadataPeerRecord", BindingFlags.NonPublic)!;
         var record = Activator.CreateInstance(recordType)!;
-        recordType.GetProperty("Asked")!.SetValue(record, count);
+        recordType.GetProperty("TimedOut")!.SetValue(record, count);
 
         records[peer] = record;
     }

@@ -132,20 +132,27 @@ public class ExtensionHandshakeTests
     }
 
     [Fact]
+    public void ListenPort_ZeroRoundTripsAsNotListening()
+    {
+        var handshake = new ExtensionHandshake { ListenPort = 0 };
+
+        Assert.Equal(0, ExtensionHandshake.Parse(handshake.ToBencode()).ListenPort);
+    }
+
+    [Fact]
     public void ListenPort_IsOmittedWhenUnset()
     {
         Assert.False(new ExtensionHandshake().ToBencode().Dict.ContainsKey("p"));
     }
 
     [Theory]
-    [InlineData(0)]
     [InlineData(-1)]
     [InlineData(65536)]
     [InlineData(1L + int.MaxValue)]
     public void ListenPort_OutOfRangeIsIgnored(long value)
     {
-        // Zero is a peer saying it does not listen, and the rest cannot be ports at all. Accepting any
-        // of them would have us record an endpoint we can never connect to.
+        // These cannot be ports at all. Accepting one would have us record an endpoint we can never
+        // connect to; zero is tested separately because it is the valid "not listening" signal.
         var dict = new BDict();
         dict.Dict["p"] = new BNumber(value);
 
@@ -162,8 +169,5 @@ public class ExtensionHandshakeTests
             UploadQueueManager.MaxQueueDepthPerPeer);
     }
 }
-
-
-
 
 

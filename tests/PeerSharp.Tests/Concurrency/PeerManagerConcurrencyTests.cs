@@ -179,6 +179,34 @@ public class PeerManagerConcurrencyTests
     }
 
     [Fact]
+    public void PeerManager_ConcurrentSameAddressRegistration_HasOneOwnerWhenMultipleIpsDisabled()
+    {
+        RunCoyoteTest(() =>
+        {
+            var torrent = TorrentTestUtility.CreateMinimal();
+            torrent.Settings.Connection.AllowMultipleConnectionsPerIp = false;
+            var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new MockFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
+            int claims = 0;
+
+            var tasks = Enumerable.Range(0, 8).Select(port => Task.Run(() =>
+            {
+                var endpoint = new IPEndPoint(IPAddress.Loopback, 43220 + port);
+                var peer = new MockPeerCommunication(torrent, manager, TimeProvider.System) { RemoteEndPoint = endpoint };
+                if (manager.TryRegisterConnectedEndpointForTesting(peer))
+                {
+                    Interlocked.Increment(ref claims);
+                }
+            })).ToArray();
+
+            Task.WaitAll(tasks);
+
+            Specification.Assert(claims == 1, $"Expected exactly one address owner, got {claims}");
+            Specification.Assert(manager.ConnectedEndpointCountForTesting == 1,
+                $"Endpoint index must contain exactly one entry, got {manager.ConnectedEndpointCountForTesting}");
+        });
+    }
+
+    [Fact]
     public void PeerManager_ConcurrentPeerIdRegistration_HasOneOwner()
     {
         RunCoyoteTest(() =>

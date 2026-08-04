@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Framework;
+using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Trackers;
 using System.Buffers.Binary;
 using System.Net;
@@ -11,6 +12,14 @@ namespace PeerSharp.Tests.Core.Trackers;
 
 public class UdpTrackerTests
 {
+    private sealed class TestPortListener(int port) : IPortListener
+    {
+        public int Port { get; } = port;
+        public void Start(int port) { }
+        public void Stop() { }
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private class MockUdpSocket : IUdpSocket
     {
         public List<byte[]> SentPackets { get; } = [];
@@ -881,6 +890,7 @@ public class UdpTrackerTests
 
         _torrent.Settings.PeerId = peerId;
         _torrent.Settings.Connection.TcpPort = 12345;
+        _torrent.PortListener = new TestPortListener(23456);
 
         var tracker = new UdpTracker(_timeProvider, _socketFactory);
         tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
@@ -903,7 +913,7 @@ public class UdpTrackerTests
         Assert.Equal(_torrent.FileTransfer.Uploaded, BinaryPrimitives.ReadInt64BigEndian(pkt.AsSpan(72)));
         Assert.Equal(2, BinaryPrimitives.ReadInt32BigEndian(pkt.AsSpan(80))); // event = started
         Assert.Equal(0, BinaryPrimitives.ReadInt32BigEndian(pkt.AsSpan(84))); // ip default
-        Assert.Equal(12345, BinaryPrimitives.ReadUInt16BigEndian(pkt.AsSpan(96)));
+        Assert.Equal(23456, BinaryPrimitives.ReadUInt16BigEndian(pkt.AsSpan(96)));
 
         await CompleteAnnounceAtIndexAsync(packetIndex: 1);
         await announceTask;
@@ -1536,7 +1546,6 @@ public class UdpTrackerTests
 
 
 }
-
 
 
 

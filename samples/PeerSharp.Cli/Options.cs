@@ -214,7 +214,7 @@ internal sealed record Options
               -o, --out <dir>      where to write data (default: current directory)
               -d, --diagnostics    report heap, peers and queue depths each interval
               -s, --seed           keep running after completion, so seeding can be profiled
-              -v, --verbose        library logging at debug level
+              -v, --verbose        library logging at trace level
                   --lsd            discover peers on the local network (BEP 14)
                   --recheck        hash-check existing files first, to seed what is already there
                   --no-dht         disable the DHT, isolating a run from the public network
@@ -245,7 +245,10 @@ internal sealed record Options
     private static bool TryTakeRate(string[] args, ref int index, out int? rate)
     {
         rate = null;
-        if (!TryTake(args, ref index, out var raw) || !int.TryParse(raw, out int kib) || kib <= 0)
+        if (!TryTake(args, ref index, out var raw)
+            || !int.TryParse(raw, out int kib)
+            || kib <= 0
+            || kib > int.MaxValue / 1024)
         {
             return false;
         }

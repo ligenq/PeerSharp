@@ -1544,7 +1544,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // BEP 10 'p': where this peer actually listens, which is not where it connected from.
                 if (RemoteExtensions.ListenPort is { } advertisedPort)
                 {
-                    RemoteListenEndPoint = RemoteEndPoint is null
+                    RemoteListenEndPoint = RemoteEndPoint is null || advertisedPort == 0
                         ? null
                         : new System.Net.IPEndPoint(RemoteEndPoint.Address, advertisedPort);
                     _logger.LogDebug(

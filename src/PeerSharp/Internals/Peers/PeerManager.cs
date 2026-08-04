@@ -66,6 +66,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     // Maps each connected remote endpoint to the PeerCommunication that owns it.
     // Authoritative duplicate gate - see thread-safety notes at the top of this file.
     private readonly ConcurrentDictionary<IPEndPoint, PeerCommunication> _connectedEndpoints = new();
+    private readonly Lock _connectedEndpointRegistrationLock = new();
 
     // Maps each connected remote peer id (hex) to the PeerCommunication that owns it.
     // Endpoints alone cannot correlate an incoming connection (peer's ephemeral source port)
@@ -277,9 +278,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // BEP 40: Use already calculated priority
             peer.Priority = incomingPriority;
 
-            // Mark as connectable in history
-            var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
-            history.IsConnectable = true;
+            // Tracked by the endpoint the connection arrived on, which for an incoming one is an
+            // ephemeral source port. Useful for this connection's own uTP history and nothing else:
+            // it is not an address anybody can dial, so it is not marked connectable and not offered
+            // to anyone. Where the peer really listens arrives later, in its BEP 10 handshake.
+            var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint, isListenAddress: false);
             if (peer.UtpStream != null)
             {
                 history.RegisterUtpSuccess(_timeProvider.GetUtcNow());
@@ -372,9 +375,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // BEP 40: Calculate canonical peer priority
             peer.Priority = incomingPriority;
 
-            // Mark as connectable in history
-            var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
-            history.IsConnectable = true;
+            // See AddIncomingPeerAsync: an incoming connection's source port is not a dialable address.
+            GetOrAddKnownPeerHistory(peer.RemoteEndPoint, isListenAddress: false);
         }
 
         if (!await peer.SetHandshakeReceivedAsync(handshake).ConfigureAwait(false))
@@ -571,6 +573,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         var p = (PeerCommunication)peer;
         try
         {
+            // BEP 10 'p' is the only way an incoming peer's real address becomes known: it arrived on
+            // an ephemeral port, so until now there was nothing about it worth keeping or passing on.
+            // Recorded as learned from the extension protocol, which is exactly what happened.
+            if (p.RemoteListenEndPoint is { } listenEndPoint)
+            {
+                GetOrAddKnownPeerHistory(listenEndPoint).UpdateSource(PeerSourceKind.Ltep);
+            }
+
             _torrent.MetadataDownloadInternal?.PeerConnected(p);
             if (!_torrent.HasMetadata &&
                 _torrent.MetadataDownloadInternal?.Active == true &&
@@ -1374,6 +1384,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 return;
             }
 
+            // We dialled this endpoint and it accepted, which is what makes it confirmed connectable -
+            // and the only place that can be confirmed. It used to be set when a peer connected to us,
+            // against the ephemeral port it dialled from, which is the one address that is certainly
+            // not connectable.
+            history.IsConnectable = true;
+
             if (attemptedUtp && !usedUtp)
             {
                 history.RegisterUtpFailure(_timeProvider.GetUtcNow(), _settings.Connection);
@@ -1861,21 +1877,27 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return true;
         }
 
-        if (!_connectedEndpoints.TryAdd(peer.RemoteEndPoint, peer))
+        // The address-only policy is a compound check over multiple endpoint keys. Serialize that
+        // check with insertion so two simultaneous connections from different ports on the same IP
+        // cannot both see the other and reject each other, leaving no surviving connection.
+        lock (_connectedEndpointRegistrationLock)
         {
-            return false;
-        }
+            if (!_connectedEndpoints.TryAdd(peer.RemoteEndPoint, peer))
+            {
+                return false;
+            }
 
-        // The endpoint gate above only stops the exact same address and port twice. One host dialling
-        // from a different source port each time gets past it, and can take as many slots as it likes.
-        // libtorrent matches on address alone for the same reason, and defaults to doing so.
-        if (!_settings.Connection.AllowMultipleConnectionsPerIp && SharesAddressWithAnotherPeer(peer))
-        {
-            _connectedEndpoints.TryRemove(KeyValuePair.Create(peer.RemoteEndPoint, peer));
-            return false;
-        }
+            // The endpoint gate above only stops the exact same address and port twice. One host
+            // dialling from a different source port each time gets past it, and can take as many slots
+            // as it likes. libtorrent matches on address alone for the same reason.
+            if (!_settings.Connection.AllowMultipleConnectionsPerIp && SharesAddressWithAnotherPeer(peer))
+            {
+                _connectedEndpoints.TryRemove(KeyValuePair.Create(peer.RemoteEndPoint, peer));
+                return false;
+            }
 
-        return true;
+            return true;
+        }
     }
 
     /// <summary>Whether some other live connection is already using this peer's address.</summary>
@@ -1901,7 +1923,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     {
         if (peer.RemoteEndPoint != null)
         {
-            _connectedEndpoints.TryRemove(KeyValuePair.Create(peer.RemoteEndPoint, peer));
+            lock (_connectedEndpointRegistrationLock)
+            {
+                _connectedEndpoints.TryRemove(KeyValuePair.Create(peer.RemoteEndPoint, peer));
+            }
         }
     }
 
@@ -2093,14 +2118,21 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         Volatile.Write(ref _globalUtpPenaltyUntilUtcTicks, until.UtcTicks);
     }
 
-    private PeerHistory GetOrAddKnownPeerHistory(IPEndPoint endpoint)
+    /// <param name="endpoint">The endpoint to look up or record.</param>
+    /// <param name="isListenAddress">
+    /// False when the endpoint is an incoming connection's source port rather than an address anyone
+    /// can dial. Applied only when the entry is created: an existing entry was recorded by a peer
+    /// source that does deal in listening addresses, and a client that dials from its own listening
+    /// port must not have that downgraded by the coincidence.
+    /// </param>
+    private PeerHistory GetOrAddKnownPeerHistory(IPEndPoint endpoint, bool isListenAddress = true)
     {
         if (_knownPeersCache.TryGetValue(endpoint, out var history))
         {
             return history;
         }
 
-        var created = new PeerHistory { EndPoint = endpoint };
+        var created = new PeerHistory { EndPoint = endpoint, IsListenAddress = isListenAddress };
         if (_knownPeersCache.TryAdd(endpoint, created))
         {
             Interlocked.Increment(ref _knownPeersCacheCount);

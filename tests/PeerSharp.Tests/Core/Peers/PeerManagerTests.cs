@@ -547,8 +547,10 @@ public class PeerManagerTests
         var ctx = CreateContext();
         var ep = new IPEndPoint(IPAddress.Parse("198.51.100.7"), 6881);
 
-        var h1 = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", ep)!;
-        var h2 = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", ep)!;
+        // isListenAddress is passed explicitly: reflection does not apply a parameter's default, so an
+        // argument per parameter is required. True is the default and what every peer source implies.
+        var h1 = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", ep, true)!;
+        var h2 = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", ep, true)!;
 
         Assert.Same(h1, h2);
         Assert.Equal(ep, h1.EndPoint);

@@ -58,6 +58,89 @@ public class PeerExchangeCoordinatorTests
     }
 
     [Fact]
+    public void Broadcast_DoesNotShareAConnectedPeersEphemeralKnownEndpoint()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var connectedEndpoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 40001);
+        var knownPeers = new ConcurrentDictionary<IPEndPoint, PeerHistory>();
+        knownPeers[connectedEndpoint] = new PeerHistory { EndPoint = connectedEndpoint };
+        var coordinator = new PeerExchangeCoordinator(torrent, knownPeers, NullLogger.Instance);
+        var connected = new PexPeer(torrent)
+        {
+            RemoteEndPoint = connectedEndpoint,
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1000)
+        };
+        var recipient = new PexPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 40002),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000)
+        };
+
+        coordinator.Broadcast([connected, recipient]);
+
+        Assert.Contains(recipient.Pex.Updates.Single(), peer => peer.Endpoint.Equals(connected.RemoteListenEndPoint));
+        Assert.DoesNotContain(recipient.Pex.Updates.Single(), peer => peer.Endpoint.Equals(connectedEndpoint));
+    }
+
+    [Fact]
+    public void Broadcast_DoesNotShareAnEphemeralEndpointLeftBehindByADepartedPeer()
+    {
+        // The case the connected-peer exclusion cannot reach. Every peer that dials us leaves a history
+        // entry under its ephemeral source port, and nothing removes it when the connection ends - only
+        // size-based pruning ever does. Gossiping it closes a loop, because the recipient records the
+        // address, ranks it, dials it, and fails, having learnt it from us.
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var departed = new IPEndPoint(IPAddress.Parse("3.3.3.3"), 40003);
+        var knownPeers = new ConcurrentDictionary<IPEndPoint, PeerHistory>
+        {
+            [departed] = new PeerHistory { EndPoint = departed, IsListenAddress = false }
+        };
+        var coordinator = new PeerExchangeCoordinator(torrent, knownPeers, NullLogger.Instance);
+        var connected = new PexPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 40001),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1000)
+        };
+        var recipient = new PexPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 40002),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000)
+        };
+
+        coordinator.Broadcast([connected, recipient]);
+
+        Assert.DoesNotContain(recipient.Pex.Updates.Single(), peer => peer.Endpoint.Equals(departed));
+    }
+
+    [Fact]
+    public void Broadcast_StillSharesKnownPeersThatAreRealListeningAddresses()
+    {
+        // The other half of the same filter: a peer a tracker or the DHT told us about is a listening
+        // address by definition, and is exactly what PEX exists to pass on.
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var fromTracker = new IPEndPoint(IPAddress.Parse("4.4.4.4"), 6881);
+        var knownPeers = new ConcurrentDictionary<IPEndPoint, PeerHistory>
+        {
+            [fromTracker] = new PeerHistory { EndPoint = fromTracker }
+        };
+        var coordinator = new PeerExchangeCoordinator(torrent, knownPeers, NullLogger.Instance);
+        var connected = new PexPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 40001),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 1000)
+        };
+        var recipient = new PexPeer(torrent)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 40002),
+            RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000)
+        };
+
+        coordinator.Broadcast([connected, recipient]);
+
+        Assert.Contains(recipient.Pex.Updates.Single(), peer => peer.Endpoint.Equals(fromTracker));
+    }
+
+    [Fact]
     public void ApplyFlags_SetsSeedAndUtpCapabilities()
     {
         var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881) };
