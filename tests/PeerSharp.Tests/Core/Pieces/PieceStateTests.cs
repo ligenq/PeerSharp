@@ -101,6 +101,77 @@ public class PieceStateTests
         }
     }
 
+    /// <summary>
+    /// Reset clears the contributor list, and the hash-failure handler used to call it before reading
+    /// that list - so the loop that strikes the peers responsible always ran over an empty set. Nothing
+    /// was ever struck and nothing was ever dropped for bad data. This pins the ordering the handler
+    /// depends on: whoever supplied a piece has to be read out before the piece is reset.
+    /// </summary>
+    [Fact]
+    public void Reset_ClearsContributors_SoTheyMustBeReadFirst()
+    {
+        var piece = new PieceState(0, 2);
+        var ctx = CreatePeerContext();
+
+        try
+        {
+            piece.TryAddBlock(0, new Block(16), ctx.Peer);
+            Assert.Contains(ctx.Peer, piece.Contributors);
+
+            var supplied = piece.Contributors.ToArray();
+            piece.Reset();
+
+            Assert.Empty(piece.Contributors);
+            Assert.Contains(ctx.Peer, supplied);
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
+    /// <summary>
+    /// A piece is asked of anyone until it fails, then of one peer at a time - which is what turns the
+    /// next failure into an answer rather than a suspicion shared between everyone who contributed.
+    /// </summary>
+    [Fact]
+    public void RetryClaim_RestrictsToOnePeerOnceThePieceHasFailed()
+    {
+        var piece = new PieceState(0, 2);
+        var first = CreatePeerContext();
+        var second = CreatePeerContext();
+        var now = DateTimeOffset.UtcNow;
+        var timeout = TimeSpan.FromSeconds(30);
+
+        try
+        {
+            // Before any failure the piece is open to everyone, which is how it downloads quickly.
+            Assert.True(piece.TryClaimForRetry(first.Peer, now, timeout));
+            Assert.True(piece.TryClaimForRetry(second.Peer, now, timeout));
+
+            piece.RecordHashFailure();
+            piece.Reset();
+
+            Assert.True(piece.TryClaimForRetry(first.Peer, now, timeout));
+            Assert.False(piece.TryClaimForRetry(second.Peer, now, timeout));
+
+            // Still the same peer a moment later - the claim is not per request.
+            Assert.True(piece.TryClaimForRetry(first.Peer, now.AddSeconds(5), timeout));
+
+            // But it expires, so a peer that goes quiet costs one interval rather than the piece.
+            Assert.True(piece.TryClaimForRetry(second.Peer, now.AddSeconds(31), timeout));
+            Assert.False(piece.TryClaimForRetry(first.Peer, now.AddSeconds(31), timeout));
+
+            // The count survives Reset; it is what says this piece is being retried at all.
+            Assert.Equal(1, piece.HashFailures);
+        }
+        finally
+        {
+            Cleanup(first);
+            Cleanup(second);
+        }
+    }
+
     private static (PeerCommunication Peer, Torrent Torrent, string Path) CreatePeerContext()
     {
         var metadata = new TorrentFileMetadata();

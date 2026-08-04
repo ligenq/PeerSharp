@@ -57,6 +57,60 @@ internal sealed class PieceState : IDisposable
     public HashSet<PeerCommunication> Contributors { get; } = [];
     public int Index { get; }
 
+    private PeerCommunication? _retryOwner;
+    private DateTimeOffset _retryClaimedAt;
+
+    /// <summary>
+    /// How many times this piece has been assembled and failed its hash. Deliberately survives
+    /// <see cref="Reset"/>, which clears everything else: it is the count of attempts, not of the
+    /// current attempt.
+    /// </summary>
+    public int HashFailures { get; private set; }
+
+    public void RecordHashFailure()
+    {
+        lock (_lock)
+        {
+            HashFailures++;
+        }
+    }
+
+    /// <summary>
+    /// Whether this peer may be asked for blocks of this piece now.
+    ///
+    /// <para>
+    /// Always, until the piece has failed its hash. After that it is asked of one peer at a time, so
+    /// that the next failure names its author instead of implicating everyone who happened to
+    /// contribute. A piece assembled from six peers and failing tells you almost nothing; the same
+    /// piece taken whole from one peer and failing tells you everything.
+    /// </para>
+    ///
+    /// <para>
+    /// The claim expires. Restricting who may be asked cannot be allowed to wedge the piece on a peer
+    /// that has stopped answering - the point is to find the bad peer, not to wait forever for a quiet
+    /// one - so once the claim goes stale the next peer to ask takes it over.
+    /// </para>
+    /// </summary>
+    public bool TryClaimForRetry(PeerCommunication peer, DateTimeOffset now, TimeSpan claimTimeout)
+    {
+        lock (_lock)
+        {
+            if (HashFailures == 0)
+            {
+                return true;
+            }
+
+            if (_retryOwner is null || now - _retryClaimedAt > claimTimeout)
+            {
+                _retryOwner = peer;
+                _retryClaimedAt = now;
+                return true;
+            }
+
+            return ReferenceEquals(_retryOwner, peer);
+        }
+    }
+
     public bool IsWriting
     {
         get
@@ -163,6 +217,10 @@ internal sealed class PieceState : IDisposable
             _receivedCount = 0;
             Contributors.Clear();
             _isWriting = false;
+
+            // A fresh attempt gets a fresh candidate. HashFailures is deliberately not cleared - it is
+            // what decides that this piece is being retried at all.
+            _retryOwner = null;
 
             // Dispose outside the critical section for BlockData, but inside _lock
             // to prevent concurrent access during reset
@@ -1414,23 +1472,42 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                     }
                     else if (outcome.HashFailed)
                     {
-                        pieceToProcess.Reset();
-                        Logger.LogWarning("Piece {PieceIndex} failed hash, will be retried", pieceToProcess.Index);
+                        // Read who supplied it before resetting, because Reset clears the contributor
+                        // list. Taking them in the other order meant the loop below iterated an empty
+                        // set every time, so in the whole life of this code no peer was ever struck for
+                        // bad data and none was ever dropped for it - the accounting existed, ran, and
+                        // could not have had an effect.
+                        var contributors = pieceToProcess.Contributors.ToArray();
+                        bool soleSupplier = contributors.Length == 1;
 
-                        foreach (var p in pieceToProcess.Contributors)
+                        pieceToProcess.RecordHashFailure();
+                        pieceToProcess.Reset();
+
+                        Logger.LogWarning(
+                            "Piece {PieceIndex} failed hash after {Failures} attempt(s), will be retried",
+                            pieceToProcess.Index,
+                            pieceToProcess.HashFailures);
+
+                        foreach (var p in contributors)
                         {
                             p.Strikes++;
 
                             // Counted against the address, not this connection. Strikes on the
                             // connection object are lost the moment the peer reconnects, so the same
-                            // source could keep feeding bad data indefinitely: one piece failed thirteen
-                            // times in a live run without a single peer ever being dropped for it.
-                            if (_torrent.PeersInternal.RecordHashFailure(p))
+                            // source could otherwise keep feeding bad data indefinitely.
+                            bool refuse = _torrent.PeersInternal.RecordHashFailure(p);
+
+                            // A piece nobody else contributed to leaves no doubt, so there is nothing
+                            // to accumulate evidence for. This is what the retry restriction below is
+                            // arranged to produce: after a piece has failed once it is asked of one
+                            // peer at a time, which turns the next failure into an answer.
+                            if (soleSupplier || refuse)
                             {
                                 Logger.LogWarning(
-                                    "Dropping peer {RemoteEndPoint} - it has contributed to {Strikes} pieces that failed their hash",
-                                    p.RemoteEndPoint,
-                                    p.Strikes);
+                                    soleSupplier
+                                        ? "Dropping peer {RemoteEndPoint} - it alone supplied a piece that failed its hash"
+                                        : "Dropping peer {RemoteEndPoint} - it has contributed to several pieces that failed their hash",
+                                    p.RemoteEndPoint);
                                 await p.CloseAsync().ConfigureAwait(false);
                             }
                         }
