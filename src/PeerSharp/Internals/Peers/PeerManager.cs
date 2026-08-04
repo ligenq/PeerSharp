@@ -432,13 +432,16 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // BEP 16: Clean up superseed state
         _torrent.SuperSeedManager.HandlePeerDisconnected(p);
 
-        if (_connectedPeers.TryRemove(p, out _))
+        bool wasRegistered = _connectedPeers.TryRemove(p, out _);
+        if (wasRegistered)
         {
             Interlocked.Decrement(ref _connectedPeersCount);
             // Release global connection slot
             _governor.ReleaseConnectionSlot();
         }
         _peerHealth.Remove(p);
+
+        RecordConnectionOutcome(p, wasRegistered);
 
         // Only remove the endpoint/id entries if this peer owns them. A rejected duplicate
         // closing must not evict the surviving connection's entries, or the dedup gates would
@@ -449,6 +452,61 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _logger.LogDebug("Connection closed to {RemoteEndPoint} (code={Code}), downloaded={Downloaded}B, uploaded={Uploaded}B, strikes={Strikes}, remaining peers={RemainingPeers}",
             p.RemoteEndPoint, code, p.Downloaded, p.Uploaded, p.Strikes, _connectedPeersCount);
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Settles what a connection was worth, now that it is over and the answer is known.
+    ///
+    /// <para>
+    /// A connection that moved bytes earns its peer a clean slate. One that moved none was not worth
+    /// making, however cleanly it connected, and is counted against the peer exactly like a dial that
+    /// never landed - which is what makes the existing backoff grow from five seconds towards five
+    /// minutes instead of staying at its first step forever.
+    /// </para>
+    ///
+    /// <para>
+    /// Seeding is where the absence of this showed. Two seeds have nothing to give each other, so the
+    /// connection completes, sits idle and closes, and nothing about that discouraged dialling the same
+    /// peer again moments later: a six minute seeding run made 6298 outgoing connections to 1515 peers,
+    /// several of them thirty-nine times. Leeching hid it, because there the connections stay up and do
+    /// work.
+    /// </para>
+    /// </summary>
+    /// <param name="p">The connection that has just closed.</param>
+    /// <param name="wasRegistered">
+    /// Whether this connection was ever a live peer. A duplicate rejected before it registered has
+    /// nothing to say about whether the peer is worth dialling - the connection that displaced it is
+    /// very likely still running.
+    /// </param>
+    private void RecordConnectionOutcome(PeerCommunication p, bool wasRegistered)
+    {
+        if (!wasRegistered || p.RemoteEndPoint is not { } endpoint)
+        {
+            return;
+        }
+
+        var history = GetOrAddKnownPeerHistory(endpoint);
+
+        // Either direction counts. Uploading is the whole point of seeding, and until now only a piece
+        // we received marked a peer as having exchanged data - so a seeder that uploaded for an hour
+        // still had every one of its peers on record as never having given it anything.
+        if (p.Downloaded > 0 || p.Uploaded > 0)
+        {
+            history.ExchangedData = true;
+            history.FruitlessConnectionCount = 0;
+            history.NextConnectAttempt = DateTimeOffset.MinValue;
+            return;
+        }
+
+        // Backing off an address nobody can dial would be meaningless: an incoming connection's source
+        // port belongs to that one connection and is never a candidate in the first place.
+        if (!history.IsListenAddress)
+        {
+            return;
+        }
+
+        history.FruitlessConnectionCount++;
+        ApplyConnectionBackoff(history);
     }
 
     public void ConnectTo(string ip, int port, bool forceUtp = false)
@@ -1333,8 +1391,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
             if (success)
             {
-                history.FruitlessConnectionCount = 0;
-                history.NextConnectAttempt = DateTimeOffset.MinValue;
+                // Deliberately not clearing the fruitless count here. Connecting is not the same as
+                // achieving anything, and treating it as such is what let a seed redial a swarm of
+                // other seeds forever: the handshake succeeded every time, so the count reset every
+                // time, so the backoff never grew past its first step. What the connection was worth
+                // is only known when it closes, and ConnectionClosedAsync settles it there.
                 history.RegisterHandshakeSuccess(peer.Stream is EncryptedStream);
             }
             else

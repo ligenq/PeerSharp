@@ -932,6 +932,82 @@ public class PeerManagerTests
         public void ReleasePendingSlot() { }
     }
 
+    /// <summary>
+    /// A connection that connected cleanly and then achieved nothing must count against the peer, or
+    /// the backoff never grows. Seeding is where this showed: two seeds have nothing for each other, so
+    /// the connection completes, idles and closes, and a six minute run made 6298 outgoing connections
+    /// to 1515 peers - several of them thirty-nine times - because every completed handshake reset the
+    /// count that the backoff is calculated from.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ConnectionClosed_HavingExchangedNothing_BacksOffFurtherEachTime()
+    {
+        var ctx = CreateContext();
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.5"), 6881);
+        var known = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+
+        for (int round = 1; round <= 3; round++)
+        {
+            var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+            {
+                RemoteEndPoint = endpoint
+            };
+            connected.TryAdd(peer, 0);
+            // The count is maintained alongside the dictionary by the registration path this bypasses,
+            // and closing decrements it - leave it at zero and teardown sizes a list from a negative.
+            SetPrivateField(ctx.Manager, "_connectedPeersCount", 1);
+
+            await ctx.Manager.ConnectionClosedAsync(peer, 0);
+
+            Assert.True(known.TryGetValue(endpoint, out var history));
+            Assert.Equal(round, history!.FruitlessConnectionCount);
+            Assert.True(
+                history.NextConnectAttempt > DateTimeOffset.UtcNow,
+                $"Round {round} should have pushed the next attempt into the future.");
+        }
+
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
+    /// And the other direction: uploading is achieving something. Only a received piece used to mark a
+    /// peer as having exchanged data, so a seeder that uploaded for an hour still had every peer on
+    /// record as never having given it anything.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ConnectionClosed_AfterUploading_ClearsTheBackoff()
+    {
+        var ctx = CreateContext();
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.6"), 6881);
+        var known = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+
+        known[endpoint] = new PeerHistory
+        {
+            EndPoint = endpoint,
+            FruitlessConnectionCount = 4,
+            NextConnectAttempt = DateTimeOffset.UtcNow.AddMinutes(5)
+        };
+
+        var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = endpoint
+        };
+        SetPrivateField(peer, "_uploaded", 16384L);
+        connected.TryAdd(peer, 0);
+        SetPrivateField(ctx.Manager, "_connectedPeersCount", 1);
+
+        await ctx.Manager.ConnectionClosedAsync(peer, 0);
+
+        var history = known[endpoint];
+        Assert.True(history.ExchangedData);
+        Assert.Equal(0, history.FruitlessConnectionCount);
+        Assert.Equal(DateTimeOffset.MinValue, history.NextConnectAttempt);
+
+        await CleanupAsync(ctx);
+    }
+
     private static PeerManagerContext CreateContext()
     {
         var metadata = new TorrentFileMetadata();
