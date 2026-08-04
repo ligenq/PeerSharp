@@ -53,7 +53,7 @@ internal class ExtensionHandshake
 
         // A port of zero means "not listening", which is legitimate for a peer behind a NAT it cannot
         // map, and is not the same as a peer that told us nothing.
-        if (dict.GetLong("p") is > 0 and <= 65535 and var port)
+        if (dict.GetLong("p") is >= 0 and <= 65535 and var port)
         {
             handshake.ListenPort = (int)port;
         }

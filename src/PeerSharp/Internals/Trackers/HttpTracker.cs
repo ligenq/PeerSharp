@@ -474,7 +474,8 @@ internal class HttpTracker : TrackerBase, IDisposable
 
         AppendParam("info_hash", UrlEncoding.Encode(Torrent.InfoFile.Info.GetTrackerInfoHash().Span));
         AppendParam("peer_id", UrlEncoding.Encode(Torrent.Settings.PeerId));
-        AppendParam("port", Torrent.Settings.Connection.TcpPort.ToString());
+        int listenPort = Torrent.PortListener?.Port ?? Torrent.Settings.Connection.TcpPort;
+        AppendParam("port", listenPort.ToString());
         AppendParam("uploaded", Torrent.FileTransfer.Uploaded.ToString());
         AppendParam("downloaded", Torrent.FileTransfer.Downloaded.ToString());
         AppendParam("left", Torrent.DataLeft.ToString());

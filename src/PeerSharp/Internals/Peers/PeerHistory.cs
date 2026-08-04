@@ -34,8 +34,25 @@ internal sealed class PeerHistory
     /// <summary>Number of consecutive failed connection attempts.</summary>
     public int FruitlessConnectionCount { get; set; }
 
-    /// <summary>Whether the peer is confirmed to be connectable (accepted an inbound connection).</summary>
+    /// <summary>
+    /// Whether a connection we made to this endpoint was accepted, which is the only thing that
+    /// confirms it can be dialled. A peer connecting to us proves the peer is reachable, not that the
+    /// address it happened to dial from is - see <see cref="IsListenAddress"/>.
+    /// </summary>
     public bool IsConnectable { get; set; }
+
+    /// <summary>
+    /// Whether this endpoint is where the peer accepts connections, rather than a source port we
+    /// merely observed one arrive from.
+    ///
+    /// <para>
+    /// True for everything a peer source hands us - trackers, the DHT, PEX, resume data - because
+    /// those are all listening addresses by definition. False only for the entry created from an
+    /// incoming connection, whose port is ephemeral and belongs to that one connection: nobody can
+    /// dial it, so it must not be gossiped onward or offered as a candidate.
+    /// </para>
+    /// </summary>
+    public bool IsListenAddress { get; set; } = true;
 
     /// <summary>Whether the peer is currently upload-only (a seed).</summary>
     public bool IsSeed { get; set; }

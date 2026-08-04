@@ -62,6 +62,13 @@ internal sealed class PeerExchangeCoordinator
             }
 
             connectedEndpoints.Add(shareable);
+            if (peer.RemoteEndPoint != null)
+            {
+                // The peer manager may also know this connection by its ephemeral source endpoint.
+                // Exclude that alias from known-peer candidates or recipients will waste connection
+                // attempts on it alongside the valid listening endpoint.
+                connectedEndpoints.Add(peer.RemoteEndPoint);
+            }
             byte flags = 0;
             if (peer.PeerPieces != null && peer.PeerPieces.ReceivedCount == peer.PeerPieces.Count) flags |= (byte)UtPex.Peer.Seed;
             if (peer.UtpStream != null) flags |= (byte)UtPex.Peer.Utp;
@@ -71,9 +78,16 @@ internal sealed class PeerExchangeCoordinator
         }
 
         var knownCandidates = new List<IPEndPoint>();
-        foreach (var (endpoint, _) in _knownPeers)
+        foreach (var (endpoint, history) in _knownPeers)
         {
-            if (!connectedEndpoints.Contains(endpoint)) knownCandidates.Add(endpoint);
+            // Only addresses a peer actually listens on. The cache is keyed by whatever endpoint each
+            // connection used, so every peer that dialled us left an entry under its ephemeral source
+            // port - unconnectable, and previously gossiped like any other. That closes a loop: the
+            // recipient records it, ranks it, dials it, and fails, having learnt it from us.
+            if (history.IsListenAddress && !connectedEndpoints.Contains(endpoint))
+            {
+                knownCandidates.Add(endpoint);
+            }
         }
 
         int takeCount = Math.Min(50, knownCandidates.Count);

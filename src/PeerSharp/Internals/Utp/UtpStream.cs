@@ -608,7 +608,9 @@ internal class UtpStream : Stream
             uint now = Utils.TimestampMicro();
             _lastReplyDelay = now - header.TimestampMicroseconds;
 
-            // Their measurement of us, fed to its own history so clock drift can be spotted.
+            // Our measurement of the peer-to-us direction, fed to its own history so relative clock
+            // drift can be spotted. The arbitrary clock offset is intentional: only changes in the
+            // minimum matter, exactly as in libutp's their_hist.
             ObserveTheirDelay(_lastReplyDelay);
             // Protect against window inflation attacks by clamping to 4MB
             _wndSize = Math.Min(header.WndSize, MaxRemoteWndSize);

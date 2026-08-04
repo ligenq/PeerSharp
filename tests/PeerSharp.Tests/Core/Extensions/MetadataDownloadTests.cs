@@ -406,6 +406,45 @@ public class MetadataDownloadTests
         Assert.Equal(0.0f, download.Progress);
     }
 
+    [Fact]
+    public async Task MetadataPieceReceivedAsync_ShortPieceKeepsValidRequestPending()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 1;
+        var download = new MetadataDownload(torrent);
+        download.Start();
+        download.InitializeMetadataBuffer(1000);
+
+        var peer = MakePeer(1000);
+        download.PeerConnected(peer);
+        Assert.Equal(1, download.PendingRequestCountForTesting);
+
+        await download.MetadataPieceReceivedAsync(peer, 0, new byte[999]);
+
+        Assert.False(download.Finished);
+        Assert.Equal(0.0f, download.Progress);
+        Assert.Equal(1, download.PendingRequestCountForTesting);
+    }
+
+    [Fact]
+    public async Task MetadataPieceReceivedAsync_MalformedCompleteMetadataIsResetAndRetried()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 1;
+        var download = new MetadataDownload(torrent);
+        download.Start();
+        download.InitializeMetadataBuffer(1000);
+
+        var peer = MakePeer(1000);
+        download.PeerConnected(peer);
+
+        await download.MetadataPieceReceivedAsync(peer, 0, new byte[1000]);
+
+        Assert.False(download.Finished);
+        Assert.Equal(0.0f, download.Progress);
+        Assert.Equal(1, download.PendingRequestCountForTesting);
+    }
+
     // ── MetadataPieceReceivedAsync – completion paths ─────────────────────────
 
     [Fact]
