@@ -225,7 +225,15 @@ internal class NatPmpPortMapping : IPortMapper
         {
             if (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
-                logger.LogDebug(ex, "NAT-PMP: Error mapping on {Gateway}", gateway);
+                // A gateway that does not answer is the ordinary case, not a fault: most consumer
+                // routers speak UPnP and not NAT-PMP, and with a VPN up there are two gateways of which
+                // at least one is certain to stay silent. The type and message identify it; the stack
+                // trace is the same every time and four of them per attempt is most of what a reader
+                // sees.
+                #pragma warning disable S6667
+                logger.LogDebug(
+                    "NAT-PMP: no mapping from {Gateway} ({Reason})", gateway, ex.GetType().Name);
+                #pragma warning restore S6667
             }
         }
         return (false, null);
