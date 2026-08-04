@@ -163,10 +163,28 @@ public sealed class ConnectionSettings
     public int MaxPeersPerTorrent { get; set; } = 50;
 
     /// <summary>
-    /// Maximum number of pending (half-open) outgoing connections.
-    /// Default is 200. Limits the resources consumed while trying to find active peers.
+    /// Maximum number of pending (half-open) outgoing connections. Default is 50.
+    ///
+    /// <para>
+    /// It was 200, which never bound: dialling at <see cref="ConnectionsPerSecond"/> with a ten second
+    /// connect timeout settles at around 180 half-open connections all by itself, and that is what the
+    /// client did. The machine copes with it easily. What does not is everything between the machine
+    /// and the internet - a home router's connection tracking table, more so behind a VPN or a second
+    /// layer of NAT - and when that table fills, entries are evicted, which kills connections that were
+    /// working.
+    /// </para>
+    ///
+    /// <para>
+    /// Traced on a real swarm, that is exactly what happened. Peers completed the handshake, announced
+    /// they had every piece, and were gone inside a second having transferred nothing, with no protocol
+    /// reason anywhere: 57 of 94 connections died within five seconds, median lifetime nine tenths of a
+    /// second. The download was unstable for ninety seconds while 125 to 153 connections were half-open,
+    /// and became rock steady at 11 MiB/s the moment that fell to 38 - same peers, same swarm, same
+    /// minute. Fifty is chosen from that measurement, being comfortably inside the range that was
+    /// stable, and it is roughly where the clients that behave well on the same network sit.
+    /// </para>
     /// </summary>
-    public int MaxPendingConnections { get; set; } = 200;
+    public int MaxPendingConnections { get; set; } = 50;
 
     /// <summary>Minimum connection timeout in milliseconds. Default is 1000.</summary>
     public int MinConnectionTimeoutMs { get; set; } = 1000;
