@@ -1318,7 +1318,7 @@ public class PeerManagerTests
 
         public override Task SendMessageAsync(PeerMessage msg) => Task.FromException(new InvalidOperationException("send failed"));
 
-        public override Task CloseAsync()
+        public override Task CloseAsync(string? closedBy = null)
         {
             CloseCalls++;
             return Task.CompletedTask;

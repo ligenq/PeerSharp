@@ -52,7 +52,7 @@ public class PeerManagerConcurrencyTests
             return Task.FromResult(true);
         }
 
-        public override Task CloseAsync()
+        public override Task CloseAsync(string? closedBy = null)
         {
             MockConnected = false;
             return Task.CompletedTask;

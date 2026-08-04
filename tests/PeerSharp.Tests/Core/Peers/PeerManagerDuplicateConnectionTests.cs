@@ -589,7 +589,7 @@ public class PeerManagerDuplicateConnectionTests
             return success;
         }
 
-        public override Task CloseAsync()
+        public override Task CloseAsync(string? closedBy = null)
         {
             Interlocked.Increment(ref _closeCalls);
             bool wasConnected = Connected == 1;

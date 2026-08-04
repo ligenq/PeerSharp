@@ -48,7 +48,7 @@ public class PeerHealthMonitorTests
     {
         public ClosablePeer(Torrent torrent) : base(torrent) { }
         public int CloseCalls { get; private set; }
-        public override Task CloseAsync()
+        public override Task CloseAsync(string? closedBy = null)
         {
             CloseCalls++;
             return Task.CompletedTask;

@@ -654,7 +654,15 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _lastChokeChange = now;
     }
 
-    public async virtual Task CloseAsync()
+    /// <param name="closedBy">
+    /// Filled in by the compiler with the name of the method that closed this connection. Free - it is
+    /// a literal at the call site - and it answers the question the stack trace below was being turned
+    /// on for. Without it a close records only that it happened: three separate investigations into
+    /// peers vanishing seconds after a successful handshake each stalled here, because "Closing
+    /// connection to X" is equally consistent with the peer hanging up, a duplicate being resolved, a
+    /// limit being enforced, and a bug.
+    /// </param>
+    public async virtual Task CloseAsync([System.Runtime.CompilerServices.CallerMemberName] string? closedBy = null)
     {
         bool wasConnected = Interlocked.Exchange(ref _connected, 0) == 1;
 
@@ -666,11 +674,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         if (wasConnected && _logger.IsEnabled(LogLevel.Trace))
         {
             var stack = new StackTrace();
-            _logger.LogTrace("Closing connection to {PeerName}. wasConnected=true. Trace: {Trace}", Name, stack.ToString());
+            _logger.LogTrace("Closing connection to {PeerName} (by {ClosedBy}). wasConnected=true. Trace: {Trace}", Name, closedBy, stack.ToString());
         }
         else if (wasConnected)
         {
-            _logger.LogDebug("Closing connection to {PeerName}", Name);
+            _logger.LogDebug("Closing connection to {PeerName} (by {ClosedBy})", Name, closedBy);
         }
 
         await CleanupResourcesAsync().ConfigureAwait(false);
