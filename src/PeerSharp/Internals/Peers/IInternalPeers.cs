@@ -60,4 +60,14 @@ internal interface IInternalPeers : IPeers
     /// Gets a list of all currently connected peer communications.
     /// </summary>
     IEnumerable<PeerCommunication> GetConnectedPeersInternal();
+
+    /// <summary>
+    /// Records that a peer contributed data to a piece that failed its hash.
+    /// </summary>
+    /// <returns>
+    /// True once it has done so often enough that it should no longer be talked to. Kept against the
+    /// address rather than the connection, so that hanging up is worth something: a count that lives on
+    /// the connection is reset by reconnecting, which a peer feeding bad data will do immediately.
+    /// </returns>
+    bool RecordHashFailure(PeerCommunication peer);
 }

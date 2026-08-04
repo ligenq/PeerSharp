@@ -285,6 +285,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // BEP 40: Use already calculated priority
             peer.Priority = incomingPriority;
 
+            // Refused in both directions, or a peer that has been dropped for serving bad data simply
+            // connects back and carries on.
+            if (IsRefusedForBadData(peer.RemoteEndPoint.Address))
+            {
+                _logger.LogDebug(
+                    "Rejecting incoming connection from {RemoteEndPoint} - it has served bad data before",
+                    peer.RemoteEndPoint);
+                await peer.CloseAsync().ConfigureAwait(false);
+                return;
+            }
+
             // Tracked by the endpoint the connection arrived on, which for an incoming one is an
             // ephemeral source port. Useful for this connection's own uTP history and nothing else:
             // it is not an address anybody can dial, so it is not marked connectable and not offered
@@ -516,12 +527,62 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         ApplyConnectionBackoff(history);
     }
 
+    /// <summary>
+    /// How many pieces a peer may contribute bad data to before it is left alone. Attribution is not
+    /// exact - a piece is assembled from several peers and all of them are counted - so this is set
+    /// where a peer that keeps appearing in failures is caught while one that appeared beside a bad
+    /// peer once or twice is not.
+    /// </summary>
+    private const int MaxHashFailuresPerAddress = 3;
+
+    /// <summary>
+    /// Bounded so a swarm cannot make this grow without limit. Far above the number of addresses that
+    /// ever serve bad data in one session; reaching it at all would itself be the anomaly.
+    /// </summary>
+    private const int MaxTrackedHashFailureAddresses = 4096;
+
+    private readonly ConcurrentDictionary<IPAddress, int> _hashFailuresByAddress = new();
+
+    /// <inheritdoc />
+    public bool RecordHashFailure(PeerCommunication peer)
+    {
+        if (peer.RemoteEndPoint?.Address is not { } address)
+        {
+            return false;
+        }
+
+        if (_hashFailuresByAddress.Count >= MaxTrackedHashFailureAddresses
+            && !_hashFailuresByAddress.ContainsKey(address))
+        {
+            return false;
+        }
+
+        int failures = _hashFailuresByAddress.AddOrUpdate(address, 1, static (_, count) => count + 1);
+        return failures >= MaxHashFailuresPerAddress;
+    }
+
+    /// <summary>Whether this address has served enough bad data to be left alone.</summary>
+    private bool IsRefusedForBadData(IPAddress address)
+        => _hashFailuresByAddress.TryGetValue(address, out int failures)
+            && failures >= MaxHashFailuresPerAddress;
+
     public void ConnectTo(string ip, int port, bool forceUtp = false)
     {
         // Check blocklist first
         if (_torrent.Blocklist?.IsBlocked(ip) == true)
         {
             _logger.LogDebug("Blocked outgoing connection to {Ip}:{Port} (blocklist)", ip, port);
+            return;
+        }
+
+        // Hanging up on a peer that serves bad data accomplishes nothing if we dial it again a moment
+        // later, which is exactly what happened: the count lived on the connection, so reconnecting
+        // cleared it, and the peer went back to the front of the queue having just proved itself
+        // useless. Worse since connections are now judged by bytes moved - corrupt blocks are still
+        // bytes, so a peer feeding us rubbish looked like a productive one.
+        if (IPAddress.TryParse(ip, out var parsedForBadData) && IsRefusedForBadData(parsedForBadData))
+        {
+            _logger.LogDebug("Not dialling {Ip}:{Port} - it has served bad data before", ip, port);
             return;
         }
 

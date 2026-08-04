@@ -1010,6 +1010,47 @@ public class PeerManagerTests
     }
 
     /// <summary>
+    /// Bad data has to be remembered against the source, not the connection it arrived on. Counting it
+    /// on the connection made dropping the peer pointless - it reconnects, the count is gone, and it
+    /// goes straight back into the rotation. In a live run one piece failed its hash thirteen times
+    /// without a single peer ever being dropped for it.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task HashFailures_AreCountedAgainstTheAddress_NotTheConnection()
+    {
+        var ctx = CreateContext();
+        var address = IPAddress.Parse("203.0.113.9");
+
+        var first = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = new IPEndPoint(address, 6881)
+        };
+
+        Assert.False(ctx.Manager.RecordHashFailure(first));
+        Assert.False(ctx.Manager.RecordHashFailure(first));
+        Assert.True(ctx.Manager.RecordHashFailure(first));
+
+        // The same source coming back on a different port, which is what a reconnect looks like and
+        // what an incoming connection looks like every time. It must not arrive with a clean slate.
+        var reconnected = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = new IPEndPoint(address, 51413)
+        };
+
+        Assert.True(ctx.Manager.RecordHashFailure(reconnected));
+
+        // And an unrelated peer is unaffected - the count is per source, not a global mood.
+        var innocent = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("203.0.113.10"), 6881)
+        };
+
+        Assert.False(ctx.Manager.RecordHashFailure(innocent));
+
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
     /// A relay that has hit the holepunch limit goes on asking, so reporting each refusal reported the
     /// same working limit over and over: a nine minute run produced several hundred warnings, twenty of
     /// them inside one second. The limit is worth a warning; each rendezvous it turns away is not.
