@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Network;
@@ -1006,6 +1007,49 @@ public class PeerManagerTests
         Assert.Equal(DateTimeOffset.MinValue, history.NextConnectAttempt);
 
         await CleanupAsync(ctx);
+    }
+
+    /// <summary>
+    /// A relay that has hit the holepunch limit goes on asking, so reporting each refusal reported the
+    /// same working limit over and over: a nine minute run produced several hundred warnings, twenty of
+    /// them inside one second. The limit is worth a warning; each rendezvous it turns away is not.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task HolepunchRateLimit_WarnsOncePerWindow_NotOncePerRefusal()
+    {
+        var captured = new Interop.CapturingLoggerProvider(LogLevel.Debug);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Debug);
+            builder.AddProvider(captured);
+        });
+
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = ProtocolConstants.BlockSize;
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, CreateTempPath());
+
+        // Zero, so every rendezvous is refused and none is dialled: this is about what gets reported,
+        // and a test of that should not open sockets to find out.
+        torrent.Settings.Connection.MaxHolepunchPerMinute = 0;
+
+        var governor = new FakeConnectionGovernor();
+        var manager = new PeerManager(
+            torrent,
+            new TorrentTestUtility.MockGeoIpService(),
+            new RealPeerFactory(),
+            TimeProvider.System,
+            governor,
+            loggerFactory.CreateLogger<PeerManager>());
+
+        for (int i = 1; i <= 25; i++)
+        {
+            manager.ConnectTo($"192.0.2.{i}", 6881, forceUtp: true);
+        }
+
+        Assert.Equal(1, captured.CountMatching("Holepunch rate limit"));
+
+        await manager.StopAsync();
+        await manager.DisposeAsync();
     }
 
     private static PeerManagerContext CreateContext()

@@ -884,6 +884,20 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
+        catch (TimeoutException ex)
+        {
+            // uTP reports an unanswered SYN this way, which is the most ordinary outcome there is of
+            // dialling a stranger over UDP - most of the addresses a swarm hands out are behind a NAT
+            // that will not answer. It belongs with the timeouts above rather than in the general catch
+            // below, where it was being reported as an unexpected fault, at error level, with a stack
+            // trace, twice per peer: once here and once from the uTP layer.
+            int elapsedMs = GetConnectionElapsedMs();
+            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+            _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Message})", ip, port, elapsedMs, ex.Message);
+            #pragma warning restore S6667
+            await CloseAsync().ConfigureAwait(false);
+            return false;
+        }
         catch (Exception ex)
         {
             // Unexpected errors - log with stack trace

@@ -115,6 +115,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private long _holepunchWindowStart = Environment.TickCount64;
 
+    /// <summary>
+    /// How many rendezvous have been refused in the current window. Exists so the limit can report
+    /// itself once rather than once per refusal: relays keep asking after it is reached, which is the
+    /// normal case, so a line each turned a limit that was working into several hundred warnings.
+    /// </summary>
+    private int _holepunchRefused = 0;
+
     private int _lastAggregateSpeed = 0;
 
 
@@ -556,13 +563,31 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             long windowStart = Interlocked.Read(ref _holepunchWindowStart);
             if (tickCount - windowStart > 60000)
             {
+                int refused = Interlocked.Exchange(ref _holepunchRefused, 0);
+                if (refused > 1)
+                {
+                    _logger.LogDebug(
+                        "Refused {Count} further holepunch requests over the last minute", refused - 1);
+                }
+
                 Interlocked.Exchange(ref _holepunchWindowStart, tickCount);
                 Interlocked.Exchange(ref _holepunchCount, 0);
             }
 
             if (Interlocked.Increment(ref _holepunchCount) > _settings.Connection.MaxHolepunchPerMinute)
             {
-                _logger.LogWarning("Holepunch rate limit exceeded for {Ip}:{Port}", ip, port);
+                // One line per window, not per refusal. A relay that has hit the limit goes on asking,
+                // so this reported every rejection: several hundred warnings in a few minutes, all
+                // saying the same thing about a limit that was doing its job. The rest are counted and
+                // summarised when the window rolls over.
+                if (Interlocked.Increment(ref _holepunchRefused) == 1)
+                {
+                    _logger.LogWarning(
+                        "Holepunch rate limit of {Limit}/minute reached; refusing further rendezvous this minute (first was {Ip}:{Port})",
+                        _settings.Connection.MaxHolepunchPerMinute,
+                        ip,
+                        port);
+                }
                 return;
             }
 
@@ -1811,10 +1836,19 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // between 0.5 and 3.5 seconds seventeen times, and 14, 36, 62, 123 and 123 seconds the rest.
         // Those are not a distribution, they are this schedule - one retry, one minute, two minutes -
         // and a torrent whose tracker is failing waits through all of them before it sees a peer.
-        int nextIn =
-            ConnectedCount == 0 ? DhtLookupRetrySeconds
-            : !_torrent.HasMetadata || ConnectedCount < DhtHealthyPeerCount ? DhtLookupHungrySeconds
-            : DhtLookupIntervalSeconds;
+        int nextIn;
+        if (ConnectedCount == 0)
+        {
+            nextIn = DhtLookupRetrySeconds;
+        }
+        else if (!_torrent.HasMetadata || ConnectedCount < DhtHealthyPeerCount)
+        {
+            nextIn = DhtLookupHungrySeconds;
+        }
+        else
+        {
+            nextIn = DhtLookupIntervalSeconds;
+        }
 
         _logger.LogDebug(
             "DHT lookup asked {Count} nodes for peers, announced on port {Port}, {Peers} peers connected, next in {Seconds}s",
