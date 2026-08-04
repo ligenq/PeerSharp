@@ -39,7 +39,12 @@ Directory.CreateDirectory(options.DownloadPath);
 var settings = new Settings
 {
     Files = { DefaultDownloadPath = options.DownloadPath },
-    Connection = { EnableLsd = options.LocalDiscovery },
+    Connection =
+    {
+        EnableLsd = options.LocalDiscovery,
+        UpnpPortMapping = options.PortMap,
+        NatPmpPortMapping = options.PortMap
+    },
     Dht = { Enabled = !options.NoDht }
 };
 

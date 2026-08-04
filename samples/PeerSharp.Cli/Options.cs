@@ -37,6 +37,14 @@ internal sealed record Options
     /// public network.</summary>
     public bool NoDht { get; init; }
 
+    /// <summary>
+    /// Ask the router to forward the listening port (UPnP and NAT-PMP), off by default in the library
+    /// and here. Worth turning on to soak the incoming path: without a forwarded port most connections
+    /// are ones this process dialled, and everything peers tell us about themselves - where they
+    /// listen, what they support - only arrives on connections they opened.
+    /// </summary>
+    public bool PortMap { get; init; }
+
     /// <summary>Peers to try in addition to discovery, as host:port.</summary>
     public IReadOnlyList<string> Peers { get; init; } = [];
 
@@ -64,6 +72,7 @@ internal sealed record Options
         bool recheck = false;
         bool noDht = false;
         bool metadataOnly = false;
+        bool portMap = false;
         var peers = new List<string>();
         int? stopAfter = null;
         var interval = TimeSpan.FromSeconds(5);
@@ -101,6 +110,10 @@ internal sealed record Options
 
                 case "--metadata-only":
                     metadataOnly = true;
+                    break;
+
+                case "--port-map":
+                    portMap = true;
                     break;
 
                 case "--stop-after":
@@ -196,6 +209,7 @@ internal sealed record Options
             Recheck = recheck,
             NoDht = noDht,
             MetadataOnly = metadataOnly,
+            PortMap = portMap,
             Peers = peers,
             StopAfterSeconds = stopAfter,
             ReportInterval = interval,
@@ -219,6 +233,7 @@ internal sealed record Options
                   --recheck        hash-check existing files first, to seed what is already there
                   --no-dht         disable the DHT, isolating a run from the public network
                   --metadata-only  fetch a magnet's metadata, time it, and stop before downloading
+                  --port-map       ask the router to forward the port (UPnP, NAT-PMP), for seeding
                   --peer <ip:port> try this peer as well as any found by discovery (repeatable)
                   --stop-after <s> stop the torrent after this long and keep reporting
                   --interval <s>   seconds between reports (default: 5)
