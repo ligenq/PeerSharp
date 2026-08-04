@@ -124,6 +124,21 @@ internal sealed class PieceState : IDisposable
         }
     }
 
+    /// <summary>
+    /// Gives up this peer's reservation, if it holds one. Called when the connection goes away, so the
+    /// piece is available to whoever asks next instead of waiting out a claim nobody can honour.
+    /// </summary>
+    public void ReleaseRetryClaim(PeerCommunication peer)
+    {
+        lock (_lock)
+        {
+            if (ReferenceEquals(_retryOwner, peer))
+            {
+                _retryOwner = null;
+            }
+        }
+    }
+
     public bool IsWriting
     {
         get
@@ -1087,6 +1102,15 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _piecePicker.UnregisterPeerAvailability(peer);
         _requestTracker.RemovePeer(peer);
         _uploadQueueManager.RemovePeer(peer);
+
+        // A piece being retried is reserved for one peer at a time so that the next failure names its
+        // author. Nothing released that reservation when the peer went away, so a piece could sit
+        // reserved for a connection that no longer exists until the claim aged out - and the peer most
+        // likely to be holding one is the peer that was just dropped for supplying the bad data.
+        foreach (var state in _pieceStateManager.ActivePieces.Values)
+        {
+            state.ReleaseRetryClaim(peer);
+        }
     }
 
     public void Update()
