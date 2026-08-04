@@ -73,11 +73,22 @@ internal static class TorrentTestUtility
 
             timeProvider.Advance(step);
 
-            // Poll rather than sleeping a fixed amount, so this returns as soon as the continuation has
-            // run instead of always paying the worst case.
-            for (int i = 0; i < 20 && !condition(); i++)
+            // Yield first. When the thread pool is healthy the continuation the advance released is
+            // ready immediately and this costs microseconds, where a timed sleep cannot cost less than
+            // the system timer tick - about 16ms on Windows however small the number passed to it.
+            for (int i = 0; i < 4 && !condition(); i++)
             {
-                await Task.Delay(10);
+                await Task.Yield();
+            }
+
+            // Then sleep, for a runner too busy to have run it yet. Kept short deliberately: this is
+            // paid on every round that does not finish, so it sets how much of the clock the real-time
+            // budget can afford to cover. Twenty sleeps a round cost 300ms each, which bought only
+            // sixty rounds - enough locally, and not enough on CI, where these tests took six and
+            // twenty seconds against the one second they take here.
+            for (int i = 0; i < 4 && !condition(); i++)
+            {
+                await Task.Delay(1);
             }
         }
 

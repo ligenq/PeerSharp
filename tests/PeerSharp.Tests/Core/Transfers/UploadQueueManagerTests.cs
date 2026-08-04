@@ -4,6 +4,7 @@ using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Transfers;
 using PeerSharp.Messages;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Reflection;
 
@@ -11,6 +12,15 @@ namespace PeerSharp.Tests.Core.Transfers;
 
 public class UploadQueueManagerTests
 {
+    /// <summary>
+    /// How long to allow the pump to pick an item up. The pump runs on the thread pool, so this is a
+    /// question about the runner rather than the code: five seconds was enough locally, where these
+    /// tests finish in one, and not on CI, where the pool is shared with every other test collection
+    /// running in parallel. Generous on purpose - waiting longer costs nothing when the pump is
+    /// healthy, and only a genuinely stuck pump reaches the end of it.
+    /// </summary>
+    private static readonly TimeSpan PumpStart = TimeSpan.FromSeconds(30);
+
     private class MockPeerListener : IPeerListener
     {
         public Task ConnectionClosedAsync(IPeerCommunication peer, int code) => Task.CompletedTask;
@@ -48,7 +58,7 @@ public class UploadQueueManagerTests
         var peer = CreateUnchockedPeer();
         Assert.True(manager.TryEnqueue(peer, new UploadQueueItem(7, 16384, 16384)));
 
-        Assert.True(await done.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await done.WaitAsync(PumpStart));
         Assert.Equal(7, received!.Value.PieceIndex);
         Assert.Equal(16384, received.Value.Offset);
     }
@@ -65,7 +75,7 @@ public class UploadQueueManagerTests
 
         // Start executing item 0 (pump blocks in gate), leaving the channel free.
         manager.TryEnqueue(peer, new UploadQueueItem(0, 0, 16384));
-        Assert.True(await pumpOnFirst.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await pumpOnFirst.WaitAsync(PumpStart));
 
         // Fill the queue by enqueuing past capacity, counting what was accepted. Derived from the
         // constant rather than written out, so raising the depth cannot silently invalidate this.
@@ -91,19 +101,19 @@ public class UploadQueueManagerTests
         using var cts = new CancellationTokenSource();
         var pumpOnFirst = new SemaphoreSlim(0);
         var gate = new TaskCompletionSource();
-        var executed = new List<int>();
+        var executed = new ConcurrentQueue<int>();
 
         await using var manager = CreateManager(async (_, item, _) =>
         {
             if (item.PieceIndex == 0) { pumpOnFirst.Release(); await gate.Task; }
-            executed.Add(item.PieceIndex);
+            executed.Enqueue(item.PieceIndex);
         }, cts.Token);
 
         var peer = CreateUnchockedPeer();
         manager.TryEnqueue(peer, new UploadQueueItem(0, 0, 16384)); // blocks pump
         manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384)); // will be cancelled
 
-        Assert.True(await pumpOnFirst.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await pumpOnFirst.WaitAsync(PumpStart));
         manager.Cancel(peer, 1, 0); // cancel while pump is blocked on item 0
         gate.SetResult();
 
@@ -114,7 +124,7 @@ public class UploadQueueManagerTests
             () => executed.Count >= 1, 10000, "the pump to execute the first item");
         await Task.Delay(200);
 
-        Assert.Equal([0], executed);
+        Assert.Equal([0], executed.ToArray());
     }
 
     [Fact]
@@ -123,19 +133,19 @@ public class UploadQueueManagerTests
         using var cts = new CancellationTokenSource();
         var pumpOnFirst = new SemaphoreSlim(0);
         var gate = new TaskCompletionSource();
-        var executed = new List<int>();
+        var executed = new ConcurrentQueue<int>();
 
         await using var manager = CreateManager(async (_, item, _) =>
         {
             if (item.PieceIndex == 0) { pumpOnFirst.Release(); await gate.Task; }
-            executed.Add(item.PieceIndex);
+            executed.Enqueue(item.PieceIndex);
         }, cts.Token);
 
         var peer = CreateUnchockedPeer();
         manager.TryEnqueue(peer, new UploadQueueItem(0, 0, 16384));
         manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384));
 
-        Assert.True(await pumpOnFirst.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await pumpOnFirst.WaitAsync(PumpStart));
         // Cancel same block multiple times — must not throw
         manager.Cancel(peer, 1, 0);
         manager.Cancel(peer, 1, 0);
@@ -147,7 +157,7 @@ public class UploadQueueManagerTests
         await TorrentTestUtility.WaitUntilAsync(
             () => executed.Count >= 1, 10000, "the pump to execute the first item");
         await Task.Delay(200);
-        Assert.Equal([0], executed);
+        Assert.Equal([0], executed.ToArray());
     }
 
     [Fact]
@@ -184,7 +194,7 @@ public class UploadQueueManagerTests
         manager.TryEnqueue(peer, new UploadQueueItem(20, 0, 16384));
         manager.TryEnqueue(peer, new UploadQueueItem(30, 0, 16384));
 
-        Assert.True(await allDone.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await allDone.WaitAsync(PumpStart));
         Assert.Equal([10, 20, 30], order);
     }
 
@@ -217,20 +227,20 @@ public class UploadQueueManagerTests
         using var cts = new CancellationTokenSource();
         var pumpOnFirst = new SemaphoreSlim(0);
         var gate = new TaskCompletionSource();
-        var executed = new List<int>();
+        var executed = new ConcurrentQueue<int>();
 
         await using var manager = CreateManager(async (_, item, _) =>
         {
             pumpOnFirst.Release();
             await gate.Task;
-            executed.Add(item.PieceIndex);
+            executed.Enqueue(item.PieceIndex);
         }, cts.Token);
 
         var peer = CreateUnchockedPeer();
         manager.TryEnqueue(peer, new UploadQueueItem(0, 0, 16384)); // pump blocks here
         manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384)); // should never execute
 
-        Assert.True(await pumpOnFirst.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await pumpOnFirst.WaitAsync(PumpStart));
         manager.RemovePeer(peer); // cancels peer's CTS — pump will stop after current item
         gate.SetResult();          // unblock current execute
 
@@ -242,7 +252,7 @@ public class UploadQueueManagerTests
         await Task.Delay(200);
 
         // Item 0 was already executing when RemovePeer was called; item 1 was not started
-        Assert.Equal([0], executed);
+        Assert.Equal([0], executed.ToArray());
     }
 
     [Fact]
@@ -267,12 +277,12 @@ public class UploadQueueManagerTests
     public async Task MultiplePeers_HaveIndependentQueues()
     {
         using var cts = new CancellationTokenSource();
-        var executedByPeer = new System.Collections.Concurrent.ConcurrentDictionary<PeerCommunication, List<int>>();
+        var executedByPeer = new ConcurrentDictionary<PeerCommunication, ConcurrentQueue<int>>();
         var done = new SemaphoreSlim(0);
 
         await using var manager = CreateManager((peer, item, _) =>
         {
-            executedByPeer.GetOrAdd(peer, _ => []).Add(item.PieceIndex);
+            executedByPeer.GetOrAdd(peer, _ => new ConcurrentQueue<int>()).Enqueue(item.PieceIndex);
             if (executedByPeer.Values.Sum(l => l.Count) == 4)
             {
                 done.Release();
@@ -289,10 +299,10 @@ public class UploadQueueManagerTests
         manager.TryEnqueue(peer2, new UploadQueueItem(3, 0, 16384));
         manager.TryEnqueue(peer2, new UploadQueueItem(4, 0, 16384));
 
-        Assert.True(await done.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await done.WaitAsync(PumpStart));
 
-        Assert.Equal([1, 2], executedByPeer[peer1]);
-        Assert.Equal([3, 4], executedByPeer[peer2]);
+        Assert.Equal([1, 2], executedByPeer[peer1].ToArray());
+        Assert.Equal([3, 4], executedByPeer[peer2].ToArray());
     }
 
     [Fact]
@@ -314,7 +324,7 @@ public class UploadQueueManagerTests
 
         manager.TryEnqueue(peer, new UploadQueueItem(5, 0, 16384));
 
-        Assert.True(await done.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(await done.WaitAsync(PumpStart));
         Assert.Equal(5, received!.Value.PieceIndex);
     }
 }

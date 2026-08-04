@@ -620,9 +620,13 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
         public bool IsAvailable(TimeProvider timeProvider)
         {
+            // Milliseconds, as the name says. This read them as seconds, which turned the intended
+            // fifteen second wait before retrying a seed that has failed its three times into four
+            // hours and ten minutes - long enough that, for any torrent that finishes in an afternoon,
+            // a web seed which failed once was never tried again.
             return !IsActive &&
             (FailureCount < MaxRetries ||
-             timeProvider.GetUtcNow() - LastFailure > TimeSpan.FromSeconds(RetryDelayMs * FailureCount));
+             timeProvider.GetUtcNow() - LastFailure > TimeSpan.FromMilliseconds(RetryDelayMs * FailureCount));
         }
     }
 }
