@@ -1420,9 +1420,17 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                         foreach (var p in pieceToProcess.Contributors)
                         {
                             p.Strikes++;
-                            if (p.Strikes >= 3)
+
+                            // Counted against the address, not this connection. Strikes on the
+                            // connection object are lost the moment the peer reconnects, so the same
+                            // source could keep feeding bad data indefinitely: one piece failed thirteen
+                            // times in a live run without a single peer ever being dropped for it.
+                            if (_torrent.PeersInternal.RecordHashFailure(p))
                             {
-                                Logger.LogWarning("Banning peer {RemoteEndPoint} due to hash failures", p.RemoteEndPoint);
+                                Logger.LogWarning(
+                                    "Dropping peer {RemoteEndPoint} - it has contributed to {Strikes} pieces that failed their hash",
+                                    p.RemoteEndPoint,
+                                    p.Strikes);
                                 await p.CloseAsync().ConfigureAwait(false);
                             }
                         }

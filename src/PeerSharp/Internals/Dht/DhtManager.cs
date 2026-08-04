@@ -456,6 +456,18 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             {
                 throw;
             }
+            catch (SocketException ex)
+            {
+                // A resolver that will not answer for a host is an environment fact, not a fault here,
+                // and its stack trace is the same every time. Some networks filter these names
+                // deliberately; the other bootstrap nodes are tried regardless, which is why there are
+                // several. Kept at warning because losing them all leaves the DHT with nowhere to
+                // start, but without the trace.
+                #pragma warning disable S6667
+                _logger.LogWarning(
+                    "Could not resolve DHT bootstrap node {Host}: {Reason}", node.Host, ex.Message);
+                #pragma warning restore S6667
+            }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to resolve DHT bootstrap node {Host}", node.Host);
