@@ -230,7 +230,9 @@ internal class UtpStream : Stream
 
                 if (_timeoutCount >= MaxSynRetries)
                 {
-                    _logger.LogWarning("uTP {Remote}: SYN-RECV timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
+                    // Debug, not warning: a peer that does not complete the handshake is the expected
+                    // majority outcome on a public swarm, not something wrong with this end.
+                    _logger.LogDebug("uTP {Remote}: SYN-RECV timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
                     CloseInternal(false, new TimeoutException("SYN-RECV timeout"));
                     return;
                 }
@@ -245,7 +247,9 @@ internal class UtpStream : Stream
 
                 if (_timeoutCount >= MaxSynRetries)
                 {
-                    _logger.LogWarning("uTP {Remote}: SYN timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
+                    // Debug, not warning: see the SYN-RECV case above. The caller reports this too, so
+                    // at warning level one unreachable peer produced two lines and a stack trace.
+                    _logger.LogDebug("uTP {Remote}: SYN timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
                     var ex = new TimeoutException($"Connection to {RemoteEndPoint} timed out after {MaxSynRetries} SYN retries");
                     _connectTcs?.TrySetException(ex);
                     CloseInternal(false, ex);
