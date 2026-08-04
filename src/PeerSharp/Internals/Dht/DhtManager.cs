@@ -145,11 +145,33 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             return;
         }
 
+        // A fresh budget per announce. The walk that follows can reach thousands of nodes, and every
+        // one of them that returns a token would otherwise be told to store us.
+        _announcesSentPerHash[Convert.ToHexString(infoHash.Span)] = 0;
+
         var nodes = _table.FindClosest(infoHash.Span, 8);
         foreach (var node in nodes)
         {
             SendGetPeers(node.EndPoint, infoHash, announce: true, port: port);
         }
+    }
+
+    /// <summary>
+    /// BEP 5 stores a peer on the nodes nearest the info hash, and eight is the number every
+    /// implementation uses. The announce rides along with an iterative lookup, so it inherits that
+    /// walk unless it is bounded: once announcing started working at all, one 100 second run reached
+    /// 3688 distinct nodes. That is not storing a peer, it is flooding the DHT with one.
+    /// </summary>
+    private const int MaxAnnouncePeerNodes = 8;
+
+    private readonly ConcurrentDictionary<string, int> _announcesSentPerHash = new();
+
+    /// <summary>Whether this announce still has budget left for one more node.</summary>
+    private bool TryTakeAnnounceSlot(InfoHash infoHash)
+    {
+        string key = Convert.ToHexString(infoHash.Span);
+        int sent = _announcesSentPerHash.AddOrUpdate(key, 1, static (_, count) => count + 1);
+        return sent <= MaxAnnouncePeerNodes;
     }
 
     public async ValueTask DisposeAsync()
@@ -174,8 +196,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         int queried = 0;
         foreach (var node in nodes)
         {
-            SendGetPeers(node.EndPoint, infoHash);
-            queried++;
+            if (SendGetPeers(node.EndPoint, infoHash))
+            {
+                queried++;
+            }
         }
 
         return queried;
@@ -1038,7 +1062,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             }
 
             var token = r.GetBytes("token");
-            if (trans.Announce && token != null)
+            if (trans.Announce && token != null && TryTakeAnnounceSlot(trans.InfoHash))
             {
                 SendAnnouncePeer(remote, trans.InfoHash.ToArray(), token.Value.ToArray(), trans.Port);
             }
@@ -1390,24 +1414,42 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         a.Dict["token"] = new BString(token);
         dict.Dict["a"] = a;
 
+        // Worth a line. Announcing is how other peers find us at all, and when it silently stopped
+        // happening - the lookup that precedes it having consumed its deduplication key - there was
+        // nothing in any log to say so.
+        _logger.LogDebug("DHT announce_peer to {Node} for port {Port}", ep, port);
+
         SendPacket(dict, ep, DhtToken);
     }
 
-    private void SendGetPeers(IPEndPoint ep, InfoHash infoHash, bool announce = false, int port = 0, bool scrape = false)
+    private bool SendGetPeers(IPEndPoint ep, InfoHash infoHash, bool announce = false, int port = 0, bool scrape = false)
     {
-        // Deduplicate: don't query the same node for the same info hash within the transaction timeout
-        var queryKey = $"{ep}:{Convert.ToHexString(infoHash.Span)}";
+        // Deduplicate equivalent work, but keep the intent in the key. An announce starts with the
+        // same get_peers packet as a lookup, yet its response must be followed by announce_peer; a
+        // scrape also asks for extra fields. Treating all three as one query silently discarded the
+        // later intent -- PeerManager calls FindPeers and Announce back-to-back, so it never actually
+        // announced.
+        char intent = 'f';
+        if (scrape)
+        {
+            intent = 's';
+        }
+        else if (announce)
+        {
+            intent = 'a';
+        }
+        var queryKey = $"{ep}:{Convert.ToHexString(infoHash.Span)}:{intent}";
         var now = _timeProvider.GetUtcNow();
         if (_recentGetPeersQueries.TryGetValue(queryKey, out var lastQueried) &&
             (now - lastQueried).TotalMinutes < ProtocolConstants.DhtTransactionTimeoutMinutes)
         {
-            return;
+            return false;
         }
 
         // Don't create new transactions if we're at capacity
         if (_transactions.Count >= MaxTransactions)
         {
-            return;
+            return false;
         }
 
         _recentGetPeersQueries[queryKey] = now;
@@ -1435,6 +1477,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
         RegisterTransaction(tid, "get_peers", infoHash, announce, port, scrape);
         SendPacket(dict, ep, DhtToken);
+        return true;
     }
 
     private void SendPacket(BDict dict, IPEndPoint ep, CancellationToken ct)

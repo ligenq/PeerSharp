@@ -130,6 +130,19 @@ public class PieceStateTests
         }
     }
 
+    [Fact]
+    public void WebSeedContribution_IsTrackedUntilReset()
+    {
+        var piece = new PieceState(0, 1);
+
+        Assert.True(piece.TryAddBlockFromWebSeed(0, new Block(16)));
+        Assert.True(piece.HasWebSeedContributor);
+
+        piece.Reset();
+
+        Assert.False(piece.HasWebSeedContributor);
+    }
+
     /// <summary>
     /// A piece is asked of anyone until it fails, then of one peer at a time - which is what turns the
     /// next failure into an answer rather than a suspicion shared between everyone who contributed.

@@ -292,7 +292,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 _logger.LogDebug(
                     "Rejecting incoming connection from {RemoteEndPoint} - it has served bad data before",
                     peer.RemoteEndPoint);
-                await peer.CloseAsync().ConfigureAwait(false);
+                // The peer has not joined _connectedPeers yet, so CloseAsync cannot release the
+                // governor slot (ConnectionClosedAsync only releases slots owned by registered
+                // peers). Undo the provisional endpoint claim and slot explicitly.
+                UnregisterConnectedEndpoint(peer);
+                _governor.ReleaseConnectionSlot();
+                stream.Close();
                 return;
             }
 
@@ -341,6 +346,15 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (_torrent.Blocklist?.IsBlocked(remoteEp) == true)
         {
             _logger.LogDebug("Blocked incoming connection from {RemoteEp} (blocklist)", remoteEp);
+            client.Close();
+            return;
+        }
+
+        if (remoteEp is not null && IsRefusedForBadData(remoteEp.Address))
+        {
+            _logger.LogDebug(
+                "Rejecting incoming TCP connection from {RemoteEp} - it has served bad data before",
+                remoteEp);
             client.Close();
             return;
         }
@@ -503,12 +517,15 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        var history = GetOrAddKnownPeerHistory(endpoint);
+        // For an incoming connection, RemoteEndPoint is its ephemeral source port. If cache pruning
+        // removed the original non-dialable entry while the connection was alive, recreating it with
+        // the default would turn it into a PEX candidate. Preserve how this connection was opened.
+        var history = GetOrAddKnownPeerHistory(endpoint, isListenAddress: p.IsOutgoing);
 
         // Either direction counts. Uploading is the whole point of seeding, and until now only a piece
         // we received marked a peer as having exchanged data - so a seeder that uploaded for an hour
         // still had every one of its peers on record as never having given it anything.
-        if (p.Downloaded > 0 || p.Uploaded > 0)
+        if (p.Downloaded > 0 || p.Uploaded > 0 || p.HasExchangedUsefulData)
         {
             history.ExchangedData = true;
             history.FruitlessConnectionCount = 0;
@@ -551,6 +568,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return false;
         }
 
+        address = NormaliseForBadDataKey(address);
+
         if (_hashFailuresByAddress.Count >= MaxTrackedHashFailureAddresses
             && !_hashFailuresByAddress.ContainsKey(address))
         {
@@ -563,8 +582,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     /// <summary>Whether this address has served enough bad data to be left alone.</summary>
     private bool IsRefusedForBadData(IPAddress address)
-        => _hashFailuresByAddress.TryGetValue(address, out int failures)
+        => _hashFailuresByAddress.TryGetValue(NormaliseForBadDataKey(address), out int failures)
             && failures >= MaxHashFailuresPerAddress;
+
+    /// <summary>
+    /// One host, one key. The same peer reaches us as 1.2.3.4 or ::ffff:1.2.3.4 depending on which
+    /// socket saw it, and those are different <see cref="IPAddress"/> values: recording under one and
+    /// looking up the other quietly never matches. Done here rather than at the call sites so that
+    /// every recorder and every check agrees without having to remember to.
+    /// </summary>
+    private static IPAddress NormaliseForBadDataKey(IPAddress address)
+        => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
     public void ConnectTo(string ip, int port, bool forceUtp = false)
     {
@@ -1082,7 +1110,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
                 if (p.RemoteEndPoint != null && p.PeerPieces.IsFull)
                 {
-                    var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint);
+                    var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint, isListenAddress: p.IsOutgoing);
                     history.IsSeed = true;
                 }
 
@@ -1105,7 +1133,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
                 if (msg.Id == MessageId.HaveAll && p.RemoteEndPoint != null)
                 {
-                    var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint);
+                    var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint, isListenAddress: p.IsOutgoing);
                     history.IsSeed = true;
                 }
 
@@ -1128,7 +1156,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     // Track successful data exchange
                     if (p.RemoteEndPoint != null)
                     {
-                        var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint);
+                        var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint, isListenAddress: p.IsOutgoing);
                         history.ExchangedData = true;
                     }
                 }
@@ -2136,7 +2164,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _logger.LogDebug("Detected connection to ourselves at {RemoteEndPoint}, closing", p.RemoteEndPoint);
             if (p.RemoteEndPoint != null)
             {
-                var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint);
+                var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint, isListenAddress: p.IsOutgoing);
                 history.FruitlessConnectionCount++;
                 ApplyConnectionBackoff(history);
             }
@@ -2442,7 +2470,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 peer.AmInterested &&
                 peer.SmoothedDownloadSpeed < utpMinSpeed)
             {
-                var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
+                var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint, isListenAddress: peer.IsOutgoing);
                 if (history.RegisterUtpSlow(now, _settings.Connection) && _settings.Connection.EnableTcpOut)
                 {
                     toClose.Add(peer);
@@ -2556,6 +2584,15 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return Task.CompletedTask;
         }
 
+        if (remote is not null && IsRefusedForBadData(remote.Address))
+        {
+            _logger.LogDebug(
+                "Rejecting connected stream peer from {Remote} - it has served bad data before",
+                remote);
+            stream.Close();
+            return Task.CompletedTask;
+        }
+
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
         if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
         {
@@ -2590,7 +2627,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
             peer.Priority = PeerPriority.Calculate(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
 
-            var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint);
+            var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint, isListenAddress: initiator);
             history.UpdateSource(sourceKind);
         }
 

@@ -272,6 +272,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private int _totalMessageCount = 0;
     private long _totalMessageWindowStart = Environment.TickCount64;
     private long _uploaded;
+    private int _usefulDataExchanged;
 
     public PeerCommunication(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
         : this(torrent, listener, timeProvider, NullLoggerFactory.Instance)
@@ -513,6 +514,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     internal bool IsOutgoing { get; set; }
 
+    /// <summary>
+    /// Whether this connection moved payload that made the torrent useful. Unlike the byte counters,
+    /// this also covers extension payload such as magnet metadata.
+    /// </summary>
+    internal bool HasExchangedUsefulData => Volatile.Read(ref _usefulDataExchanged) != 0;
+
+    internal void MarkUsefulDataExchanged() => Volatile.Write(ref _usefulDataExchanged, 1);
+
     private Stream? _stream;
 
     /// <summary>
@@ -605,6 +614,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public void AddDownloaded(long bytes)
     {
         Interlocked.Add(ref _downloaded, bytes);
+        if (bytes > 0)
+        {
+            MarkUsefulDataExchanged();
+        }
 
         // Any data at all clears the snub: the peer answered, so whatever stalled it has passed.
         ClearSnubbed();
@@ -613,6 +626,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public void AddUploaded(long bytes)
     {
         Interlocked.Add(ref _uploaded, bytes);
+        if (bytes > 0)
+        {
+            MarkUsefulDataExchanged();
+        }
     }
 
     public void AssignBandwidth(int amount)
