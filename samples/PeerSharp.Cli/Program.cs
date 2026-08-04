@@ -20,6 +20,18 @@ if (options is null)
     return 2;
 }
 
+// What is worth watching live and what is worth keeping are different things. With a log file the
+// console holds the periodic report and anything that went wrong, while the detail - which runs to
+// tens of thousands of lines in a few minutes - goes where it can still be read afterwards. Without
+// one, everything goes to the console as before.
+var consoleLevel = options.LogPath is null
+    ? (options.Verbose ? LogLevel.Trace : LogLevel.Warning)
+    : LogLevel.Warning;
+
+// Debug even without -v: a file nobody is watching costs nothing to fill, and a run reported after
+// the fact is exactly the one where turning the detail on afterwards is no longer possible.
+var fileLevel = options.Verbose ? LogLevel.Trace : LogLevel.Debug;
+
 using var loggerFactory = LoggerFactory.Create(builder =>
 {
     builder.AddSimpleConsole(o =>
@@ -31,7 +43,16 @@ using var loggerFactory = LoggerFactory.Create(builder =>
         // long that peer then sat there before it was asked for anything.
         o.TimestampFormat = "HH:mm:ss.fff ";
     });
-    builder.SetMinimumLevel(options.Verbose ? LogLevel.Trace : LogLevel.Warning);
+    builder.AddFilter<Microsoft.Extensions.Logging.Console.ConsoleLoggerProvider>(null, consoleLevel);
+
+    if (options.LogPath is { } logPath)
+    {
+        builder.AddProvider(new FileLoggerProvider(logPath));
+        builder.AddFilter<FileLoggerProvider>(null, fileLevel);
+    }
+
+    // The floor for both sinks; each provider filters itself down from here.
+    builder.SetMinimumLevel(options.LogPath is null ? consoleLevel : fileLevel);
 });
 
 Directory.CreateDirectory(options.DownloadPath);
@@ -58,6 +79,10 @@ await engine.InitializeAsync();
 
 Console.WriteLine($"Listening on   : TCP {engine.BoundTcpPort}, UDP {engine.BoundUdpPort}");
 Console.WriteLine($"Download path  : {options.DownloadPath}");
+if (options.LogPath is { } configuredLogPath)
+{
+    Console.WriteLine($"Log file       : {Path.GetFullPath(configuredLogPath)} ({fileLevel})");
+}
 
 var wallClock = System.Diagnostics.Stopwatch.StartNew();
 
