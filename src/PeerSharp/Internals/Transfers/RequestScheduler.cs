@@ -6,6 +6,13 @@ namespace PeerSharp.Internals.Transfers;
 
 internal sealed class RequestScheduler
 {
+    /// <summary>
+    /// How long one peer keeps the exclusive right to serve a piece that is being retried. Long enough
+    /// that a peer of ordinary speed finishes a piece well inside it, short enough that a peer which
+    /// goes quiet costs one interval rather than the download.
+    /// </summary>
+    private static readonly TimeSpan RetryClaimTimeout = TimeSpan.FromSeconds(30);
+
     private readonly PieceStateManager _pieceStateManager;
     private readonly int _blockSize;
     private readonly ILogger<RequestScheduler> _logger;
@@ -161,6 +168,15 @@ internal sealed class RequestScheduler
         int sent = 0;
         int pieceIndex = state.Index;
         var now = _timeProvider.GetUtcNow();
+
+        // A piece that has already failed its hash is asked of one peer at a time. Restricting who is
+        // asked, rather than whose blocks are accepted, is what keeps this safe: a peer that stops
+        // answering has its requests time out and reassigned as usual, where refusing its blocks would
+        // have left the piece unable to complete from anyone.
+        if (!state.TryClaimForRetry(peer, now, RetryClaimTimeout))
+        {
+            return 0;
+        }
 
         long pSize = _torrent.InfoFile.Info.GetPieceSize(pieceIndex);
 
