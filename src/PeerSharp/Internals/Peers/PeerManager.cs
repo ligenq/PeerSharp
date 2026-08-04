@@ -747,7 +747,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     {
         long now = Environment.TickCount64;
         long windowStart = Interlocked.Read(ref _queueOverflowWindowStart);
-        int dropped = Interlocked.Increment(ref _queueOverflowCount);
+        Interlocked.Increment(ref _queueOverflowCount);
 
         if (now - windowStart < 10000)
         {
@@ -759,7 +759,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        Interlocked.Exchange(ref _queueOverflowCount, 0);
+        // Read the count only after winning the window. The value returned by this thread's earlier
+        // Increment can already be stale because other producers may have incremented before the
+        // exchange; logging that value while discarding the newer one loses drops from the report.
+        int dropped = Interlocked.Exchange(ref _queueOverflowCount, 0);
         _logger.LogDebug(
             "Connection queue full: discarded {Count} candidate(s) in the last {Seconds}s - peers are arriving faster than they can be dialled",
             dropped,
