@@ -177,6 +177,15 @@ public class PieceStateTests
 
             // The count survives Reset; it is what says this piece is being retried at all.
             Assert.Equal(1, piece.HashFailures);
+
+            // A reservation held by a connection that has gone away must not outlive it. The peer most
+            // likely to be holding one is the peer just dropped for supplying the bad data.
+            Assert.True(piece.TryClaimForRetry(first.Peer, now.AddSeconds(62), timeout));
+            piece.ReleaseRetryClaim(second.Peer);
+            Assert.False(piece.TryClaimForRetry(second.Peer, now.AddSeconds(63), timeout));
+
+            piece.ReleaseRetryClaim(first.Peer);
+            Assert.True(piece.TryClaimForRetry(second.Peer, now.AddSeconds(64), timeout));
         }
         finally
         {
