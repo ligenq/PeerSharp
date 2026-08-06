@@ -437,7 +437,26 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (torrent is Torrent { Started: true } t)
         {
             t.PeersInternal.AddPeers(peers, PeerSourceKind.Dht, null);
-            _logger.LogDebug("Found {PeerCount} peers for {TorrentName}", peers.Count, t.Name);
+
+            // Split by family. BEP 32 is two overlaid DHTs and the IPv6 half is easy to have wired up
+            // and never actually reaching: ours parsed values6 correctly for months while bootstrapping
+            // only over IPv4, so there was never an IPv6 node to hear it from. A count here says which
+            // half is working without having to read packet dumps.
+            int ipv6Count = 0;
+            foreach (var peer in peers)
+            {
+                if (peer.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6
+                    && !peer.Address.IsIPv4MappedToIPv6)
+                {
+                    ipv6Count++;
+                }
+            }
+
+            _logger.LogDebug(
+                "Found {PeerCount} peers for {TorrentName} ({IPv6Count} over IPv6)",
+                peers.Count,
+                t.Name,
+                ipv6Count);
         }
     }
 
