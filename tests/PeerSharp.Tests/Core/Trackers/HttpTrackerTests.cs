@@ -4,7 +4,6 @@ using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
 using PeerSharp.BEncoding;
 using System.Net;
-using System.Net.Sockets;
 using System.Text;
 
 namespace PeerSharp.Tests.Core.Trackers;
@@ -118,14 +117,8 @@ public class HttpTrackerTests
         Assert.Equal(16705, _callback.AnnounceResponse.Peers[0].Port);
     }
 
-    /// <summary>
-    /// BEP 7's ipv6 parameter carries the client's own IPv6 address, so a tracker can pass it to
-    /// IPv6-capable peers. This used to send the literal "1", which is not an address: a tracker
-    /// reading it strictly records nonsense and one reading it loosely records nothing, so the
-    /// "request IPv6 peers" it was written for never happened either way.
-    /// </summary>
     [Fact(Timeout = 30000)]
-    public async Task AnnounceAsync_SendsARealIPv6AddressOrNoneAtAll()
+    public async Task AnnounceAsync_DoesNotDiscloseLocalIpAddresses()
     {
         var tracker = new HttpTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
@@ -135,22 +128,8 @@ public class HttpTrackerTests
         await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
 
         var url = _mockHttp.LastUrl!;
-        Assert.DoesNotContain("ipv6=1&", url, StringComparison.Ordinal);
-        Assert.False(url.EndsWith("ipv6=1", StringComparison.Ordinal), "ipv6 must never be the flag '1'.");
-
-        // Whether this machine has IPv6 decides which branch runs, so the test asserts the invariant
-        // that holds either way: the parameter is present only when it carries a parsable address.
-        int start = url.IndexOf("ipv6=", StringComparison.Ordinal);
-        if (start >= 0)
-        {
-            int end = url.IndexOf('&', start);
-            var value = Uri.UnescapeDataString(
-                end < 0 ? url[(start + 5)..] : url[(start + 5)..end]);
-
-            Assert.True(
-                IPAddress.TryParse(value, out var parsed) && parsed.AddressFamily == AddressFamily.InterNetworkV6,
-                $"ipv6 was sent as '{value}', which is not an IPv6 address.");
-        }
+        Assert.DoesNotContain("ipv6=", url, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ipv4=", url, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact(Timeout = 30000)]
@@ -840,7 +819,6 @@ public class HttpTrackerTests
         return count;
     }
 }
-
 
 
 
