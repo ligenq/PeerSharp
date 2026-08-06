@@ -63,6 +63,11 @@ var settings = new Settings
     Connection =
     {
         EnableLsd = options.LocalDiscovery,
+        // Both, or two instances on one machine collide on UDP while appearing to have separate
+        // ports - which is how the first IPv6 test ran with the leecher's DHT and uTP silently
+        // fighting the seeder's for 55125.
+        TcpPort = options.Port ?? new ConnectionSettings().TcpPort,
+        UdpPort = options.Port ?? new ConnectionSettings().UdpPort,
         UpnpPortMapping = options.PortMap,
         NatPmpPortMapping = options.PortMap
     },
@@ -91,18 +96,49 @@ if (options.LogPath is { } configuredLogPath)
 
 var wallClock = System.Diagnostics.Stopwatch.StartNew();
 
+if (options.ResumeDir is { } resumeDirToCreate)
+{
+    Directory.CreateDirectory(resumeDirToCreate);
+    Console.WriteLine($"Resume data    : {Path.GetFullPath(resumeDirToCreate)}");
+}
+
+// Resume data is already a byte array by the time the library hands it over, so persisting it is
+// only a matter of choosing a filename. Keyed on the info hash, because that is what identifies the
+// torrent across runs regardless of where its .torrent file happens to live.
+string ResumeFile(InfoHash hash) =>
+    Path.Combine(options.ResumeDir!, Convert.ToHexString(hash.Span) + ".resume");
+
+TorrentResumeData? LoadResume(InfoHash hash)
+{
+    if (options.ResumeDir is null)
+    {
+        return null;
+    }
+
+    var file = ResumeFile(hash);
+    if (!File.Exists(file))
+    {
+        return null;
+    }
+
+    Console.WriteLine($"                 resuming from {Path.GetFileName(file)}");
+    return new TorrentResumeData { Data = File.ReadAllBytes(file), Hash = hash };
+}
+
 var torrents = new List<ITorrent>(options.Sources.Count);
 foreach (var source in options.Sources)
 {
     if (source.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
     {
+        var magnet = MagnetLink.Parse(source);
         Console.WriteLine($"Source         : magnet link");
         torrents.Add(await engine.AddMagnetAsync(
-            MagnetLink.Parse(source),
+            magnet,
             new AddTorrentOptions
             {
                 StartImmediately = !options.Recheck,
-                StopAfterMetadata = options.MetadataOnly
+                StopAfterMetadata = options.MetadataOnly,
+                ResumeData = LoadResume(magnet.InfoHash)
             }));
         continue;
     }
@@ -115,9 +151,14 @@ foreach (var source in options.Sources)
     }
 
     Console.WriteLine($"Source         : {path}");
+    var torrentFile = TorrentFile.Load(path);
     torrents.Add(await engine.AddTorrentAsync(
-        TorrentFile.Load(path),
-        new AddTorrentOptions { StartImmediately = !options.Recheck }));
+        torrentFile,
+        new AddTorrentOptions
+        {
+            StartImmediately = !options.Recheck,
+            ResumeData = LoadResume(torrentFile.InfoHash)
+        }));
 }
 
 if (options.Queue)
@@ -184,6 +225,13 @@ Console.CancelKeyPress += (_, e) =>
     Console.WriteLine("Stopping...");
     stopping.Cancel();
 };
+
+if (options.RunForSeconds is { } runFor)
+{
+    // The same signal Ctrl+C raises, so the run ends down the same path and everything that happens
+    // on the way out still happens.
+    stopping.CancelAfter(TimeSpan.FromSeconds(runFor));
+}
 
 var reporter = new Reporter(engine, torrents, options, loggerFactory.CreateLogger("Report"));
 
@@ -270,4 +318,23 @@ catch (OperationCanceledException)
 reporter.ReportFinal();
 
 await Task.WhenAll(torrents.Select(static t => t.StopAsync()));
+
+// After stopping, so what is written reflects a settled torrent rather than one mid-write.
+if (options.ResumeDir is not null)
+{
+    foreach (var torrent in torrents)
+    {
+        try
+        {
+            var resume = torrent.GetResumeData();
+            await File.WriteAllBytesAsync(ResumeFile(resume.Hash), resume.Data);
+            Console.WriteLine($"Resume saved   : {torrent.Progress:P2}  {torrent.Name}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Could not save resume data for {torrent.Name}: {ex.Message}");
+        }
+    }
+}
+
 return 0;
