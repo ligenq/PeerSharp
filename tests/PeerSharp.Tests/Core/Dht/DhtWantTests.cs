@@ -1,6 +1,7 @@
 using System.Net;
 using PeerSharp.BEncoding;
 using PeerSharp.Internals.Dht;
+using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.Tests.Core.Dht;
 
@@ -36,6 +37,12 @@ public class DhtWantTests
             .ToList();
 
         Assert.Contains("n4", families);
+
+        // Whether this machine has IPv6 decides the other half, so the test asserts the invariant
+        // that holds either way: we ask for n6 exactly when we could dial what comes back. Asking
+        // regardless would fill the v6 routing table with nodes unreachable from here.
+        bool hasIPv6 = NetworkUtils.GetGlobalIPv6Address() is not null;
+        Assert.Equal(hasIPv6, families.Contains("n6"));
     }
 
     [Theory]

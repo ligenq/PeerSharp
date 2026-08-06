@@ -128,7 +128,7 @@ internal partial class DhtManager
 
         var timeProvider = _timeProvider;
         var deadline = timeProvider.GetUtcNow() + RoutingTableWarmupTimeout;
-        int candidates = _table.FindClosest(target.Span, ReplicationCount).Count;
+        int candidates = FindClosestNodes(target.Span, ReplicationCount).Count;
 
         if (candidates < UsableItemLookupCandidates)
         {
@@ -159,7 +159,7 @@ internal partial class DhtManager
                 throw new InvalidOperationException("The DHT stopped while waiting to publish an item.");
             }
 
-            candidates = _table.FindClosest(target.Span, ReplicationCount).Count;
+            candidates = FindClosestNodes(target.Span, ReplicationCount).Count;
         }
 
         _logger.LogDebug(
@@ -232,7 +232,7 @@ internal partial class DhtManager
         int replied = 0, errored = 0, timedOut = 0, itemsReturned = 0;
         var errorCodes = new Dictionary<int, int>();
 
-        var candidates = _table.FindClosest(target.Span, ReplicationCount)
+        var candidates = FindClosestNodes(target.Span, ReplicationCount)
             .Select(node => node.EndPoint)
             .ToList();
         int initialCandidates = candidates.Count;
