@@ -320,6 +320,35 @@ public class DhtManagerTests
     }
 
     [Fact]
+    public async Task SameNodeId_IsRetainedInBothAddressFamilies()
+    {
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback);
+        await dht.StartAsync();
+
+        var nodeId = InfoHash.CreateRandom();
+        var ipv4 = new IPEndPoint(IPAddress.Parse("192.0.2.50"), 6881);
+        var ipv6 = new IPEndPoint(IPAddress.Parse("2001:db8::50"), 6881);
+
+        foreach (var endpoint in new[] { ipv4, ipv6 })
+        {
+            var ping = new BDict();
+            ping.Dict["t"] = new BString("dual"u8.ToArray());
+            ping.Dict["y"] = new BString("q"u8.ToArray());
+            ping.Dict["q"] = new BString("ping"u8.ToArray());
+            var arguments = new BDict();
+            arguments.Dict["id"] = new BString(nodeId.ToArray());
+            ping.Dict["a"] = arguments;
+            dht.Receive(BencodeWriter.Write(ping), endpoint);
+        }
+
+        _listener.SentPackets.Clear();
+
+        Assert.Equal(2, dht.FindPeers(InfoHash.CreateRandom()));
+        var queried = _listener.SentPackets.Select(static packet => packet.EndPoint).ToHashSet();
+        Assert.True(new HashSet<IPEndPoint> { ipv4, ipv6 }.SetEquals(queried));
+    }
+
+    [Fact]
     public async Task Receive_GetPeers_ReturnsTokenAndNodes()
     {
         var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback);

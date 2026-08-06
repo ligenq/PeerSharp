@@ -55,7 +55,7 @@ internal partial class DhtManager
     /// </summary>
     internal IReadOnlyList<IPEndPoint> GetKnownNodeEndpoints(int maxNodes)
     {
-        return [.. _table.GetAllNodes(maxNodes).Select(static node => node.EndPoint)];
+        return [.. GetAllKnownNodes(maxNodes).Select(static node => node.EndPoint)];
     }
 
     /// <summary>

@@ -65,7 +65,11 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
     private byte[] _secret = GenerateSecret();
 
-    private RoutingTable _table;
+    // BEP 32 defines independent IPv4 and IPv6 DHTs. Keeping them separate is also necessary
+    // because a dual-stack node normally uses the same node ID in both families; a table keyed only
+    // by ID would otherwise let the last response overwrite the other family's endpoint.
+    private RoutingTable _ipv4Table;
+    private RoutingTable _ipv6Table;
 
     public DhtManager(InfoHash id, IUdpListener listener, Settings settings, TimeProvider timeProvider, IDhtCallback? callback = null, IDnsResolver? dnsResolver = null)
         : this(id, listener, settings, timeProvider, callback, dnsResolver, NullLoggerFactory.Instance)
@@ -79,7 +83,8 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         _settings = settings;
         _timeProvider = timeProvider;
         _dnsResolver = dnsResolver!;
-        _table = new RoutingTable(NodeId.ToArray(), _timeProvider);
+        _ipv4Table = new RoutingTable(NodeId.ToArray(), _timeProvider);
+        _ipv6Table = new RoutingTable(NodeId.ToArray(), _timeProvider);
         _callback = callback;
         _logger = loggerFactory.CreateLogger<DhtManager>();
         _lastSecretRotation = _timeProvider.GetUtcNow();
@@ -148,9 +153,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
         // A fresh budget per announce. The walk that follows can reach thousands of nodes, and every
         // one of them that returns a token would otherwise be told to store us.
-        _announcesSentPerHash[Convert.ToHexString(infoHash.Span)] = 0;
+        _announcesSentPerHash[AnnounceBudgetKey(infoHash, ipv6: false)] = 0;
+        _announcesSentPerHash[AnnounceBudgetKey(infoHash, ipv6: true)] = 0;
 
-        var nodes = _table.FindClosest(infoHash.Span, 8);
+        var nodes = FindClosestNodes(infoHash.Span, 8);
         foreach (var node in nodes)
         {
             SendGetPeers(node.EndPoint, infoHash, announce: true, port: port);
@@ -168,12 +174,15 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     private readonly ConcurrentDictionary<string, int> _announcesSentPerHash = new();
 
     /// <summary>Whether this announce still has budget left for one more node.</summary>
-    private bool TryTakeAnnounceSlot(InfoHash infoHash)
+    private bool TryTakeAnnounceSlot(InfoHash infoHash, IPEndPoint endpoint)
     {
-        string key = Convert.ToHexString(infoHash.Span);
+        string key = AnnounceBudgetKey(infoHash, IsIPv6(endpoint));
         int sent = _announcesSentPerHash.AddOrUpdate(key, 1, static (_, count) => count + 1);
         return sent <= MaxAnnouncePeerNodes;
     }
+
+    private static string AnnounceBudgetKey(InfoHash infoHash, bool ipv6)
+        => $"{Convert.ToHexString(infoHash.Span)}:{(ipv6 ? '6' : '4')}";
 
     public async ValueTask DisposeAsync()
     {
@@ -193,7 +202,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             return 0;
         }
 
-        var nodes = _table.FindClosest(infoHash.Span, 8);
+        var nodes = FindClosestNodes(infoHash.Span, 8);
         int queried = 0;
         foreach (var node in nodes)
         {
@@ -261,7 +270,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             return;
         }
 
-        var nodes = _table.FindClosest(infoHash.Span, 8);
+        var nodes = FindClosestNodes(infoHash.Span, 8);
         foreach (var node in nodes)
         {
             SendGetPeers(node.EndPoint, infoHash, scrape: true);
@@ -400,6 +409,67 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         return secret;
     }
 
+    private static bool IsIPv6(IPEndPoint endpoint)
+        => endpoint.AddressFamily == AddressFamily.InterNetworkV6
+            && !endpoint.Address.IsIPv4MappedToIPv6;
+
+    private RoutingTable RoutingTableFor(IPEndPoint endpoint)
+        => IsIPv6(endpoint) ? _ipv6Table : _ipv4Table;
+
+    private void AddRoutingNode(ReadOnlySpan<byte> id, IPEndPoint endpoint)
+    {
+        var normalized = NetworkUtils.NormalizeEndPoint(endpoint)!;
+        RoutingTableFor(normalized).AddNode(id, normalized);
+    }
+
+    /// <summary>Closest active nodes from each independent DHT, interleaved to avoid family bias.</summary>
+    private List<NodeInfo> FindClosestNodes(ReadOnlySpan<byte> target, int countPerFamily)
+    {
+        var ipv4 = _ipv4Table.FindClosest(target, countPerFamily);
+        var ipv6 = _ipv6Table.FindClosest(target, countPerFamily);
+        return Interleave(ipv4, ipv6, countPerFamily * 2);
+    }
+
+    private List<NodeInfo> GetAllKnownNodes(int maxNodes)
+    {
+        if (maxNodes <= 0)
+        {
+            return [];
+        }
+
+        var ipv4 = _ipv4Table.GetAllNodes(maxNodes);
+        var ipv6 = _ipv6Table.GetAllNodes(maxNodes);
+        return Interleave(ipv4, ipv6, maxNodes);
+    }
+
+    private static List<NodeInfo> Interleave(
+        IReadOnlyList<NodeInfo> ipv4,
+        IReadOnlyList<NodeInfo> ipv6,
+        int maxNodes)
+    {
+        var result = new List<NodeInfo>(Math.Min(maxNodes, ipv4.Count + ipv6.Count));
+        for (int i = 0; result.Count < maxNodes && (i < ipv4.Count || i < ipv6.Count); i++)
+        {
+            if (i < ipv4.Count)
+            {
+                result.Add(ipv4[i]);
+            }
+
+            if (result.Count < maxNodes && i < ipv6.Count)
+            {
+                result.Add(ipv6[i]);
+            }
+        }
+
+        return result;
+    }
+
+    private void ResetRoutingTables()
+    {
+        _ipv4Table = new RoutingTable(NodeId.ToArray(), _timeProvider);
+        _ipv6Table = new RoutingTable(NodeId.ToArray(), _timeProvider);
+    }
+
     private void RestoreInitialState()
     {
         var state = _settings.Dht.InitialState;
@@ -413,12 +483,12 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             if (state.NodeId?.Length == 20)
             {
                 NodeId = state.NodeId;
-                _table = new RoutingTable(NodeId.ToArray(), _timeProvider);
+                ResetRoutingTables();
             }
 
             foreach (var node in state.Nodes)
             {
-                _table.AddNode(node.Id, node.EndPoint);
+                AddRoutingNode(node.Id, node.EndPoint);
             }
         }
         catch (Exception ex)
@@ -441,7 +511,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
         try
         {
-            var nodes = _table.GetAllNodes();
+            var nodes = GetAllKnownNodes(500);
             var state = new DhtState(
                 NodeId.ToArray(),
                 nodes.ConvertAll(n => new DhtNode(n.Id, n.EndPoint)));
@@ -456,12 +526,32 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         }
     }
 
+    private static readonly TimeSpan IPv6AvailabilityCacheDuration = TimeSpan.FromSeconds(30);
+    private bool _hasGlobalIPv6;
+    private DateTimeOffset _hasGlobalIPv6CheckedAt = DateTimeOffset.MinValue;
+
     /// <summary>
-    /// Whether this machine has an IPv6 address worth bootstrapping over. Distinct from the OS merely
-    /// supporting IPv6, which Windows reports even on a network that has none: dialling a v6 bootstrap
+    /// Whether this machine has an IPv6 address worth talking to the IPv6 DHT over. Distinct from the
+    /// OS merely supporting IPv6, which Windows reports even on a network that has none: dialling a v6
     /// node from a machine with only a link-local address buys nothing but a timeout.
+    ///
+    /// <para>
+    /// Cached briefly because every outgoing query consults it, and answering means enumerating every
+    /// network interface. Connectivity does change under a running client - a laptop moves between
+    /// networks - so this re-checks rather than deciding once at startup.
+    /// </para>
     /// </summary>
-    private static bool HasGlobalIPv6() => NetworkUtils.GetGlobalIPv6Address() is not null;
+    private bool HasGlobalIPv6()
+    {
+        var now = _timeProvider.GetUtcNow();
+        if (now - _hasGlobalIPv6CheckedAt >= IPv6AvailabilityCacheDuration)
+        {
+            _hasGlobalIPv6 = NetworkUtils.GetGlobalIPv6Address() is not null;
+            _hasGlobalIPv6CheckedAt = now;
+        }
+
+        return _hasGlobalIPv6;
+    }
 
     private async Task BootstrapAsync(CancellationToken cancellationToken)
     {
@@ -568,7 +658,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             }
             else
             {
-                _table.AddNode(id.Value.Span, remote);
+                AddRoutingNode(id.Value.Span, remote);
                 MarkStateDirty();
             }
         }
@@ -589,10 +679,12 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             var target = a.GetBytes("target");
             if (target != null)
             {
-                var nodes = _table.FindClosest(target.Value.Span, 8);
-                // BEP 32: Include both nodes (IPv4) and nodes6 (IPv6) in response
-                var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
-                var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
+                // BEP 32: each field comes from its own DHT's closest nodes. Selecting eight from a
+                // combined table first could return only one family even when both were requested.
+                var nodesV4 = DhtCompactNodeCodec.Encode(
+                    _ipv4Table.FindClosest(target.Value.Span, 8), ipv6: false);
+                var nodesV6 = DhtCompactNodeCodec.Encode(
+                    _ipv6Table.FindClosest(target.Value.Span, 8), ipv6: true);
                 if (wantV4 && nodesV4.Length > 0)
                 {
                     r.Dict["nodes"] = new BString(nodesV4);
@@ -664,9 +756,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 else
                 {
                     // BEP 32: Include both nodes and nodes6 when returning closest nodes
-                    var nodes = _table.FindClosest(infoHash.Value.Span, 8);
-                    var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
-                    var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
+                    var nodesV4 = DhtCompactNodeCodec.Encode(
+                        _ipv4Table.FindClosest(infoHash.Value.Span, 8), ipv6: false);
+                    var nodesV6 = DhtCompactNodeCodec.Encode(
+                        _ipv6Table.FindClosest(infoHash.Value.Span, 8), ipv6: true);
                     if (wantV4 && nodesV4.Length > 0)
                     {
                         r.Dict["nodes"] = new BString(nodesV4);
@@ -783,9 +876,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         r.Dict["samples"] = new BString(sample.Samples);
 
         // BEP 32: same dual node lists as every other reply that carries nodes.
-        var nodes = _table.FindClosest(targetBytes.Value.Span, 8);
-        var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
-        var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
+        var nodesV4 = DhtCompactNodeCodec.Encode(
+            _ipv4Table.FindClosest(targetBytes.Value.Span, 8), ipv6: false);
+        var nodesV6 = DhtCompactNodeCodec.Encode(
+            _ipv6Table.FindClosest(targetBytes.Value.Span, 8), ipv6: true);
         if (nodesV4.Length > 0)
         {
             r.Dict["nodes"] = new BString(nodesV4);
@@ -840,9 +934,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         }
 
         // Closest nodes always accompany the reply; a get is a lookup step as well as a read.
-        var nodes = _table.FindClosest(targetBytes.Value.Span, 8);
-        var nodesV4 = DhtCompactNodeCodec.Encode(nodes, ipv6: false);
-        var nodesV6 = DhtCompactNodeCodec.Encode(nodes, ipv6: true);
+        var nodesV4 = DhtCompactNodeCodec.Encode(
+            _ipv4Table.FindClosest(targetBytes.Value.Span, 8), ipv6: false);
+        var nodesV6 = DhtCompactNodeCodec.Encode(
+            _ipv6Table.FindClosest(targetBytes.Value.Span, 8), ipv6: true);
         if (nodesV4.Length > 0)
         {
             r.Dict["nodes"] = new BString(nodesV4);
@@ -1001,7 +1096,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 var responderId = itemReply.GetBytes("id");
                 if (responderId != null)
                 {
-                    _table.AddNode(responderId.Value.Span, remote);
+                    AddRoutingNode(responderId.Value.Span, remote);
                     MarkStateDirty();
                 }
             }
@@ -1020,7 +1115,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             var id = r.GetBytes("id");
             if (id != null)
             {
-                _table.AddNode(id.Value.Span, remote);
+                AddRoutingNode(id.Value.Span, remote);
                 MarkStateDirty();
             }
 
@@ -1038,7 +1133,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 var nodes = DhtCompactNodeCodec.Parse(nodesData.Value.Span, ipv6: false);
                 foreach (var n in nodes)
                 {
-                    _table.AddNode(n.Id, n.EndPoint);
+                    AddRoutingNode(n.Id, n.EndPoint);
                     MarkStateDirty();
                     ContinueWalk(trans, n.EndPoint);
                 }
@@ -1050,7 +1145,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 var nodes = DhtCompactNodeCodec.Parse(nodes6Data.Value.Span, ipv6: true);
                 foreach (var n in nodes)
                 {
-                    _table.AddNode(n.Id, n.EndPoint);
+                    AddRoutingNode(n.Id, n.EndPoint);
                     MarkStateDirty();
                     ContinueWalk(trans, n.EndPoint);
                 }
@@ -1095,7 +1190,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             }
 
             var token = r.GetBytes("token");
-            if (trans.Announce && token != null && TryTakeAnnounceSlot(trans.InfoHash))
+            if (trans.Announce && token != null && TryTakeAnnounceSlot(trans.InfoHash, remote))
             {
                 SendAnnouncePeer(remote, trans.InfoHash.ToArray(), token.Value.ToArray(), trans.Port);
             }
@@ -1187,9 +1282,9 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         byte[] newId = DhtSecurity.GenerateSecureNodeId(externalIp);
         _logger.LogInformation("BEP 42: Regenerating node ID for IP {ExternalIP}: {NodeIdPrefix}...", externalIp, Convert.ToHexString(newId)[..8]);
 
-        // Update our ID and create a new routing table
+        // Update our ID and recreate both independent routing tables.
         NodeId = newId;
-        _table = new RoutingTable(NodeId.ToArray(), _timeProvider);
+        ResetRoutingTables();
         MarkStateDirty();
 
         // Re-bootstrap to populate the new routing table. Skip once stopped so we
@@ -1275,13 +1370,20 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// told otherwise, so a v4 socket that never asks may simply never be given IPv6 nodes and its
     /// v6 routing table stays empty. We ask for both whenever IPv6 is available to us.
     /// </para>
+    ///
+    /// <para>
+    /// "Available to us" means a globally routable address, not <c>OSSupportsIPv6</c>: Windows reports
+    /// that on a network with no IPv6 at all, and every n6 node we then collect is one we can only
+    /// send timeouts to. Asking for a family we cannot dial fills the v6 routing table with nodes that
+    /// are unreachable from here and puts them into half of every lookup's opening fan-out.
+    /// </para>
     /// </summary>
-    private static void AddWant(BDict a)
+    private void AddWant(BDict a)
     {
         var want = new BList();
         want.List.Add(new BString("n4"u8.ToArray()));
 
-        if (System.Net.Sockets.Socket.OSSupportsIPv6)
+        if (HasGlobalIPv6())
         {
             want.List.Add(new BString("n6"u8.ToArray()));
         }
@@ -1319,7 +1421,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             }
         }
 
-        bool arrivedOverV6 = remote.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
+        bool arrivedOverV6 = IsIPv6(remote);
         return (!arrivedOverV6, arrivedOverV6);
     }
 
