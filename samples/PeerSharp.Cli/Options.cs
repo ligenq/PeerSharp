@@ -66,6 +66,26 @@ internal sealed record Options
     /// <summary>How many torrents the queue lets download at once. Ignored unless <see cref="Queue"/>.</summary>
     public int MaxActiveDownloads { get; init; } = 3;
 
+    /// <summary>
+    /// The port to listen on, when the default would collide. Two instances on one machine is how a
+    /// transfer gets watched from both ends, and they cannot share a port.
+    /// </summary>
+    public ushort? Port { get; init; }
+
+    /// <summary>
+    /// Directory to keep resume data in. Saved when the run ends and loaded when it starts, which is
+    /// what lets a restart pick up where the last one stopped instead of rehashing everything - the
+    /// path a real client takes every time it is closed and reopened.
+    /// </summary>
+    public string? ResumeDir { get; init; }
+
+    /// <summary>
+    /// End the run cleanly after this many seconds, exactly as Ctrl+C would. Killing the process from
+    /// outside instead - which is what a script reaches for - loses everything that happens on the way
+    /// out: the final totals, and any state the run was supposed to save.
+    /// </summary>
+    public int? RunForSeconds { get; init; }
+
     /// <summary>Peers to try in addition to discovery, as host:port.</summary>
     public IReadOnlyList<string> Peers { get; init; } = [];
 
@@ -96,6 +116,9 @@ internal sealed record Options
         bool portMap = false;
         string? logPath = null;
         bool queue = false;
+        ushort? port = null;
+        string? resumeDir = null;
+        int? runFor = null;
         int maxActiveDownloads = 3;
         var peers = new List<string>();
         int? stopAfter = null;
@@ -138,6 +161,36 @@ internal sealed record Options
 
                 case "--port-map":
                     portMap = true;
+                    break;
+
+                case "--port":
+                    if (!TryTake(args, ref i, out var rawPort) || !ushort.TryParse(rawPort, out ushort parsedPort))
+                    {
+                        error.WriteLine("--port needs a number from 0 to 65535 (0 lets the OS choose).");
+                        return null;
+                    }
+
+                    port = parsedPort;
+                    break;
+
+                case "--resume":
+                    if (!TryTake(args, ref i, out var rawResume))
+                    {
+                        error.WriteLine("--resume needs a directory.");
+                        return null;
+                    }
+
+                    resumeDir = rawResume;
+                    break;
+
+                case "--run-for":
+                    if (!TryTake(args, ref i, out var rawRunFor) || !int.TryParse(rawRunFor, out int runForSeconds) || runForSeconds <= 0)
+                    {
+                        error.WriteLine("--run-for needs a positive number of seconds.");
+                        return null;
+                    }
+
+                    runFor = runForSeconds;
                     break;
 
                 case "--queue":
@@ -253,6 +306,9 @@ internal sealed record Options
             MetadataOnly = metadataOnly,
             PortMap = portMap,
             LogPath = logPath,
+            Port = port,
+            ResumeDir = resumeDir,
+            RunForSeconds = runFor,
             Queue = queue,
             MaxActiveDownloads = maxActiveDownloads,
             Peers = peers,
@@ -280,6 +336,9 @@ internal sealed record Options
                   --metadata-only  fetch a magnet's metadata, time it, and stop before downloading
                   --port-map       ask the router to forward the port (UPnP, NAT-PMP), for seeding
                   --log <file>     write the full log here; the console keeps reports and warnings
+                  --port <n>       listen here instead of the default, for two instances at once
+                  --resume <dir>   save resume data here on exit and reload it on start
+                  --run-for <s>    end cleanly after this long, as Ctrl+C would
                   --queue          enable the torrent queue (off by default)
                   --max-active <n> torrents downloading at once; implies --queue (default 3)
                   --peer <ip:port> try this peer as well as any found by discovery (repeatable)
