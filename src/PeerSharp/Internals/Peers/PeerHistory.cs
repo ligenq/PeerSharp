@@ -54,8 +54,25 @@ internal sealed class PeerHistory
     /// </summary>
     public bool IsListenAddress { get; set; } = true;
 
-    /// <summary>Whether the peer is currently upload-only (a seed).</summary>
+    /// <summary>
+    /// Whether the peer is currently upload-only (a seed). May be hearsay: BEP 11 carries a seed flag,
+    /// so this can be another peer's claim rather than something observed here. Good enough to rank a
+    /// candidate by, which is all it is used for.
+    /// </summary>
     public bool IsSeed { get; set; }
+
+    /// <summary>
+    /// Whether this client saw the peer say it has everything, over a connection of its own - a full
+    /// bitfield or BEP 6 have_all, not a PEX flag.
+    ///
+    /// <para>
+    /// Separate from <see cref="IsSeed"/> because it carries a heavier consequence: while this torrent
+    /// is also complete the peer is not dialled at all, and a peer nobody dials cannot correct the
+    /// record. Acting on hearsay there would let one peer's PEX message, mistaken or malicious, flag a
+    /// whole swarm as seeds and quietly stop this client connecting to any of it.
+    /// </para>
+    /// </summary>
+    public bool SeedConfirmed { get; set; }
 
     /// <summary>When the last connection attempt was made.</summary>
     public DateTimeOffset LastAttempt { get; set; } = DateTimeOffset.MinValue;

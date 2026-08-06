@@ -1207,6 +1207,133 @@ public class PeerManagerTests
         await manager.DisposeAsync();
     }
 
+    /// <summary>
+    /// Port 0 is not a port anything listens on, so an address carrying it is malformed rather than
+    /// unreachable. Dialling one is not a cheap mistake: uTP has nothing to refuse the connection and
+    /// waits out the whole timeout, and a live run spent 1471 attempts on 519 such addresses.
+    /// </summary>
+    [Theory(Timeout = 30000)]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(70000)]
+    public async Task ConnectTo_APortNoPeerCanListenOn_IsNotDialled(int port)
+    {
+        var ctx = CreateContext();
+        var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
+
+        ctx.Manager.ConnectTo("203.0.113.9", port);
+
+        Assert.Empty(pending);
+
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
+    /// The same address arrives through the peer sources too, and one that can never be dialled must
+    /// not take a place in a cache bounded at <see cref="Settings.MaxKnownPeersCache"/>.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task AddPeers_APortNoPeerCanListenOn_IsNotEvenRemembered()
+    {
+        var ctx = CreateContext();
+        var cache = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+        var unusable = new IPEndPoint(IPAddress.Parse("203.0.113.10"), 0);
+        var usable = new IPEndPoint(IPAddress.Parse("203.0.113.11"), 6881);
+
+        ctx.Manager.AddPeers([unusable, usable], PeerSourceKind.Tracker);
+
+        Assert.DoesNotContain(unusable, cache.Keys);
+        Assert.Contains(usable, cache.Keys);
+
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
+    /// Two seeds have nothing to trade. The peer hangs up within a fraction of a second of the
+    /// handshake, so the backoff sees one more failed dial and the candidate returns as soon as the
+    /// pool cycles - a live seeding run handshaked seeds 9363 times, one of them 26 times in ten
+    /// minutes. Being complete is the whole of the reason, so the moment this torrent wants pieces
+    /// again a seed is the best peer available and must be dialled.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ConnectTo_AKnownSeed_IsSkippedOnlyWhileThisTorrentIsAlsoComplete()
+    {
+        var ctx = CreateContext();
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.12"), 6881);
+        var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
+
+        var history = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", endpoint, true)!;
+        history.SeedConfirmed = true;
+
+        Assert.False(ctx.Torrent.Finished);
+        ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+        Assert.Contains(endpoint, pending.Keys);
+
+        // Cleared because a second dial to an already-pending endpoint is refused for that reason
+        // alone, which would pass this test whether or not the seed rule exists.
+        pending.Clear();
+
+        ctx.Torrent.Pieces.AddPiece(0);
+        Assert.True(ctx.Torrent.Finished);
+        ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+        Assert.Empty(pending);
+
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
+    /// BEP 11 carries a seed flag, so a peer can be marked one on a stranger's word. That is fine for
+    /// ranking a candidate and not fine for refusing to dial it: a peer nobody dials never gets to
+    /// correct the record, so one mistaken or malicious PEX message would otherwise be enough to flag
+    /// a swarm and end this client's seeding.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ConnectTo_ASeedKnownOnlyFromPexFlags_IsStillDialled()
+    {
+        var ctx = CreateContext();
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.13"), 6881);
+        var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
+
+        var history = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", endpoint, true)!;
+        PeerExchangeCoordinator.ApplyFlags(history, (byte)UtPex.Peer.Seed);
+        Assert.True(history.IsSeed);
+        Assert.False(history.SeedConfirmed);
+
+        ctx.Torrent.Pieces.AddPiece(0);
+        Assert.True(ctx.Torrent.Finished);
+
+        ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+        Assert.Contains(endpoint, pending.Keys);
+
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
+    /// Half-open connections are capped by the deficit once there is nothing left to download, and by
+    /// nothing but the setting while there is. Throttling the hunt for peers is what makes a download
+    /// ramp slowly, and a finished torrent is not hunting.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task MaxPendingConnections_IsBoundedByTheDeficitOnlyWhenComplete()
+    {
+        var ctx = CreateContext();
+        int configured = ctx.Torrent.Settings.Connection.MaxPendingConnections;
+        int target = ctx.Torrent.Settings.Connection.MaxPeersPerTorrent;
+
+        Assert.False(ctx.Torrent.Finished);
+        Assert.Equal(configured, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", 0));
+        Assert.Equal(configured, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", target - 1));
+
+        ctx.Torrent.Pieces.AddPiece(0);
+        Assert.True(ctx.Torrent.Finished);
+        Assert.Equal(target, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", 0));
+        Assert.Equal(1, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", target - 1));
+        Assert.Equal(0, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", target));
+        Assert.Equal(0, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", target + 10));
+
+        await CleanupAsync(ctx);
+    }
+
     private static PeerManagerContext CreateContext(IPeerCommunicationFactory? peerFactory = null)
     {
         var metadata = new TorrentFileMetadata();
