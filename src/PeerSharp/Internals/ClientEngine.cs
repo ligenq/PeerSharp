@@ -431,7 +431,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     public void OnPeersFound(InfoHash infoHash, List<IPEndPoint> peers)
     {
         var torrent = ResolveTorrentForBackgroundWork(infoHash);
-        if (torrent is Torrent t)
+
+        // Started, because a lookup answered after the torrent stopped would otherwise queue dials for
+        // a torrent nobody is waiting on.
+        if (torrent is Torrent { Started: true } t)
         {
             t.PeersInternal.AddPeers(peers, PeerSourceKind.Dht, null);
             _logger.LogDebug("Found {PeerCount} peers for {TorrentName}", peers.Count, t.Name);
@@ -808,6 +811,16 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             }
 
             var torrent = ResolveTorrentForBackgroundWork(negotiated.InfoHash);
+            if (torrent is Torrent { Started: false } stopped)
+            {
+                // See PortListener: a stopped torrent must not take connections, or the capacity the
+                // queue freed by stopping it goes straight back out of the door.
+                _logger.LogDebug(
+                    "Refusing incoming uTP connection for {TorrentName}: the torrent is not running",
+                    stopped.Name);
+                throw new InvalidOperationException("Torrent is not running");
+            }
+
             if (torrent is Torrent t)
             {
                 _logger.LogDebug(

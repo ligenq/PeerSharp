@@ -14,11 +14,11 @@ namespace PeerSharp.Cli;
 /// from a process that is doing nothing else.
 /// </para>
 /// </summary>
-internal sealed class Reporter(IClientEngine engine, ITorrent torrent, Options options, ILogger logger)
+internal sealed class Reporter(IClientEngine engine, IReadOnlyList<ITorrent> torrents, Options options, ILogger logger)
 {
     private readonly Stopwatch _clock = Stopwatch.StartNew();
-    private long _lastDownloaded;
-    private long _lastUploaded;
+    private readonly long[] _lastDownloaded = new long[torrents.Count];
+    private readonly long[] _lastUploaded = new long[torrents.Count];
     private TimeSpan _lastSample;
 
     /// <summary>Managed heap when the first report ran, so growth is visible rather than absolute size.</summary>
@@ -29,36 +29,70 @@ internal sealed class Reporter(IClientEngine engine, ITorrent torrent, Options o
     public void ReportOnce()
     {
         var stats = engine.GetStats();
-        long downloaded = torrent.FileTransfer.Downloaded;
-        long uploaded = torrent.FileTransfer.Uploaded;
-
         var elapsed = _clock.Elapsed - _lastSample;
-        double downRate = elapsed.TotalSeconds <= 0 ? 0 : (downloaded - _lastDownloaded) / elapsed.TotalSeconds;
-        double upRate = elapsed.TotalSeconds <= 0 ? 0 : (uploaded - _lastUploaded) / elapsed.TotalSeconds;
-        _lastDownloaded = downloaded;
-        _lastUploaded = uploaded;
         _lastSample = _clock.Elapsed;
 
-        var line = new StringBuilder();
-        line.Append($"[{_clock.Elapsed.TotalSeconds,6:F0}s] ");
-        // MetadataDownload is only present while a magnet is still fetching its metadata; a torrent
-        // added from a file has none, and asks about progress instead.
-        var metadata = torrent.MetadataDownload;
-        line.Append(torrent.HasMetadata || metadata is null
-            ? $"{torrent.Progress,7:P1} "
-            : $"metadata {metadata.Progress,5:P0} ");
-        line.Append($"peers={torrent.Peers.ConnectedCount,3} ");
-        line.Append($"down={Rate(downRate)} up={Rate(upRate)} ");
-        line.Append($"state={torrent.State}");
-        var report = line.ToString();
-        Console.WriteLine(report);
+        double totalDown = 0;
+        double totalUp = 0;
+        int totalPeers = 0;
+        var perTorrent = new List<string>(torrents.Count);
 
-        // Into the log as well. A log file that records what the engine did but not how fast it was
-        // going cannot answer the question it exists for: the first one collected this way had every
-        // connection and request in it and no way to tell which ten seconds were the slow ones.
-        if (options.LogPath is not null)
+        for (int i = 0; i < torrents.Count; i++)
         {
-            logger.LogInformation("REPORT {Report}", report);
+            var torrent = torrents[i];
+            long downloaded = torrent.FileTransfer.Downloaded;
+            long uploaded = torrent.FileTransfer.Uploaded;
+
+            double downRate = elapsed.TotalSeconds <= 0 ? 0 : (downloaded - _lastDownloaded[i]) / elapsed.TotalSeconds;
+            double upRate = elapsed.TotalSeconds <= 0 ? 0 : (uploaded - _lastUploaded[i]) / elapsed.TotalSeconds;
+            _lastDownloaded[i] = downloaded;
+            _lastUploaded[i] = uploaded;
+
+            totalDown += downRate;
+            totalUp += upRate;
+            totalPeers += torrent.Peers.ConnectedCount;
+
+            var line = new StringBuilder();
+            // MetadataDownload is only present while a magnet is still fetching its metadata; a torrent
+            // added from a file has none, and asks about progress instead.
+            var metadata = torrent.MetadataDownload;
+            line.Append(torrent.HasMetadata || metadata is null
+                ? $"{torrent.Progress,7:P1} "
+                : $"metadata {metadata.Progress,5:P0} ");
+            line.Append($"peers={torrent.Peers.ConnectedCount,3} ");
+            line.Append($"down={Rate(downRate)} up={Rate(upRate)} ");
+            line.Append($"state={torrent.State,-12} ");
+            line.Append(Shorten(torrent.Name));
+            perTorrent.Add(line.ToString());
+        }
+
+        // With one torrent the summary would repeat the only row, so it is left out; with several it is
+        // the number being watched, and the per-torrent rows say which of them is doing the work - or,
+        // when the queue is on, which of them has been stopped to let another run.
+        var reports = new List<string>(perTorrent.Count + 1);
+        if (torrents.Count > 1)
+        {
+            reports.Add(
+                $"[{_clock.Elapsed.TotalSeconds,6:F0}s] {torrents.Count} torrents  peers={totalPeers,3}  " +
+                $"down={Rate(totalDown)} up={Rate(totalUp)}");
+            reports.AddRange(perTorrent.Select(static row => "          " + row));
+        }
+        else
+        {
+            reports.Add($"[{_clock.Elapsed.TotalSeconds,6:F0}s] {perTorrent[0]}");
+        }
+
+        foreach (var report in reports)
+        {
+            Console.WriteLine(report);
+
+            // Into the log as well. A log file that records what the engine did but not how fast it was
+            // going cannot answer the question it exists for: the first one collected this way had every
+            // connection and request in it and no way to tell which ten seconds were the slow ones.
+            if (options.LogPath is not null)
+            {
+                logger.LogInformation("REPORT {Report}", report);
+            }
         }
 
         if (options.Diagnostics)
@@ -127,9 +161,13 @@ internal sealed class Reporter(IClientEngine engine, ITorrent torrent, Options o
     {
         Console.WriteLine();
         Console.WriteLine($"Ran for        : {_clock.Elapsed.TotalSeconds:F1}s");
-        Console.WriteLine($"Downloaded     : {Bytes(torrent.FileTransfer.Downloaded)}");
-        Console.WriteLine($"Uploaded       : {Bytes(torrent.FileTransfer.Uploaded)}");
-        Console.WriteLine($"Progress       : {torrent.Progress:P2}");
+        Console.WriteLine($"Downloaded     : {Bytes(torrents.Sum(t => t.FileTransfer.Downloaded))}");
+        Console.WriteLine($"Uploaded       : {Bytes(torrents.Sum(t => t.FileTransfer.Uploaded))}");
+
+        foreach (var torrent in torrents)
+        {
+            Console.WriteLine($"  {torrent.Progress,7:P2}  {Shorten(torrent.Name)}");
+        }
 
         if (options.Diagnostics)
         {
@@ -139,6 +177,12 @@ internal sealed class Reporter(IClientEngine engine, ITorrent torrent, Options o
                 $"Collections    : gen0={GC.CollectionCount(0)} gen1={GC.CollectionCount(1)} gen2={GC.CollectionCount(2)}");
         }
     }
+
+    /// <summary>Enough of the name to tell the rows apart without wrapping the line.</summary>
+    private static string Shorten(string name)
+        => string.IsNullOrEmpty(name) ? "(unnamed)"
+            : name.Length <= 34 ? name
+            : name[..31] + "...";
 
     private static string Bytes(long value)
     {

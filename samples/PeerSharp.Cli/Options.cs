@@ -7,7 +7,12 @@ namespace PeerSharp.Cli;
 /// </summary>
 internal sealed record Options
 {
-    public required string Source { get; init; }
+    /// <summary>
+    /// The torrents or magnets to run. More than one is the case worth exercising: everything that
+    /// arbitrates between torrents - the queue, the global connection governor, bandwidth allocation -
+    /// only does anything when there are several.
+    /// </summary>
+    public required IReadOnlyList<string> Sources { get; init; }
 
     public required string DownloadPath { get; init; }
 
@@ -52,6 +57,15 @@ internal sealed record Options
     /// </summary>
     public string? LogPath { get; init; }
 
+    /// <summary>
+    /// Turn on the torrent queue, which is off by default and has never run against real torrents.
+    /// It stops torrents past <see cref="MaxActiveDownloads"/> and restarts them as others finish.
+    /// </summary>
+    public bool Queue { get; init; }
+
+    /// <summary>How many torrents the queue lets download at once. Ignored unless <see cref="Queue"/>.</summary>
+    public int MaxActiveDownloads { get; init; } = 3;
+
     /// <summary>Peers to try in addition to discovery, as host:port.</summary>
     public IReadOnlyList<string> Peers { get; init; } = [];
 
@@ -70,7 +84,7 @@ internal sealed record Options
 
     public static Options? Parse(string[] args, TextWriter error)
     {
-        string? source = null;
+        var sources = new List<string>();
         var downloadPath = Directory.GetCurrentDirectory();
         bool diagnostics = false;
         bool seed = false;
@@ -81,6 +95,8 @@ internal sealed record Options
         bool metadataOnly = false;
         bool portMap = false;
         string? logPath = null;
+        bool queue = false;
+        int maxActiveDownloads = 3;
         var peers = new List<string>();
         int? stopAfter = null;
         var interval = TimeSpan.FromSeconds(5);
@@ -122,6 +138,20 @@ internal sealed record Options
 
                 case "--port-map":
                     portMap = true;
+                    break;
+
+                case "--queue":
+                    queue = true;
+                    break;
+
+                case "--max-active":
+                    if (!TryTake(args, ref i, out var rawActive) || !int.TryParse(rawActive, out maxActiveDownloads) || maxActiveDownloads <= 0)
+                    {
+                        error.WriteLine("--max-active needs a positive number of torrents.");
+                        return null;
+                    }
+
+                    queue = true;
                     break;
 
                 case "--log":
@@ -199,18 +229,12 @@ internal sealed record Options
                         return null;
                     }
 
-                    if (source is not null)
-                    {
-                        error.WriteLine("Only one torrent or magnet may be given.");
-                        return null;
-                    }
-
-                    source = arg;
+                    sources.Add(arg);
                     break;
             }
         }
 
-        if (source is null)
+        if (sources.Count == 0)
         {
             error.WriteLine("A .torrent path or magnet link is required.");
             return null;
@@ -218,7 +242,7 @@ internal sealed record Options
 
         return new Options
         {
-            Source = source,
+            Sources = sources,
             DownloadPath = Path.GetFullPath(downloadPath),
             Diagnostics = diagnostics,
             Seed = seed,
@@ -229,6 +253,8 @@ internal sealed record Options
             MetadataOnly = metadataOnly,
             PortMap = portMap,
             LogPath = logPath,
+            Queue = queue,
+            MaxActiveDownloads = maxActiveDownloads,
             Peers = peers,
             StopAfterSeconds = stopAfter,
             ReportInterval = interval,
@@ -242,7 +268,7 @@ internal sealed record Options
         output.WriteLine("""
             peersharp-cli - a sample client, and the harness for diagnosing the library
 
-            usage: peersharp-cli <torrent-file|magnet> [options]
+            usage: peersharp-cli <torrent-file|magnet> [more...] [options]
 
               -o, --out <dir>      where to write data (default: current directory)
               -d, --diagnostics    report heap, peers and queue depths each interval
@@ -254,6 +280,8 @@ internal sealed record Options
                   --metadata-only  fetch a magnet's metadata, time it, and stop before downloading
                   --port-map       ask the router to forward the port (UPnP, NAT-PMP), for seeding
                   --log <file>     write the full log here; the console keeps reports and warnings
+                  --queue          enable the torrent queue (off by default)
+                  --max-active <n> torrents downloading at once; implies --queue (default 3)
                   --peer <ip:port> try this peer as well as any found by discovery (repeatable)
                   --stop-after <s> stop the torrent after this long and keep reporting
                   --interval <s>   seconds between reports (default: 5)

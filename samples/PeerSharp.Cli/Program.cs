@@ -66,7 +66,12 @@ var settings = new Settings
         UpnpPortMapping = options.PortMap,
         NatPmpPortMapping = options.PortMap
     },
-    Dht = { Enabled = !options.NoDht }
+    Dht = { Enabled = !options.NoDht },
+    Queue =
+    {
+        Enabled = options.Queue,
+        MaxActiveDownloads = options.MaxActiveDownloads
+    }
 };
 
 await using var engine = ClientEngineFactory.Create(new TorrentClientOptions
@@ -86,21 +91,23 @@ if (options.LogPath is { } configuredLogPath)
 
 var wallClock = System.Diagnostics.Stopwatch.StartNew();
 
-ITorrent torrent;
-if (options.Source.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
+var torrents = new List<ITorrent>(options.Sources.Count);
+foreach (var source in options.Sources)
 {
-    Console.WriteLine("Source         : magnet link");
-    torrent = await engine.AddMagnetAsync(
-        MagnetLink.Parse(options.Source),
-        new AddTorrentOptions
-        {
-            StartImmediately = !options.Recheck,
-            StopAfterMetadata = options.MetadataOnly
-        });
-}
-else
-{
-    var path = Path.GetFullPath(options.Source);
+    if (source.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine($"Source         : magnet link");
+        torrents.Add(await engine.AddMagnetAsync(
+            MagnetLink.Parse(source),
+            new AddTorrentOptions
+            {
+                StartImmediately = !options.Recheck,
+                StopAfterMetadata = options.MetadataOnly
+            }));
+        continue;
+    }
+
+    var path = Path.GetFullPath(source);
     if (!File.Exists(path))
     {
         Console.Error.WriteLine($"No such torrent file: {path}");
@@ -108,9 +115,14 @@ else
     }
 
     Console.WriteLine($"Source         : {path}");
-    torrent = await engine.AddTorrentAsync(
+    torrents.Add(await engine.AddTorrentAsync(
         TorrentFile.Load(path),
-        new AddTorrentOptions { StartImmediately = !options.Recheck });
+        new AddTorrentOptions { StartImmediately = !options.Recheck }));
+}
+
+if (options.Queue)
+{
+    Console.WriteLine($"Queue          : on, {options.MaxActiveDownloads} downloading at once");
 }
 
 if (options.Recheck)
@@ -118,19 +130,27 @@ if (options.Recheck)
     // Added stopped above: ForceRecheckAsync refuses to run on a live torrent, and a seed that
     // starts before its data is verified would advertise pieces it has not checked.
     Console.WriteLine("Rechecking     : hashing what is already on disk...");
-    int have = await torrent.ForceRecheckAsync();
-    Console.WriteLine($"                 {have}/{torrent.PieceCount} pieces present");
-    await torrent.StartAsync();
+    foreach (var torrent in torrents)
+    {
+        int have = await torrent.ForceRecheckAsync();
+        Console.WriteLine($"                 {have}/{torrent.PieceCount} pieces present  {torrent.Name}");
+        await torrent.StartAsync();
+    }
 }
 
-if (options.DownloadLimitBytesPerSecond is { } down)
+// Per torrent, which is what the library exposes. With several running this is the setting that
+// says whether the engine shares a link sensibly or lets one torrent starve the rest.
+foreach (var torrent in torrents)
 {
-    torrent.DownloadLimitBytesPerSecond = down;
-}
+    if (options.DownloadLimitBytesPerSecond is { } down)
+    {
+        torrent.DownloadLimitBytesPerSecond = down;
+    }
 
-if (options.UploadLimitBytesPerSecond is { } up)
-{
-    torrent.UploadLimitBytesPerSecond = up;
+    if (options.UploadLimitBytesPerSecond is { } up)
+    {
+        torrent.UploadLimitBytesPerSecond = up;
+    }
 }
 
 if (options.Peers.Count > 0)
@@ -150,8 +170,8 @@ if (options.Peers.Count > 0)
 
     // Offered, not forced: these go through the same blocklist, limits and duplicate checks as a
     // peer from any other source, so "accepted" is not the same as "connected".
-    int accepted = torrent.Peers.Add(endpoints);
-    Console.WriteLine($"Peers added    : {accepted} of {endpoints.Count} accepted as candidates");
+    int accepted = torrents[0].Peers.Add(endpoints);
+    Console.WriteLine($"Peers added    : {accepted} of {endpoints.Count} accepted as candidates (first torrent)");
 }
 
 // Ctrl+C should stop the engine rather than kill the process, so a run ends with its files closed
@@ -165,11 +185,11 @@ Console.CancelKeyPress += (_, e) =>
     stopping.Cancel();
 };
 
-var reporter = new Reporter(engine, torrent, options, loggerFactory.CreateLogger("Report"));
+var reporter = new Reporter(engine, torrents, options, loggerFactory.CreateLogger("Report"));
 
 if (options.MetadataOnly)
 {
-    if (torrent.HasMetadata)
+    if (torrents.All(static t => t.HasMetadata))
     {
         Console.WriteLine("Metadata       : already present, nothing to fetch");
         return 0;
@@ -178,7 +198,7 @@ if (options.MetadataOnly)
     // Report while waiting rather than blocking silently: when this is slow, the interesting part
     // is what the peer count was doing meanwhile - metadata that takes thirty seconds with a
     // hundred peers connected is a different fault from one that takes thirty seconds to find any.
-    var metadataWait = torrent.WaitForMetadataAsync(stopping.Token);
+    var metadataWait = Task.WhenAll(torrents.Select(t => t.WaitForMetadataAsync(stopping.Token)));
     while (!metadataWait.IsCompleted && !stopping.IsCancellationRequested)
     {
         reporter.ReportOnce();
@@ -189,12 +209,15 @@ if (options.MetadataOnly)
     await metadataWait.ConfigureAwait(false);
 
     Console.WriteLine();
-    Console.WriteLine($"Metadata in    : {wallClock.Elapsed.TotalSeconds:F2}s");
-    Console.WriteLine($"Name           : {torrent.Name}");
-    Console.WriteLine($"Pieces         : {torrent.PieceCount}");
-    Console.WriteLine($"Peers at end   : {torrent.Peers.ConnectedCount}");
+    Console.WriteLine($"Metadata in    : {wallClock.Elapsed.TotalSeconds:F2}s (all {torrents.Count})");
+    foreach (var torrent in torrents)
+    {
+        Console.WriteLine($"  {torrent.PieceCount,6} pieces  {torrent.Name}");
+    }
 
-    await torrent.StopAsync();
+    Console.WriteLine($"Peers at end   : {torrents.Sum(static t => t.Peers.ConnectedCount)}");
+
+    await Task.WhenAll(torrents.Select(static t => t.StopAsync()));
     return 0;
 }
 
@@ -215,20 +238,20 @@ try
         {
             stopped = true;
             reporter.ReportSettledHeap("before stop");
-            Console.WriteLine("Stopping the torrent...");
-            await torrent.StopAsync();
+            Console.WriteLine("Stopping the torrents...");
+            await Task.WhenAll(torrents.Select(static t => t.StopAsync()));
 
             // Give teardown a moment to finish before asking what is still held.
             await Task.Delay(TimeSpan.FromSeconds(3), stopping.Token);
             reporter.ReportSettledHeap("after stop ");
         }
 
-        if (torrent.Finished && !announcedCompletion)
+        if (torrents.All(static t => t.Finished) && !announcedCompletion)
         {
             announcedCompletion = true;
             Console.WriteLine(options.Seed
-                ? "Complete - seeding. Ctrl+C to stop."
-                : "Complete.");
+                ? "All complete - seeding. Ctrl+C to stop."
+                : "All complete.");
 
             if (!options.Seed)
             {
@@ -246,5 +269,5 @@ catch (OperationCanceledException)
 
 reporter.ReportFinal();
 
-await torrent.StopAsync();
+await Task.WhenAll(torrents.Select(static t => t.StopAsync()));
 return 0;

@@ -152,6 +152,18 @@ internal class PortListener : IPortListener
             var torrent = _resolver.GetTorrent(negotiated.InfoHash);
             if (torrent is Torrent t)
             {
+                // A torrent that is not running has no business taking connections. The queue stops
+                // torrents past its limit precisely to free capacity for the ones still going, and a
+                // stopped torrent that goes on accepting peers spends the connection slots, the
+                // memory and the sockets that were meant to be handed back - measured with the queue
+                // holding one torrent, the stopped one still had fourteen peers and was climbing.
+                if (!t.Started)
+                {
+                    _logger.LogDebug(
+                        "Refusing incoming connection for {TorrentName}: the torrent is not running", t.Name);
+                    return;
+                }
+
                 if (negotiated.Encryption != null)
                 {
                     await t.PeersInternal.AddIncomingPeerAsync(client, negotiated.Handshake, negotiated.Encryption).ConfigureAwait(false);
