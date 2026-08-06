@@ -93,6 +93,14 @@ public sealed class PexLiveExchangeTests : IAsyncLifetime
         var torrentA = await leechA.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = true });
         var torrentB = await leechB.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = true });
 
+        // Rate limited so both are still leeching when peer exchange delivers, which is the situation
+        // this test is about. Unthrottled, two megabytes over loopback finish inside the first PEX
+        // interval, and two peers that have everything have no reason to connect to each other - the
+        // engine now declines that dial outright, so an unthrottled run would be asserting that a
+        // connection nobody wants gets made. At this rate the transfer spans several intervals.
+        torrentA.DownloadLimitBytesPerSecond = 128 * 1024;
+        torrentB.DownloadLimitBytesPerSecond = 128 * 1024;
+
         // The only address either leecher is ever given. Neither is told the other exists.
         leechA.OnPeersFound(torrentFile.InfoHash, [seedEndpoint]);
         leechB.OnPeersFound(torrentFile.InfoHash, [seedEndpoint]);

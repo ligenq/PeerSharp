@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Framework;
@@ -594,8 +594,49 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private static IPAddress NormaliseForBadDataKey(IPAddress address)
         => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
+    /// <summary>
+    /// How many half-open outgoing connections to allow right now.
+    ///
+    /// <para>
+    /// While pieces are still wanted this is the flat <see cref="ConnectionSettings.MaxPendingConnections"/>,
+    /// and deliberately so: most advertised addresses never answer, so reaching a useful number of
+    /// peers takes far more attempts than peers, and throttling that is what makes a download ramp
+    /// slowly. See the remarks on that setting for the measurements.
+    /// </para>
+    ///
+    /// <para>
+    /// A finished torrent is a different problem. It is not racing anything and it is not looking for
+    /// pieces - the peers worth having are leechers, and they arrive on their own wherever this client
+    /// is reachable. Dialling out is the fallback for when it is not, so it stays enabled, but there is
+    /// no reason to have more attempts in flight than the number of peers still wanted. A live seeding
+    /// run sat at 78 half-open against 18 connected for twenty-eight minutes.
+    /// </para>
+    /// </summary>
+    private int MaxPendingConnectionsNow(int currentConnections)
+    {
+        int configured = _settings.Connection.MaxPendingConnections;
+        if (!_torrent.Finished)
+        {
+            return configured;
+        }
+
+        int wanted = _settings.Connection.MaxPeersPerTorrent - currentConnections;
+        return Math.Clamp(wanted, 0, configured);
+    }
+
     public void ConnectTo(string ip, int port, bool forceUtp = false)
     {
+        // Port 0 is not a port a peer can listen on, so an address carrying it is not a candidate -
+        // it is a malformed entry that discovery handed us. Dialling one is not free: uTP has nothing
+        // to reject and spends its whole connect timeout waiting, and a live run burnt 1471 attempts
+        // across 519 such addresses, up to seven seconds each. The same hosts turned up later with
+        // their real ports, so the zero-port entry was never even the only way to reach them.
+        if (port is <= 0 or > ushort.MaxValue)
+        {
+            _logger.LogDebug("Not dialling {Ip}:{Port} - not a port a peer can listen on", ip, port);
+            return;
+        }
+
         // Check blocklist first
         if (_torrent.Blocklist?.IsBlocked(ip) == true)
         {
@@ -625,7 +666,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
 
         // Limit pending/half-open connections (prevents router saturation)
-        if (currentConnecting >= _settings.Connection.MaxPendingConnections && !forceUtp)
+        if (currentConnecting >= MaxPendingConnectionsNow(currentConnections) && !forceUtp)
         {
             return;
         }
@@ -709,6 +750,25 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         var now = _timeProvider.GetUtcNow();
         if (!forceUtp && history.NextConnectAttempt > now)
         {
+            return;
+        }
+
+        // Two seeds have nothing to trade, and no amount of waiting changes that. The peer knows it
+        // too and hangs up within a fraction of a second of the handshake, which is why the existing
+        // discouragements never caught this: the backoff treats it as one more failed dial and grows
+        // from five seconds, and GetScore only demotes a seed by a bit that ranks below "attempted
+        // least recently", so the candidate comes round again as soon as the pool cycles. A live
+        // seeding run handshaked seeds 9363 times, one of them 26 times in ten minutes.
+        //
+        // So this is an exclusion rather than a penalty, which is what libtorrent does with the same
+        // pair of facts. It applies only while this torrent is finished; the moment it wants pieces
+        // again a seed is the best peer there is. SeedConfirmed rather than IsSeed because a peer that
+        // is never dialled can never correct the record, and IsSeed accepts BEP 11's seed flag - one
+        // peer's PEX message could otherwise mark a whole swarm and end this client's seeding.
+        if (!forceUtp && history.SeedConfirmed && _torrent.Finished)
+        {
+            _logger.LogDebug(
+                "Not dialling {Ip}:{Port} - both it and this torrent are complete", ip, port);
             return;
         }
 
@@ -1152,6 +1212,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 {
                     var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint, isListenAddress: p.IsOutgoing);
                     history.IsSeed = true;
+                    history.SeedConfirmed = true;
                 }
 
                 _torrent.FileTransferInternal.RegisterPeerAvailability(p);
@@ -1175,6 +1236,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 {
                     var history = GetOrAddKnownPeerHistory(p.RemoteEndPoint, isListenAddress: p.IsOutgoing);
                     history.IsSeed = true;
+                    history.SeedConfirmed = true;
                 }
 
                 _torrent.FileTransferInternal.RegisterPeerAvailability(p);
@@ -1369,6 +1431,16 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         foreach (var rawEndpoint in peers)
         {
             var endpoint = NetworkUtils.NormalizeEndPoint(rawEndpoint);
+
+            // Dropped here as well as in ConnectTo so the known-peer cache never holds one. 519 of
+            // them turned up in one run against a cache bounded at 2000, which is a quarter of the
+            // room given to addresses that can never be dialled.
+            if (endpoint is null or { Port: <= 0 } or { Port: > ushort.MaxValue })
+            {
+                index++;
+                continue;
+            }
+
             if (_torrent.Blocklist?.IsBlocked(endpoint) == true)
             {
                 index++;
