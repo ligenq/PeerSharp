@@ -4,6 +4,7 @@ using PeerSharp.Internals.Network;
 using PeerSharp.BEncoding;
 using System.Buffers;
 using System.Collections.Concurrent;
+using PeerSharp.Internals.Utilities;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -455,6 +456,13 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         }
     }
 
+    /// <summary>
+    /// Whether this machine has an IPv6 address worth bootstrapping over. Distinct from the OS merely
+    /// supporting IPv6, which Windows reports even on a network that has none: dialling a v6 bootstrap
+    /// node from a machine with only a link-local address buys nothing but a timeout.
+    /// </summary>
+    private static bool HasGlobalIPv6() => NetworkUtils.GetGlobalIPv6Address() is not null;
+
     private async Task BootstrapAsync(CancellationToken cancellationToken)
     {
         var nodes = _settings.Dht.BootstrapNodes;
@@ -466,9 +474,34 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 var ips = await _dnsResolver
                     .GetHostAddressesAsync(node.Host, cancellationToken)
                     .ConfigureAwait(false);
-                if (ips.Length > 0)
+                // One address of each family, not merely the first the resolver happened to list.
+                // BEP 32 describes two overlaid DHTs, and a node is only in the one it can be reached
+                // over: bootstrapping into whichever family DNS returned first left the routing table
+                // entirely IPv4, so the 'want n6' we ask for had nobody to ask. On a connection with
+                // real IPv6, that showed as eight IPv6 peers dialling in and not one being dialled -
+                // we had no IPv6 addresses to try, because nothing IPv6 had ever answered us.
+                var v4 = Array.Find(ips, static ip => ip.AddressFamily == AddressFamily.InterNetwork);
+                var v6 = HasGlobalIPv6()
+                    ? Array.Find(ips, static ip => ip.AddressFamily == AddressFamily.InterNetworkV6)
+                    : null;
+
+                foreach (var ip in new[] { v4, v6 })
                 {
-                    var endpoint = new IPEndPoint(ips[0], node.Port);
+                    if (ip is null)
+                    {
+                        continue;
+                    }
+
+                    var endpoint = new IPEndPoint(ip, node.Port);
+
+                    // Which node, over which family. Bootstrap is the one step everything else depends
+                    // on, and it logged nothing at all - so "did we even try IPv6?" could not be
+                    // answered from a log, only guessed at.
+                    _logger.LogDebug(
+                        "DHT bootstrapping from {Host} at {Endpoint} ({Family})",
+                        node.Host,
+                        endpoint,
+                        ip.AddressFamily == AddressFamily.InterNetworkV6 ? "IPv6" : "IPv4");
 
                     // Ping proves reachability; find_node for our own id is what actually populates
                     // the routing table, by asking for the nodes nearest us and walking into those.
