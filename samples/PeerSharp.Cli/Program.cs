@@ -156,7 +156,10 @@ foreach (var source in options.Sources)
         torrentFile,
         new AddTorrentOptions
         {
-            StartImmediately = !options.Recheck,
+            // A file already has metadata, so metadata-only mode has no reason to start it. This
+            // matters in a mixed file/magnet run: the file must not download payload while the
+            // magnet is still fetching its metadata.
+            StartImmediately = !options.Recheck && !options.MetadataOnly,
             ResumeData = LoadResume(torrentFile.InfoHash)
         }));
 }
@@ -175,7 +178,10 @@ if (options.Recheck)
     {
         int have = await torrent.ForceRecheckAsync();
         Console.WriteLine($"                 {have}/{torrent.PieceCount} pieces present  {torrent.Name}");
-        await torrent.StartAsync();
+        if (!options.MetadataOnly || !torrent.HasMetadata)
+        {
+            await torrent.StartAsync();
+        }
     }
 }
 
@@ -235,6 +241,28 @@ if (options.RunForSeconds is { } runFor)
 
 var reporter = new Reporter(engine, torrents, options, loggerFactory.CreateLogger("Report"));
 
+async Task SaveResumeDataAsync()
+{
+    if (options.ResumeDir is null)
+    {
+        return;
+    }
+
+    foreach (var torrent in torrents)
+    {
+        try
+        {
+            var resume = torrent.GetResumeData();
+            await File.WriteAllBytesAsync(ResumeFile(resume.Hash), resume.Data);
+            Console.WriteLine($"Resume saved   : {torrent.Progress:P2}  {torrent.Name}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Could not save resume data for {torrent.Name}: {ex.Message}");
+        }
+    }
+}
+
 if (options.MetadataOnly)
 {
     if (torrents.All(static t => t.HasMetadata))
@@ -254,7 +282,20 @@ if (options.MetadataOnly)
             .ConfigureAwait(false);
     }
 
-    await metadataWait.ConfigureAwait(false);
+    try
+    {
+        await metadataWait.ConfigureAwait(false);
+    }
+    catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+    {
+        // Ctrl+C and --run-for are normal shutdown signals here too. Continue through the same
+        // reporting, stop and resume-save work as a regular transfer instead of escaping top-level
+        // Main with an unhandled TaskCanceledException.
+        reporter.ReportFinal();
+        await Task.WhenAll(torrents.Select(static t => t.StopAsync()));
+        await SaveResumeDataAsync();
+        return 0;
+    }
 
     Console.WriteLine();
     Console.WriteLine($"Metadata in    : {wallClock.Elapsed.TotalSeconds:F2}s (all {torrents.Count})");
@@ -266,6 +307,7 @@ if (options.MetadataOnly)
     Console.WriteLine($"Peers at end   : {torrents.Sum(static t => t.Peers.ConnectedCount)}");
 
     await Task.WhenAll(torrents.Select(static t => t.StopAsync()));
+    await SaveResumeDataAsync();
     return 0;
 }
 
@@ -320,21 +362,6 @@ reporter.ReportFinal();
 await Task.WhenAll(torrents.Select(static t => t.StopAsync()));
 
 // After stopping, so what is written reflects a settled torrent rather than one mid-write.
-if (options.ResumeDir is not null)
-{
-    foreach (var torrent in torrents)
-    {
-        try
-        {
-            var resume = torrent.GetResumeData();
-            await File.WriteAllBytesAsync(ResumeFile(resume.Hash), resume.Data);
-            Console.WriteLine($"Resume saved   : {torrent.Progress:P2}  {torrent.Name}");
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            Console.Error.WriteLine($"Could not save resume data for {torrent.Name}: {ex.Message}");
-        }
-    }
-}
+await SaveResumeDataAsync();
 
 return 0;
