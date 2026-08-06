@@ -52,6 +52,34 @@ internal class UdpSocketAdapter : IUdpSocket
     {
         _client = client;
         _ownsClient = ownsClient;
+        SuppressConnectionReset(client);
+    }
+
+    /// <summary>
+    /// Windows reports a datagram's ICMP port-unreachable on the <em>next receive</em> from the socket,
+    /// as <see cref="SocketError.ConnectionReset"/>. On a connectionless socket that answer belongs to
+    /// nothing the caller asked about: the DHT sends to thousands of nodes and any one of them being
+    /// gone would otherwise abort an unrelated receive, log a stack trace, and count towards the
+    /// receive-error backoff. SIO_UDP_CONNRESET turns the behaviour off, which is what every other
+    /// platform already does.
+    /// </summary>
+    private static void SuppressConnectionReset(UdpClient client)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const int SIO_UDP_CONNRESET = unchecked((int)0x9800000C);
+
+        try
+        {
+            client.Client.IOControl(SIO_UDP_CONNRESET, [0, 0, 0, 0], null);
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException or PlatformNotSupportedException)
+        {
+            // Not fatal: the socket keeps working, receives just keep surfacing resets as before.
+        }
     }
 
     public Socket Client => _client.Client;
