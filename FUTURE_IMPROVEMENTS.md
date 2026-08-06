@@ -154,6 +154,29 @@ which may be lost in the noise of ordinary churn.
 
 ---
 
+## No tracker ever learns our IPv6 address
+
+**Observed.** A dual-stack run of the Ubuntu desktop torrent announced only to
+`https://torrent.ubuntu.com/announce`. `https://ipv6.torrent.ubuntu.com/announce` sits in the second
+BEP 12 tier, and a tier is only tried when the one above it fails, so in a healthy run it received no
+announce at all until the `stopped` event at shutdown. That single working announce goes out over
+IPv4, so the address the tracker records for us is our IPv4 address and nothing else. IPv6-only peers
+in that swarm therefore cannot be told about us — we can dial them, they cannot dial us.
+
+**Why the obvious fix is not the fix.** BEP 7's `ipv6` announce parameter is exactly what this looks
+like it wants, and it was tried. It is discouraged by the BEP itself: it lets a client claim any
+address, and it defeats a tracker proxy by disclosing the address the proxy exists to hide. A tracker
+following the BEP ignores it when the announce arrives from a global source address, which is every
+case that matters here, so it buys nothing in exchange for the disclosure. It has been removed again.
+
+**What would settle it.** What other clients do is announce once per listening address with the HTTP
+connection bound to that address, letting each tracker infer the family from the connection. That
+means a per-family announce loop in `TrackerManager` and a per-family `HttpClient` (or `SocketsHttpHandler`
+with a bound `ConnectCallback`) in `HttpTracker` - both are real work, and the payoff is confined to
+peers that have no IPv4 at all.
+
+---
+
 ## `MetadataRequestRedundancy` is a constant, not a setting
 
 **Observed.** How many peers are asked for the same metadata piece is a private `const` in

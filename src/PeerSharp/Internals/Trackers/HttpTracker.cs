@@ -480,15 +480,11 @@ internal class HttpTracker : TrackerBase, IDisposable
         AppendParam("downloaded", Torrent.FileTransfer.Downloaded.ToString());
         AppendParam("left", Torrent.DataLeft.ToString());
         AppendParam("compact", "1");
-        // BEP 7: this parameter carries the client's own IPv6 address, so a tracker can hand it out to
-        // IPv6-capable peers. It is not a flag, and "1" is not an address - a tracker that reads it
-        // strictly gets nonsense and one that reads it loosely gets nothing, so it never did what the
-        // old comment here claimed. Omitted entirely when this machine has no IPv6, which is the
-        // honest answer and what every other client sends in that case.
-        if (NetworkUtils.GetGlobalIPv6Address() is { } ownIPv6)
-        {
-            AppendParam("ipv6", ownIPv6.ToString());
-        }
+        // BEP 7 now discourages ipv4/ipv6 announce parameters: besides allowing address spoofing,
+        // embedding a local address here defeats tracker proxies by disclosing the address the proxy
+        // was meant to hide. A dual-stack client announces each listening address separately, with
+        // the HTTP connection bound to that address; this single announce lets the tracker infer its
+        // address from the connection instead.
         AppendParam("numwant", Torrent.Settings.MaxPeersPerTrackerRequest.ToString());
 
         // BEP 3: quote back whatever this tracker last gave us, so it can tie our announces together.
