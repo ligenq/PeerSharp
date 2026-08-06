@@ -480,7 +480,15 @@ internal class HttpTracker : TrackerBase, IDisposable
         AppendParam("downloaded", Torrent.FileTransfer.Downloaded.ToString());
         AppendParam("left", Torrent.DataLeft.ToString());
         AppendParam("compact", "1");
-        AppendParam("ipv6", "1"); // BEP 7: Request IPv6 peers
+        // BEP 7: this parameter carries the client's own IPv6 address, so a tracker can hand it out to
+        // IPv6-capable peers. It is not a flag, and "1" is not an address - a tracker that reads it
+        // strictly gets nonsense and one that reads it loosely gets nothing, so it never did what the
+        // old comment here claimed. Omitted entirely when this machine has no IPv6, which is the
+        // honest answer and what every other client sends in that case.
+        if (NetworkUtils.GetGlobalIPv6Address() is { } ownIPv6)
+        {
+            AppendParam("ipv6", ownIPv6.ToString());
+        }
         AppendParam("numwant", Torrent.Settings.MaxPeersPerTrackerRequest.ToString());
 
         // BEP 3: quote back whatever this tracker last gave us, so it can tie our announces together.

@@ -9,6 +9,51 @@ namespace PeerSharp.Internals.Utilities;
 internal static class NetworkUtils
 {
     /// <summary>
+    /// This machine's own globally routable IPv6 address, or null when it has none.
+    ///
+    /// <para>
+    /// Globally routable is the whole point, so link-local (fe80::) is excluded: every machine has one
+    /// of those whether or not it has IPv6 connectivity, and handing it to a tracker would publish an
+    /// address no peer outside the local segment can reach. Unique-local (fc00::/7) is excluded for
+    /// the same reason.
+    /// </para>
+    /// </summary>
+    public static IPAddress? GetGlobalIPv6Address()
+    {
+        try
+        {
+            foreach (var iface in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (iface.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up
+                    || iface.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
+                {
+                    continue;
+                }
+
+                foreach (var unicast in iface.GetIPProperties().UnicastAddresses)
+                {
+                    var address = unicast.Address;
+                    if (address.AddressFamily == AddressFamily.InterNetworkV6
+                        && !address.IsIPv6LinkLocal
+                        && !address.IsIPv6SiteLocal
+                        && !address.IsIPv6UniqueLocal
+                        && !IPAddress.IsLoopback(address))
+                    {
+                        return address;
+                    }
+                }
+            }
+        }
+        catch (System.Net.NetworkInformation.NetworkInformationException)
+        {
+            // Enumerating interfaces can fail while the stack is being reconfigured. Having no answer
+            // is the same as having no address: the caller omits the parameter.
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Normalizes an IPv4-mapped IPv6 endpoint (e.g. [::ffff:1.2.3.4]:6881) to its plain IPv4 form.
     /// Dual-stack sockets report IPv4 peers in the mapped form while trackers and PEX hand out
     /// plain IPv4 addresses; without normalization the two forms compare as different endpoints.
