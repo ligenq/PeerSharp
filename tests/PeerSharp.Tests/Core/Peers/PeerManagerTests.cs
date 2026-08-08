@@ -1300,7 +1300,7 @@ public class PeerManagerTests
         history.SeedConfirmed = true;
 
         Assert.False(ctx.Torrent.HasMetadata);
-        Assert.True(ctx.Torrent.Finished);
+        Assert.False(ctx.Torrent.Finished);
 
         ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
         Assert.Contains(endpoint, pending.Keys);
@@ -1376,8 +1376,11 @@ public class PeerManagerTests
         var ctx = CreateContext(hasPieceCount: false);
         int configured = ctx.Torrent.Settings.Connection.MaxPendingConnections;
 
+        // Finished is false precisely because there is no metadata - the piece collection is empty,
+        // so "received every piece" would otherwise be satisfied by a torrent that does not yet know
+        // what it is downloading.
         Assert.False(ctx.Torrent.HasMetadata);
-        Assert.True(ctx.Torrent.Finished);
+        Assert.False(ctx.Torrent.Finished);
         Assert.Equal(configured, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", 0));
 
         await CleanupAsync(ctx);
