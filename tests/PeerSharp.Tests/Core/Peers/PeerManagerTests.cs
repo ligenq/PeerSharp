@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Network;
@@ -1259,6 +1259,8 @@ public class PeerManagerTests
     public async Task ConnectTo_AKnownSeed_IsSkippedOnlyWhileThisTorrentIsAlsoComplete()
     {
         var ctx = CreateContext();
+        ctx.Torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        Assert.True(ctx.Torrent.HasMetadata);
         var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.12"), 6881);
         var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
 
@@ -1282,6 +1284,31 @@ public class PeerManagerTests
     }
 
     /// <summary>
+    /// The same empty piece collection that makes a magnet look Finished must not make its peers look
+    /// useless. Most peers in a magnet's swarm are seeds and announce it with have_all the moment they
+    /// handshake, and those are precisely the peers holding the metadata being fetched - refusing to
+    /// dial them would leave the fetch with nowhere to go.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ConnectTo_AConfirmedSeed_IsStillDialledBeforeMetadataArrives()
+    {
+        var ctx = CreateContext(hasPieceCount: false);
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.17"), 6881);
+        var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
+
+        var history = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", endpoint, true)!;
+        history.SeedConfirmed = true;
+
+        Assert.False(ctx.Torrent.HasMetadata);
+        Assert.True(ctx.Torrent.Finished);
+
+        ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+        Assert.Contains(endpoint, pending.Keys);
+
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
     /// BEP 11 carries a seed flag, so a peer can be marked one on a stranger's word. That is fine for
     /// ranking a candidate and not fine for refusing to dial it: a peer nobody dials never gets to
     /// correct the record, so one mistaken or malicious PEX message would otherwise be enough to flag
@@ -1291,6 +1318,8 @@ public class PeerManagerTests
     public async Task ConnectTo_ASeedKnownOnlyFromPexFlags_IsStillDialled()
     {
         var ctx = CreateContext();
+        ctx.Torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        Assert.True(ctx.Torrent.HasMetadata);
         var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.13"), 6881);
         var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
 
@@ -1317,9 +1346,11 @@ public class PeerManagerTests
     public async Task MaxPendingConnections_IsBoundedByTheDeficitOnlyWhenComplete()
     {
         var ctx = CreateContext();
+        ctx.Torrent.InfoFile.Info.Pieces.Add(new byte[20]);
         int configured = ctx.Torrent.Settings.Connection.MaxPendingConnections;
         int target = ctx.Torrent.Settings.Connection.MaxPeersPerTorrent;
 
+        Assert.True(ctx.Torrent.HasMetadata);
         Assert.False(ctx.Torrent.Finished);
         Assert.Equal(configured, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", 0));
         Assert.Equal(configured, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", target - 1));
@@ -1334,14 +1365,101 @@ public class PeerManagerTests
         await CleanupAsync(ctx);
     }
 
-    private static PeerManagerContext CreateContext(IPeerCommunicationFactory? peerFactory = null)
+    /// <summary>
+    /// A magnet has no piece count until metadata arrives, so its empty piece collection happens to
+    /// satisfy Finished. It is nevertheless still hunting for peers and must retain download-time
+    /// connection depth so it can find one that supplies the metadata.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task MaxPendingConnections_WithoutMetadata_UsesTheConfiguredDownloadDepth()
+    {
+        var ctx = CreateContext(hasPieceCount: false);
+        int configured = ctx.Torrent.Settings.Connection.MaxPendingConnections;
+
+        Assert.False(ctx.Torrent.HasMetadata);
+        Assert.True(ctx.Torrent.Finished);
+        Assert.Equal(configured, InvokePrivate(ctx.Manager, "MaxPendingConnectionsNow", 0));
+
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
+    /// A batch is queued faster than its entries become half-open, so the completed-torrent deficit
+    /// has to be checked by the queue reader as well as by the producer.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ConnectionQueue_WhenComplete_StartsNoMoreThanThePeerDeficit()
+    {
+        var factory = new BlockingPeerFactory();
+        var ctx = CreateContext(factory);
+        ctx.Torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        ctx.Torrent.Settings.Connection.ConnectionsPerSecond = 1000;
+        ctx.Torrent.Settings.Connection.MaxPeersPerTorrent = 1;
+        ctx.Torrent.Pieces.AddPiece(0);
+
+        var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
+        var first = new IPEndPoint(IPAddress.Parse("203.0.113.14"), 6881);
+        var second = new IPEndPoint(IPAddress.Parse("203.0.113.15"), 6881);
+
+        // Queue both before the reader starts. At producer time neither is half-open, so both pass
+        // the early check; only the dequeue-time check can see the first attempt occupying the slot.
+        ctx.Manager.ConnectTo(first.Address.ToString(), first.Port);
+        ctx.Manager.ConnectTo(second.Address.ToString(), second.Port);
+        Assert.Equal(2, pending.Count);
+
+        await ctx.Manager.StartAsync();
+        await TorrentTestUtility.WaitUntilAsync(
+            () => factory.Created.Count == 1 && !pending.ContainsKey(second),
+            because: "the second queued request to be declined once the only half-open slot is occupied");
+
+        Assert.Single(factory.Created);
+
+        factory.CompleteAll(false);
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
+    /// Completion can happen while a request waits in the rate-limited queue. A confirmed seed that
+    /// was useful when queued must be discarded rather than dialled after that transition.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ConnectionQueue_AConfirmedSeedQueuedBeforeCompletion_IsRevalidatedBeforeDial()
+    {
+        var factory = new BlockingPeerFactory();
+        var ctx = CreateContext(factory);
+        ctx.Torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        ctx.Torrent.Settings.Connection.ConnectionsPerSecond = 1000;
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.16"), 6881);
+        var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
+
+        var history = (PeerHistory)InvokePrivate(ctx.Manager, "GetOrAddKnownPeerHistory", endpoint, true)!;
+        history.SeedConfirmed = true;
+
+        ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+        Assert.Contains(endpoint, pending.Keys);
+
+        ctx.Torrent.Pieces.AddPiece(0);
+        await ctx.Manager.StartAsync();
+        await TorrentTestUtility.WaitUntilAsync(
+            () => !pending.ContainsKey(endpoint),
+            because: "the now-useless queued seed request to be discarded");
+
+        Assert.Empty(factory.Created);
+
+        await CleanupAsync(ctx);
+    }
+
+    private static PeerManagerContext CreateContext(IPeerCommunicationFactory? peerFactory = null, bool hasPieceCount = true)
     {
         var metadata = new TorrentFileMetadata();
         metadata.Info.Version = TorrentVersion.V1;
         metadata.Info.Hash = new InfoHash(Enumerable.Range(0, 20).Select(i => (byte)i).ToArray());
         metadata.Info.PieceSize = ProtocolConstants.BlockSize;
-        metadata.Info.FullSize = ProtocolConstants.BlockSize;
-        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = ProtocolConstants.BlockSize, Offset = 0 });
+        if (hasPieceCount)
+        {
+            metadata.Info.FullSize = ProtocolConstants.BlockSize;
+            metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "file.bin", Size = ProtocolConstants.BlockSize, Offset = 0 });
+        }
 
         string path = CreateTempPath();
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
@@ -1468,6 +1586,52 @@ public class PeerManagerTests
         {
             return new PeerCommunication(torrent, listener, timeProvider);
         }
+    }
+
+    private sealed class BlockingPeerFactory : IPeerCommunicationFactory
+    {
+        public ConcurrentQueue<BlockingPeer> Created { get; } = new();
+
+        public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
+        {
+            var peer = new BlockingPeer(torrent, listener, timeProvider);
+            Created.Enqueue(peer);
+            return peer;
+        }
+
+        public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, Stream stream, IPEndPoint? remoteEndPoint)
+            => throw new NotSupportedException();
+
+        public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider, TcpClient client)
+            => throw new NotSupportedException();
+
+        public void CompleteAll(bool result)
+        {
+            foreach (var peer in Created)
+            {
+                peer.ConnectResult.TrySetResult(result);
+            }
+        }
+    }
+
+    private sealed class BlockingPeer : PeerCommunication
+    {
+        public BlockingPeer(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
+            : base(torrent, listener, timeProvider)
+        {
+        }
+
+        public TaskCompletionSource<bool> ConnectResult { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override Task<bool> ConnectAsync(
+            string ip,
+            int port,
+            bool useUtp,
+            int timeoutMs,
+            bool offerEncryption = true,
+            CancellationToken ct = default)
+            => ConnectResult.Task;
     }
 
     private sealed class FakeConnectionGovernor : IConnectionGovernor
