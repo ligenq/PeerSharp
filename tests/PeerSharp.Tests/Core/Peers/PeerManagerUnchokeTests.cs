@@ -65,9 +65,15 @@ public class PeerManagerUnchokeTests
     [Fact]
     public void UnchokePeers_Seeding_RotatesOutQuotaCompletePeer()
     {
-        // torrent.Finished = true triggers the seeding sort path in UnchokePeers.
+        // torrent.Finished = true triggers the seeding sort path in UnchokePeers, and Finished needs
+        // metadata as well as the pieces: a torrent that does not yet know its own piece count has
+        // finished nothing. Without the piece hash this reached the seeding path only because Finished
+        // used to be satisfied by an empty piece collection.
         var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        torrent.InfoFile.Info.FullSize = ProtocolConstants.BlockSize;
         torrent.Pieces.SetHaveAll();
+        Assert.True(torrent.Finished);
         torrent.Settings.Connection.UploadSlotsMin = 2;
         torrent.Settings.Connection.UploadSlotsMax = 2;
 

@@ -625,23 +625,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     }
 
     /// <summary>
-    /// Whether there is nothing left this torrent wants from the swarm.
-    ///
-    /// <para>
-    /// <see cref="Torrent.Finished"/> alone does not say that. A magnet has no piece count until its
-    /// metadata arrives, and an empty piece collection satisfies "received every piece" trivially - so
-    /// a torrent that has not yet learned what it is downloading reports itself finished. It is in fact
-    /// at the point of wanting the swarm most: the metadata can only come from a peer, and most peers
-    /// in a magnet's swarm announce have_all the moment they handshake, which is exactly the mark that
-    /// suppresses dialling once a torrent really is complete.
-    /// </para>
-    ///
-    /// <para>
-    /// Kept as one predicate because three separate decisions read it, and a fourth is likely. Written
-    /// out at each of them, one would eventually be written without the metadata half.
-    /// </para>
+    /// Whether there is nothing left this torrent wants from the swarm. Named for what the three
+    /// connection decisions below actually mean by it, and a thin wrapper now that
+    /// <see cref="Torrent.Finished"/> no longer counts a metadata-less magnet as complete.
     /// </summary>
-    private bool WantsNothingFurther => _torrent.HasMetadata && _torrent.Finished;
+    private bool WantsNothingFurther => _torrent.Finished;
 
     public void ConnectTo(string ip, int port, bool forceUtp = false)
     {

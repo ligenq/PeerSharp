@@ -131,7 +131,19 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public IFileTransfer FileTransfer => FileTransferInternal;
 
-    public bool Finished => Pieces?.ReceivedCount == Pieces?.Count;
+    /// <summary>
+    /// Whether every piece has been received.
+    ///
+    /// <para>
+    /// The metadata check is not redundant. A magnet has no piece count until its metadata arrives, so
+    /// "received every piece" is satisfied by an empty collection and a torrent that has not yet
+    /// learned what it is downloading would report itself finished - at the one moment it wants the
+    /// swarm most. Every caller reading this as "wants nothing further" got the opposite of the truth,
+    /// and the connection manager acted on it: it marked the seeds holding the metadata as peers worth
+    /// nothing and stopped dialling them.
+    /// </para>
+    /// </summary>
+    public bool Finished => HasMetadata && Pieces?.ReceivedCount == Pieces?.Count;
 
     public ulong FinishedBytes => GetFinishedBytes();
 

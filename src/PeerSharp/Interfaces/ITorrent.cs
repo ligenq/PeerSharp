@@ -74,7 +74,9 @@ public interface ITorrent
     IFileTransfer FileTransfer { get; }
 
     /// <summary>
-    /// Gets whether the entire torrent has been downloaded.
+    /// Gets whether the entire torrent has been downloaded. Always false while
+    /// <see cref="HasMetadata"/> is false: a magnet that does not yet know its own piece count has not
+    /// finished anything, however little is outstanding.
     /// </summary>
     bool Finished { get; }
 
