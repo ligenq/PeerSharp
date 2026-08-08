@@ -615,7 +615,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private int MaxPendingConnectionsNow(int currentConnections)
     {
         int configured = _settings.Connection.MaxPendingConnections;
-        if (!_torrent.Finished)
+        if (!WantsNothingFurther)
         {
             return configured;
         }
@@ -623,6 +623,25 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         int wanted = _settings.Connection.MaxPeersPerTorrent - currentConnections;
         return Math.Clamp(wanted, 0, configured);
     }
+
+    /// <summary>
+    /// Whether there is nothing left this torrent wants from the swarm.
+    ///
+    /// <para>
+    /// <see cref="Torrent.Finished"/> alone does not say that. A magnet has no piece count until its
+    /// metadata arrives, and an empty piece collection satisfies "received every piece" trivially - so
+    /// a torrent that has not yet learned what it is downloading reports itself finished. It is in fact
+    /// at the point of wanting the swarm most: the metadata can only come from a peer, and most peers
+    /// in a magnet's swarm announce have_all the moment they handshake, which is exactly the mark that
+    /// suppresses dialling once a torrent really is complete.
+    /// </para>
+    ///
+    /// <para>
+    /// Kept as one predicate because three separate decisions read it, and a fourth is likely. Written
+    /// out at each of them, one would eventually be written without the metadata half.
+    /// </para>
+    /// </summary>
+    private bool WantsNothingFurther => _torrent.HasMetadata && _torrent.Finished;
 
     public void ConnectTo(string ip, int port, bool forceUtp = false)
     {
@@ -765,7 +784,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // again a seed is the best peer there is. SeedConfirmed rather than IsSeed because a peer that
         // is never dialled can never correct the record, and IsSeed accepts BEP 11's seed flag - one
         // peer's PEX message could otherwise mark a whole swarm and end this client's seeding.
-        if (!forceUtp && history.SeedConfirmed && _torrent.Finished)
+        if (!forceUtp && history.SeedConfirmed && WantsNothingFurther)
         {
             _logger.LogDebug(
                 "Not dialling {Ip}:{Port} - both it and this torrent are complete", ip, port);
@@ -2142,8 +2161,22 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             await foreach (var request in _connectionQueue.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
             {
-                // Start connection attempt (fire-and-forget, the actual TCP handshake happens asynchronously)
-                ConnectToInternal(request.Ip, request.Port, request.ForceUtp);
+                // ConnectTo makes its decisions when the request is queued, but a peer-source batch can
+                // fill this channel before even one request becomes half-open. State can also change
+                // while it waits: other requests connect, or the torrent finishes. The single reader is
+                // the point at which the local half-open limit can be enforced without a race between
+                // queued requests.
+                if (CanStartQueuedConnection(request, out var endpoint))
+                {
+                    // Fire-and-forget: the actual TCP handshake happens asynchronously.
+                    ConnectToInternal(request.Ip, request.Port, request.ForceUtp);
+                }
+                else if (endpoint != null)
+                {
+                    // It never became a connection attempt, so do not leave the queue-time duplicate
+                    // guard behind until the periodic stale-entry cleanup runs.
+                    _pendingConnections.TryRemove(endpoint, out _);
+                }
 
                 // Pending connections are cleaned up periodically in MainLoopAsync
                 // No Task.Run per connection - much more efficient
@@ -2170,6 +2203,50 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _logger.LogError(ex, "Connection queue processor error");
             _torrent.FireErrorEvent(new TorrentException("Connection queue processor error.", _torrent.Hash, ex));
         }
+    }
+
+    /// <summary>
+    /// Revalidates a normal queued dial immediately before it becomes a half-open connection.
+    /// Holepunch requests do not use the queue and deliberately bypass these limits.
+    /// </summary>
+    private bool CanStartQueuedConnection(ConnectionRequest request, out IPEndPoint? endpoint)
+    {
+        endpoint = null;
+        if (request.ForceUtp)
+        {
+            return true;
+        }
+
+        if (IPAddress.TryParse(request.Ip, out var address))
+        {
+            endpoint = NetworkUtils.NormalizeEndPoint(new IPEndPoint(address, request.Port));
+        }
+
+        int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
+        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        {
+            return false;
+        }
+
+        int currentConnecting = Interlocked.CompareExchange(ref _connectingPeersCount, 0, 0);
+        if (currentConnecting >= MaxPendingConnectionsNow(currentConnections))
+        {
+            return false;
+        }
+
+        if (endpoint == null)
+        {
+            return false;
+        }
+
+        if (_connectedEndpoints.ContainsKey(endpoint))
+        {
+            return false;
+        }
+
+        return !WantsNothingFurther
+            || !_knownPeersCache.TryGetValue(endpoint, out var history)
+            || !history.SeedConfirmed;
     }
 
     /// <summary>
