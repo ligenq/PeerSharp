@@ -514,6 +514,11 @@ bytes. It is on by default because the alternative is a silent failure — a pas
 a working socket and no peers. Set `Settings.SendUdpTrackerUrlData = false` if a particular tracker
 rejects the longer packet.
 
+## Changes
+
+[CHANGELOG.md](CHANGELOG.md) lists what each release changed, with the upgrade notes first — the
+behaviour that moves without a signature moving with it.
+
 ## Known Gaps
 
 [FUTURE_IMPROVEMENTS.md](FUTURE_IMPROVEMENTS.md) records work that was identified and measured but
