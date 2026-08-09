@@ -45,29 +45,85 @@ public class PathValidatorTests
         Assert.Equal(PathValidationError.PathTraversalAttempt, _validator.ValidatePath("folder/../../test.txt").Error);
     }
 
+    /// <summary>
+    /// A name the platform will not accept is rewritten, not discarded. Dropping it lost the file
+    /// while the torrent still reported complete: "Subs\British | SDH.eng.HI.srt" is a real subtitle
+    /// name from a real release, and it went missing on Windows and arrived on Linux.
+    /// </summary>
     [Fact]
-    public void ValidatePath_InvalidCharacters_ReturnsError()
+    public void ValidatePath_CharactersThePlatformRejects_AreRewrittenAndTheFileKept()
     {
-        // The validator uses Path.GetInvalidFileNameChars(), which is platform-specific:
-        // < > : " | ? * are invalid on Windows but perfectly legal on Linux/macOS.
-        if (OperatingSystem.IsWindows())
-        {
-            Assert.Equal(PathValidationError.InvalidCharacters, _validator.ValidatePath("test<abc>.txt").Error);
-        }
-        else
-        {
-            Assert.Equal(PathValidationError.None, _validator.ValidatePath("test<abc>.txt").Error);
-        }
+        var result = _validator.ValidatePath("Subs/British | SDH.eng.HI.srt");
 
-        // The null character is invalid on every platform
-        Assert.Equal(PathValidationError.InvalidCharacters, _validator.ValidatePath("test\0.txt").Error);
+        Assert.True(result.IsValid);
+        Assert.Equal(PathValidationError.None, result.Error);
+        Assert.NotNull(result.SanitizedPath);
+
+        // Path.GetInvalidFileNameChars() is platform-specific, so the expected name is too: a pipe is
+        // illegal on Windows and ordinary everywhere else. Renaming it on Linux would be the bug.
+        string expected = OperatingSystem.IsWindows() ? "British _ SDH.eng.HI.srt" : "British | SDH.eng.HI.srt";
+        Assert.Equal(expected, Path.GetFileName(result.SanitizedPath));
+        Assert.Equal("Subs", Path.GetFileName(Path.GetDirectoryName(result.SanitizedPath)));
     }
 
     [Fact]
-    public void ValidatePath_WindowsReservedName_ReturnsError()
+    public void ValidatePath_TheNullCharacter_IsRewrittenOnEveryPlatform()
     {
-        Assert.Equal(PathValidationError.WindowsReservedName, _validator.ValidatePath("CON.txt").Error);
-        Assert.Equal(PathValidationError.WindowsReservedName, _validator.ValidatePath("folder/LPT1").Error);
+        var result = _validator.ValidatePath("test\0.txt");
+
+        Assert.True(result.IsValid);
+        Assert.Equal("test_.txt", Path.GetFileName(result.SanitizedPath));
+    }
+
+    /// <summary>
+    /// A reserved name keeps its extension: CON.txt is still a .txt file, so the suffix goes on the
+    /// stem rather than the end.
+    /// </summary>
+    [Fact]
+    public void ValidatePath_WindowsReservedName_IsSuffixedRatherThanDropped()
+    {
+        var withExtension = _validator.ValidatePath("CON.txt");
+        Assert.True(withExtension.IsValid);
+        Assert.Equal("CON_.txt", Path.GetFileName(withExtension.SanitizedPath));
+
+        var bare = _validator.ValidatePath("folder/LPT1");
+        Assert.True(bare.IsValid);
+        Assert.Equal("LPT1_", Path.GetFileName(bare.SanitizedPath));
+    }
+
+    /// <summary>
+    /// Windows resolves a trailing dot or space away, so "name." and "name" would address one file.
+    /// Trimming makes that collision visible to the caller instead of silent on disk.
+    /// </summary>
+    [Fact]
+    public void ValidatePath_TrailingDotsAndSpaces_AreTrimmed()
+    {
+        Assert.Equal("report.txt", Path.GetFileName(_validator.ValidatePath("report.txt. ").SanitizedPath));
+        Assert.Equal("name", Path.GetFileName(_validator.ValidatePath("name.").SanitizedPath));
+    }
+
+    /// <summary>
+    /// A component that is nothing but unusable characters contributes no directory level, but the
+    /// file itself still arrives - rewriting must not turn into rejection by another route.
+    /// </summary>
+    [Fact]
+    public void ValidatePath_AComponentThatSanitizesAway_DoesNotTakeTheFileWithIt()
+    {
+        var result = _validator.ValidatePath("...  /real.txt");
+
+        Assert.True(result.IsValid);
+        Assert.Equal("real.txt", Path.GetFileName(result.SanitizedPath));
+    }
+
+    /// <summary>
+    /// Traversal is the actual security concern and stays a hard refusal - rewriting applies to names
+    /// the platform cannot store, never to a path trying to leave the download directory.
+    /// </summary>
+    [Fact]
+    public void ValidatePath_Traversal_IsStillRefusedOutright()
+    {
+        Assert.False(_validator.ValidatePath("../../etc/passwd").IsValid);
+        Assert.False(_validator.ValidatePath("folder/../../x.txt").IsValid);
     }
 
     [Fact]
