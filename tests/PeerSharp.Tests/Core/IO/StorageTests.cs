@@ -242,6 +242,65 @@ public class StorageTests : IAsyncLifetime
         }
     }
 
+    [Theory(Timeout = 30000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Init_FileAndDirectoryCollision_AssignsEveryEntryAStableUsablePath(bool nestedFileFirst)
+    {
+        string storageRoot = Path.Combine(_tempDir, "sanitized-file-directory-collision");
+        string flatPath = OperatingSystem.IsWindows() ? "a|b" : "a_b";
+        string nestedPath = OperatingSystem.IsWindows() ? "a?b" : "a_b";
+        string[] torrentPaths = nestedFileFirst
+            ? [$"{nestedPath}/file.txt", flatPath, $"{nestedPath}/other.txt"]
+            : [flatPath, $"{nestedPath}/file.txt", $"{nestedPath}/other.txt"];
+
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Name = "sanitized_collision";
+        metadata.Info.PieceSize = 16384;
+        for (int i = 0; i < torrentPaths.Length; i++)
+        {
+            metadata.Info.Files.Add(new Internals.TorrentFileEntry
+            {
+                Path = torrentPaths[i],
+                Size = 1,
+                Offset = i
+            });
+        }
+
+        metadata.Info.FullSize = 3;
+
+        using var handleCache = new FileHandleCache();
+        var storage = new Storage(
+            metadata,
+            storageRoot,
+            new PathValidator(storageRoot),
+            handleCache,
+            enableSparseFiles: false);
+
+        try
+        {
+            await storage.InitAsync();
+            await storage.WriteAsync(0, new byte[] { 0x11, 0x22, 0x33 });
+            handleCache.CloseTorrentHandles(storageRoot);
+
+            string flatPhysicalPath = Path.Combine(storageRoot, nestedFileFirst ? "a_b.1" : "a_b");
+            string nestedPhysicalDirectory = Path.Combine(storageRoot, nestedFileFirst ? "a_b" : "a_b.1");
+            Assert.Equal(
+                new byte[] { nestedFileFirst ? (byte)0x22 : (byte)0x11 },
+                File.ReadAllBytes(flatPhysicalPath));
+            Assert.Equal(
+                new byte[] { nestedFileFirst ? (byte)0x11 : (byte)0x22 },
+                File.ReadAllBytes(Path.Combine(nestedPhysicalDirectory, "file.txt")));
+            Assert.Equal(
+                new byte[] { 0x33 },
+                File.ReadAllBytes(Path.Combine(nestedPhysicalDirectory, "other.txt")));
+        }
+        finally
+        {
+            await storage.DisposeAsync();
+        }
+    }
+
     [Fact]
     public async Task InitAsync_Fails_ResetsInitializationState()
     {

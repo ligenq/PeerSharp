@@ -16,7 +16,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp.WebTorrent 3.0 targets PeerSharp 3.0 and carries its intentional interface-breaking changes. WebTorrent startup, tracker connection, initial offer generation, stopped announces, and disposal now run independent work concurrently; partial startup and connection failures clean up deterministically; cancellation and background-task faults are observed; and tracker/peer diagnostics remain available during reconnect and shutdown. The package now includes XML documentation and a Source Link symbol package.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp.WebTorrent 3.1 targets PeerSharp 3.1 and contains no WebTorrent-specific API changes. See https://github.com/ligenq/PeerSharp/blob/main/CHANGELOG.md for the core engine changes included in this release.</PackageReleaseNotes>
 		<IsTrimmable>true</IsTrimmable>
 		<RootNamespace>PeerSharp.WebTorrent</RootNamespace>
 		<AssemblyName>PeerSharp.WebTorrent</AssemblyName>
@@ -25,6 +25,7 @@
 	<ItemGroup>
 		<None Include="..\PeerSharp\application-icon.png" Pack="true" PackagePath="\" />
 		<None Include="..\..\README.md" Pack="true" PackagePath="\" />
+		<None Include="..\..\CHANGELOG.md" Pack="true" PackagePath="\" />
 	</ItemGroup>
 
 	<ItemGroup>

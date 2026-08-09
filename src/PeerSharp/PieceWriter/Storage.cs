@@ -290,12 +290,15 @@ internal sealed class Storage : IStorage
                 // many) SetLength calls can run concurrently rather than one at a time.
                 var toAllocate = new List<(string Path, long Size)>();
 
-                // Two entries can want the same path on disk. A torrent may simply declare one twice,
-                // and rewriting unusable names now makes it reachable another way - "a|b.txt" and
-                // "a?b.txt" both become "a_b.txt" on Windows. Sharing a file between them would have
-                // each overwrite the other's bytes and neither would verify, so the later one is given
-                // a name of its own.
-                var claimedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                // Entries can want the same path on disk, or require one path to be both a file and a
+                // directory. A torrent may declare that directly, and rewriting unusable names makes
+                // it reachable another way - "a|b" and "a?b/file.txt" collide on Windows. Sharing a
+                // file would corrupt both entries, while a file/directory collision makes allocation
+                // fail, so claim both kinds as the paths are assigned.
+                var pathComparer = StringComparer.OrdinalIgnoreCase;
+                var claimedFiles = new HashSet<string>(pathComparer);
+                var claimedDirectories = new HashSet<string>(pathComparer);
+                var directoryMappings = new Dictionary<string, string>(pathComparer);
 
                 for (int i = 0; i < count; i++)
                 {
@@ -327,7 +330,12 @@ internal sealed class Storage : IStorage
                         continue;
                     }
 
-                    fullPath = ClaimUniquePath(fullPath, claimedPaths);
+                    fullPath = ClaimUniquePath(
+                        _rootPath,
+                        fullPath,
+                        claimedFiles,
+                        claimedDirectories,
+                        directoryMappings);
 
                     if (!isSelected)
                     {
@@ -894,39 +902,113 @@ internal sealed class Storage : IStorage
         }
     }
     /// <summary>
-    /// Sanitizes a file path from torrent metadata to prevent path traversal attacks.
+    /// Claims a physical path for one torrent file, numbering any component that an earlier entry
+    /// needs as the other filesystem kind. For example, a file at "a_b" and a later entry under
+    /// "a_b/file.txt" become "a_b" and "a_b.1/file.txt" rather than making initialization fail
+    /// because one path must be both a file and a directory. Repeated logical directories reuse the
+    /// same mapping, while duplicate leaf paths get their own numbered files.
     /// </summary>
-    /// <summary>
-    /// Returns <paramref name="fullPath"/> if no earlier file in this torrent has taken it, and a
-    /// numbered variant if one has - "movie.mkv", then "movie.1.mkv". Claims whichever it returns.
-    /// </summary>
-    private static string ClaimUniquePath(string fullPath, HashSet<string> claimed)
+    private static string ClaimUniquePath(
+        string rootPath,
+        string fullPath,
+        HashSet<string> claimedFiles,
+        HashSet<string> claimedDirectories,
+        Dictionary<string, string> directoryMappings)
     {
-        if (claimed.Add(fullPath))
+        string root = Path.GetFullPath(rootPath);
+        string relativePath = Path.GetRelativePath(root, fullPath);
+        string[] parts = relativePath.Split(
+            Path.DirectorySeparatorChar,
+            StringSplitOptions.RemoveEmptyEntries);
+
+        if (parts.Length == 0)
         {
-            return fullPath;
+            throw new InvalidOperationException($"File path '{fullPath}' has no component below '{root}'.");
         }
 
-        string directory = Path.GetDirectoryName(fullPath) ?? string.Empty;
-        string stem = Path.GetFileNameWithoutExtension(fullPath);
-        string extension = Path.GetExtension(fullPath);
+        string logicalDirectory = root;
+        string physicalDirectory = root;
 
-        // Bounded rather than open-ended: only as many variants can already be taken as there are
-        // paths claimed, so one more attempt than that always finds a free name.
-        int attempts = claimed.Count + 1;
+        for (int i = 0; i < parts.Length - 1; i++)
+        {
+            logicalDirectory = Path.Combine(logicalDirectory, parts[i]);
+            if (!directoryMappings.TryGetValue(logicalDirectory, out string? mappedDirectory))
+            {
+                string candidate = Path.Combine(physicalDirectory, parts[i]);
+                mappedDirectory = ClaimUniqueDirectory(
+                    candidate,
+                    claimedFiles,
+                    claimedDirectories);
+                directoryMappings.Add(logicalDirectory, mappedDirectory);
+            }
+
+            physicalDirectory = mappedDirectory;
+        }
+
+        string fileCandidate = Path.Combine(physicalDirectory, parts[^1]);
+        return ClaimUniqueFile(fileCandidate, claimedFiles, claimedDirectories);
+    }
+
+    private static string ClaimUniqueDirectory(
+        string path,
+        HashSet<string> claimedFiles,
+        HashSet<string> claimedDirectories)
+    {
+        if (!claimedFiles.Contains(path) && claimedDirectories.Add(path))
+        {
+            return path;
+        }
+
+        string parent = Path.GetDirectoryName(path) ?? string.Empty;
+        string name = Path.GetFileName(path);
+        int attempts = claimedFiles.Count + claimedDirectories.Count + 1;
+
         for (int suffix = 1; suffix <= attempts; suffix++)
         {
-            string candidate = Path.Combine(directory, $"{stem}.{suffix}{extension}");
-            if (claimed.Add(candidate))
+            string candidate = Path.Combine(parent, $"{name}.{suffix}");
+            if (!claimedFiles.Contains(candidate) && claimedDirectories.Add(candidate))
             {
                 return candidate;
             }
         }
 
         throw new InvalidOperationException(
-            $"Could not find a free name for '{fullPath}' in {attempts} attempts.");
+            $"Could not find a free directory name for '{path}' in {attempts} attempts.");
     }
 
+    private static string ClaimUniqueFile(
+        string path,
+        HashSet<string> claimedFiles,
+        HashSet<string> claimedDirectories)
+    {
+        if (!claimedDirectories.Contains(path) && claimedFiles.Add(path))
+        {
+            return path;
+        }
+
+        string directory = Path.GetDirectoryName(path) ?? string.Empty;
+        string stem = Path.GetFileNameWithoutExtension(path);
+        string extension = Path.GetExtension(path);
+
+        // Bounded rather than open-ended: only as many variants can already be taken as there are
+        // paths claimed, so one more attempt than that always finds a free name.
+        int attempts = claimedFiles.Count + claimedDirectories.Count + 1;
+        for (int suffix = 1; suffix <= attempts; suffix++)
+        {
+            string candidate = Path.Combine(directory, $"{stem}.{suffix}{extension}");
+            if (!claimedDirectories.Contains(candidate) && claimedFiles.Add(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Could not find a free file name for '{path}' in {attempts} attempts.");
+    }
+
+    /// <summary>
+    /// Sanitizes a file path from torrent metadata to prevent path traversal attacks.
+    /// </summary>
     private string? SanitizeFilePath(string relativePath)
     {
         var result = _pathValidator.ValidatePath(relativePath);

@@ -47,8 +47,10 @@ internal sealed class PathValidator : IPathValidator
     private static readonly HashSet<string> WindowsReservedNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "COM¹", "COM²", "COM³",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "LPT¹", "LPT²", "LPT³"
     };
 
     private readonly string _rootPath;
@@ -86,11 +88,11 @@ internal sealed class PathValidator : IPathValidator
     /// other client does rather than dropping the file.
     ///
     /// <para>
-    /// Invalid characters become underscores and a reserved name gains one, so <c>CON.txt</c> is
-    /// written as <c>CON_.txt</c> and keeps its extension. The set of invalid characters is whatever
-    /// the running platform reports, so nothing is renamed where nothing needed to be: on Linux only
-    /// NUL and the separator qualify, and a name with a pipe in it is left exactly as the torrent
-    /// spelled it.
+    /// Invalid characters become underscores. On Windows, a reserved name gains one, so
+    /// <c>CON.txt</c> is written as <c>CON_.txt</c> and keeps its extension, and trailing dots and
+    /// spaces are removed because Windows resolves them away. The rules come from the running
+    /// platform, so a name with a pipe or trailing dot is left exactly as the torrent spelled it on
+    /// platforms which can store it.
     /// </para>
     ///
     /// <para>
@@ -115,21 +117,35 @@ internal sealed class PathValidator : IPathValidator
         }
 
         // Windows resolves a trailing dot or space away, so "name." and "name" address the same file.
-        // Left alone, two entries in one torrent could quietly become one file on disk.
-        cleaned = cleaned.TrimEnd('.', ' ');
+        // Left alone, two entries in one torrent could quietly become one file on disk. POSIX filesystems
+        // can distinguish those names, so changing them there would break existing downloads on upgrade.
+        if (OperatingSystem.IsWindows())
+        {
+            cleaned = cleaned.TrimEnd('.', ' ');
+        }
+
         if (cleaned.Length == 0)
         {
             return string.Empty;
         }
 
-        if (!IsWindowsReservedNameCore(Path.GetFileNameWithoutExtension(cleaned)))
+        if (!OperatingSystem.IsWindows())
         {
             return cleaned;
         }
 
-        // Suffix the stem rather than the whole name: CON.txt is still a .txt file.
-        string extension = Path.GetExtension(cleaned);
-        return string.Concat(Path.GetFileNameWithoutExtension(cleaned), "_", extension);
+        // Windows treats the first dot as the start of the extension for device-name purposes:
+        // CON.tar.gz is equivalent to CON just as CON.txt is. Preserve every extension segment.
+        int extensionStart = cleaned.IndexOf('.');
+        string stem = extensionStart >= 0 ? cleaned[..extensionStart] : cleaned;
+        if (!IsWindowsReservedNameCore(stem))
+        {
+            return cleaned;
+        }
+
+        return extensionStart >= 0
+            ? string.Concat(stem, "_", cleaned.AsSpan(extensionStart))
+            : string.Concat(stem, "_");
     }
 
     private static bool IsWindowsReservedNameCore(string name)
