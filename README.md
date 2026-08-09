@@ -1,5 +1,5 @@
-<p align="center">
-  <img src="src/PeerSharp/application-icon.png" alt="PeerSharp" width="128" />
+﻿<p align="center">
+  <img src="https://raw.githubusercontent.com/ligenq/PeerSharp/main/src/PeerSharp/application-icon.png" alt="PeerSharp" width="128" />
 </p>
 
 <h1 align="center">PeerSharp</h1>
@@ -28,7 +28,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 - **Proxy Support:** SOCKS5 and HTTP proxy support with authentication.
 - **IP Blocklist & GeoIP:** Block peers by IP range or country.
 - **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.
-- **Enterprise-Grade Testing:** Rigorous validation using **Microsoft Coyote** for concurrency testing, architecture tests for design integrity, fuzzing for robustness, and [BenchmarkDotNet suites](benchmarks/PeerSharp.Benchmarks/README.md) covering the engine's hot paths.
+- **Enterprise-Grade Testing:** Rigorous validation using **Microsoft Coyote** for concurrency testing, architecture tests for design integrity, fuzzing for robustness, and [BenchmarkDotNet suites](https://github.com/ligenq/PeerSharp/blob/main/benchmarks/PeerSharp.Benchmarks/README.md) covering the engine's hot paths.
 
 ## Getting Started
 
@@ -254,6 +254,35 @@ Notes:
 var stream = await torrent.OpenStreamAsync(fileIndex: 0);
 ```
 
+### Adding Peers Directly
+
+Discovery finds peers on its own, but some are only reachable if you say so — a machine on the same
+LAN, a known seedbox, or a second instance during testing.
+
+```csharp
+int accepted = torrent.Peers.Add([new IPEndPoint(IPAddress.Parse("192.0.2.10"), 51413)]);
+```
+
+Offered rather than forced: each address still passes the blocklist, the connection limits and the
+same duplicate checks as any other candidate, and joins the ordinary connection queue rather than
+pre-empting it. The return value counts addresses accepted as new candidates, not connections made.
+
+### The Sample Client
+
+`samples/PeerSharp.Cli` is a working client and the harness most of this engine's diagnosis is done
+with. It runs as its own process, so `dotnet-counters`, `dotnet-gcdump` and `dotnet-trace` can attach
+to a real workload rather than a test host.
+
+```bash
+dotnet run --project samples/PeerSharp.Cli -- <torrent-file|magnet> -o ./downloads --diagnostics
+```
+
+It takes several torrents at once and covers the things worth watching over a long run: `--seed` to
+keep going after completion, `--log <file>` to send full logging to disk while the console keeps
+reports, `--resume <dir>` to save and reload resume data across restarts, `--metadata-only` to time a
+magnet's metadata fetch and stop, `--run-for <s>` for an unattended run that exits cleanly, and
+`--down`/`--up` rate caps. Running it with no arguments prints the full list.
+
 ## WebTorrent
 
 PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
@@ -290,7 +319,7 @@ Notes for production use:
 
 - WebTorrent discovery requires `ws://` or `wss://` trackers. UDP and HTTP trackers do not participate in WebTorrent signaling.
 - The default ICE configuration is STUN-only. That is often enough for open networks and some home NATs, but not for symmetric-NAT or relay-required environments. For reliable browser-style connectivity you should supply TURN servers in `WebTorrentSessionOptions.IceServers`.
-- There is a demo harness at [samples/PeerSharp.WebTorrent.Demo/Program.cs](samples/PeerSharp.WebTorrent.Demo/Program.cs) for controlled interop and soak testing.
+- There is a demo harness at [samples/PeerSharp.WebTorrent.Demo/Program.cs](https://github.com/ligenq/PeerSharp/blob/main/samples/PeerSharp.WebTorrent.Demo/Program.cs) for controlled interop and soak testing.
 - The `PeerSharp.WebTorrent` logger category emits reconnect, pending-peer expiry, and signaling lifecycle information. For rollout, capture this category at `Information` or `Debug`.
 
 Recommended validation before broad rollout:
@@ -447,7 +476,7 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 3   | The BitTorrent Protocol Specification | Supported |
 | 5   | DHT Protocol | Supported |
 | 6   | Fast Extension | Supported |
-| 7   | IPv6 Tracker Extension | Supported |
+| 7   | IPv6 Tracker Extension | Supported for `peers6` responses. The `ipv6` announce parameter is deliberately not sent - the BEP discourages it - so a tracker only records the family we announce over |
 | 9   | Extension for Peers to Send Metadata Files | Supported |
 | 10  | Extension Protocol | Supported |
 | 11  | Peer Exchange (PEX) | Supported |
@@ -471,8 +500,8 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 42  | DHT Security Extension | Supported |
 | 43  | Read-only DHT Nodes | Supported, honoured inbound and settable via `Settings.Dht.ReadOnly` |
 | 44  | Storing Arbitrary Data in the DHT | Supported, immutable and mutable items, as both client and storage node |
-| 47  | Padding Files and Extended File Attributes | Supported, including padding-file creation and download skipping |
 | 46  | Updating Torrents Via DHT Mutable Items | Supported, including `xs=urn:btpk:` magnet links |
+| 47  | Padding Files and Extended File Attributes | Supported, including padding-file creation and download skipping |
 | 48  | Tracker Protocol Extension: Scrape | Supported |
 | 51  | DHT Infohash Indexing | Supported, both as responder and as crawler |
 | 52  | The BitTorrent Protocol Specification v2 | Supported |
