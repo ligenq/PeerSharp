@@ -15,7 +15,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp 3.0 is a major release with intentional breaking API changes: IClientEngine adds BEP 46 publishing/resolution and BEP 51 discovery members, and ITorrent.SetDownloadPathAsync now accepts a CancellationToken; consumers implementing or mocking these interfaces must update and recompile. New protocol support includes BEP 44 mutable/immutable DHT items with Ed25519 signatures, BEP 46 self-updating torrents, BEP 51 info-hash sampling and crawling, tracker enhancements from BEP 24/31/41, DHT read-only mode from BEP 43, upload-only signaling from BEP 21, and lt_donthave from BEP 54. Reliability and performance work covers parallel storage/session I/O, faster deterministic shutdown, cancellation and teardown races, rate limits on every peer transport, encrypted inbound uTP and MSE interoperability, pipelined-handshake preservation, metadata-request redundancy, tracker retry semantics, and extensive real-swarm, concurrency, trim, API-surface, and benchmark guards. Packages now include XML documentation and Source Link symbol packages.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp 3.1 improves peer, DHT, metadata, tracker, web-seed, and transfer reliability. Upgrade notes: magnets no longer report Finished before metadata arrives; metadata request defaults are more aggressive; and filenames the platform cannot store are rewritten rather than dropped. See https://github.com/ligenq/PeerSharp/blob/main/CHANGELOG.md.</PackageReleaseNotes>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<IsTrimmable>true</IsTrimmable>
 	</PropertyGroup>
@@ -23,6 +23,7 @@
 	<ItemGroup>
 		<None Include="application-icon.png" Pack="true" PackagePath="\" />
 		<None Include="..\..\README.md" Pack="true" PackagePath="\" />
+		<None Include="..\..\CHANGELOG.md" Pack="true" PackagePath="\" />
 	</ItemGroup>
 
 	<ItemGroup>

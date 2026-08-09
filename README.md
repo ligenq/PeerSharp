@@ -35,7 +35,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 ### Installation
 
 ```bash
-dotnet add package PeerSharp --version 3.0.0
+dotnet add package PeerSharp --version 3.1.0
 ```
 
 Requires .NET 10.0 or later.
@@ -259,7 +259,7 @@ var stream = await torrent.OpenStreamAsync(fileIndex: 0);
 PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
 
 ```bash
-dotnet add package PeerSharp.WebTorrent --version 3.0.0
+dotnet add package PeerSharp.WebTorrent --version 3.1.0
 ```
 
 ```csharp
@@ -516,12 +516,13 @@ rejects the longer packet.
 
 ## Changes
 
-[CHANGELOG.md](CHANGELOG.md) lists what each release changed, with the upgrade notes first — the
-behaviour that moves without a signature moving with it.
+[CHANGELOG.md](https://github.com/ligenq/PeerSharp/blob/main/CHANGELOG.md) lists what each release
+changed, with the upgrade notes first — the behaviour that moves without a signature moving with it.
 
 ## Known Gaps
 
-[FUTURE_IMPROVEMENTS.md](FUTURE_IMPROVEMENTS.md) records work that was identified and measured but
+[FUTURE_IMPROVEMENTS.md](https://github.com/ligenq/PeerSharp/blob/main/FUTURE_IMPROVEMENTS.md)
+records work that was identified and measured but
 deliberately not done — where PeerSharp is known to leave something on the table, what was observed,
 and what would settle each question. Nothing there produces wrong results; it is the difference between
 what the engine does and what it could do.

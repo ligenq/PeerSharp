@@ -76,19 +76,30 @@ public class PathValidatorTests
     }
 
     /// <summary>
-    /// A reserved name keeps its extension: CON.txt is still a .txt file, so the suffix goes on the
-    /// stem rather than the end.
+    /// A Windows reserved name keeps all of its extension: CON.tar.gz is still a .tar.gz file, so
+    /// the suffix goes on the device-name stem rather than the end. Other platforms keep names they
+    /// can store unchanged.
     /// </summary>
     [Fact]
-    public void ValidatePath_WindowsReservedName_IsSuffixedRatherThanDropped()
+    public void ValidatePath_WindowsReservedName_IsSuffixedRatherThanDroppedOnWindows()
     {
-        var withExtension = _validator.ValidatePath("CON.txt");
+        var withExtension = _validator.ValidatePath("CON.tar.gz");
         Assert.True(withExtension.IsValid);
-        Assert.Equal("CON_.txt", Path.GetFileName(withExtension.SanitizedPath));
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? "CON_.tar.gz" : "CON.tar.gz",
+            Path.GetFileName(withExtension.SanitizedPath));
 
         var bare = _validator.ValidatePath("folder/LPT1");
         Assert.True(bare.IsValid);
-        Assert.Equal("LPT1_", Path.GetFileName(bare.SanitizedPath));
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? "LPT1_" : "LPT1",
+            Path.GetFileName(bare.SanitizedPath));
+
+        var superscript = _validator.ValidatePath("COM¹.txt");
+        Assert.True(superscript.IsValid);
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? "COM¹_.txt" : "COM¹.txt",
+            Path.GetFileName(superscript.SanitizedPath));
     }
 
     /// <summary>
@@ -96,10 +107,14 @@ public class PathValidatorTests
     /// Trimming makes that collision visible to the caller instead of silent on disk.
     /// </summary>
     [Fact]
-    public void ValidatePath_TrailingDotsAndSpaces_AreTrimmed()
+    public void ValidatePath_TrailingDotsAndSpaces_FollowPlatformRules()
     {
-        Assert.Equal("report.txt", Path.GetFileName(_validator.ValidatePath("report.txt. ").SanitizedPath));
-        Assert.Equal("name", Path.GetFileName(_validator.ValidatePath("name.").SanitizedPath));
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? "report.txt" : "report.txt. ",
+            Path.GetFileName(_validator.ValidatePath("report.txt. ").SanitizedPath));
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? "name" : "name.",
+            Path.GetFileName(_validator.ValidatePath("name.").SanitizedPath));
     }
 
     /// <summary>
@@ -113,6 +128,9 @@ public class PathValidatorTests
 
         Assert.True(result.IsValid);
         Assert.Equal("real.txt", Path.GetFileName(result.SanitizedPath));
+        Assert.Equal(
+            OperatingSystem.IsWindows() ? _rootPath : Path.Combine(_rootPath, "...  "),
+            Path.GetDirectoryName(result.SanitizedPath));
     }
 
     /// <summary>
@@ -142,7 +160,15 @@ public class PathValidatorTests
         Assert.True(_validator.IsWindowsReservedName("con"));
         Assert.True(_validator.IsWindowsReservedName("AUX"));
         Assert.True(_validator.IsWindowsReservedName("COM1"));
+        Assert.True(_validator.IsWindowsReservedName("COM¹"));
         Assert.True(_validator.IsWindowsReservedName("LPT9"));
+        Assert.True(_validator.IsWindowsReservedName("LPT²"));
+
+        // Documented by Microsoft alongside the rest, and cheaper to carry than to argue about: this
+        // list only has to be a superset of what some Windows version refuses, since being on it
+        // costs one underscore and being wrongly off it costs the file.
+        Assert.True(_validator.IsWindowsReservedName("COM0"));
+        Assert.True(_validator.IsWindowsReservedName("LPT0"));
 
         Assert.False(_validator.IsWindowsReservedName("normal"));
         Assert.False(_validator.IsWindowsReservedName(""));
