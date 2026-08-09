@@ -16,8 +16,6 @@ internal enum PathValidationError
     None,
     EmptyOrWhitespace,
     PathTraversalAttempt,
-    InvalidCharacters,
-    WindowsReservedName,
     EscapesRootDirectory,
     NoValidComponents
 }
@@ -80,8 +78,62 @@ internal sealed class PathValidator : IPathValidator
             return false;
         }
 
-        return WindowsReservedNames.Contains(name);
+        return IsWindowsReservedNameCore(name);
     }
+
+    /// <summary>
+    /// Rewrites one path component into something this platform can actually store, the way every
+    /// other client does rather than dropping the file.
+    ///
+    /// <para>
+    /// Invalid characters become underscores and a reserved name gains one, so <c>CON.txt</c> is
+    /// written as <c>CON_.txt</c> and keeps its extension. The set of invalid characters is whatever
+    /// the running platform reports, so nothing is renamed where nothing needed to be: on Linux only
+    /// NUL and the separator qualify, and a name with a pipe in it is left exactly as the torrent
+    /// spelled it.
+    /// </para>
+    ///
+    /// <para>
+    /// Returns an empty string when nothing survives, which the caller drops as a component. That is
+    /// not the same as rejecting the file - a path of "&lt;/&gt;/real.txt" still yields "real.txt".
+    /// </para>
+    /// </summary>
+    internal static string MakeUsableFileName(string part)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        string cleaned = part;
+
+        if (part.AsSpan().IndexOfAny(invalid) >= 0)
+        {
+            var buffer = new char[part.Length];
+            for (int i = 0; i < part.Length; i++)
+            {
+                buffer[i] = Array.IndexOf(invalid, part[i]) >= 0 ? '_' : part[i];
+            }
+
+            cleaned = new string(buffer);
+        }
+
+        // Windows resolves a trailing dot or space away, so "name." and "name" address the same file.
+        // Left alone, two entries in one torrent could quietly become one file on disk.
+        cleaned = cleaned.TrimEnd('.', ' ');
+        if (cleaned.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        if (!IsWindowsReservedNameCore(Path.GetFileNameWithoutExtension(cleaned)))
+        {
+            return cleaned;
+        }
+
+        // Suffix the stem rather than the whole name: CON.txt is still a .txt file.
+        string extension = Path.GetExtension(cleaned);
+        return string.Concat(Path.GetFileNameWithoutExtension(cleaned), "_", extension);
+    }
+
+    private static bool IsWindowsReservedNameCore(string name)
+        => !string.IsNullOrEmpty(name) && WindowsReservedNames.Contains(name);
 
     /// <inheritdoc />
     public PathValidationResult ValidatePath(string relativePath)
@@ -115,20 +167,17 @@ internal sealed class PathValidator : IPathValidator
                 return new PathValidationResult(false, null, PathValidationError.PathTraversalAttempt);
             }
 
-            // Check for invalid filename characters
-            if (part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            // Characters this platform will not accept, and names it reserves, are made usable rather
+            // than treated as an attack. A name is not hostile for containing a pipe - "British | SDH"
+            // is how subtitle releases label themselves - and the two are only rejected on Windows
+            // anyway, so the same torrent was losing files on one platform and not the other.
+            string safe = MakeUsableFileName(part);
+            if (safe.Length == 0)
             {
-                return new PathValidationResult(false, null, PathValidationError.InvalidCharacters);
+                continue;
             }
 
-            // Check for Windows reserved names
-            string nameWithoutExt = Path.GetFileNameWithoutExtension(part);
-            if (IsWindowsReservedName(nameWithoutExt))
-            {
-                return new PathValidationResult(false, null, PathValidationError.WindowsReservedName);
-            }
-
-            safeParts.Add(part);
+            safeParts.Add(safe);
         }
 
         // Must have at least one valid component

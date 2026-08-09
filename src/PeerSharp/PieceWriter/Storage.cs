@@ -290,6 +290,13 @@ internal sealed class Storage : IStorage
                 // many) SetLength calls can run concurrently rather than one at a time.
                 var toAllocate = new List<(string Path, long Size)>();
 
+                // Two entries can want the same path on disk. A torrent may simply declare one twice,
+                // and rewriting unusable names now makes it reachable another way - "a|b.txt" and
+                // "a?b.txt" both become "a_b.txt" on Windows. Sharing a file between them would have
+                // each overwrite the other's bytes and neither would verify, so the later one is given
+                // a name of its own.
+                var claimedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
                 for (int i = 0; i < count; i++)
                 {
                     ct.ThrowIfCancellationRequested();
@@ -319,6 +326,8 @@ internal sealed class Storage : IStorage
                         _fileSkipped[i] = true;
                         continue;
                     }
+
+                    fullPath = ClaimUniquePath(fullPath, claimedPaths);
 
                     if (!isSelected)
                     {
@@ -887,6 +896,37 @@ internal sealed class Storage : IStorage
     /// <summary>
     /// Sanitizes a file path from torrent metadata to prevent path traversal attacks.
     /// </summary>
+    /// <summary>
+    /// Returns <paramref name="fullPath"/> if no earlier file in this torrent has taken it, and a
+    /// numbered variant if one has - "movie.mkv", then "movie.1.mkv". Claims whichever it returns.
+    /// </summary>
+    private static string ClaimUniquePath(string fullPath, HashSet<string> claimed)
+    {
+        if (claimed.Add(fullPath))
+        {
+            return fullPath;
+        }
+
+        string directory = Path.GetDirectoryName(fullPath) ?? string.Empty;
+        string stem = Path.GetFileNameWithoutExtension(fullPath);
+        string extension = Path.GetExtension(fullPath);
+
+        // Bounded rather than open-ended: only as many variants can already be taken as there are
+        // paths claimed, so one more attempt than that always finds a free name.
+        int attempts = claimed.Count + 1;
+        for (int suffix = 1; suffix <= attempts; suffix++)
+        {
+            string candidate = Path.Combine(directory, $"{stem}.{suffix}{extension}");
+            if (claimed.Add(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Could not find a free name for '{fullPath}' in {attempts} attempts.");
+    }
+
     private string? SanitizeFilePath(string relativePath)
     {
         var result = _pathValidator.ValidatePath(relativePath);
@@ -896,8 +936,6 @@ internal sealed class Storage : IStorage
             string errorMessage = result.Error switch
             {
                 PathValidationError.PathTraversalAttempt => $"SECURITY: Blocked path traversal attempt in torrent file path: {relativePath}",
-                PathValidationError.InvalidCharacters => $"SECURITY: Invalid characters in torrent file path: {relativePath}",
-                PathValidationError.WindowsReservedName => $"SECURITY: Reserved filename in torrent file path: {relativePath}",
                 PathValidationError.EscapesRootDirectory => $"SECURITY: Path escapes root directory: {relativePath}",
                 _ => $"Invalid file path in torrent: {relativePath}"
             };
