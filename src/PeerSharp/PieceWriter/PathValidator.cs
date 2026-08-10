@@ -148,6 +148,32 @@ internal sealed class PathValidator : IPathValidator
             : string.Concat(stem, "_");
     }
 
+    /// <summary>
+    /// Whether a root-relative path leaves the root, judged by its first path component rather than
+    /// by its first two characters.
+    ///
+    /// <para>
+    /// The distinction is the whole point: a plain <c>StartsWith("..")</c> rejects "..foo" and
+    /// "...bar" as readily as "../foo", and those are ordinary directory names that a torrent may
+    /// legitimately contain. Only the component that <em>is</em> <c>..</c> moves upwards.
+    /// </para>
+    /// </summary>
+    private static bool EscapesUpwards(string relativeToRoot)
+    {
+        if (!relativeToRoot.StartsWith("..", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (relativeToRoot.Length == 2)
+        {
+            return true;
+        }
+
+        char following = relativeToRoot[2];
+        return following == Path.DirectorySeparatorChar || following == Path.AltDirectorySeparatorChar;
+    }
+
     private static bool IsWindowsReservedNameCore(string name)
         => !string.IsNullOrEmpty(name) && WindowsReservedNames.Contains(name);
 
@@ -209,12 +235,9 @@ internal sealed class PathValidator : IPathValidator
         string fullPath = Path.GetFullPath(Path.Combine(_rootPath, safePath));
 
         // Final validation: ensure path stays within root directory
-        // Use Path.GetRelativePath for robust containment check
-        string relativeTorRoot = Path.GetRelativePath(_rootPathNormalized, fullPath);
+        string relativeToRoot = Path.GetRelativePath(_rootPathNormalized, fullPath);
 
-        // If the relative path starts with ".." or is rooted, it escapes the root
-        if (relativeTorRoot.StartsWith("..", StringComparison.Ordinal) ||
-            Path.IsPathRooted(relativeTorRoot))
+        if (Path.IsPathRooted(relativeToRoot) || EscapesUpwards(relativeToRoot))
         {
             return new PathValidationResult(false, null, PathValidationError.EscapesRootDirectory);
         }

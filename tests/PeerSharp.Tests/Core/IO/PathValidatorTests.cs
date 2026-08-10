@@ -128,8 +128,40 @@ public class PathValidatorTests
 
         Assert.True(result.IsValid);
         Assert.Equal("real.txt", Path.GetFileName(result.SanitizedPath));
+
+        // Only Windows can trim a component away to nothing; "...  " is a storable directory name
+        // everywhere else, so there the file keeps its parent. Asserted by shape rather than by the
+        // exact string, which would be a claim about how the platform round-trips trailing spaces.
+        string? directory = Path.GetDirectoryName(result.SanitizedPath);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(_rootPath, directory);
+        }
+        else
+        {
+            Assert.NotEqual(_rootPath, directory);
+            Assert.StartsWith(_rootPath, directory, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A name is not an escape attempt for beginning with two dots. The containment check compared
+    /// the relative path as a string, so "..foo" tripped it exactly as "../foo" does - a legal
+    /// directory name on every platform, and one a torrent may perfectly well contain.
+    /// </summary>
+    [Theory]
+    [InlineData("..foo/real.txt", "..foo")]
+    [InlineData("..config/settings.ini", "..config")]
+    [InlineData("...bar/real.txt", "...bar")]
+    public void ValidatePath_ANameBeginningWithTwoDots_IsNotMistakenForTraversal(
+        string relativePath,
+        string expectedDirectory)
+    {
+        var result = _validator.ValidatePath(relativePath);
+
+        Assert.True(result.IsValid, $"'{relativePath}' is a name, not a traversal.");
         Assert.Equal(
-            OperatingSystem.IsWindows() ? _rootPath : Path.Combine(_rootPath, "...  "),
+            Path.Combine(_rootPath, expectedDirectory),
             Path.GetDirectoryName(result.SanitizedPath));
     }
 
