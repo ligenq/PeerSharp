@@ -482,6 +482,51 @@ up as a problem on a machine that matters.
 
 ---
 
+## Every socket binds to every interface, so a VPN cannot be enforced
+
+**Observed.** Nothing in the engine can be told which local address to use, and every path defaults to
+all of them. Inbound: `PortListener` asks for `IPAddress.Any` (`PortListener.cs:63`), which
+`ITcpListener.Create` turns into a dual-mode `IPv6Any` bind (`ITcpListener.cs:27-34`); the shared UDP
+socket binds `IPv6Any` or, in the IPv4 path, `new UdpClient(port)` which is `Any` by another spelling
+(`IUdpSocket.cs:91-99`); LSD binds `Any` and `IPv6Any` outright (`LsdManager.cs:122,139`). Outbound is
+the half that matters and is worse: `PeerCommunication` constructs a bare `new TcpClient()` and calls
+`ConnectAsync` (`PeerCommunication.cs:773-775`), so the operating system picks the route.
+
+**Why it matters.** A consumer - Peerfluence - wants a VPN kill switch, which is the single most
+requested privacy feature for a torrent client, and it cannot be built on top of this engine. Binding
+to the tunnel adapter is what makes the guarantee: if the tunnel drops, the bind fails and traffic
+stops, rather than the operating system quietly re-routing peer connections and tracker announces out
+of the real interface. A proxy is not a substitute - it covers what is sent through it, not what the
+routing table does when it disappears. This is the same tunnel the interop baseline at the end of this
+file was measured through, which is how the gap came up.
+
+**Why it was left.** No measurement, and this entry is the odd one out in that respect: it is a missing
+capability rather than a known cost. It was not built because nothing inside the engine needed it -
+the listeners work, and a default route is the right default for a library that has not been told
+otherwise.
+
+**What would settle it.** A bind address on `Configuration`, threaded to four places, three of which
+already have the seam:
+
+- Inbound TCP and UDP go through `ITcpListenerFactory` and `IUdpSocketFactory`, so they take an address
+  instead of assuming one. Mechanical.
+- UDP trackers already take `IUdpSocketFactory`, so they follow from the same change
+  (`UdpTracker.cs:87`).
+- HTTP trackers go through `IHttpClientFactory` (`HttpTracker.cs:16,526-542`), which would need a
+  `SocketsHttpHandler` whose `ConnectCallback` binds before connecting. Easy to forget, and forgetting
+  it leaks the real address to every HTTP tracker while every peer connection looks correctly bound.
+- Outbound peer connections are the one place with no seam: `PeerCommunication` builds its own
+  `TcpClient`. It would have to construct it over a local `IPEndPoint`, which also means the uTP path
+  and the shared UDP socket agree on the same address.
+
+**The part to get right is the failure behaviour.** A bind to an address that has gone away throws,
+and the correct response is to fail the connection, not to retry unbound. Anything that falls back to
+`Any` on error turns the feature into a guarantee that silently is not one, which is worse than not
+offering it. A test that binds to a loopback alias, removes it, and asserts that connections fail
+rather than succeed by another route would be the thing that proves it.
+
+---
+
 ## Interop baseline
 
 Re-measured after the session that found the Transmission fault. Every earlier figure in this file was
