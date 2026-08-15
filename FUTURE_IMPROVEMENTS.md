@@ -527,6 +527,74 @@ rather than succeed by another route would be the thing that proves it.
 
 ---
 
+## Four things found by building a client against this
+
+Grouped because they share a shape: none is a defect in what the engine computes, and each cost a
+consumer either a workaround or a bug. Recorded from writing Peerfluence against version 3.1.0.
+
+### `TryParse` does not promise the compiler what it promises the reader
+
+**Observed.** `MagnetLink.TryParse(string?, out MagnetLink?)` and its three-argument sibling
+(`MagnetLink.cs:155,167`) hand back a nullable without `[NotNullWhen(true)]`. Every caller that checks
+the bool and then uses the result gets CS8604 for a null that cannot happen.
+
+**Why it matters.** The consumer's choices are a redundant null check, a `!`, or a suppression. The
+first is noise, and the other two teach people to silence exactly the warning that catches the real
+case. Peerfluence took the redundant check.
+
+**What would settle it.** Two attributes. `[NotNullWhen(true)] out MagnetLink? result` on both
+overloads, and the same treatment for any other `TryParse` in the surface.
+
+### Nothing can be asked how fast a torrent is going
+
+**Observed.** `ITorrent` carries no rate at all - no property matches `Speed` or `Rate`
+(`ITorrent.cs`) - and `IFileTransfer` offers only the cumulative `Downloaded` and `Uploaded`
+(`IFileTransfer.cs:11,21`). The current figures exist solely as `TransferStatsAlert.DownloadSpeed`
+and `UploadSpeed` (`Alerts.cs:210,214`), which arrive when they arrive.
+
+**Why it matters.** Anything that has to answer "how fast is this going" on demand has nowhere to
+look. A list on screen can subscribe and keep its own copy, which is what Peerfluence's does; but a
+second consumer - in this case a Transmission-compatible RPC endpoint being polled every few seconds
+by Sonarr - has to build a cache of the same alerts, because the first consumer's copy is private to
+it. Two caches of the same numbers, in one process, because the numbers cannot be read.
+
+**What would settle it.** A rate pair on `ITorrent`, computed where the alert is already computed, so
+that consumers can subscribe for the push or read for the pull rather than being forced into the
+first.
+
+### Two empty info hashes are equal, so naive identity comparison matches unrelated torrents
+
+**Observed.** `Equals` returns true when both instances hold no bytes (`InfoHash.cs:230-235`), and
+`==` forwards to it (`InfoHash.cs:168`). A V1-only torrent has an empty `InfoHashV2`.
+
+**Why it matters.** The obvious way to ask "are these the same torrent" is to compare the hashes, and
+with two hash versions the obvious way to be thorough is to compare both. Do that across two V1
+torrents and their empty V2 hashes compare equal, so every torrent matches every other. Peerfluence
+shipped that and it showed as the details pane redrawing from the wrong torrent whenever two were
+active; the fix was a `TorrentIdentity` helper that checks `IsEmpty` before comparing.
+
+**What would settle it.** Either a documented warning on `Equals`, or - better, since every consumer
+of a two-hash torrent needs it - a comparison on the engine's side that answers "same torrent" and
+knows that an absent hash is not evidence of anything.
+
+### A URL handed to `TorrentFile.LoadAsync` fails as though the caller mistyped a path
+
+**Observed.** `LoadAsync` checks `File.Exists` and throws `FileNotFoundException` naming the argument
+(`TorrentFile.cs:141-148`). Nothing in the name or the signature says the argument is a local path
+and not a location generally.
+
+**Why it matters.** Search results are http links to a `.torrent` on someone's server, so a consumer
+building search reaches for the method whose name matches what it has. Peerfluence did, and shipped a
+release where adding any search result failed with "torrent file not found" - a message that reads
+like a bug in the caller's path handling rather than an unsupported input. `Parse(byte[])` was there
+the whole time and is the right answer; nothing pointed at it.
+
+**What would settle it.** A sentence on `LoadAsync` saying it reads the local file system and
+pointing at `Parse` for bytes fetched elsewhere. Not an overload that does the fetching - a torrent
+library has no business making HTTP requests - just a signpost where the wrong turn is taken.
+
+---
+
 ## Interop baseline
 
 Re-measured after the session that found the Transmission fault. Every earlier figure in this file was
