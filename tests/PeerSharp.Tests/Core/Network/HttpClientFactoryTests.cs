@@ -83,6 +83,70 @@ public class HttpClientFactoryTests
         }
     }
 
+    /// <summary>
+    /// Selecting the address family means resolving and connecting by hand, which quietly gives up
+    /// what <see cref="SocketsHttpHandler"/> did for free: it hands the whole resolved set to the
+    /// socket and tries each in turn. Trackers behind DNS round-robin publish several A records
+    /// precisely so that one being down does not matter, and this path is now on every announce.
+    /// </summary>
+    [Fact]
+    public async Task Connect_WhenAnEarlierAddressRefuses_TriesTheRest()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var accepted = listener.AcceptTcpClientAsync(TestContext.Current.CancellationToken).AsTask();
+
+            // Nothing is listening on 127.0.0.9, so it refuses at once - the same answer a dead
+            // round-robin member gives, without the wait.
+            await using var stream = await HttpClientFactory.ConnectForTestingAsync(
+                new DnsEndPoint("tracker.invalid", port),
+                bindAddress: null,
+                AddressFamily.InterNetwork,
+                (_, _) => Task.FromResult<IPAddress[]>([IPAddress.Parse("127.0.0.9"), IPAddress.Loopback]),
+                TestContext.Current.CancellationToken);
+
+            using var connection = await accepted;
+            Assert.NotNull(stream);
+            Assert.Equal(IPAddress.Loopback, ((IPEndPoint)connection.Client.RemoteEndPoint!).Address);
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task Connect_WhenEveryAddressFails_ReportsTheFailure()
+    {
+        var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        int deadPort = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+
+        await Assert.ThrowsAnyAsync<SocketException>(() => HttpClientFactory.ConnectForTestingAsync(
+            new DnsEndPoint("tracker.invalid", deadPort),
+            bindAddress: null,
+            AddressFamily.InterNetwork,
+            (_, _) => Task.FromResult<IPAddress[]>([IPAddress.Parse("127.0.0.9"), IPAddress.Loopback]),
+            TestContext.Current.CancellationToken).AsTask());
+    }
+
+    [Fact]
+    public async Task Connect_WhenNoAddressMatchesTheFamily_ReportsHostNotFound()
+    {
+        var error = await Assert.ThrowsAsync<SocketException>(() => HttpClientFactory.ConnectForTestingAsync(
+            new DnsEndPoint("tracker.invalid", 80),
+            bindAddress: null,
+            AddressFamily.InterNetworkV6,
+            (_, _) => Task.FromResult<IPAddress[]>([IPAddress.Loopback]),
+            TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Equal(SocketError.HostNotFound, error.SocketErrorCode);
+    }
+
     [Fact]
     public void CreateClient_BindAndRequestedFamilyMismatch_IsRejected()
     {

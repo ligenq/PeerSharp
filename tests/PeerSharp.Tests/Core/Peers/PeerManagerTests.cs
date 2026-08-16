@@ -3,6 +3,7 @@ using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Peers;
+using PeerSharp.Internals.Utilities;
 using PeerSharp.Exceptions;
 using PeerSharp.Messages;
 using System.Collections.Concurrent;
@@ -1530,7 +1531,65 @@ public class PeerManagerTests
         await CleanupAsync(ctx);
     }
 
-    private static PeerManagerContext CreateContext(IPeerCommunicationFactory? peerFactory = null, bool hasPieceCount = true)
+    /// <summary>
+    /// The point of the alert is to keep what the live-peer snapshot loses when a peer goes away, and
+    /// the endpoint is the one field that is not lost - it is already on the record. A client name has
+    /// to come from the peer ID, the same way <see cref="PeerInfo.ClientName"/> gets it.
+    /// </summary>
+    [Fact]
+    public async Task PeerDisconnected_ReportsTheClientNameAndNotTheEndpointAgain()
+    {
+        var alerts = new RecordingAlertsManager();
+        var ctx = CreateContext(alerts: alerts);
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.90"), 51413);
+        var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            Connected = 1,
+            RemoteEndPoint = endpoint
+        };
+        System.Text.Encoding.ASCII.GetBytes("-qB4550-abcdefghijkl").CopyTo(peer.PeerId, 0);
+        Assert.True(ctx.Governor.TryAcquireConnectionSlot());
+        ctx.Manager.AddConnectedPeerForTesting(peer);
+
+        await ctx.Manager.ConnectionClosedAsync(peer, 7);
+
+        var alert = Assert.Single(alerts.Alerts.OfType<PeerDisconnectedAlert>());
+        Assert.Equal(endpoint, alert.Endpoint);
+        Assert.Equal(7, alert.ReasonCode);
+        Assert.Equal(ClientIdentification.GetClientName(peer.PeerId), alert.ClientName);
+        Assert.NotEqual(endpoint.ToString(), alert.ClientName);
+
+        await CleanupAsync(ctx);
+    }
+
+    private sealed class RecordingAlertsManager : IAlertsManager
+    {
+        public List<Alert> Alerts { get; } = [];
+        public void PostAlert(Alert alert) => Alerts.Add(alert);
+        public void MetadataAlert(AlertId id, ITorrent torrent) { }
+        public void MetadataProgressAlert(ITorrent torrent, float progress, int receivedPieces, int totalPieces) { }
+        public void TorrentAlert(AlertId id, ITorrent torrent) { }
+        public void ConfigAlert(AlertId id, string configType) { }
+        public void PieceCompletedAlert(ITorrent torrent, int pieceIndex, int completedPieces, int totalPieces) { }
+        public void ProgressChangedAlert(ITorrent torrent, float progress, float selectionProgress, ulong finishedBytes, ulong totalBytes, int completedPieces, int totalPieces) { }
+        public void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, long downloadSpeed, long uploadSpeed, int connectedPeers) { }
+        public void StateChangedAlert(ITorrent torrent, TorrentState previousState, TorrentState newState) { }
+        public void TorrentErrorAlert(ITorrent torrent, Exception exception) { }
+        public void RegisterAlerts(uint categories) { }
+        public List<Alert> PopAlerts() => [];
+        public async IAsyncEnumerable<Alert> GetAlertsAsync(
+            TimeSpan? timeout = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+    }
+
+    private static PeerManagerContext CreateContext(
+        IPeerCommunicationFactory? peerFactory = null,
+        bool hasPieceCount = true,
+        IAlertsManager? alerts = null)
     {
         var metadata = new TorrentFileMetadata();
         metadata.Info.Version = TorrentVersion.V1;
@@ -1543,7 +1602,7 @@ public class PeerManagerTests
         }
 
         string path = CreateTempPath();
-        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path, alerts: alerts);
         torrent.Settings.Connection.Encryption = Encryption.Refuse;
 
         var governor = new FakeConnectionGovernor();

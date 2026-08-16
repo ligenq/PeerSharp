@@ -109,9 +109,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public long DownloadSpeed => Volatile.Read(ref _lastReportedDownloadSpeed);
 
-    public int DiskReadLimitBytesPerSecond { get => Configuration.DiskReadLimitBytesPerSecond; set => Configuration.DiskReadLimitBytesPerSecond = value; }
+    public long DiskReadLimitBytesPerSecond { get => Configuration.DiskReadLimitBytesPerSecond; set => Configuration.DiskReadLimitBytesPerSecond = value; }
 
-    public int DiskWriteLimitBytesPerSecond { get => Configuration.DiskWriteLimitBytesPerSecond; set => Configuration.DiskWriteLimitBytesPerSecond = value; }
+    public long DiskWriteLimitBytesPerSecond { get => Configuration.DiskWriteLimitBytesPerSecond; set => Configuration.DiskWriteLimitBytesPerSecond = value; }
 
     // Configuration Passthrough
     public DownloadStrategy DownloadStrategy

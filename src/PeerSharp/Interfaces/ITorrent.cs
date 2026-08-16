@@ -43,12 +43,12 @@ public interface ITorrent
     /// <summary>
     /// Gets or sets the per-torrent disk read limit in bytes per second. 0 means unlimited.
     /// </summary>
-    int DiskReadLimitBytesPerSecond { get; set; }
+    long DiskReadLimitBytesPerSecond { get; set; }
 
     /// <summary>
     /// Gets or sets the per-torrent disk write limit in bytes per second. 0 means unlimited.
     /// </summary>
-    int DiskWriteLimitBytesPerSecond { get; set; }
+    long DiskWriteLimitBytesPerSecond { get; set; }
 
     /// <summary>Gets the current aggregate upload speed in bytes per second.</summary>
     long UploadSpeed => 0;

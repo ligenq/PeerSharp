@@ -177,6 +177,63 @@ public class BandwidthManagerTests
         Assert.Equal(2048, manager.GetChannel($"{hash}_DW").GetLimit());
     }
 
+    /// <summary>
+    /// Disk limits travel the same 64-bit channel as transfer limits, so a value a caller can legally
+    /// express must survive the trip. The pairing matters more than the number: rejecting negatives is
+    /// only safe if nothing upstream can manufacture one out of a value the caller meant.
+    /// </summary>
+    [Fact]
+    public void SetTorrentDiskLimits_AboveIntMaxRange_RoundTripsIntact()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+        var torrent = TorrentTestUtility.CreateMinimal();
+
+        manager.SetTorrentDiskLimits(torrent, 3_000_000_000, 4_000_000_000);
+
+        var limits = manager.GetTorrentDiskLimits(torrent);
+        Assert.Equal(3_000_000_000, limits.ReadLimit);
+        Assert.Equal(4_000_000_000, limits.WriteLimit);
+    }
+
+    [Fact]
+    public void SetGlobalDiskLimits_AboveIntMaxRange_RoundTripsIntact()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+
+        manager.SetGlobalDiskLimits(3_000_000_000, 4_000_000_000);
+
+        Assert.Equal(3_000_000_000, manager.GetChannel(BandwidthManager.GlobalDiskRead).GetLimit());
+        Assert.Equal(4_000_000_000, manager.GetChannel(BandwidthManager.GlobalDiskWrite).GetLimit());
+    }
+
+    [Fact]
+    public void SetGlobalDiskLimits_RejectsNegativeValues()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => manager.SetGlobalDiskLimits(-1, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => manager.SetGlobalDiskLimits(0, -1));
+    }
+
+    /// <summary>
+    /// The engine applies the configured disk speeds during initialization. Any value the settings
+    /// type accepts has to reach the channel unchanged - narrowing it on the way is what turns a
+    /// configuration choice into a startup failure.
+    /// </summary>
+    [Fact]
+    public void ConfiguredDiskSpeeds_AboveIntMaxRange_ApplyToTheGlobalChannels()
+    {
+        var settings = new Settings();
+        settings.Files.MaxDiskReadSpeed = 3_000_000_000;
+        settings.Files.MaxDiskWriteSpeed = 4_000_000_000;
+
+        var manager = new BandwidthManager(10, _timeProvider);
+        manager.SetGlobalDiskLimits(settings.Files.MaxDiskReadSpeed, settings.Files.MaxDiskWriteSpeed);
+
+        Assert.Equal(3_000_000_000, manager.GetChannel(BandwidthManager.GlobalDiskRead).GetLimit());
+        Assert.Equal(4_000_000_000, manager.GetChannel(BandwidthManager.GlobalDiskWrite).GetLimit());
+    }
+
     [Fact]
     public void GetTorrentDiskLimits_NoLimitsSet_ReturnsZero()
     {

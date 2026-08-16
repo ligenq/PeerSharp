@@ -41,7 +41,7 @@ internal static class BandwidthTestDoubles
             return (0, 0);
         }
 
-        public (int ReadLimit, int WriteLimit) GetTorrentDiskLimits(ITorrent torrent)
+        public (long ReadLimit, long WriteLimit) GetTorrentDiskLimits(ITorrent torrent)
         {
             return (0, 0);
         }
@@ -69,7 +69,7 @@ internal static class BandwidthTestDoubles
         {
         }
 
-        public void SetGlobalDiskLimits(int readLimit, int writeLimit)
+        public void SetGlobalDiskLimits(long readLimit, long writeLimit)
         {
         }
 
@@ -77,7 +77,7 @@ internal static class BandwidthTestDoubles
         {
         }
 
-        public void SetTorrentDiskLimits(ITorrent torrent, int readLimit, int writeLimit)
+        public void SetTorrentDiskLimits(ITorrent torrent, long readLimit, long writeLimit)
         {
         }
 

@@ -994,6 +994,98 @@ public class PeerCommunicationTests
         CleanupPath(path);
     }
 
+    /// <summary>
+    /// A magnet has no piece count, which is exactly the number the HAVE index would be checked
+    /// against, so every index a peer sends before metadata arrives is unvalidatable and gets kept.
+    /// `PiecesProgress.AddPiece` used to discard out-of-range indices for free; deferring them puts a
+    /// peer-controlled, unbounded collection in their place, filled by a nine-byte wire message.
+    /// </summary>
+    [Fact]
+    public async Task DeferredMagnetHaveFlood_IsBoundedRatherThanRetainedInFull()
+    {
+        var metadata = CreateMetadataV1();
+        metadata.Info.PieceSize = 0;
+        metadata.Info.FullSize = 0;
+        metadata.Info.Files.Clear();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        Assert.Equal(0, peer.PeerPieces.Count);
+        for (int index = 0; index < 50_000; index++)
+        {
+            await InvokePrivate<Task>(peer, "ProcessMessageAsync", new PeerMessage(MessageId.Have) { HavePieceIndex = index });
+        }
+
+        var deferred = (HashSet<int>)typeof(PeerCommunication)
+            .GetField(
+                "_deferredHavePieces",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(peer)!;
+        Assert.InRange(deferred.Count, 0, 8192);
+
+        // Discarding the record must not quietly hand over a partial one: a peer whose availability
+        // cannot be replayed takes the close-and-rediscover path instead.
+        Assert.False(peer.TryApplyDeferredAvailability(10));
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    /// <summary>
+    /// Messages are accepted up to 2 MB and the deferred copy is held for the life of the connection,
+    /// so a peer can pin that much before the torrent knows its own piece count. No real bitfield
+    /// comes close: the metadata cap works out at about 420,000 pieces, or a 52 KB bitfield.
+    /// </summary>
+    [Fact]
+    public async Task DeferredMagnetBitfield_OversizedPayload_IsNotRetained()
+    {
+        var metadata = CreateMetadataV1();
+        metadata.Info.PieceSize = 0;
+        metadata.Info.FullSize = 0;
+        metadata.Info.Files.Clear();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        Assert.Equal(0, peer.PeerPieces.Count);
+        await InvokePrivate<Task>(
+            peer,
+            "ProcessMessageAsync",
+            new PeerMessage(MessageId.Bitfield) { Data = new byte[1024 * 1024] });
+
+        var retained = (byte[]?)typeof(PeerCommunication)
+            .GetField(
+                "_deferredBitfield",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .GetValue(peer);
+        Assert.Null(retained);
+        Assert.False(peer.TryApplyDeferredAvailability(10));
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task DeferredMagnetHave_WithNegativeIndex_CannotBeAdopted()
+    {
+        var metadata = CreateMetadataV1();
+        metadata.Info.PieceSize = 0;
+        metadata.Info.FullSize = 0;
+        metadata.Info.Files.Clear();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", new PeerMessage(MessageId.Have) { HavePieceIndex = -1 });
+
+        Assert.False(peer.TryApplyDeferredAvailability(10));
+        Assert.Equal(0, peer.PeerPieces.Count);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
     [Fact]
     public async Task ProcessMessageAsync_RequestWhenAmChoking_MessageDroppedSilently()
     {

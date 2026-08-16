@@ -35,7 +35,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 ### Installation
 
 ```bash
-dotnet add package PeerSharp --version 3.1.0
+dotnet add package PeerSharp --version 3.2.0
 ```
 
 Requires .NET 10.0 or later.
@@ -288,7 +288,7 @@ magnet's metadata fetch and stop, `--run-for <s>` for an unattended run that exi
 PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
 
 ```bash
-dotnet add package PeerSharp.WebTorrent --version 3.1.0
+dotnet add package PeerSharp.WebTorrent --version 3.2.0
 ```
 
 ```csharp

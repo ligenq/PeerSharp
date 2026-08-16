@@ -101,9 +101,9 @@ sealed class PeerSharp.Config.FilesSettings
     Boolean EnableSparseFiles { get; set; }
     Int32 BlockCacheSizeBytes { get; set; }
     Int32 ReadAheadBlocks { get; set; }
+    Int64 MaxDiskReadSpeed { get; set; }
+    Int64 MaxDiskWriteSpeed { get; set; }
     String DefaultDownloadPath { get; set; }
-    UInt32 MaxDiskReadSpeed { get; set; }
-    UInt32 MaxDiskWriteSpeed { get; set; }
 sealed class PeerSharp.Config.ProxySettings
     .ctor()
     Boolean Equals(Object obj)
@@ -667,11 +667,11 @@ interface PeerSharp.Interfaces.IAlerts
     List<PeerSharp.Core.Alert> PopAlerts()
     Void RegisterAlerts(UInt32 alertMask)
 interface PeerSharp.Interfaces.IBandwidth
-    ValueTuple<Int32, Int32> GetTorrentDiskLimits(PeerSharp.Interfaces.ITorrent torrent)
+    ValueTuple<Int64, Int64> GetTorrentDiskLimits(PeerSharp.Interfaces.ITorrent torrent)
     ValueTuple<Int64, Int64> GetTorrentLimits(PeerSharp.Interfaces.ITorrent torrent)
-    Void SetGlobalDiskLimits(Int32 readLimit, Int32 writeLimit)
+    Void SetGlobalDiskLimits(Int64 readLimit, Int64 writeLimit)
     Void SetGlobalLimits(Int64 downloadLimit, Int64 uploadLimit)
-    Void SetTorrentDiskLimits(PeerSharp.Interfaces.ITorrent torrent, Int32 readLimit, Int32 writeLimit)
+    Void SetTorrentDiskLimits(PeerSharp.Interfaces.ITorrent torrent, Int64 readLimit, Int64 writeLimit)
     Void SetTorrentLimits(PeerSharp.Interfaces.ITorrent torrent, Int64 downloadLimit, Int64 uploadLimit)
 interface PeerSharp.Interfaces.IClientEngine
     Boolean BlocklistEnabled { get; set; }
@@ -753,13 +753,13 @@ interface PeerSharp.Interfaces.ITorrent
     IReadOnlyList<Int32> StreamableFileIndices { get; }
     IReadOnlyList<PeerSharp.Core.FileSelection> GetAllFileSelections()
     IReadOnlyList<PeerSharp.Core.TorrentFileInfo> GetAllFileInfo()
-    Int32 DiskReadLimitBytesPerSecond { get; set; }
-    Int32 DiskWriteLimitBytesPerSecond { get; set; }
     Int32 FileCount { get; }
     Int32 PieceCount { get; }
     Int32 PiecesReceived { get; }
     Int32 QueuePriority { get; set; }
     Int64 DataLeft { get; }
+    Int64 DiskReadLimitBytesPerSecond { get; set; }
+    Int64 DiskWriteLimitBytesPerSecond { get; set; }
     Int64 DownloadLimitBytesPerSecond { get; set; }
     Int64 DownloadSpeed { get; }
     Int64 TotalSize { get; }

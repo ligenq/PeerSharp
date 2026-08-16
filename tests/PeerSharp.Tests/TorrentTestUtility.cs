@@ -115,14 +115,14 @@ internal static class TorrentTestUtility
         private readonly Dictionary<string, BandwidthChannel> _channels = [];
 
         public void SetGlobalLimits(long downloadLimit, long uploadLimit) { }
-        public void SetGlobalDiskLimits(int readLimit, int writeLimit) { }
+        public void SetGlobalDiskLimits(long readLimit, long writeLimit) { }
         public void SetTorrentLimits(ITorrent torrent, long downloadLimit, long uploadLimit) { }
-        public void SetTorrentDiskLimits(ITorrent torrent, int readLimit, int writeLimit) { }
+        public void SetTorrentDiskLimits(ITorrent torrent, long readLimit, long writeLimit) { }
         public (long DownloadLimit, long UploadLimit) GetTorrentLimits(ITorrent torrent)
         {
             return (0, 0);
         }
-        public (int ReadLimit, int WriteLimit) GetTorrentDiskLimits(ITorrent torrent)
+        public (long ReadLimit, long WriteLimit) GetTorrentDiskLimits(ITorrent torrent)
         {
             return (0, 0);
         }

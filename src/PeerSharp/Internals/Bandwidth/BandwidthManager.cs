@@ -124,12 +124,12 @@ internal class BandwidthManager : IBandwidthManager
         );
     }
 
-    public (int ReadLimit, int WriteLimit) GetTorrentDiskLimits(ITorrent torrent)
+    public (long ReadLimit, long WriteLimit) GetTorrentDiskLimits(ITorrent torrent)
     {
         string hash = torrent.Hash.ToHexStringUpper();
         return (
-            checked((int)GetChannel($"{hash}_DR").GetLimit()),
-            checked((int)GetChannel($"{hash}_DW").GetLimit())
+            GetChannel($"{hash}_DR").GetLimit(),
+            GetChannel($"{hash}_DW").GetLimit()
         );
     }
 
@@ -291,8 +291,10 @@ internal class BandwidthManager : IBandwidthManager
         GetChannel(GlobalUpload).SetLimit(uploadLimit);
     }
 
-    public void SetGlobalDiskLimits(int readLimit, int writeLimit)
+    public void SetGlobalDiskLimits(long readLimit, long writeLimit)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(readLimit);
+        ArgumentOutOfRangeException.ThrowIfNegative(writeLimit);
         GetChannel(GlobalDiskRead).SetLimit(readLimit);
         GetChannel(GlobalDiskWrite).SetLimit(writeLimit);
     }
@@ -306,8 +308,10 @@ internal class BandwidthManager : IBandwidthManager
         GetChannel($"{hash}_UL").SetLimit(uploadLimit);
     }
 
-    public void SetTorrentDiskLimits(ITorrent torrent, int readLimit, int writeLimit)
+    public void SetTorrentDiskLimits(ITorrent torrent, long readLimit, long writeLimit)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(readLimit);
+        ArgumentOutOfRangeException.ThrowIfNegative(writeLimit);
         string hash = torrent.Hash.ToHexStringUpper();
         GetChannel($"{hash}_DR").SetLimit(readLimit);
         GetChannel($"{hash}_DW").SetLimit(writeLimit);

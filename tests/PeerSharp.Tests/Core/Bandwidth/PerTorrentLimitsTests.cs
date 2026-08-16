@@ -14,14 +14,14 @@ public class PerTorrentLimitsTests
     {
         private readonly Dictionary<string, BandwidthChannel> _channels = [];
         public long DownloadLimit { get; private set; }
-        public int DiskReadLimit { get; private set; }
-        public int DiskWriteLimit { get; private set; }
+        public long DiskReadLimit { get; private set; }
+        public long DiskWriteLimit { get; private set; }
         public long UploadLimit { get; private set; }
         public int Calls { get; private set; }
         public int DiskCalls { get; private set; }
 
         public void SetGlobalLimits(long downloadLimit, long uploadLimit) { }
-        public void SetGlobalDiskLimits(int readLimit, int writeLimit) { }
+        public void SetGlobalDiskLimits(long readLimit, long writeLimit) { }
 
         public void SetTorrentLimits(ITorrent torrent, long downloadLimit, long uploadLimit)
         {
@@ -30,7 +30,7 @@ public class PerTorrentLimitsTests
             Calls++;
         }
 
-        public void SetTorrentDiskLimits(ITorrent torrent, int readLimit, int writeLimit)
+        public void SetTorrentDiskLimits(ITorrent torrent, long readLimit, long writeLimit)
         {
             DiskReadLimit = readLimit;
             DiskWriteLimit = writeLimit;
@@ -42,7 +42,7 @@ public class PerTorrentLimitsTests
             return (DownloadLimit, UploadLimit);
         }
 
-        public (int ReadLimit, int WriteLimit) GetTorrentDiskLimits(ITorrent torrent)
+        public (long ReadLimit, long WriteLimit) GetTorrentDiskLimits(ITorrent torrent)
         {
             return (DiskReadLimit, DiskWriteLimit);
         }

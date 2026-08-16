@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
@@ -18,6 +18,32 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     // independently choose the least-requested missing piece while per-piece redundancy stays bounded.
     private readonly Dictionary<(IPeerCommunication Peer, int Piece), PendingMetadataRequest> _pendingRequests = [];
     private readonly Dictionary<(IPeerCommunication Peer, int Piece), int> _requestAttempts = [];
+
+    /// <summary>
+    /// Pairs a peer has explicitly refused, or has been disqualified from by supplying metadata that
+    /// failed its info hash.
+    ///
+    /// <para>
+    /// Kept apart from <see cref="_requestAttempts"/> because the two mean different things. A timeout
+    /// is ambiguous - a slow link produces one just as readily as an unwilling peer - so its budget is
+    /// allowed to be restored when the alternative is having nobody left to ask. A reject is an answer,
+    /// and re-asking a peer that already said no is how a reject storm starts.
+    /// </para>
+    /// </summary>
+    private readonly HashSet<(IPeerCommunication Peer, int Piece)> _refusedRequests = [];
+
+    /// <summary>
+    /// Which peer supplied each piece currently held in the buffer.
+    ///
+    /// <para>
+    /// Only the first correctly sized arrival for a piece is stored, so this is the peer whose bytes
+    /// are actually in the assembled metadata. That distinction is the whole point: requests are
+    /// deliberately redundant, so several peers answer for the same piece and every one of them looks
+    /// like a contributor. Blaming all of them when the completed set fails its info hash convicts the
+    /// honest majority along with the one peer whose bytes were used.
+    /// </para>
+    /// </summary>
+    private readonly Dictionary<int, IPeerCommunication> _pieceSuppliers = [];
 
     /// <summary>
     /// How many timed-out requests a peer is given before it stops being a first choice. Requests which
@@ -198,6 +224,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
             Array.Copy(data, 0, _metadataBuffer, offset, data.Length);
             _receivedPieces[pieceIndex] = true;
+            _pieceSuppliers[pieceIndex] = peer;
             _logger.LogInformation("Received metadata piece {PieceIndex} from {PeerId} (size={Size})", pieceIndex, peer.PeerId, data.Length);
 
             // Fire progress event
@@ -244,6 +271,8 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 Active = false;
                 _pendingRequests.Clear();
                 _requestAttempts.Clear();
+                _refusedRequests.Clear();
+                _pieceSuppliers.Clear();
 
                 if (string.IsNullOrEmpty(newMetadata.Announce))
                 {
@@ -296,7 +325,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             if (_pendingRequests.Remove((peer, pieceIndex)))
             {
                 RecordFor(peer).TimedOut++;
-                _requestAttempts[(peer, pieceIndex)] = MetadataMaxRequestAttempts;
+                _refusedRequests.Add((peer, pieceIndex));
                 _logger.LogWarning("Peer {PeerId} rejected metadata piece {PieceIndex}", peer.PeerId, pieceIndex);
                 FillPeerRequests(peer);
             }
@@ -401,6 +430,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             {
                 _requestAttempts.Remove(key);
             }
+            _refusedRequests.RemoveWhere(key => key.Peer == peer);
             FillPeerRequests();
         }
     }
@@ -415,6 +445,8 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             Active = false;
             _pendingRequests.Clear();
             _requestAttempts.Clear();
+            _refusedRequests.Clear();
+            _pieceSuppliers.Clear();
         }
     }
 
@@ -429,6 +461,8 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
             _pendingRequests.Clear();
             _requestAttempts.Clear();
+            _refusedRequests.Clear();
+            _pieceSuppliers.Clear();
             _firstRequestAt = null;
             _requestsSent = 0;
             _responsesReceived = 0;
@@ -448,6 +482,8 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             Active = false;
             _pendingRequests.Clear();
             _requestAttempts.Clear();
+            _refusedRequests.Clear();
+            _pieceSuppliers.Clear();
         }
     }
 
@@ -558,6 +594,33 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             return;
         }
 
+        AssignEligiblePeers(first);
+
+        // The attempt budget has only one direction: nothing decrements it and nothing expires it, so
+        // it is spent for good. That is what stops one peer being asked the same thing forever, but it
+        // also means enough timeouts can spend every (peer, piece) pair the swarm has - and the
+        // download is then indistinguishable from one with no peers at all, except that the peers are
+        // still connected and still advertising the metadata. The default timeout is one second, which
+        // a peer on a slow link misses routinely, so this is reached by latency rather than malice.
+        //
+        // Nothing outstanding, work still to do and peers still here is the one state where that has
+        // happened. Clearing the ledger there keeps the budget doing its job as rotation pressure
+        // without letting it become the end of the download.
+        if (_pendingRequests.Count > 0 || _requestAttempts.Count == 0 ||
+            _activePeers.Count == 0 || !HasMissingPieces())
+        {
+            return;
+        }
+
+        _logger.LogInformation(
+            "Every metadata request budget is spent with pieces still missing and {PeerCount} peer(s) connected; restarting exploration",
+            _activePeers.Count);
+        _requestAttempts.Clear();
+        AssignEligiblePeers(first);
+    }
+
+    private void AssignEligiblePeers(IPeerCommunication? first)
+    {
         bool haveDeclaredHolder = _activePeers.Any(PeerCanDeclareMetadata);
         bool assigned;
         do
@@ -577,6 +640,28 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             }
         }
         while (assigned);
+    }
+
+    /// <summary>
+    /// Whether anything is still worth asking for. Before the size is known that is the probe for
+    /// piece 0, which is the only request that can be made at all.
+    /// </summary>
+    private bool HasMissingPieces()
+    {
+        if (_metadataSize == 0)
+        {
+            return true;
+        }
+
+        for (int piece = 0; piece < _receivedPieces.Length; piece++)
+        {
+            if (!_receivedPieces[piece])
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal IReadOnlyList<(IPeerCommunication Peer, int Piece, DateTimeOffset Timestamp, int Attempts)> GetPendingRequestsForTesting()
@@ -640,6 +725,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             int probeCount = _pendingRequests.Keys.Count(key => key.Piece == 0);
             return probeCount < MetadataRequestRedundancy &&
                    !_pendingRequests.ContainsKey((peer, 0)) &&
+                   !_refusedRequests.Contains((peer, 0)) &&
                    AttemptsFor(peer, 0) < MetadataMaxRequestAttempts ? 0 : null;
         }
 
@@ -668,6 +754,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             int piece = (_nextPieceCursor + offset) % totalPieces;
             if (_receivedPieces[piece] || requestCounts[piece] >= MetadataRequestRedundancy ||
                 _pendingRequests.ContainsKey((peer, piece)) ||
+                _refusedRequests.Contains((peer, piece)) ||
                 AttemptsFor(peer, piece) >= MetadataMaxRequestAttempts)
             {
                 continue;
@@ -805,35 +892,44 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     }
 
     /// <summary>
-    /// Resets a completed but unauthentic metadata set and demotes the peers that supplied it.
-    /// A peer is promoted as soon as it serves a piece for latency reasons, but that evidence must not
-    /// trap every retry on the same corrupt suppliers once the complete info hash disproves the set.
+    /// Resets a completed but unauthentic metadata set and refuses the peers whose bytes were in it.
+    ///
+    /// <para>
+    /// Refusal here is permanent for the rest of the download, so it has to be aimed at the peers that
+    /// actually supplied the rejected bytes and nobody else. Requests are deliberately redundant and a
+    /// peer is credited with an answer for any correctly sized piece, duplicates included, so
+    /// "answered something" describes most of the swarm rather than the culprit - and refusing on that
+    /// basis can blacklist every connected peer over one bad supplier, which leaves the download with
+    /// nothing to ask until a new peer happens to arrive.
+    /// </para>
+    ///
+    /// <para>
+    /// <see cref="_pieceSuppliers"/> names the peer whose copy of each piece was the one stored, which
+    /// is exactly the set that produced the failing hash.
+    /// </para>
     /// </summary>
     private void RejectCompletedMetadata()
     {
-        foreach (var record in _peerRecords.Values)
+        var suppliers = _pieceSuppliers.Values.Distinct().ToList();
+
+        foreach (var supplier in suppliers)
         {
-            if (record.Answered > 0)
-            {
-                record.Answered = 0;
-                record.TimedOut = Math.Max(record.TimedOut, UnansweredRequestsBeforeDemotion);
-            }
+            var record = RecordFor(supplier);
+            record.Answered = 0;
+            record.TimedOut = Math.Max(record.TimedOut, UnansweredRequestsBeforeDemotion);
         }
 
         _receivedPieces.SetAll(false);
         _pendingRequests.Clear();
-        foreach (var (peer, record) in _peerRecords)
+        foreach (var supplier in suppliers)
         {
-            if (record.TimedOut < UnansweredRequestsBeforeDemotion)
-            {
-                continue;
-            }
-
             for (int piece = 0; piece < _receivedPieces.Length; piece++)
             {
-                _requestAttempts[(peer, piece)] = MetadataMaxRequestAttempts;
+                _refusedRequests.Add((supplier, piece));
             }
         }
+
+        _pieceSuppliers.Clear();
         FillPeerRequests();
     }
 

@@ -17,6 +17,9 @@ internal class HttpClientFactory : IHttpClientFactory
 {
     private static readonly ConcurrentDictionary<string, HttpClient> Cache = new();
 
+    /// <summary>How many resolved addresses one connect may try before giving up.</summary>
+    private const int MaxConnectAttempts = 3;
+
     public HttpClient CreateClient(
         ProxySettings proxy,
         bool isTracker,
@@ -86,10 +89,40 @@ internal class HttpClientFactory : IHttpClientFactory
         return client;
     }
 
-    private static async ValueTask<Stream> ConnectAsync(
+    private static ValueTask<Stream> ConnectAsync(
         DnsEndPoint remoteEndPoint,
         IPAddress? bindAddress,
         AddressFamily addressFamily,
+        CancellationToken cancellationToken)
+        => ConnectForTestingAsync(
+            remoteEndPoint,
+            bindAddress,
+            addressFamily,
+            static (host, ct) => Dns.GetHostAddressesAsync(host, ct),
+            cancellationToken);
+
+    /// <summary>
+    /// Connects to the first address of the requested family that accepts, in the order the resolver
+    /// returned them.
+    ///
+    /// <para>
+    /// Choosing the address family means doing this by hand, and the thing not to lose while doing so
+    /// is what the default connect path gives for free: it hands the socket the whole resolved set and
+    /// walks it. A tracker published behind several A records has them precisely so that one host
+    /// being down is survivable, and this path runs on every announce, so stopping at the first
+    /// address turns an ordinary DNS arrangement into a failed announce.
+    /// </para>
+    ///
+    /// <para>
+    /// <c>resolveAddressesAsync</c> is a parameter rather than a direct <see cref="Dns"/> call so the
+    /// walk itself can be tested without depending on what a real name happens to resolve to.
+    /// </para>
+    /// </summary>
+    internal static async ValueTask<Stream> ConnectForTestingAsync(
+        DnsEndPoint remoteEndPoint,
+        IPAddress? bindAddress,
+        AddressFamily addressFamily,
+        Func<string, CancellationToken, Task<IPAddress[]>> resolveAddressesAsync,
         CancellationToken cancellationToken)
     {
         IPAddress[] addresses;
@@ -99,29 +132,52 @@ internal class HttpClientFactory : IHttpClientFactory
         }
         else
         {
-            addresses = await Dns.GetHostAddressesAsync(remoteEndPoint.Host, cancellationToken).ConfigureAwait(false);
+            addresses = await resolveAddressesAsync(remoteEndPoint.Host, cancellationToken).ConfigureAwait(false);
         }
 
-        var remoteAddress = addresses.FirstOrDefault(address => address.AddressFamily == addressFamily)
-            ?? throw new SocketException((int)SocketError.HostNotFound);
-
-        var socket = new Socket(addressFamily, SocketType.Stream, ProtocolType.Tcp);
-        try
+        // Every attempt spends from one ConnectTimeout, so a long list of dead records could burn the
+        // whole budget before reaching a live address and leave the fallback buying nothing. Round
+        // robin exists to spread load over a handful of hosts, not dozens, so a short walk keeps the
+        // benefit while bounding the worst case.
+        var candidates = addresses
+            .Where(address => address.AddressFamily == addressFamily)
+            .Take(MaxConnectAttempts)
+            .ToArray();
+        if (candidates.Length == 0)
         {
-            if (bindAddress != null)
+            throw new SocketException((int)SocketError.HostNotFound);
+        }
+
+        Exception? lastError = null;
+        foreach (var remoteAddress in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var socket = new Socket(addressFamily, SocketType.Stream, ProtocolType.Tcp);
+            try
             {
-                socket.Bind(new IPEndPoint(bindAddress, 0));
-            }
+                if (bindAddress != null)
+                {
+                    socket.Bind(new IPEndPoint(bindAddress, 0));
+                }
 
-            await socket.ConnectAsync(
-                new IPEndPoint(remoteAddress, remoteEndPoint.Port),
-                cancellationToken).ConfigureAwait(false);
-            return new NetworkStream(socket, ownsSocket: true);
+                await socket.ConnectAsync(
+                    new IPEndPoint(remoteAddress, remoteEndPoint.Port),
+                    cancellationToken).ConfigureAwait(false);
+                return new NetworkStream(socket, ownsSocket: true);
+            }
+            catch (Exception ex) when (ex is SocketException or IOException)
+            {
+                socket.Dispose();
+                lastError = ex;
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
         }
-        catch
-        {
-            socket.Dispose();
-            throw;
-        }
+
+        throw lastError ?? new SocketException((int)SocketError.HostUnreachable);
     }
 }
