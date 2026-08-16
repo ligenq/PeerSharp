@@ -1196,8 +1196,8 @@ public class WebTorrentSessionTests
         public long DataLeft { get; set; } = 1024;
         public long DataUploaded { get; set; }
         public long DownloadLimitBytesPerSecond { get; set; }
-        public int DiskReadLimitBytesPerSecond { get; set; }
-        public int DiskWriteLimitBytesPerSecond { get; set; }
+        public long DiskReadLimitBytesPerSecond { get; set; }
+        public long DiskWriteLimitBytesPerSecond { get; set; }
         public DownloadStrategy DownloadStrategy { get; set; }
         public ITorrentEvents? Events => null;
         public int FileCount => 0;

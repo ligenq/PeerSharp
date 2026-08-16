@@ -17,7 +17,7 @@ public interface IBandwidth
     /// </summary>
     /// <param name="torrent">The torrent.</param>
     /// <returns>A tuple containing (readLimit, writeLimit).</returns>
-    (int ReadLimit, int WriteLimit) GetTorrentDiskLimits(ITorrent torrent);
+    (long ReadLimit, long WriteLimit) GetTorrentDiskLimits(ITorrent torrent);
 
     /// <summary>
     /// Sets global download and upload speed limits.
@@ -31,7 +31,7 @@ public interface IBandwidth
     /// </summary>
     /// <param name="readLimit">Maximum disk read speed in bytes per second. 0 for unlimited.</param>
     /// <param name="writeLimit">Maximum disk write speed in bytes per second. 0 for unlimited.</param>
-    void SetGlobalDiskLimits(int readLimit, int writeLimit);
+    void SetGlobalDiskLimits(long readLimit, long writeLimit);
 
     /// <summary>
     /// Sets bandwidth limits for a specific torrent.
@@ -47,5 +47,5 @@ public interface IBandwidth
     /// <param name="torrent">The torrent to set limits for.</param>
     /// <param name="readLimit">Maximum disk read speed in bytes per second. 0 for unlimited.</param>
     /// <param name="writeLimit">Maximum disk write speed in bytes per second. 0 for unlimited.</param>
-    void SetTorrentDiskLimits(ITorrent torrent, int readLimit, int writeLimit);
+    void SetTorrentDiskLimits(ITorrent torrent, long readLimit, long writeLimit);
 }

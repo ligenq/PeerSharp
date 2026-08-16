@@ -476,7 +476,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 Id = AlertId.PeerDisconnected,
                 Torrent = _torrent,
                 Endpoint = p.RemoteEndPoint,
-                ClientName = p.Name,
+                ClientName = ClientIdentification.GetClientName(p.PeerId),
                 Downloaded = p.Downloaded,
                 Uploaded = p.Uploaded,
                 ReasonCode = code,

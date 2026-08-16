@@ -279,8 +279,8 @@ public class HttpStreamServerTests
 
         public long DataLeft => 0;
         public long DownloadLimitBytesPerSecond { get; set; }
-        public int DiskReadLimitBytesPerSecond { get; set; }
-        public int DiskWriteLimitBytesPerSecond { get; set; }
+        public long DiskReadLimitBytesPerSecond { get; set; }
+        public long DiskWriteLimitBytesPerSecond { get; set; }
         public DownloadStrategy DownloadStrategy { get; set; }
         public ITorrentEvents? Events => null;
         public int FileCount => _files.Count;

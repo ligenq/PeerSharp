@@ -132,7 +132,7 @@ public class UdpTrackerTests
 
         public void Dispose() { }
 
-        public void JoinMulticastGroup(IPAddress multicastAddr) { }
+        public void JoinMulticastGroup(IPAddress multicastAddr, IPAddress? localInterface = null) { }
 
         public Task<UdpReceiveResult> ReceiveAsync(CancellationToken cancellationToken)
         {

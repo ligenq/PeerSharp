@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
 namespace PeerSharp.Internals.Framework;
@@ -12,7 +13,16 @@ internal interface IUdpSocket : IDisposable
 
     void Close();
 
-    void JoinMulticastGroup(IPAddress multicastAddr);
+    /// <summary>
+    /// Joins a multicast group, optionally pinning it to one local interface.
+    /// </summary>
+    /// <param name="multicastAddr">The group to join.</param>
+    /// <param name="localInterface">
+    /// The local address whose interface should carry the membership and this socket's outgoing
+    /// multicast, or <see langword="null"/> to leave both to the host's routing table. Binding the
+    /// socket does not settle either one on its own.
+    /// </param>
+    void JoinMulticastGroup(IPAddress multicastAddr, IPAddress? localInterface = null);
 
     Task<UdpReceiveResult> ReceiveAsync(CancellationToken cancellationToken);
 
@@ -111,9 +121,62 @@ internal class UdpSocketAdapter : IUdpSocket
         GC.SuppressFinalize(this);
     }
 
-    public void JoinMulticastGroup(IPAddress multicastAddr)
+    public void JoinMulticastGroup(IPAddress multicastAddr, IPAddress? localInterface = null)
     {
-        _client.JoinMulticastGroup(multicastAddr);
+        if (localInterface == null)
+        {
+            _client.JoinMulticastGroup(multicastAddr);
+            return;
+        }
+
+        // Membership and outbound selection are two separate settings, and binding the socket sets
+        // neither. The membership decides which interface's group traffic reaches us and where the
+        // IGMP/MLD join itself is sent; the multicast-interface option decides where our own
+        // datagrams leave from. A socket bound to enforce one interface needs both pinned, or half
+        // its multicast traffic still follows the host's default route.
+        if (localInterface.AddressFamily == AddressFamily.InterNetwork)
+        {
+            _client.JoinMulticastGroup(multicastAddr, localInterface);
+            _client.Client.SetSocketOption(
+                SocketOptionLevel.IP,
+                SocketOptionName.MulticastInterface,
+                localInterface.GetAddressBytes());
+            return;
+        }
+
+        int interfaceIndex = GetInterfaceIndex(localInterface);
+        _client.JoinMulticastGroup(interfaceIndex, multicastAddr);
+        _client.Client.SetSocketOption(
+            SocketOptionLevel.IPv6,
+            SocketOptionName.MulticastInterface,
+            interfaceIndex);
+    }
+
+    /// <summary>
+    /// Finds the interface index owning an IPv6 address. IPv6 multicast is joined by index rather
+    /// than by address, and a scope id only carries one for link-local addresses - the global address
+    /// a tunnel hands out has none. Failing here is deliberate: the caller asked for traffic confined
+    /// to this address, and the alternative is index 0, which is the default route.
+    /// </summary>
+    private static int GetInterfaceIndex(IPAddress localInterface)
+    {
+        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            var properties = nic.GetIPProperties();
+            if (!properties.UnicastAddresses.Any(unicast => unicast.Address.Equals(localInterface)))
+            {
+                continue;
+            }
+
+            return properties.GetIPv6Properties().Index;
+        }
+
+        if (localInterface.ScopeId is > 0 and <= int.MaxValue)
+        {
+            return (int)localInterface.ScopeId;
+        }
+
+        throw new SocketException((int)SocketError.AddressNotAvailable);
     }
 
     public Task<UdpReceiveResult> ReceiveAsync(CancellationToken cancellationToken)

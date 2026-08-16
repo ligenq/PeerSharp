@@ -14,6 +14,7 @@ public class LsdManagerTests
     {
         public List<byte[]> SentPackets { get; } = [];
         public bool JoinedMulticast { get; private set; }
+        public IPAddress? JoinedOnInterface { get; private set; }
         private readonly TaskCompletionSource<UdpReceiveResult> _receiveTcs = new();
 
         public Socket Client { get; }
@@ -23,9 +24,10 @@ public class LsdManagerTests
             Client = new Socket(family, SocketType.Dgram, ProtocolType.Udp);
         }
 
-        public void JoinMulticastGroup(IPAddress multicastAddr)
+        public void JoinMulticastGroup(IPAddress multicastAddr, IPAddress? localInterface = null)
         {
             JoinedMulticast = true;
+            JoinedOnInterface = localInterface;
         }
 
         public void Close() { }
@@ -95,6 +97,36 @@ public class LsdManagerTests
 
         Assert.True(_socketFactory.IPv4Socket.JoinedMulticast);
         Assert.True(_socketFactory.IPv6Socket.JoinedMulticast);
+    }
+
+    /// <summary>
+    /// Binding the socket only fixes the source address of what LSD sends. Group membership is a
+    /// separate choice, and the single-argument join leaves it to the routing table - so with a bind
+    /// address configured as a kill switch, the IGMP join still leaves by whichever interface the host
+    /// would have used anyway, and announcements arriving on the bound network are never seen.
+    /// </summary>
+    [Fact]
+    public void Start_WithBindAddress_JoinsOnThatInterface()
+    {
+        _settings.Connection.BindAddress = IPAddress.Loopback;
+        var lsd = new LsdManager(_settings, _resolver, _timeProvider, _socketFactory);
+
+        lsd.Start();
+
+        Assert.True(_socketFactory.IPv4Socket.JoinedMulticast);
+        Assert.Equal(IPAddress.Loopback, _socketFactory.IPv4Socket.JoinedOnInterface);
+    }
+
+    [Fact]
+    public void Start_WithoutBindAddress_LeavesTheInterfaceToTheHost()
+    {
+        var lsd = new LsdManager(_settings, _resolver, _timeProvider, _socketFactory);
+
+        lsd.Start();
+
+        Assert.True(_socketFactory.IPv4Socket.JoinedMulticast);
+        Assert.Null(_socketFactory.IPv4Socket.JoinedOnInterface);
+        Assert.Null(_socketFactory.IPv6Socket.JoinedOnInterface);
     }
 
     [Fact]

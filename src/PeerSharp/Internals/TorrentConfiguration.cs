@@ -11,8 +11,8 @@ internal sealed class TorrentConfiguration
     private readonly ITorrent _torrent; // Back-reference needed for BandwidthManager calls
 
     private long _downloadLimitBytesPerSecond;
-    private int _diskReadLimitBytesPerSecond;
-    private int _diskWriteLimitBytesPerSecond;
+    private long _diskReadLimitBytesPerSecond;
+    private long _diskWriteLimitBytesPerSecond;
     private long _uploadLimitBytesPerSecond;
 
     public TorrentConfiguration(ITorrent torrent, IBandwidthManager bandwidth)
@@ -32,7 +32,7 @@ internal sealed class TorrentConfiguration
         }
     }
 
-    public int DiskReadLimitBytesPerSecond
+    public long DiskReadLimitBytesPerSecond
     {
         get => _diskReadLimitBytesPerSecond;
         set
@@ -43,7 +43,7 @@ internal sealed class TorrentConfiguration
         }
     }
 
-    public int DiskWriteLimitBytesPerSecond
+    public long DiskWriteLimitBytesPerSecond
     {
         get => _diskWriteLimitBytesPerSecond;
         set

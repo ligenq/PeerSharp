@@ -3,6 +3,108 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
+## 3.2.0 — 2026-08-16
+
+Two things drove this release: a host routing through a VPN had no way to make the engine stay on
+that interface, and a magnet's metadata fetch was scheduled per piece, so one silent peer could hold
+a piece's only timer while capable peers sat idle.
+
+### Upgrade notes
+
+**This release changes signatures. Source changes are required.** Bandwidth limits and reported
+transfer rates are signed 64-bit throughout, where they were a mix of `int` and `uint`. Recompiling
+is enough for most callers; anything that stores these values in an `int`, or implements `ITorrent`
+or `IBandwidth`, needs editing. This is a minor version rather than a major one by choice, so a
+binary-only upgrade of a pre-compiled consumer can fail at runtime — rebuild against the new
+package rather than swapping the assembly.
+
+The members that changed:
+
+- `TransferSettings.MaxDownloadSpeed` / `MaxUploadSpeed`: `uint` → `long`.
+- `FilesSettings.MaxDiskReadSpeed` / `MaxDiskWriteSpeed`: `uint` → `long`.
+- `ITorrent.DownloadLimitBytesPerSecond` / `UploadLimitBytesPerSecond` and the two disk equivalents:
+  `int` → `long`.
+- `AddTorrentOptions.DownloadLimitBytesPerSecond` / `UploadLimitBytesPerSecond`: `int?` → `long?`.
+- `SavedTorrentOptions` limit fields, `PeerInfo` and `EngineStats` speeds, `TransferStats.DownloadSpeed`
+  / `UploadSpeed`, and `TransferStatsAlert` speeds: `int` → `long`.
+- `IBandwidth`: every limit parameter and the tuples returned by `GetTorrentLimits` and
+  `GetTorrentDiskLimits`.
+
+Negative limits are now rejected with `ArgumentOutOfRangeException` where they were previously
+clamped to zero or accepted and mishandled. A caller passing a computed limit that can go negative
+needs to clamp it before the call.
+
+Also worth reading before upgrading:
+
+- **`ConnectionSettings.BindAddress` disables port mapping while it is set.** UPnP and NAT-PMP open
+  their own interface-selected sockets and cannot honour a single-address guarantee, so they are
+  turned off rather than allowed to leak. Setting `BindAddress` to `IPAddress.Any` or `IPv6Any` now
+  throws; use `null` for the previous listen-on-everything behaviour.
+- **Direct trackers announce over IPv4 and IPv6 independently.** A tracker reachable both ways now
+  sees two announces per interval instead of one, and one family failing no longer discards the
+  other's peers. A configured `BindAddress` stays strict and single-family; proxied trackers keep
+  proxy-selected addressing.
+- **`MetadataMaxRequestAttempts` orders who gets asked rather than capping the total.** When every
+  peer has been set aside for every missing piece the budgets are restored, so a magnet is never left
+  with willing peers connected and nothing scheduled. An explicit reject survives restoration; a
+  timeout does not, since a slow link produces one just as readily as an unwilling peer.
+
+### Added
+
+- `ConnectionSettings.BindAddress` — binds inbound TCP/UDP, LSD, outbound TCP/uTP, SOCKS control and
+  relay sockets, HTTP and UDP trackers, web seeds, and exact-source magnet fetches to one local
+  address. Socket creation fails rather than falling back to an unbound socket, which is what makes
+  it usable as a kill switch. OS name resolution is outside the binding and follows the host resolver.
+- `PeerDisconnectedAlert` — a departing peer's endpoint, client name, final byte totals and reason
+  code, which the current-peer snapshot cannot report once the peer is gone.
+- `MetadataDownloadStalledAlert` — fired once when metadata-capable peers have been asked repeatedly
+  over an extended period without a single piece arriving.
+- `IClientEngine.GetMagnetMetadataWithProgressAsync` — the transient metadata fetch with
+  operation-scoped progress, without adding the torrent to the engine or its alert stream.
+- `ITorrent.DownloadSpeed` / `UploadSpeed` and `ITorrent.HasSameIdentity`, which compares V1 and V2
+  info hashes while treating an absent hash version as no evidence.
+- `AddTorrentOptions.AdditionalPeers`, for carrying BEP 9 `x.pe` hints from a previewed magnet into
+  the subsequent torrent-file add.
+- `TransferSettings.MetadataRequestRedundancy` — how many peers may hold a request for the same
+  metadata piece at once. Default 3.
+- `DhtIndexerOptions.ReturnDuplicateSightings`, for BEP 51 crawls that want repeat sightings as a
+  ranking hint. `MaxInfoHashes` still counts unique hashes.
+- Peer uTP and encryption preferences are persisted with session options and restored on startup.
+  Only non-default preferences are written.
+- Nullable flow annotations on `MagnetLink.TryParse` and `TorrentFile.TryParse`.
+
+### Changed
+
+- Metadata requests are peer-owned. Each eligible peer independently picks a least-requested missing
+  piece, and timeouts, rejects, disconnects and attempt limits are tracked per peer and piece. The
+  pipeline still caps distinct pieces in flight and `MetadataRequestRedundancy` caps simultaneous
+  owners of one piece.
+- A running magnet keeps its established peer connections across metadata initialization. Bitfield
+  and HAVE state that arrived while the piece count was unknown is retained, resized and replayed;
+  anything missing or inconsistent falls back to close-and-rediscover. Preview mode keeps no live
+  sockets, since it stops after metadata by design.
+- End-game requests are capped at four copies per block.
+- Adaptive connection-timeout history is keyed by endpoint rather than by address alone, so peers
+  behind one NAT or seedbox no longer share a latency and success record.
+- Quota arithmetic saturates instead of overflowing.
+
+### Fixed
+
+- A magnet could stall permanently with capable peers connected. Metadata attempt budgets never
+  expired, so enough timeouts spent every peer/piece pair and left nothing schedulable — reached by
+  ordinary latency against the one-second default timeout, not by malice.
+- Corrupt metadata could blacklist a whole swarm. Every peer credited with an answer was refused on
+  hash failure, including the peers whose copies were harmless duplicates. Only the peers whose bytes
+  were actually stored are refused now.
+- A peer could grow unbounded memory during a magnet's pre-metadata window by sending HAVE messages,
+  whose indices cannot be range-checked before the piece count is known. Deferred availability is now
+  bounded, and a peer that exceeds it is rediscovered rather than adopted with a partial record.
+- HTTP tracker and web-seed connections try every resolved address of the family instead of stopping
+  at the first, so a tracker behind DNS round-robin survives one host being down.
+- LSD joins its multicast group on the configured bind interface. Binding the socket alone left group
+  membership to the routing table, so announcements on the bound network were never received.
+- `EngineStats` and per-torrent rates no longer truncate above 2 GB/s.
+
 ## 3.1.0 — 2026-08-09
 
 65 commits since 3.0.0. Most of this release came out of running the library against real swarms and

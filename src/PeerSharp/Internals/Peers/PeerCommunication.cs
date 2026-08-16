@@ -245,6 +245,41 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private byte[]? _deferredBitfield;
     private readonly HashSet<int> _deferredHavePieces = [];
     private DeferredAvailabilityKind _deferredAvailabilityKind;
+    private bool _deferredAvailabilityUnusable;
+
+    /// <summary>
+    /// How many pre-metadata HAVE indices are worth remembering.
+    ///
+    /// <para>
+    /// Before metadata arrives there is no piece count, and the piece count is exactly what a HAVE
+    /// index would be checked against - so every index a peer sends in that window is unvalidatable.
+    /// Retaining them replaces <see cref="PiecesProgress.AddPiece"/>'s free out-of-range discard with
+    /// a peer-controlled collection fed by a nine-byte message, which is a memory amplifier if left
+    /// open. A peer reports the pieces it already has in one bitfield, so the deferred set only ever
+    /// holds pieces it completes during the few seconds the metadata fetch takes; a peer claiming
+    /// thousands is not describing a real download.
+    /// </para>
+    ///
+    /// <para>
+    /// Overflowing discards the record rather than keeping a partial one, which sends the peer down
+    /// the close-and-rediscover path that already exists for availability that cannot be replayed.
+    /// </para>
+    /// </summary>
+    private const int MaxDeferredHavePieces = 4096;
+
+    /// <summary>
+    /// The largest pre-metadata bitfield worth keeping.
+    ///
+    /// <para>
+    /// Messages are accepted up to <see cref="ProtocolConstants.MaxMessageSize"/>, which is 2 MB, and
+    /// the deferred copy is held for the life of the connection - so without a ceiling a peer can pin
+    /// 2 MB per connection before the torrent knows anything at all. A real bitfield cannot approach
+    /// that: metadata is capped at <see cref="TransferSettings.MaxMetadataSizeBytes"/> (8 MiB by
+    /// default), which at twenty bytes per piece hash is about 420,000 pieces, or a 52 KB bitfield.
+    /// 64 KiB clears that comfortably while leaving nothing like 2 MB on the table.
+    /// </para>
+    /// </summary>
+    private const int MaxDeferredBitfieldBytes = 64 * 1024;
 
     /// <summary>
     /// Bytes that arrived after the handshake but were pulled off the socket along with it.
@@ -406,7 +441,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
         lock (_availabilityLock)
         {
-            if (!HasReportedPieces)
+            if (!HasReportedPieces || _deferredAvailabilityUnusable)
             {
                 return false;
             }
@@ -449,6 +484,56 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             _deferredAvailabilityKind = DeferredAvailabilityKind.None;
             return true;
         }
+    }
+
+    /// <summary>
+    /// Remembers a HAVE that arrived before the piece count did, up to
+    /// <see cref="MaxDeferredHavePieces"/>. Past that, or for an index that cannot be a piece at all,
+    /// the record is dropped and marked unusable so the peer is rediscovered rather than adopted with
+    /// availability that was only partly kept.
+    /// </summary>
+    /// <summary>
+    /// Keeps a bitfield that arrived before the piece count did, unless it is larger than any real
+    /// torrent could produce. An oversized one is discarded and the peer marked for rediscovery, the
+    /// same as an unusable HAVE record.
+    /// </summary>
+    private void RecordDeferredBitfield(ReadOnlySpan<byte> bitfield)
+    {
+        _deferredHavePieces.Clear();
+
+        if (_deferredAvailabilityUnusable)
+        {
+            return;
+        }
+
+        if (bitfield.Length > MaxDeferredBitfieldBytes)
+        {
+            _deferredAvailabilityUnusable = true;
+            _deferredBitfield = null;
+            return;
+        }
+
+        _deferredBitfield = bitfield.ToArray();
+        _deferredAvailabilityKind = DeferredAvailabilityKind.Bitfield;
+    }
+
+    private void RecordDeferredHave(int pieceIndex)
+    {
+        if (_deferredAvailabilityUnusable)
+        {
+            return;
+        }
+
+        if (pieceIndex < 0 || _deferredHavePieces.Count >= MaxDeferredHavePieces)
+        {
+            _deferredAvailabilityUnusable = true;
+            _deferredHavePieces.Clear();
+            _deferredHavePieces.TrimExcess();
+            _deferredBitfield = null;
+            return;
+        }
+
+        _deferredHavePieces.Add(pieceIndex);
     }
 
     private static bool HasNonZeroSpareBits(byte[] bitfield, int pieceCount)
@@ -2108,7 +2193,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 {
                     if (PeerPieces.Count == 0)
                     {
-                        _deferredHavePieces.Add(msg.HavePieceIndex);
+                        RecordDeferredHave(msg.HavePieceIndex);
                     }
                     else
                     {
@@ -2124,9 +2209,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 {
                     if (PeerPieces.Count == 0)
                     {
-                        _deferredBitfield = receivedBitfield.ToArray();
-                        _deferredHavePieces.Clear();
-                        _deferredAvailabilityKind = DeferredAvailabilityKind.Bitfield;
+                        RecordDeferredBitfield(receivedBitfield);
                     }
                     else
                     {

@@ -21,7 +21,7 @@ public class UdpListenerTests
             _receiveChannel.Writer.TryWrite(new UdpReceiveResult(data, remote));
         }
 
-        public void JoinMulticastGroup(IPAddress multicastAddr) { }
+        public void JoinMulticastGroup(IPAddress multicastAddr, IPAddress? localInterface = null) { }
         public void Close() { }
         public void Dispose()
         {

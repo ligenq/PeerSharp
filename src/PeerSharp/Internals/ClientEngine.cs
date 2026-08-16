@@ -1010,8 +1010,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 Settings.Transfer.MaxDownloadSpeed,
                 Settings.Transfer.MaxUploadSpeed);
             _bandwidth.SetGlobalDiskLimits(
-                (int)Settings.Files.MaxDiskReadSpeed,
-                (int)Settings.Files.MaxDiskWriteSpeed);
+                Settings.Files.MaxDiskReadSpeed,
+                Settings.Files.MaxDiskWriteSpeed);
 
             _bandwidth.Start();
             Interlocked.Exchange(ref _bandwidthStarted, 1);

@@ -460,6 +460,9 @@ public sealed class DhtSettings
 /// </summary>
 public sealed class FilesSettings
 {
+    private long _maxDiskReadSpeed;
+    private long _maxDiskWriteSpeed;
+
     /// <summary>
     /// Gets or sets the default directory for downloading torrent files.
     /// This is used if no specific download path is provided when adding a torrent.
@@ -486,11 +489,31 @@ public sealed class FilesSettings
     /// </summary>
     public int ReadAheadBlocks { get; set; } = 4;
 
-    /// <summary>Global disk read speed limit in bytes per second. 0 for unlimited.</summary>
-    public uint MaxDiskReadSpeed { get; set; } = 0;
+    /// <summary>
+    /// Global disk read speed limit in bytes per second. 0 for unlimited. Negative values are rejected.
+    /// </summary>
+    public long MaxDiskReadSpeed
+    {
+        get => _maxDiskReadSpeed;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _maxDiskReadSpeed = value;
+        }
+    }
 
-    /// <summary>Global disk write speed limit in bytes per second. 0 for unlimited.</summary>
-    public uint MaxDiskWriteSpeed { get; set; } = 0;
+    /// <summary>
+    /// Global disk write speed limit in bytes per second. 0 for unlimited. Negative values are rejected.
+    /// </summary>
+    public long MaxDiskWriteSpeed
+    {
+        get => _maxDiskWriteSpeed;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _maxDiskWriteSpeed = value;
+        }
+    }
 }
 
 /// <summary>
@@ -710,8 +733,22 @@ public sealed class TransferSettings
     public int MetadataRequestTimeoutSeconds { get; set; } = 1;
 
     /// <summary>
-    /// Maximum attempts for the same metadata piece against the same peer.
-    /// Default is 5.
+    /// How many times the same metadata piece is asked of the same peer before that pair is set aside
+    /// in favour of an untried one. Default is 5.
+    ///
+    /// <para>
+    /// This orders who gets asked; it is not a hard ceiling on the total. When every peer has been set
+    /// aside for every missing piece the budgets are restored rather than leaving a magnet with willing
+    /// peers connected and nothing scheduled - a timeout says a peer was slow, which a slow link
+    /// produces just as readily as an unwilling peer, so it is not evidence enough to stop for good.
+    /// An explicit reject is, and survives the restoration.
+    /// </para>
+    ///
+    /// <para>
+    /// Restoration therefore costs at most one further round per piece per peer before the pairs are
+    /// set aside again, and cannot run more often than <see cref="MetadataRequestTimeoutSeconds"/>,
+    /// since the restored requests must time out before the budgets can be spent again.
+    /// </para>
     /// </summary>
     public int MetadataMaxRequestAttempts { get; set; } = 5;
 

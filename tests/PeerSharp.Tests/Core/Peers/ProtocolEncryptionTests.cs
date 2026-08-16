@@ -58,8 +58,8 @@ public class ProtocolEncryptionTests
         public ITorrentEvents? Events => null;
         public DownloadStrategy DownloadStrategy { get => DownloadStrategy.RarestFirst; set { } }
         public long DownloadLimitBytesPerSecond { get => 0; set { } }
-        public int DiskReadLimitBytesPerSecond { get => 0; set { } }
-        public int DiskWriteLimitBytesPerSecond { get => 0; set { } }
+        public long DiskReadLimitBytesPerSecond { get => 0; set { } }
+        public long DiskWriteLimitBytesPerSecond { get => 0; set { } }
         public long UploadLimitBytesPerSecond { get => 0; set { } }
         public int QueuePriority { get => 0; set { } }
         public bool QueueAutoStart { get => false; set { } }
