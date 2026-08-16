@@ -527,10 +527,11 @@ rather than succeed by another route would be the thing that proves it.
 
 ---
 
-## Four things found by building a client against this
+## Found by building a client against this
 
 Grouped because they share a shape: none is a defect in what the engine computes, and each cost a
-consumer either a workaround or a bug. Recorded from writing Peerfluence against version 3.1.0.
+consumer either a workaround or a bug. Recorded from writing Peerfluence against version 3.1.0, and
+added to as more turn up - so the heading deliberately does not count them.
 
 ### `TryParse` does not promise the compiler what it promises the reader
 
@@ -542,8 +543,14 @@ the bool and then uses the result gets CS8604 for a null that cannot happen.
 first is noise, and the other two teach people to silence exactly the warning that catches the real
 case. Peerfluence took the redundant check.
 
-**What would settle it.** Two attributes. `[NotNullWhen(true)] out MagnetLink? result` on both
-overloads, and the same treatment for any other `TryParse` in the surface.
+**The codebase already knows.** `TorrentRegistry.TryGet`, `TorrentRegistry.Remove` and
+`UtpManager.TryGetStream` all annotate their out parameters correctly
+(`TorrentRegistry.cs:94,114,132`, `UtpManager.cs:245`). The pattern is applied where the engine talks
+to itself and dropped where it talks to everyone else, which is the wrong way round: an internal
+caller can read the implementation and a consumer cannot.
+
+**What would settle it.** Four attributes, on the four public overloads that lack them -
+`MagnetLink.TryParse` twice and `TorrentFile.TryParse` twice (`TorrentFile.cs:204,216`).
 
 ### Nothing can be asked how fast a torrent is going
 
@@ -561,6 +568,10 @@ it. Two caches of the same numbers, in one process, because the numbers cannot b
 **What would settle it.** A rate pair on `ITorrent`, computed where the alert is already computed, so
 that consumers can subscribe for the push or read for the pull rather than being forced into the
 first.
+
+**Since writing this.** The second cache has acquired its own test file. That does not make the
+duplication worse, but it does make it permanent in the way that tested code is: it is now something
+Peerfluence maintains rather than something it happens to do.
 
 ### Two empty info hashes are equal, so naive identity comparison matches unrelated torrents
 
@@ -592,6 +603,43 @@ the whole time and is the right answer; nothing pointed at it.
 **What would settle it.** A sentence on `LoadAsync` saying it reads the local file system and
 pointing at `Parse` for bytes fetched elsewhere. Not an overload that does the fetching - a torrent
 library has no business making HTTP requests - just a signpost where the wrong turn is taken.
+
+---
+
+### One quantity, three types, and the unsigned one is a trap
+
+**Observed.** Bytes per second is expressed differently depending on where it is touched. Engine-wide
+limits are `uint` (`Configuration.cs:477,480,709,712`). Per-torrent limits are `int`
+(`ITorrent.cs:38,43,48,227`). Reported rates are `int` (`Alerts.cs:210,215`), while the cumulative
+totals beside them are `long` (`Alerts.cs:200,205`).
+
+**Why it matters.** The `uint` is the one that bites. A consumer holding a limit as `long` - which it
+will, because every other byte count here is `long` - and casting it across writes an enormous limit
+where a negative was intended, silently, because that is what an unsigned conversion does. Peerfluence
+clamps rather than casts, and the comment explaining why is longer than the code. The `int` on the
+per-torrent limits has the opposite problem: a negative is expressible and nothing says what it means.
+
+**What would settle it.** `long` throughout, with negatives rejected where they arrive rather than
+made unrepresentable in a way that turns them into their opposite. Failing that, a sentence on each
+`uint` saying what a caller should do with a value it cannot represent.
+
+---
+
+### `DownloadPath` does not say which path it is
+
+**Observed.** `IFiles.DownloadPath` is documented as "the download path for this torrent's files"
+(`IFiles.cs:13-16`). That admits two readings - the directory the torrent was saved into, or that
+directory plus the torrent's own folder - and they differ by exactly one path segment.
+
+**Why it matters.** It is the second, and a consumer that assumes the first is wrong in a way nothing
+catches: both produce a plausible path, and the mistake only shows up as files appearing one level
+too deep or a remote client reporting the wrong directory. Peerfluence's Transmission endpoint has to
+answer with the parent, so it takes `Path.GetDirectoryName` on the strength of having read the engine
+rather than the documentation.
+
+**What would settle it.** Six words in the summary. "Includes the torrent's own folder" would remove
+the ambiguity entirely, and is worth more here than in most places because the two readings are
+equally sensible.
 
 ---
 
