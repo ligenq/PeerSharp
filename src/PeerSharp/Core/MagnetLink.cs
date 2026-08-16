@@ -152,7 +152,7 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
     /// <param name="magnetUri">The magnet link URI string.</param>
     /// <param name="result">The parsed MagnetLink if successful.</param>
     /// <returns>True if parsing succeeded, false otherwise.</returns>
-    public static bool TryParse(string? magnetUri, out MagnetLink? result)
+    public static bool TryParse(string? magnetUri, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out MagnetLink? result)
     {
         return TryParse(magnetUri, out result, out _);
     }
@@ -164,7 +164,7 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
     /// <param name="result">The parsed MagnetLink if successful.</param>
     /// <param name="error">Error message if parsing failed.</param>
     /// <returns>True if parsing succeeded, false otherwise.</returns>
-    public static bool TryParse(string? magnetUri, out MagnetLink? result, out string? error)
+    public static bool TryParse(string? magnetUri, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out MagnetLink? result, out string? error)
     {
         result = null;
         error = null;

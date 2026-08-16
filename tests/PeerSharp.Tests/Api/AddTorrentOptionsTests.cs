@@ -20,6 +20,7 @@ public class AddTorrentOptionsTests
         Assert.Equal(DownloadStrategy.RarestFirst, options.DownloadStrategy);
         Assert.Null(options.DownloadPath);
         Assert.Null(options.AdditionalTrackers);
+        Assert.Null(options.AdditionalPeers);
         Assert.Null(options.FileSelections);
         Assert.Null(options.Events);
         Assert.Null(options.ResumeData);

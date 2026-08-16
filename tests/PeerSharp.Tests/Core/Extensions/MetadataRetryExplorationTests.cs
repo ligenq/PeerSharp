@@ -347,48 +347,31 @@ public class MetadataRetryExplorationTests
         ((List<IPeerCommunication>)field.GetValue(download)!).Add(peer);
     }
 
-    private static System.Collections.IDictionary Pending(MetadataDownload download)
-    {
-        var field = typeof(MetadataDownload)
-            .GetField("_pendingRequests", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        return (System.Collections.IDictionary)field.GetValue(download)!;
-    }
-
     /// <summary>Replaces the pending request with one old enough to have timed out, keeping its count.</summary>
     private static void StalePendingRequest(MetadataDownload download, int piece, IPeerCommunication peer)
     {
-        var dict = Pending(download);
-        int attempts = dict.Contains(piece) ? ReadAttempts(dict[piece]!) : 1;
-
-        var pendingType = typeof(MetadataDownload).GetNestedType("PendingMetadataRequest", BindingFlags.NonPublic)!;
-
-        // AskedCount is passed explicitly: reflection does not apply the parameter's default, so an
-        // argument per constructor parameter is required. One means "only the owning peer holds it",
-        // which is what a request injected for a single peer represents.
-        dict[piece] = pendingType.GetConstructors()[0]
-            .Invoke([peer, DateTimeOffset.UtcNow.AddMinutes(-5), attempts, 1]);
+        int attempts = download.GetPendingRequestsForTesting()
+            .Where(request => request.Peer == peer && request.Piece == piece)
+            .Select(request => request.Attempts)
+            .DefaultIfEmpty(1)
+            .Max();
+        download.SetPendingRequestForTesting(peer, piece, DateTimeOffset.UtcNow.AddMinutes(-5), attempts);
     }
 
     private static int CurrentAttempts(MetadataDownload download, int piece)
     {
-        var dict = Pending(download);
-        return dict.Contains(piece) ? ReadAttempts(dict[piece]!) : 0;
+        return download.GetPendingRequestsForTesting()
+            .Where(request => request.Piece == piece)
+            .Select(request => request.Attempts)
+            .DefaultIfEmpty(0)
+            .Max();
     }
 
     private static IPeerCommunication? PendingPeer(MetadataDownload download, int piece)
     {
-        var dict = Pending(download);
-        if (!dict.Contains(piece))
-        {
-            return null;
-        }
-
-        var value = dict[piece]!;
-        return (IPeerCommunication?)value.GetType().GetProperty("Peer")!.GetValue(value);
+        return download.GetPendingRequestsForTesting()
+            .FirstOrDefault(request => request.Piece == piece).Peer;
     }
-
-    private static int ReadAttempts(object pending)
-        => (int)pending.GetType().GetProperty("Attempts")!.GetValue(pending)!;
 
     private class MockPeerCommunication : IPeerCommunication
     {

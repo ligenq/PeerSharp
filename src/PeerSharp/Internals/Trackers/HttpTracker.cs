@@ -6,6 +6,7 @@ using PeerSharp.BEncoding;
 using PeerSharp.Internals.Network;
 using System.Buffers;
 using System.Net;
+using System.Net.Sockets;
 
 namespace PeerSharp.Internals.Trackers;
 
@@ -13,17 +14,23 @@ internal class HttpTracker : TrackerBase, IDisposable
 {
     private const int MaxTrackerResponseBytes = 1024 * 1024;
     private readonly ILogger<HttpTracker> _logger;
-    private readonly IHttpClientFactory _httpClientFactory = new HttpClientFactory();
+    private readonly IHttpClientFactory _httpClientFactory;
     private AtomicDisposal _disposal = new();
     private IHttpClient? _testClient;
 
     public HttpTracker()
-        : this(NullLoggerFactory.Instance)
+        : this(NullLoggerFactory.Instance, new HttpClientFactory())
     {
     }
 
     public HttpTracker(ILoggerFactory loggerFactory)
+        : this(loggerFactory, new HttpClientFactory())
     {
+    }
+
+    internal HttpTracker(ILoggerFactory loggerFactory, IHttpClientFactory httpClientFactory)
+    {
+        _httpClientFactory = httpClientFactory;
         _logger = loggerFactory.CreateLogger<HttpTracker>();
     }
 
@@ -34,8 +41,29 @@ internal class HttpTracker : TrackerBase, IDisposable
             string url = BuildUrl(evt);
             _logger.LogDebug("Announcing to {Url}", url);
 
-            var responseBytes = await GetResponseBytesAsync(url, ct).ConfigureAwait(false);
-            var response = ParseResponse(responseBytes);
+            var families = GetAnnounceAddressFamilies();
+            AnnounceResponse response;
+            if (families.Count == 1)
+            {
+                response = await AnnounceOnceAsync(url, families[0], ct).ConfigureAwait(false);
+            }
+            else
+            {
+                var attempts = await Task.WhenAll(
+                    families.Select(family => TryAnnounceOnceAsync(url, family!.Value, ct))).ConfigureAwait(false);
+                var successes = attempts
+                    .Where(attempt => attempt.Response != null)
+                    .Select(attempt => attempt.Response!)
+                    .ToArray();
+                if (successes.Length == 0)
+                {
+                    throw new AggregateException(
+                        "Tracker could not be reached over IPv4 or IPv6.",
+                        attempts.Where(attempt => attempt.Error != null).Select(attempt => attempt.Error!).ToArray());
+                }
+
+                response = MergeAnnounceResponses(successes);
+            }
 
             // BEP 3: hold on to the session token for the next announce to this tracker.
             if (!string.IsNullOrEmpty(response.TrackerId))
@@ -95,7 +123,7 @@ internal class HttpTracker : TrackerBase, IDisposable
 
             _logger.LogDebug("Scraping {Url}", url);
 
-            var responseBytes = await GetResponseBytesAsync(url, ct).ConfigureAwait(false);
+            var responseBytes = await GetResponseBytesAsync(url, null, ct).ConfigureAwait(false);
             var response = ParseScrapeResponse(responseBytes);
 
             RaiseScrapeResult(true, response);
@@ -136,7 +164,7 @@ internal class HttpTracker : TrackerBase, IDisposable
 
             _logger.LogDebug("Multi-scraping {Url}", url);
 
-            var responseBytes = await GetResponseBytesAsync(url, ct).ConfigureAwait(false);
+            var responseBytes = await GetResponseBytesAsync(url, null, ct).ConfigureAwait(false);
             var response = ParseMultiScrapeResponse(responseBytes);
 
             RaiseMultiScrapeResult(true, response);
@@ -172,9 +200,47 @@ internal class HttpTracker : TrackerBase, IDisposable
         }
     }
 
-    private async Task<byte[]> GetResponseBytesAsync(string url, CancellationToken ct)
+    private async Task<AnnounceResponse> AnnounceOnceAsync(
+        string url,
+        AddressFamily? addressFamily,
+        CancellationToken ct)
     {
-        var client = GetClient();
+        var responseBytes = await GetResponseBytesAsync(url, addressFamily, ct).ConfigureAwait(false);
+        return ParseResponse(responseBytes);
+    }
+
+    private async Task<AnnounceAttempt> TryAnnounceOnceAsync(
+        string url,
+        AddressFamily addressFamily,
+        CancellationToken ct)
+    {
+        try
+        {
+            return new AnnounceAttempt(
+                await AnnounceOnceAsync(url, addressFamily, ct).ConfigureAwait(false),
+                null);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(
+                ex,
+                "Announce to {Url} over {AddressFamily} failed while the other family remains eligible",
+                Url,
+                addressFamily);
+            return new AnnounceAttempt(null, ex);
+        }
+    }
+
+    private async Task<byte[]> GetResponseBytesAsync(
+        string url,
+        AddressFamily? addressFamily,
+        CancellationToken ct)
+    {
+        var client = GetClient(addressFamily);
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -523,7 +589,70 @@ internal class HttpTracker : TrackerBase, IDisposable
         return baseUrl + sb.ToString();
     }
 
-    private IHttpClient GetClient()
+    private IReadOnlyList<AddressFamily?> GetAnnounceAddressFamilies()
+    {
+        var bindAddress = Torrent.Settings.Connection.BindAddress;
+        if (bindAddress != null)
+        {
+            return [bindAddress.AddressFamily];
+        }
+
+        var proxy = Torrent.Settings.Proxy;
+        bool proxyIsActive = proxy.ProxyTrackers
+            && proxy.Type != ProxyType.None
+            && !string.IsNullOrEmpty(proxy.Host);
+        if (_testClient != null || proxyIsActive)
+        {
+            return [null];
+        }
+
+        return [AddressFamily.InterNetwork, AddressFamily.InterNetworkV6];
+    }
+
+    private static AnnounceResponse MergeAnnounceResponses(IReadOnlyList<AnnounceResponse> responses)
+    {
+        var merged = new AnnounceResponse
+        {
+            Interval = responses.Min(response => response.Interval),
+            MinInterval = responses
+                .Where(response => response.MinInterval.HasValue)
+                .Select(response => response.MinInterval!.Value)
+                .DefaultIfEmpty()
+                .Min(),
+            SeedCount = responses.Max(response => response.SeedCount),
+            LeechCount = responses.Max(response => response.LeechCount),
+            TrackerId = responses.Select(response => response.TrackerId).FirstOrDefault(value => !string.IsNullOrEmpty(value)),
+            WarningMessage = responses.Select(response => response.WarningMessage).FirstOrDefault(value => !string.IsNullOrEmpty(value))
+        };
+
+        if (responses.All(response => !response.MinInterval.HasValue))
+        {
+            merged.MinInterval = null;
+        }
+
+        var peers = new HashSet<IPEndPoint>();
+        var addresses = new HashSet<IPAddress>();
+        foreach (var response in responses)
+        {
+            foreach (var peer in response.Peers)
+            {
+                if (peers.Add(peer))
+                {
+                    merged.Peers.Add(peer);
+                }
+            }
+
+            if (response.ExternalIp != null && addresses.Add(response.ExternalIp))
+            {
+                merged.ExternalAddresses.Add(response.ExternalIp);
+            }
+        }
+
+        merged.ExternalIp = merged.ExternalAddresses.FirstOrDefault();
+        return merged;
+    }
+
+    private IHttpClient GetClient(AddressFamily? addressFamily = null)
     {
         if (_testClient != null)
         {
@@ -536,9 +665,19 @@ internal class HttpTracker : TrackerBase, IDisposable
             // Create a temporary settings object for "None" proxy to force direct connection
             // We can't modify the global settings object as it might be used elsewhere
             var directSettings = new ProxySettings { Type = ProxyType.None };
-            return new DefaultHttpClient(_httpClientFactory.CreateClient(directSettings, true));
+            return new DefaultHttpClient(_httpClientFactory.CreateClient(
+                directSettings,
+                true,
+                Torrent.Settings.Connection.BindAddress,
+                addressFamily));
         }
 
-        return new DefaultHttpClient(_httpClientFactory.CreateClient(settings, true));
+        return new DefaultHttpClient(_httpClientFactory.CreateClient(
+            settings,
+            true,
+            Torrent.Settings.Connection.BindAddress,
+            addressFamily));
     }
+
+    private sealed record AnnounceAttempt(AnnounceResponse? Response, Exception? Error);
 }

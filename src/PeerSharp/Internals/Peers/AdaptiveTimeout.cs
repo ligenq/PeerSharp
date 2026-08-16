@@ -302,8 +302,9 @@ internal class AdaptiveTimeout
 
     private static string GetEndpointKey(IPEndPoint endpoint)
     {
-        // Use IP only (not port) for grouping - same host likely has similar latency
-        return endpoint.Address.ToString();
+        // A shared address can represent unrelated peers behind NAT or multiple services on a
+        // seedbox. Keep their success and latency histories independent.
+        return endpoint.ToString();
     }
 
     private int ClampTimeout(int timeout)

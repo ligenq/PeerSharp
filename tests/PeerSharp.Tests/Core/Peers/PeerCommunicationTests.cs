@@ -949,6 +949,52 @@ public class PeerCommunicationTests
     }
 
     [Fact]
+    public async Task DeferredMagnetAvailability_IsReplayedWhenPieceCountBecomesKnown()
+    {
+        var metadata = CreateMetadataV1();
+        metadata.Info.PieceSize = 0;
+        metadata.Info.FullSize = 0;
+        metadata.Info.Files.Clear();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        Assert.Equal(0, peer.PeerPieces.Count);
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", new PeerMessage(MessageId.Bitfield) { Data = [0b1000_0000, 0b0100_0000] });
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", new PeerMessage(MessageId.Have) { HavePieceIndex = 4 });
+
+        Assert.True(peer.TryApplyDeferredAvailability(10));
+        Assert.Equal(10, peer.PeerPieces.Count);
+        Assert.True(peer.PeerPieces.HasPiece(0));
+        Assert.True(peer.PeerPieces.HasPiece(4));
+        Assert.True(peer.PeerPieces.HasPiece(9));
+        Assert.Equal(3, peer.PeerPieces.ReceivedCount);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task DeferredMagnetBitfield_WithWrongLength_CannotBeAdopted()
+    {
+        var metadata = CreateMetadataV1();
+        metadata.Info.PieceSize = 0;
+        metadata.Info.FullSize = 0;
+        metadata.Info.Files.Clear();
+        string path = CreateTempPath();
+        var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", new PeerMessage(MessageId.Bitfield) { Data = [0x80] });
+
+        Assert.False(peer.TryApplyDeferredAvailability(10));
+        Assert.Equal(0, peer.PeerPieces.Count);
+
+        await torrent.DisposeAsync();
+        CleanupPath(path);
+    }
+
+    [Fact]
     public async Task ProcessMessageAsync_RequestWhenAmChoking_MessageDroppedSilently()
     {
         var metadata = CreateMetadataV1();

@@ -36,10 +36,17 @@ public sealed class AddTorrentOptions
     public IReadOnlyList<string>? AdditionalTrackers { get; set; }
 
     /// <summary>
-    /// Gets or sets the download bandwidth limit in bytes per second.
-    /// If null, uses the global limit.
+    /// Gets or sets peer endpoints to seed into discovery when the torrent is added. This is useful
+    /// when a magnet was previewed as a <see cref="TorrentFile"/> and its BEP 9 <c>x.pe</c> hints need
+    /// to be carried into the subsequent torrent-file add.
     /// </summary>
-    public int? DownloadLimitBytesPerSecond { get; set; }
+    public IReadOnlyList<System.Net.IPEndPoint>? AdditionalPeers { get; set; }
+
+    /// <summary>
+    /// Gets or sets the download bandwidth limit in bytes per second.
+    /// If null, uses the global limit. Negative values are rejected when the torrent is added.
+    /// </summary>
+    public long? DownloadLimitBytesPerSecond { get; set; }
 
     /// <summary>
     /// Gets or sets the download directory path.
@@ -107,8 +114,8 @@ public sealed class AddTorrentOptions
 
     /// <summary>
     /// Gets or sets the upload bandwidth limit in bytes per second.
-    /// If null, uses the global limit.
+    /// If null, uses the global limit. Negative values are rejected when the torrent is added.
     /// </summary>
-    public int? UploadLimitBytesPerSecond { get; set; }
+    public long? UploadLimitBytesPerSecond { get; set; }
 }
 

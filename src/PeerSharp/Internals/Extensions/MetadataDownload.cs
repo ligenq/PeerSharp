@@ -8,17 +8,16 @@ namespace PeerSharp.Internals.Extensions;
 
 internal class MetadataDownload : IMetadataDownload, IDisposable
 {
+    private static readonly TimeSpan StallWarningAfter = TimeSpan.FromSeconds(30);
+    private const int StallWarningMinimumRequests = 6;
     private readonly List<IPeerCommunication> _activePeers = [];
     private readonly Lock _lock = new();
     private readonly ILogger<MetadataDownload> _logger;
     private readonly ILoggerFactory _loggerFactory;
-    /// <summary>
-    /// How many peers to ask for the same metadata piece at once. A piece is at most 16 KiB, so the
-    /// redundancy is negligible next to being held up by one unresponsive peer.
-    /// </summary>
-    private const int MetadataRequestRedundancy = 3;
-
-    private readonly Dictionary<int, PendingMetadataRequest> _pendingRequests = [];
+    // One outstanding request per peer. Piece pressure is derived from these values so every peer can
+    // independently choose the least-requested missing piece while per-piece redundancy stays bounded.
+    private readonly Dictionary<(IPeerCommunication Peer, int Piece), PendingMetadataRequest> _pendingRequests = [];
+    private readonly Dictionary<(IPeerCommunication Peer, int Piece), int> _requestAttempts = [];
 
     /// <summary>
     /// How many timed-out requests a peer is given before it stops being a first choice. Requests which
@@ -52,10 +51,15 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private AtomicDisposal _disposal = new();
 
     private float _lastReportedProgress = -1f;
+    private DateTimeOffset? _firstRequestAt;
+    private long _requestsSent;
+    private long _responsesReceived;
+    private bool _stallReported;
     private byte[] _metadataBuffer = [];
     private int _metadataSize = 0;
     private int MetadataRequestTimeoutSeconds => Math.Max(1, _torrent.Settings.Transfer.MetadataRequestTimeoutSeconds);
     private int MetadataRequestPipeline => Math.Clamp(_torrent.Settings.Transfer.MetadataRequestPipeline, 1, 32);
+    private int MetadataRequestRedundancy => Math.Clamp(_torrent.Settings.Transfer.MetadataRequestRedundancy, 1, 16);
     private int MetadataMaxRequestAttempts => Math.Max(1, _torrent.Settings.Transfer.MetadataMaxRequestAttempts);
     private int MaxMetadataSizeBytes => Math.Max(1, _torrent.Settings.Transfer.MaxMetadataSizeBytes);
 
@@ -145,7 +149,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
             if (Active && _activePeers.Count > 0)
             {
-                FillMissingRequests();
+                FillPeerRequests();
             }
         }
     }
@@ -179,7 +183,8 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             // first, though: malformed or out-of-range messages must not promote a peer or cancel the
             // valid request which is still in flight.
             RecordFor(peer).Answered++;
-            _pendingRequests.Remove(pieceIndex);
+            _responsesReceived++;
+            ReleaseRequestsForReceivedPiece(pieceIndex);
             if (peer is PeerCommunication communication)
             {
                 communication.MarkUsefulDataExchanged();
@@ -187,7 +192,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
             if (_receivedPieces[pieceIndex])
             {
-                FillMissingRequests(peer);
+                FillPeerRequests(peer);
                 return;
             }
 
@@ -238,6 +243,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 Finished = true;
                 Active = false;
                 _pendingRequests.Clear();
+                _requestAttempts.Clear();
 
                 if (string.IsNullOrEmpty(newMetadata.Announce))
                 {
@@ -267,7 +273,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             }
             else
             {
-                FillMissingRequests(peer);
+                FillPeerRequests(peer);
             }
         }
 
@@ -287,13 +293,12 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     {
         lock (_lock)
         {
-            if (_pendingRequests.Remove(pieceIndex))
+            if (_pendingRequests.Remove((peer, pieceIndex)))
             {
+                RecordFor(peer).TimedOut++;
+                _requestAttempts[(peer, pieceIndex)] = MetadataMaxRequestAttempts;
                 _logger.LogWarning("Peer {PeerId} rejected metadata piece {PieceIndex}", peer.PeerId, pieceIndex);
-                if (pieceIndex >= 0 && pieceIndex < _receivedPieces.Length && !_receivedPieces[pieceIndex])
-                {
-                    RequestPiece(pieceIndex, preferredPeer: GetAlternatePeer(peer));
-                }
+                FillPeerRequests(peer);
             }
         }
     }
@@ -366,24 +371,17 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
                     if (Active && !Finished)
                     {
-                        // Top up first: a peer that arrives while the pipeline is full would otherwise
-                        // be given nothing to do, which is the whole reason the first round was slow.
-                        TopUpOutstandingRequests(peer);
-                        FillMissingRequests();
+                        FillPeerRequests(peer);
                     }
                 }
                 else if (Active && !Finished && _metadataSize == 0)
                 {
                     // Some peers omit metadata_size in the extended handshake; probe piece 0.
-                    if (!_pendingRequests.ContainsKey(0))
-                    {
-                        RequestPiece(0, preferredPeer: peer);
-                    }
+                    TryAssignPeer(peer);
                 }
                 else if (Active && !Finished && _metadataSize > 0)
                 {
-                    TopUpOutstandingRequests(peer);
-                    FillMissingRequests(peer);
+                    FillPeerRequests(peer);
                 }
             }
         }
@@ -395,18 +393,15 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         {
             _activePeers.Remove(peer);
             _peerRecords.Remove(peer);
-            if (_pendingRequests.Count > 0)
+            foreach (var key in _pendingRequests.Keys.Where(key => key.Peer == peer).ToList())
             {
-                var toRemove = _pendingRequests
-                    .Where(kv => kv.Value.Peer == peer)
-                    .Select(kv => kv.Key)
-                    .ToList();
-
-                foreach (var piece in toRemove)
-                {
-                    _pendingRequests.Remove(piece);
-                }
+                _pendingRequests.Remove(key);
             }
+            foreach (var key in _requestAttempts.Keys.Where(key => key.Peer == peer).ToList())
+            {
+                _requestAttempts.Remove(key);
+            }
+            FillPeerRequests();
         }
     }
 
@@ -419,6 +414,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             Finished = true;
             Active = false;
             _pendingRequests.Clear();
+            _requestAttempts.Clear();
         }
     }
 
@@ -432,6 +428,11 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             }
 
             _pendingRequests.Clear();
+            _requestAttempts.Clear();
+            _firstRequestAt = null;
+            _requestsSent = 0;
+            _responsesReceived = 0;
+            _stallReported = false;
             Active = true;
         }
 
@@ -446,6 +447,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         {
             Active = false;
             _pendingRequests.Clear();
+            _requestAttempts.Clear();
         }
     }
 
@@ -460,15 +462,12 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
             if (_metadataSize == 0)
             {
-                if (_activePeers.Count > 0 && !_pendingRequests.ContainsKey(0))
-                {
-                    RequestPiece(0, preferredPeer: GetRandomMetadataPeer());
-                }
+                FillPeerRequests();
                 return;
             }
 
             var now = _torrent.Services.TimeProvider.GetUtcNow();
-            var timedOut = new List<int>();
+            var timedOut = new List<(IPeerCommunication Peer, int Piece)>();
             foreach (var kvp in _pendingRequests)
             {
                 if ((now - kvp.Value.Timestamp).TotalSeconds > MetadataRequestTimeoutSeconds)
@@ -477,19 +476,16 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 }
             }
 
-            foreach (var piece in timedOut)
+            foreach (var key in timedOut)
             {
-                if (_pendingRequests.Remove(piece, out var pending))
+                if (_pendingRequests.Remove(key, out _))
                 {
-                    RecordFor(pending.Peer).TimedOut++;
-                    if (pending.Attempts < MetadataMaxRequestAttempts)
-                    {
-                        RequestPiece(piece, GetAlternatePeer(pending.Peer), pending.Attempts);
-                    }
+                    RecordFor(key.Peer).TimedOut++;
                 }
             }
 
-            FillMissingRequests();
+            ReportStalledMetadataDownload(now);
+            FillPeerRequests();
         }
     }
 
@@ -549,239 +545,170 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         _torrent.Alerts.MetadataProgressAlert(_torrent, currentProgress, received, total);
     }
 
-    private IPeerCommunication? GetRandomMetadataPeer()
-    {
-        if (_activePeers.Count == 0)
-        {
-            return null;
-        }
-
-        // Prefer a peer that has declared a metadata size, for the same reason the redundant requests
-        // do: a peer that speaks the extension but holds nothing can never answer.
-        var candidates = EligibleMetadataPeers(exclude: null);
-        if (candidates.Count == 0)
-        {
-            return _activePeers[Random.Shared.Next(_activePeers.Count)];
-        }
-
-        return candidates[Random.Shared.Next(candidates.Count)];
-    }
-
-    private void FillMissingRequests(IPeerCommunication? preferredPeer = null)
-    {
-        if (!Active || Finished || _metadataSize == 0)
-        {
-            return;
-        }
-
-        if (_pendingRequests.Count >= MetadataRequestPipeline)
-        {
-            return;
-        }
-
-        int totalPieces = _receivedPieces.Length;
-        if (totalPieces == 0)
-        {
-            return;
-        }
-
-        int attempts = 0;
-        while (_pendingRequests.Count < MetadataRequestPipeline && attempts < totalPieces)
-        {
-            int idx = _nextPieceCursor % totalPieces;
-            _nextPieceCursor = (idx + 1) % totalPieces;
-            attempts++;
-
-            if (!_receivedPieces[idx] && !_pendingRequests.ContainsKey(idx))
-            {
-                RequestPiece(idx, preferredPeer);
-            }
-        }
-    }
-
     /// <summary>
-    /// Asks a peer for one piece of the metadata, recording the request so it can be timed out.
+    /// Gives every eligible peer one independently owned request. Each peer chooses a least-requested
+    /// missing piece; the global pipeline limits distinct pieces, while redundancy limits simultaneous
+    /// owners of the same piece. This makes timeout, reject and disconnect recovery peer-local instead
+    /// of allowing one piece-owned timer to hide several untracked requests.
     /// </summary>
-    /// <param name="pieceIndex">Which metadata piece to ask for.</param>
-    /// <param name="preferredPeer">Peer to ask, or null to pick one at random from the active list.</param>
-    /// <param name="attemptsSoFar">
-    /// How many times this piece has already been asked for. The retry path removes the pending request
-    /// before calling back in, so the count cannot be recovered from <c>_pendingRequests</c> - it has to
-    /// be carried. Losing it pinned every request at attempt 1, which made the give-up check
-    /// (<c>Attempts &lt; MetadataMaxRequestAttempts</c>) permanently true: a peer that never answered
-    /// was asked again every ten seconds for as long as the torrent ran, and the piece was never handed
-    /// back to the random-peer path that would have found a different one.
-    /// </param>
-    private void RequestPiece(int pieceIndex, IPeerCommunication? preferredPeer = null, int attemptsSoFar = 0)
+    private void FillPeerRequests(IPeerCommunication? first = null)
     {
         if (!Active || Finished)
         {
             return;
         }
 
-        if (_metadataSize == 0 && pieceIndex != 0)
+        bool haveDeclaredHolder = _activePeers.Any(PeerCanDeclareMetadata);
+        bool assigned;
+        do
         {
-            return;
-        }
-
-        var peer = preferredPeer ?? GetRandomMetadataPeer();
-        if (peer == null && preferredPeer != null && !_activePeers.Contains(preferredPeer))
-        {
-            peer = preferredPeer;
-        }
-        if (peer != null)
-        {
-            if (peer.UtMetadata.RemoteMessageId == null)
+            assigned = false;
+            if (first != null && (!haveDeclaredHolder || PeerCanDeclareMetadata(first)))
             {
-                _logger.LogInformation("Skipping metadata request for piece {PieceIndex}; peer {PeerId} has no ut_metadata id", pieceIndex, peer.PeerId);
-                return;
+                assigned |= TryAssignPeer(first);
             }
-            int attempts = attemptsSoFar + 1;
-            if (attemptsSoFar == 0 && _pendingRequests.TryGetValue(pieceIndex, out var existing))
+
+            foreach (IPeerCommunication peer in _activePeers)
             {
-                attempts = existing.Attempts + 1;
+                if ((!haveDeclaredHolder || PeerCanDeclareMetadata(peer)) && !ReferenceEquals(peer, first))
+                {
+                    assigned |= TryAssignPeer(peer);
+                }
             }
-            _logger.LogInformation("Requesting metadata piece {PieceIndex} from {PeerId} (attempt={Attempt})", pieceIndex, peer.PeerId, attempts);
-            SendMetadataRequest(peer, pieceIndex);
-
-            int alsoAsked = AskAdditionalPeers(pieceIndex, peer);
-
-            _pendingRequests[pieceIndex] = new PendingMetadataRequest(
-                peer,
-                _torrent.Services.TimeProvider.GetUtcNow(),
-                attempts,
-                AskedCount: 1 + alsoAsked);
         }
-        else
+        while (assigned);
+    }
+
+    internal IReadOnlyList<(IPeerCommunication Peer, int Piece, DateTimeOffset Timestamp, int Attempts)> GetPendingRequestsForTesting()
+    {
+        lock (_lock)
         {
-            _logger.LogInformation("No metadata peers available for piece {PieceIndex}", pieceIndex);
+            return _pendingRequests
+                .Select(entry => (entry.Key.Peer, entry.Key.Piece, entry.Value.Timestamp, entry.Value.Attempts))
+                .ToList();
         }
     }
 
-    /// <summary>
-    /// Asks a few more peers for the same piece, without tracking them.
-    ///
-    /// <para>
-    /// Metadata is the whole download for a magnet and a piece is at most 16 KiB, so latency matters
-    /// enormously and bandwidth does not matter at all. Asking one peer and waiting for a timeout makes
-    /// the transfer only as fast as the slowest peer we happened to pick: three torrents in a live
-    /// session took between thirty-six seconds and never, with over a hundred willing peers connected
-    /// the whole time. Asking several means the fastest answer wins.
-    /// </para>
-    ///
-    /// <para>
-    /// Only the first peer is recorded in <c>_pendingRequests</c>, because that entry exists to drive
-    /// the timeout and one timer per piece is enough. The extra replies are still accepted -
-    /// <see cref="MetadataPieceReceivedAsync"/> judges a piece on its own merits rather than on whether
-    /// it was expected - and a duplicate is discarded by the already-received check.
-    /// </para>
-    ///
-    /// <para>
-    /// libtorrent goes further and lets every peer hold its own outstanding requests, throttled only by
-    /// not re-asking for the same piece within three seconds.
-    /// </para>
-    /// </summary>
-    /// <returns>How many additional peers were asked.</returns>
-    private int AskAdditionalPeers(int pieceIndex, IPeerCommunication alreadyAsked)
+    internal void SetPendingRequestForTesting(
+        IPeerCommunication peer,
+        int piece,
+        DateTimeOffset timestamp,
+        int attempts)
     {
-        var candidates = EligibleMetadataPeers(alreadyAsked);
-        if (candidates.Count == 0)
+        lock (_lock)
         {
-            return 0;
+            _pendingRequests[(peer, piece)] = new PendingMetadataRequest(timestamp, attempts);
+            _requestAttempts[(peer, piece)] = attempts;
         }
-
-        // Draw without replacement rather than walking the list. Taking the first matches sends every
-        // round to the same two peers, so if those are silent the redundancy buys nothing at all -
-        // which is the mistake this replaces, and the same one that made GetAlternatePeer ping-pong.
-        int wanted = Math.Min(MetadataRequestRedundancy - 1, candidates.Count);
-        for (int i = 0; i < wanted; i++)
-        {
-            int pick = Random.Shared.Next(i, candidates.Count);
-            (candidates[i], candidates[pick]) = (candidates[pick], candidates[i]);
-            SendMetadataRequest(candidates[i], pieceIndex);
-        }
-
-        _logger.LogDebug(
-            "Also asked {Count} other peer(s) for metadata piece {PieceIndex}", wanted, pieceIndex);
-        return wanted;
     }
 
-    /// <summary>
-    /// Hands a peer that has just arrived the requests that are already outstanding.
-    ///
-    /// <para>
-    /// Without this a peer can connect, advertise the metadata, and be asked for nothing at all. The
-    /// pipeline is a cap on distinct pieces in flight, not on peers, so once the first peer to turn up
-    /// has taken every slot, <see cref="FillMissingRequests"/> returns immediately - the count is at
-    /// the limit - and every piece it skips is skipped again for having a pending entry. If that first
-    /// peer never answers, nothing breaks the deadlock until the timeout fires.
-    /// </para>
-    ///
-    /// <para>
-    /// Measured on a real magnet: the size arrived with one peer connected, all eight slots went to it,
-    /// and seven more capable peers connected over the next 3.5 seconds and sat idle until the whole
-    /// round timed out. The pieces then arrived from those peers in 400 ms. The first request round was
-    /// pure latency, and it is the round that decides how fast a magnet starts.
-    /// </para>
-    ///
-    /// <para>
-    /// Bounded by <see cref="MetadataRequestRedundancy"/> so that a large swarm does not turn every
-    /// piece into a broadcast: the existing pending entry still owns the timeout, exactly as in
-    /// <see cref="AskAdditionalPeers"/>, and a duplicate reply is discarded by the already-received
-    /// check in <see cref="MetadataPieceReceivedAsync"/>.
-    /// </para>
-    /// </summary>
-    private void TopUpOutstandingRequests(IPeerCommunication peer)
-    {
-        if (!Active || Finished || _metadataSize == 0 || _pendingRequests.Count == 0)
-        {
-            return;
-        }
+    private static bool PeerCanDeclareMetadata(IPeerCommunication peer) =>
+        peer.UtMetadata.RemoteMessageId != null && peer.RemoteExtensions?.MetadataSize is > 0;
 
+    private bool TryAssignPeer(IPeerCommunication peer)
+    {
         if (peer.UtMetadata.RemoteMessageId == null)
         {
-            return;
+            return false;
         }
 
-        int asked = 0;
-        foreach (int pieceIndex in _pendingRequests.Keys.ToList())
+        int? pieceIndex = SelectPieceForPeer(peer);
+        if (pieceIndex == null)
         {
-            var pending = _pendingRequests[pieceIndex];
-            if (pending.AskedCount >= MetadataRequestRedundancy || pending.Peer == peer)
-            {
-                continue;
-            }
-
-            if (pieceIndex >= 0 && pieceIndex < _receivedPieces.Length && _receivedPieces[pieceIndex])
-            {
-                continue;
-            }
-
-            SendMetadataRequest(peer, pieceIndex);
-            _pendingRequests[pieceIndex] = pending with { AskedCount = pending.AskedCount + 1 };
-            asked++;
+            return false;
         }
 
-        if (asked > 0)
-        {
-            _logger.LogDebug(
-                "Asked newly connected peer {PeerId} for {Count} already-outstanding metadata piece(s)",
-                peer.PeerId,
-                asked);
-        }
+        var key = (peer, pieceIndex.Value);
+        int attempts = _requestAttempts.TryGetValue(key, out int previous) ? previous + 1 : 1;
+        _requestAttempts[key] = attempts;
+        _pendingRequests[key] = new PendingMetadataRequest(
+            _torrent.Services.TimeProvider.GetUtcNow(), attempts);
+
+        _logger.LogInformation(
+            "Requesting metadata piece {PieceIndex} from {PeerId} (peer attempt={Attempt})",
+            pieceIndex.Value,
+            peer.PeerId,
+            attempts);
+        SendMetadataRequest(peer, pieceIndex.Value);
+        return true;
     }
 
-    /// <summary>
-    /// Peers worth asking, preferring those that told us how large the metadata is.
-    ///
-    /// <para>
-    /// Advertising ut_metadata only says a peer speaks the extension; the size in its handshake is what
-    /// says it actually holds the data. Asking a peer that has none is a request that can never be
-    /// answered, and a magnet has nothing else to do meanwhile. libtorrent gates its requests on the
-    /// same signal, relaxing it on a timer so a peer is not written off forever - hence the fallback
-    /// here to anyone at all when nobody has declared a size.
-    /// </para>
-    /// </summary>
+    private int? SelectPieceForPeer(IPeerCommunication peer)
+    {
+        if (_metadataSize == 0)
+        {
+            int probeCount = _pendingRequests.Keys.Count(key => key.Piece == 0);
+            return probeCount < MetadataRequestRedundancy &&
+                   !_pendingRequests.ContainsKey((peer, 0)) &&
+                   AttemptsFor(peer, 0) < MetadataMaxRequestAttempts ? 0 : null;
+        }
+
+        int totalPieces = _receivedPieces.Length;
+        if (totalPieces == 0)
+        {
+            return null;
+        }
+
+        var requestCounts = new int[totalPieces];
+        var activePieces = new HashSet<int>();
+        foreach (var key in _pendingRequests.Keys)
+        {
+            if ((uint)key.Piece < (uint)totalPieces && !_receivedPieces[key.Piece])
+            {
+                requestCounts[key.Piece]++;
+                activePieces.Add(key.Piece);
+            }
+        }
+
+        bool mayOpenAnotherPiece = activePieces.Count < Math.Min(MetadataRequestPipeline, totalPieces);
+        int bestCount = int.MaxValue;
+        int? bestPiece = null;
+        for (int offset = 0; offset < totalPieces; offset++)
+        {
+            int piece = (_nextPieceCursor + offset) % totalPieces;
+            if (_receivedPieces[piece] || requestCounts[piece] >= MetadataRequestRedundancy ||
+                _pendingRequests.ContainsKey((peer, piece)) ||
+                AttemptsFor(peer, piece) >= MetadataMaxRequestAttempts)
+            {
+                continue;
+            }
+
+            if (!mayOpenAnotherPiece && !activePieces.Contains(piece))
+            {
+                continue;
+            }
+
+            if (requestCounts[piece] < bestCount)
+            {
+                bestCount = requestCounts[piece];
+                bestPiece = piece;
+                if (bestCount == 0)
+                {
+                    break;
+                }
+            }
+        }
+
+        if (bestPiece.HasValue)
+        {
+            _nextPieceCursor = (bestPiece.Value + 1) % totalPieces;
+        }
+        return bestPiece;
+    }
+
+    private int AttemptsFor(IPeerCommunication peer, int pieceIndex) =>
+        _requestAttempts.TryGetValue((peer, pieceIndex), out int attempts) ? attempts : 0;
+
+    private void ReleaseRequestsForReceivedPiece(int pieceIndex)
+    {
+        foreach (var owner in _pendingRequests
+                     .Where(entry => entry.Key.Piece == pieceIndex)
+                     .Select(entry => entry.Key)
+                     .ToList())
+        {
+            _pendingRequests.Remove(owner);
+        }
+    }
     /// <summary>
     /// Drops pending requests that were guesses, now that there is something better to go on.
     ///
@@ -802,13 +729,13 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         }
 
         var speculative = _pendingRequests
-            .Where(entry => entry.Value.Peer?.RemoteExtensions?.MetadataSize is not > 0)
+            .Where(entry => entry.Key.Peer.RemoteExtensions?.MetadataSize is not > 0)
             .Select(entry => entry.Key)
             .ToList();
 
-        foreach (var piece in speculative)
+        foreach (var peer in speculative)
         {
-            _pendingRequests.Remove(piece);
+            _pendingRequests.Remove(peer);
         }
 
         if (speculative.Count > 0)
@@ -822,9 +749,48 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     /// Sends a metadata request. Silence is recorded only if the request later times out; merely
     /// sending one is not evidence against a peer because requests are deliberately issued in bursts.
     /// </summary>
-    private static void SendMetadataRequest(IPeerCommunication peer, int pieceIndex)
+    private void SendMetadataRequest(IPeerCommunication peer, int pieceIndex)
     {
+        _firstRequestAt ??= _torrent.Services.TimeProvider.GetUtcNow();
+        _requestsSent++;
         peer.UtMetadata.SendRequest(pieceIndex);
+    }
+
+    private void ReportStalledMetadataDownload(DateTimeOffset now)
+    {
+        if (_stallReported || _responsesReceived > 0 || _firstRequestAt == null ||
+            _requestsSent < StallWarningMinimumRequests)
+        {
+            return;
+        }
+
+        TimeSpan elapsed = now - _firstRequestAt.Value;
+        if (elapsed < StallWarningAfter)
+        {
+            return;
+        }
+
+        int capablePeers = _activePeers.Count(peer => peer.RemoteExtensions?.MetadataSize is > 0);
+        if (capablePeers == 0)
+        {
+            return;
+        }
+
+        _stallReported = true;
+        _logger.LogWarning(
+            "Metadata download is stalled: {CapablePeers} capable peer(s), {RequestsSent} requests over {ElapsedSeconds:F0}s, no pieces received",
+            capablePeers,
+            _requestsSent,
+            elapsed.TotalSeconds);
+        _torrent.Alerts.PostAlert(new MetadataDownloadStalledAlert
+        {
+            Id = AlertId.MetadataDownloadStalled,
+            Torrent = _torrent,
+            CapablePeers = capablePeers,
+            RequestsSent = _requestsSent,
+            Elapsed = elapsed,
+            Timestamp = now
+        });
     }
 
     private MetadataPeerRecord RecordFor(IPeerCommunication peer)
@@ -856,115 +822,25 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
         _receivedPieces.SetAll(false);
         _pendingRequests.Clear();
-        FillMissingRequests();
-    }
-
-    /// <summary>
-    /// Peers worth asking, best first: those that have actually served a piece, then those never asked,
-    /// and only then those that have been asked and stayed silent.
-    ///
-    /// <para>
-    /// Advertising ut_metadata with a size says a peer holds the metadata, not that it will part with
-    /// it, and in a real swarm most will not. Measured on Ubuntu's: of 75 peers asked, 8 ever answered,
-    /// and that willing group barely grows with the swarm - so drawing uniformly at random, which is
-    /// what this did, gives a hit rate that falls as the swarm gets larger. The effect was plainly
-    /// visible across eight runs of the same magnet: 28 connected peers took 6.5 seconds to collect
-    /// sixteen pieces and 148 took 55, monotonically in between. Having more peers made it slower.
-    /// </para>
-    ///
-    /// <para>
-    /// Tiering fixes that without any per-client knowledge: a peer earns its place by answering. The
-    /// tiers also give exploration for free, because <see cref="AskAdditionalPeers"/> excludes the peer
-    /// it just asked - so while a proven peer serves the piece, the redundant asks fall through to peers
-    /// nobody has tried yet, which is how the proven set grows.
-    /// </para>
-    /// </summary>
-    private List<IPeerCommunication> EligibleMetadataPeers(IPeerCommunication? exclude)
-    {
-        var proven = new List<IPeerCommunication>();
-        var untried = new List<IPeerCommunication>();
-        var silent = new List<IPeerCommunication>();
-        var anySpeaker = new List<IPeerCommunication>();
-
-        foreach (var candidate in _activePeers)
+        foreach (var (peer, record) in _peerRecords)
         {
-            if (candidate == exclude || candidate.UtMetadata.RemoteMessageId == null)
+            if (record.TimedOut < UnansweredRequestsBeforeDemotion)
             {
                 continue;
             }
 
-            anySpeaker.Add(candidate);
-
-            if (candidate.RemoteExtensions?.MetadataSize is not > 0)
+            for (int piece = 0; piece < _receivedPieces.Length; piece++)
             {
-                continue;
-            }
-
-            _peerRecords.TryGetValue(candidate, out var record);
-            if (record is { Answered: > 0 })
-            {
-                proven.Add(candidate);
-            }
-            else if (record is { TimedOut: >= UnansweredRequestsBeforeDemotion })
-            {
-                silent.Add(candidate);
-            }
-            else
-            {
-                untried.Add(candidate);
+                _requestAttempts[(peer, piece)] = MetadataMaxRequestAttempts;
             }
         }
-
-        if (proven.Count > 0)
-        {
-            return proven;
-        }
-
-        if (untried.Count > 0)
-        {
-            return untried;
-        }
-
-        return silent.Count > 0 ? silent : anySpeaker;
-    }
-
-    private IPeerCommunication? GetAlternatePeer(IPeerCommunication? current)
-    {
-        if (_activePeers.Count == 0)
-        {
-            return null;
-        }
-
-        if (current == null || _activePeers.Count == 1)
-        {
-            return GetRandomMetadataPeer();
-        }
-
-        // Use the same evidence-based tiers as an initial request, while excluding the peer whose
-        // request just timed out. Random selection within the best tier avoids the old two-peer
-        // ping-pong without putting another known-silent peer ahead of an untried one.
-        var candidates = EligibleMetadataPeers(current);
-        if (candidates.Count > 0)
-        {
-            return candidates[Random.Shared.Next(candidates.Count)];
-        }
-
-        return GetRandomMetadataPeer();
+        FillPeerRequests();
     }
 
     /// <summary>
-    /// One outstanding metadata piece request: the peer that owns its timeout, when it was made, how
-    /// many times the piece has been asked for, and how many peers currently hold a copy of the request.
-    ///
-    /// <para>
-    /// That last count is what bounds <see cref="TopUpOutstandingRequests"/> to
-    /// <see cref="MetadataRequestRedundancy"/> however many peers turn up, so redundancy stays a fixed
-    /// multiple rather than scaling with the size of the swarm.
-    /// </para>
+    /// One peer-owned metadata request and its per-peer/per-piece attempt number.
     /// </summary>
     private readonly record struct PendingMetadataRequest(
-        IPeerCommunication Peer,
         DateTimeOffset Timestamp,
-        int Attempts,
-        int AskedCount = 1);
+        int Attempts);
 }

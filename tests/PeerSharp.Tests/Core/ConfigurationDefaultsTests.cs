@@ -31,4 +31,19 @@ public class ConfigurationDefaultsTests
 
         Assert.True(settings.Connection.EnableWebSeeds);
     }
+
+    [Fact]
+    public void TransferLimits_AcceptInt64RangeAndRejectNegativeValues()
+    {
+        var transfer = new TransferSettings();
+        long limit = (long)int.MaxValue + 1;
+
+        transfer.MaxDownloadSpeed = limit;
+        transfer.MaxUploadSpeed = limit;
+
+        Assert.Equal(limit, transfer.MaxDownloadSpeed);
+        Assert.Equal(limit, transfer.MaxUploadSpeed);
+        Assert.Throws<ArgumentOutOfRangeException>(() => transfer.MaxDownloadSpeed = -1);
+        Assert.Throws<ArgumentOutOfRangeException>(() => transfer.MaxUploadSpeed = -1);
+    }
 }

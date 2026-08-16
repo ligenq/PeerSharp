@@ -84,6 +84,18 @@ public sealed class AlertModelsTests : IAsyncLifetime
             ConnectedPeers = 7
         };
 
+        var peerDisconnected = new PeerDisconnectedAlert
+        {
+            Id = AlertId.PeerDisconnected,
+            Timestamp = timestamp,
+            Torrent = _torrent,
+            Endpoint = new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 6881),
+            ClientName = "PeerSharp",
+            Downloaded = 300,
+            Uploaded = 400,
+            ReasonCode = 2
+        };
+
         var stateAlert = new StateChangedAlert
         {
             Id = AlertId.TorrentStateChanged,
@@ -111,6 +123,16 @@ public sealed class AlertModelsTests : IAsyncLifetime
             TotalPieces = 8
         };
 
+        var metadataStalled = new MetadataDownloadStalledAlert
+        {
+            Id = AlertId.MetadataDownloadStalled,
+            Timestamp = timestamp,
+            Torrent = _torrent,
+            CapablePeers = 6,
+            RequestsSent = 110,
+            Elapsed = TimeSpan.FromSeconds(111)
+        };
+
         Assert.Equal(AlertId.TorrentAdded, simpleTorrent.Id);
         Assert.Equal(timestamp, simpleTorrent.Timestamp);
         Assert.Same(_torrent, simpleTorrent.Torrent);
@@ -134,6 +156,12 @@ public sealed class AlertModelsTests : IAsyncLifetime
         Assert.Equal(200, transferAlert.Uploaded);
         Assert.Equal(7, transferAlert.ConnectedPeers);
 
+        Assert.Equal(AlertId.PeerDisconnected, peerDisconnected.Id);
+        Assert.Equal("PeerSharp", peerDisconnected.ClientName);
+        Assert.Equal(300, peerDisconnected.Downloaded);
+        Assert.Equal(400, peerDisconnected.Uploaded);
+        Assert.Equal(2, peerDisconnected.ReasonCode);
+
         Assert.Equal(TorrentState.Stopped, stateAlert.PreviousState);
         Assert.Equal(TorrentState.Active, stateAlert.NewState);
 
@@ -143,6 +171,10 @@ public sealed class AlertModelsTests : IAsyncLifetime
         Assert.Equal(0.75f, metadataProgress.Progress);
         Assert.Equal(6, metadataProgress.ReceivedPieces);
         Assert.Equal(8, metadataProgress.TotalPieces);
+
+        Assert.Equal(6, metadataStalled.CapablePeers);
+        Assert.Equal(110, metadataStalled.RequestsSent);
+        Assert.Equal(TimeSpan.FromSeconds(111), metadataStalled.Elapsed);
     }
 }
 

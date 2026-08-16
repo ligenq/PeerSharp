@@ -11,7 +11,8 @@ public interface IFiles
     bool Checking { get; }
 
     /// <summary>
-    /// Gets the download path for this torrent's files.
+    /// Gets the download path for this torrent's files, including the torrent's own folder when it
+    /// has one.
     /// </summary>
     string DownloadPath { get; }
 }

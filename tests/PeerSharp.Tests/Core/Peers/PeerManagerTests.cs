@@ -13,6 +13,84 @@ namespace PeerSharp.Tests.Core.Peers;
 
 public class PeerManagerTests
 {
+    [Fact]
+    public async Task MetadataRebuild_AdoptsSameLivePeerAndPreservesGovernorSlot()
+    {
+        var ctx = CreateContext();
+        var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            Connected = 1,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("203.0.113.80"), 51413)
+        };
+        peer.Stream = new MemoryStream();
+        Stream retainedStream = peer.Stream;
+        SetPrivateProperty(peer, "PeerPieces", new PiecesProgress(0));
+        await (Task)InvokePrivate(peer, "ProcessMessageAsync", new PeerMessage(MessageId.HaveAll))!;
+        Assert.True(ctx.Governor.TryAcquireConnectionSlot());
+        ctx.Manager.AddConnectedPeerForTesting(peer);
+
+        IReadOnlyList<PeerCommunication> detached =
+            await ctx.Manager.DetachConnectedPeersForMetadataRebuildAsync();
+        var replacement = new PeerManager(
+            ctx.Torrent,
+            new TorrentTestUtility.MockGeoIpService(),
+            new RealPeerFactory(),
+            TimeProvider.System,
+            ctx.Governor);
+        int adopted = await replacement.AdoptPeersAfterMetadataRebuildAsync(detached);
+
+        Assert.Equal(1, adopted);
+        Assert.Equal(0, ctx.Manager.ConnectedCount);
+        Assert.Equal(1, replacement.ConnectedCount);
+        Assert.Same(peer, Assert.Single(replacement.GetConnectedPeersInternal()));
+        Assert.Same(retainedStream, peer.Stream);
+        Assert.Same(replacement, peer.Listener);
+        Assert.Equal(ctx.Torrent.Pieces.Count, peer.PeerPieces.Count);
+        Assert.True(peer.PeerPieces.IsFull);
+        Assert.Equal(0, ctx.Governor.ReleasedConnections);
+
+        await peer.CloseAsync();
+        Assert.Equal(1, ctx.Governor.ReleasedConnections);
+        await replacement.StopAsync();
+        await CleanupAsync(ctx);
+    }
+
+    [Fact]
+    public async Task MetadataRebuild_InvalidSavedBitfield_ClosesPeerAndReleasesGovernorSlot()
+    {
+        var ctx = CreateContext();
+        var peer = new PeerCommunication(ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            Connected = 1,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("203.0.113.81"), 51413)
+        };
+        SetPrivateProperty(peer, "PeerPieces", new PiecesProgress(0));
+        await (Task)InvokePrivate(
+            peer,
+            "ProcessMessageAsync",
+            new PeerMessage(MessageId.Bitfield) { Data = [0x80, 0x00] })!;
+        Assert.True(ctx.Governor.TryAcquireConnectionSlot());
+        ctx.Manager.AddConnectedPeerForTesting(peer);
+
+        IReadOnlyList<PeerCommunication> detached =
+            await ctx.Manager.DetachConnectedPeersForMetadataRebuildAsync();
+        var replacement = new PeerManager(
+            ctx.Torrent,
+            new TorrentTestUtility.MockGeoIpService(),
+            new RealPeerFactory(),
+            TimeProvider.System,
+            ctx.Governor);
+        int adopted = await replacement.AdoptPeersAfterMetadataRebuildAsync(detached);
+
+        Assert.Equal(0, adopted);
+        Assert.Equal(0, replacement.ConnectedCount);
+        Assert.Equal(0, peer.Connected);
+        Assert.Equal(1, ctx.Governor.ReleasedConnections);
+
+        await replacement.StopAsync();
+        await CleanupAsync(ctx);
+    }
+
     [Fact(Timeout = 30000)]
     public async Task AddIncomingPeerAsync_ForceProxy_Rejects()
     {

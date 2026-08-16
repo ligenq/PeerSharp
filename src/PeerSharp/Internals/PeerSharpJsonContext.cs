@@ -5,6 +5,7 @@ namespace PeerSharp.Internals;
 
 [JsonSerializable(typeof(TorrentStateData))]
 [JsonSerializable(typeof(SavedTorrentOptions))]
+[JsonSerializable(typeof(SavedPeerPreference))]
 [JsonSerializable(typeof(SessionPersistence.DhtStateDto))]
 internal partial class PeerSharpJsonContext : JsonSerializerContext
 {

@@ -10,6 +10,7 @@ namespace PeerSharp.Internals.Network;
 internal class PortListener : IPortListener
 {
     private readonly ILogger<PortListener> _logger;
+    private readonly IPAddress? _bindAddress;
     private readonly ITorrentResolver _resolver;
     private readonly ITcpListenerFactory _tcpFactory;
     private CancellationTokenSource? _acceptCts;
@@ -18,25 +19,36 @@ internal class PortListener : IPortListener
     private ITcpListener? _tcpListener;
 
     public PortListener(ITorrentResolver resolver)
-        : this(resolver, new TcpListenerFactory(), NullLoggerFactory.Instance)
+        : this(resolver, new TcpListenerFactory(), NullLoggerFactory.Instance, null)
     {
     }
 
     public PortListener(ITorrentResolver resolver, ILoggerFactory loggerFactory)
-        : this(resolver, new TcpListenerFactory(), loggerFactory)
+        : this(resolver, new TcpListenerFactory(), loggerFactory, null)
+    {
+    }
+
+    internal PortListener(ITorrentResolver resolver, ILoggerFactory loggerFactory, IPAddress? bindAddress)
+        : this(resolver, new TcpListenerFactory(), loggerFactory, bindAddress)
     {
     }
 
     internal PortListener(ITorrentResolver resolver, ITcpListenerFactory tcpFactory)
-        : this(resolver, tcpFactory, NullLoggerFactory.Instance)
+        : this(resolver, tcpFactory, NullLoggerFactory.Instance, null)
     {
     }
 
     internal PortListener(ITorrentResolver resolver, ITcpListenerFactory tcpFactory, ILoggerFactory loggerFactory)
+        : this(resolver, tcpFactory, loggerFactory, null)
+    {
+    }
+
+    internal PortListener(ITorrentResolver resolver, ITcpListenerFactory tcpFactory, ILoggerFactory loggerFactory, IPAddress? bindAddress)
     {
         _resolver = resolver;
         _tcpFactory = tcpFactory;
         _logger = loggerFactory.CreateLogger<PortListener>();
+        _bindAddress = bindAddress;
     }
 
     public int Port { get; private set; }
@@ -60,7 +72,7 @@ internal class PortListener : IPortListener
         Port = port;
         try
         {
-            _tcpListener = _tcpFactory.Create(IPAddress.Any, port);
+            _tcpListener = _tcpFactory.Create(_bindAddress ?? IPAddress.Any, port);
             _tcpListener.Start();
             var cts = new CancellationTokenSource();
             _acceptCts = cts;
@@ -79,6 +91,10 @@ internal class PortListener : IPortListener
         {
             _logger.LogError(ex, "Failed to start listener");
             _running = false;
+            if (_bindAddress != null)
+            {
+                throw;
+            }
         }
     }
 

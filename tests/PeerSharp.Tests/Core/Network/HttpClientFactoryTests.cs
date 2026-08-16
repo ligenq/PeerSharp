@@ -1,11 +1,100 @@
 using PeerSharp.Internals.Network;
 using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 
 namespace PeerSharp.Tests.Core.Network;
 
 public class HttpClientFactoryTests
 {
+    [Fact]
+    public async Task CreateClient_WithBindAddress_UsesItAsTheTcpSourceAddress()
+    {
+        var listener = new TcpListener(IPAddress.Any, 0);
+        listener.Start();
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var accepted = listener.AcceptTcpClientAsync(TestContext.Current.CancellationToken).AsTask();
+            var factory = new HttpClientFactory();
+            using var client = factory.CreateClient(
+                new ProxySettings { Type = ProxyType.None },
+                isTracker: true,
+                IPAddress.Parse("127.0.0.2"));
+
+            var request = client.GetAsync(
+                $"http://127.0.0.1:{port}/",
+                HttpCompletionOption.ResponseHeadersRead,
+                TestContext.Current.CancellationToken);
+            using var connection = await accepted;
+            var remote = Assert.IsType<IPEndPoint>(connection.Client.RemoteEndPoint);
+
+            Assert.Equal(IPAddress.Parse("127.0.0.2"), remote.Address);
+
+            await using var stream = connection.GetStream();
+            byte[] buffer = new byte[1024];
+            _ = await stream.ReadAsync(buffer, TestContext.Current.CancellationToken);
+            await stream.WriteAsync(
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(),
+                TestContext.Current.CancellationToken);
+            using var response = await request;
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task CreateClient_WithIPv4Family_ConnectsOnlyToIPv4Endpoint()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var accepted = listener.AcceptTcpClientAsync(TestContext.Current.CancellationToken).AsTask();
+            var factory = new HttpClientFactory();
+            using var client = factory.CreateClient(
+                new ProxySettings { Type = ProxyType.None },
+                isTracker: true,
+                addressFamily: AddressFamily.InterNetwork);
+
+            var request = client.GetAsync(
+                $"http://localhost:{port}/",
+                HttpCompletionOption.ResponseHeadersRead,
+                TestContext.Current.CancellationToken);
+            using var connection = await accepted;
+            Assert.Equal(AddressFamily.InterNetwork, connection.Client.RemoteEndPoint?.AddressFamily);
+
+            await using var stream = connection.GetStream();
+            byte[] buffer = new byte[1024];
+            _ = await stream.ReadAsync(buffer, TestContext.Current.CancellationToken);
+            await stream.WriteAsync(
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(),
+                TestContext.Current.CancellationToken);
+            using var response = await request;
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [Fact]
+    public void CreateClient_BindAndRequestedFamilyMismatch_IsRejected()
+    {
+        var factory = new HttpClientFactory();
+
+        Assert.Throws<ArgumentException>(() => factory.CreateClient(
+            new ProxySettings { Type = ProxyType.None },
+            isTracker: true,
+            bindAddress: IPAddress.Loopback,
+            addressFamily: AddressFamily.InterNetworkV6));
+    }
+
     [Fact]
     public void CreateClient_NoProxy_HasNullProxy()
     {

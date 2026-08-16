@@ -114,11 +114,11 @@ internal static class TorrentTestUtility
     {
         private readonly Dictionary<string, BandwidthChannel> _channels = [];
 
-        public void SetGlobalLimits(int downloadLimit, int uploadLimit) { }
+        public void SetGlobalLimits(long downloadLimit, long uploadLimit) { }
         public void SetGlobalDiskLimits(int readLimit, int writeLimit) { }
-        public void SetTorrentLimits(ITorrent torrent, int downloadLimit, int uploadLimit) { }
+        public void SetTorrentLimits(ITorrent torrent, long downloadLimit, long uploadLimit) { }
         public void SetTorrentDiskLimits(ITorrent torrent, int readLimit, int writeLimit) { }
-        public (int DownloadLimit, int UploadLimit) GetTorrentLimits(ITorrent torrent)
+        public (long DownloadLimit, long UploadLimit) GetTorrentLimits(ITorrent torrent)
         {
             return (0, 0);
         }
@@ -164,7 +164,7 @@ internal static class TorrentTestUtility
         public void ConfigAlert(AlertId id, string configType) { }
         public void PieceCompletedAlert(ITorrent torrent, int pieceIndex, int completedPieces, int totalPieces) { }
         public void ProgressChangedAlert(ITorrent torrent, float progress, float selectionProgress, ulong finishedBytes, ulong totalBytes, int completedPieces, int totalPieces) { }
-        public void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, int downloadSpeed, int uploadSpeed, int connectedPeers) { }
+        public void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, long downloadSpeed, long uploadSpeed, int connectedPeers) { }
         public void StateChangedAlert(ITorrent torrent, TorrentState previousState, TorrentState newState) { }
         public void TorrentErrorAlert(ITorrent torrent, Exception exception) { }
         public void RegisterAlerts(uint categories) { }
@@ -341,7 +341,9 @@ internal static class TorrentTestUtility
     public static Torrent CreateMinimal(
         TorrentFileMetadata? metadata = null,
         string? downloadPath = null,
-        ITrackerFactory? trackerFactory = null)
+        ITrackerFactory? trackerFactory = null,
+        TimeProvider? timeProvider = null,
+        IAlertsManager? alerts = null)
     {
         metadata ??= new TorrentFileMetadata();
         if (metadata.Info.PieceSize == 0)
@@ -358,19 +360,17 @@ internal static class TorrentTestUtility
             metadata,
             settings,
             new MockBandwidthManager(),
-            new MockAlertsManager(),
+            alerts ?? new MockAlertsManager(),
             new MockFileSelectionManager(),
             new MockPeerCommunicationFactory(),
             trackerFactory ?? new MockTrackerFactory(),
             new MockGeoIpService(),
             new MockFileHandleCache(),
             new MockConnectionGovernor(),
-            TimeProvider.System
+            timeProvider ?? TimeProvider.System
         );
     }
 }
-
-
 
 
 

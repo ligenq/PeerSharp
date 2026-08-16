@@ -59,9 +59,9 @@ public interface IClientEngine : IAsyncDisposable
     /// </para>
     ///
     /// <para>
-    /// The consequence of that silence is that the fetch's progress is not observable either -
-    /// there is no <see cref="AlertId.MetadataProgressChanged"/> for it. A caller wanting a
-    /// progress indicator has only the fact that this task has not completed yet.
+    /// The fetch emits no engine-wide <see cref="AlertId.MetadataProgressChanged"/> alert. Use
+    /// <see cref="GetMagnetMetadataWithProgressAsync"/> when this operation needs a scoped progress
+    /// indicator.
     /// </para>
     /// </summary>
     /// <param name="magnetLink">The magnet link to resolve.</param>
@@ -69,6 +69,19 @@ public interface IClientEngine : IAsyncDisposable
     /// <exception cref="ArgumentNullException">Thrown when magnetLink is null.</exception>
     /// <exception cref="OperationCanceledException">Thrown when the token is cancelled before metadata arrives.</exception>
     Task<TorrentFile> GetMagnetMetadataAsync(MagnetLink magnetLink, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Downloads only a magnet's metadata like <see cref="GetMagnetMetadataAsync"/>, while reporting
+    /// progress specifically for this operation. The transient torrent remains absent from the engine
+    /// and its global alert stream.
+    /// </summary>
+    /// <param name="magnetLink">The magnet link to resolve.</param>
+    /// <param name="progress">Receives metadata piece progress from 0.0 to 1.0.</param>
+    /// <param name="cancellationToken">Cancellation token; use a timeout-based token to bound the fetch.</param>
+    Task<TorrentFile> GetMagnetMetadataWithProgressAsync(
+        MagnetLink magnetLink,
+        IProgress<MetadataProgress> progress,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Adds a torrent from a magnet link. Metadata is fetched from the swarm in the background,

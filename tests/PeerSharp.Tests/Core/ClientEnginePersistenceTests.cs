@@ -59,9 +59,10 @@ public class ClientEnginePersistenceTests
         public DhtState? StateToReturn { get; set; }
         public InfoHash NodeId { get; } = new InfoHash(new byte[20]);
         public void Announce(InfoHash infoHash, int port) { }
-        public int FindPeers(InfoHash infoHash) {
-    return 0;
-    }
+        public int FindPeers(InfoHash infoHash)
+        {
+            return 0;
+        }
         public void Ping(IPEndPoint ep) { }
         public void ReportExternalIp(IPAddress address) { }
         public void ScrapeInfoHash(InfoHash infoHash) { }
@@ -221,14 +222,20 @@ public class ClientEnginePersistenceTests
             torrentBytes,
             null,
             null,
-            new SavedTorrentOptions(DownloadPath: Path.GetTempPath(), WasStarted: false)));
+            new SavedTorrentOptions(DownloadPath: Path.GetTempPath(), WasStarted: false)
+            {
+                PeerPreferences = [new SavedPeerPreference("192.0.2.20", 6881, OfferEncryptionNext: false)]
+            }));
 
         var settings = CreateSettings();
         await using var engine = ClientEngine.Create(new TorrentClientOptions { Settings = settings, SessionPersistence = persistence });
 
         await InvokePrivateAsync(engine, "LoadPersistedTorrentsAsync", CancellationToken.None);
 
-        Assert.Contains(engine.GetTorrents(), t => t.Hash == torrentFile.InfoHash);
+        var loaded = Assert.IsType<Torrent>(Assert.Single(engine.GetTorrents(), t => t.Hash == torrentFile.InfoHash));
+        var preference = Assert.Single(loaded.PeersInternal.ExportConnectionPreferences());
+        Assert.Equal("192.0.2.20", preference.Address);
+        Assert.False(preference.OfferEncryptionNext);
     }
 
     [Fact(Timeout = 10000)]

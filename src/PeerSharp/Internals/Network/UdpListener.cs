@@ -116,7 +116,14 @@ internal class UdpListener : IUdpListener
             _logger.LogInformation("Starting UDP listener via SOCKS5 proxy {ProxyHost}:{ProxyPort}", proxy.Host, proxy.Port);
             try
             {
-                var result = await ProxyHelper.ConnectSocks5UdpAsync(proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, _cts.Token).ConfigureAwait(false);
+                var result = await ProxyHelper.ConnectSocks5UdpAsync(
+                    proxy.Host,
+                    proxy.Port,
+                    proxy.Username,
+                    proxy.Password,
+                    _logger,
+                    _settings.Connection.BindAddress,
+                    _cts.Token).ConfigureAwait(false);
                 _client = new UdpSocketAdapter(result.UdpClient, true);
                 _proxyUdpEndPoint = result.ProxyUdpEndPoint;
                 _proxyControlClient = result.ControlClient;
@@ -129,7 +136,16 @@ internal class UdpListener : IUdpListener
         }
         else
         {
-            _client = _socketFactory.Create(_port);
+            var bindAddress = _settings.Connection.BindAddress;
+            if (bindAddress == null)
+            {
+                _client = _socketFactory.Create(_port);
+            }
+            else
+            {
+                _client = _socketFactory.Create(bindAddress.AddressFamily);
+                _client.Client.Bind(new IPEndPoint(bindAddress, _port));
+            }
             _logger.LogInformation("UDP listener bound to {LocalEndPoint}", _client.Client.LocalEndPoint);
         }
 

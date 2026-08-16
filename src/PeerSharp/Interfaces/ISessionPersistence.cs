@@ -29,12 +29,32 @@ public sealed record SavedTorrentEntry(
 public sealed record SavedTorrentOptions(
     string? DownloadPath = null,
     bool WasStarted = false,
-    int DownloadLimitBytesPerSecond = 0,
-    int UploadLimitBytesPerSecond = 0,
+    long DownloadLimitBytesPerSecond = 0,
+    long UploadLimitBytesPerSecond = 0,
     int QueuePriority = 0,
     float? RatioLimit = null,
     TimeSpan? SeedTimeLimit = null,
-    DownloadStrategy DownloadStrategy = DownloadStrategy.RarestFirst);
+    DownloadStrategy DownloadStrategy = DownloadStrategy.RarestFirst)
+{
+    /// <summary>
+    /// Learned connection preferences for peer endpoints. Only preferences which differ from the
+    /// engine defaults need to be stored.
+    /// </summary>
+    public IReadOnlyList<SavedPeerPreference>? PeerPreferences { get; init; }
+}
+
+/// <summary>
+/// Connection preferences learned for a peer endpoint and retained with the torrent session.
+/// </summary>
+/// <param name="Address">The numeric IPv4 or IPv6 address.</param>
+/// <param name="Port">The peer's listening port.</param>
+/// <param name="UtpSupported">Whether future connection attempts should try uTP.</param>
+/// <param name="OfferEncryptionNext">Whether the next handshake should offer encryption.</param>
+public sealed record SavedPeerPreference(
+    string Address,
+    int Port,
+    bool UtpSupported = true,
+    bool OfferEncryptionNext = true);
 
 /// <summary>
 /// Interface for session persistence operations.

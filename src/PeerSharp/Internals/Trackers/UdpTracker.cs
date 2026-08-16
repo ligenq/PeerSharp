@@ -59,6 +59,7 @@ internal class UdpTracker : TrackerBase, IDisposable
     private static readonly int[] RetryDelaysMs = [1000, 2000, 4000];
     private readonly ILogger<UdpTracker> _logger;
     private readonly IUdpSocketFactory _socketFactory;
+    private readonly Func<string, CancellationToken, Task<IPAddress[]>> _resolveAddressesAsync;
 
     private readonly SemaphoreSlim _syncLock = new(1, 1);
 
@@ -71,6 +72,8 @@ internal class UdpTracker : TrackerBase, IDisposable
     private DateTimeOffset _connectionIdTimestamp = DateTimeOffset.MinValue;
     private AtomicDisposal _disposal = new();
     private IPEndPoint? _endpoint;
+    private AddressFamily? _connectedAddressFamily;
+    private AddressFamily? _requestedAddressFamily;
     private TcpClient? _proxyControlClient; // Keep TCP connection alive for SOCKS5 UDP association
     private IPEndPoint? _proxyUdpEndPoint;
 
@@ -90,105 +93,182 @@ internal class UdpTracker : TrackerBase, IDisposable
     }
 
     internal UdpTracker(TimeProvider timeProvider, IUdpSocketFactory socketFactory, ILoggerFactory loggerFactory)
+        : this(timeProvider, socketFactory, loggerFactory, ResolveAddressesAsync)
+    {
+    }
+
+    internal UdpTracker(
+        TimeProvider timeProvider,
+        IUdpSocketFactory socketFactory,
+        ILoggerFactory loggerFactory,
+        Func<string, CancellationToken, Task<IPAddress[]>> resolveAddressesAsync)
     {
         _timeProvider = timeProvider;
         _socketFactory = socketFactory;
         _logger = loggerFactory.CreateLogger<UdpTracker>();
+        _resolveAddressesAsync = resolveAddressesAsync;
     }
+
+    private static Task<IPAddress[]> ResolveAddressesAsync(string host, CancellationToken ct) =>
+        Dns.GetHostAddressesAsync(host, ct);
 
     public override async Task AnnounceAsync(TrackerEvent evt, CancellationToken ct)
     {
         await _syncLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // Retry logic for transient failures
-            Exception? lastException = null;
-            for (int attempt = 0; attempt <= MaxRetries; attempt++)
+            var responses = new List<AnnounceResponse>();
+            var errors = new List<Exception>();
+            foreach (var addressFamily in GetAnnounceAddressFamilies())
             {
+                if (_client != null && _connectedAddressFamily != addressFamily)
+                {
+                    ResetClientUnsafe();
+                }
+                _requestedAddressFamily = addressFamily;
                 try
                 {
-                    if (attempt > 0)
-                    {
-                        // Exponential backoff delay before retry
-                        int delayMs = RetryDelaysMs[Math.Min(attempt - 1, RetryDelaysMs.Length - 1)];
-                        _logger.LogDebug("Announce retry {Attempt}/{MaxRetries} after {Delay}ms delay", attempt, MaxRetries, delayMs);
-                        await Task.Delay(TimeSpan.FromMilliseconds(delayMs), _timeProvider, ct).ConfigureAwait(false);
-
-                        // Reset client on retry to get fresh connection
-                        _client?.Close();
-                        _client = null;
-                        _proxyControlClient?.Dispose();
-                        _proxyControlClient = null;
-                        _connectionId = 0;
-                    }
-
-                    await EnsureConnectedAsyncUnsafeAsync(ct).ConfigureAwait(false);
-                    long connId = await GetConnectionIdAsyncUnsafeAsync(ct).ConfigureAwait(false);
-                    var response = await SendAnnounceAsync(connId, evt, ct).ConfigureAwait(false);
-
-                    RaiseAnnounceResult(true, response);
-                    return;
+                    responses.Add(await AnnounceSingleFamilyAsync(evt, ct).ConfigureAwait(false));
                 }
-                catch (UdpTrackerException ex) when (ex.IsTransient && attempt < MaxRetries)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    lastException = ex;
-                    _logger.LogDebug(ex, "Announce transient error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
+                    throw;
                 }
-                catch (TimeoutException ex) when (attempt < MaxRetries)
+                catch (Exception ex)
                 {
-                    lastException = ex;
-                    _logger.LogDebug(ex, "Announce timeout (attempt {Attempt}/{MaxRetries})", attempt + 1, MaxRetries);
-                }
-                catch (SocketException ex) when (attempt < MaxRetries)
-                {
-                    lastException = ex;
-                    _logger.LogDebug(ex, "Announce socket error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
+                    errors.Add(ex);
+                    _logger.LogDebug(
+                        ex,
+                        "UDP announce to {Url} over {AddressFamily} failed while the other family remains eligible",
+                        Url,
+                        addressFamily?.ToString() ?? "proxy-selected");
                 }
             }
 
-            // All retries exhausted - this is expected for unreachable trackers
-            _connectionId = 0;
-            _logger.LogWarning(lastException, "Tracker {Url} announce failed after {MaxRetries} retries - {Message}", Url, MaxRetries, lastException?.Message ?? "Unknown error");
-            RaiseAnnounceResult(false, new AnnounceResponse(), lastException?.Message ?? "Retries exhausted");
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (UdpTrackerException ex)
-        {
-            // Non-transient tracker error (e.g., protocol error)
-            _connectionId = 0;
-            _logger.LogWarning(ex, "Tracker {Url} announce failed - {Message}", Url, ex.Message);
-            RaiseAnnounceResult(false, new AnnounceResponse(), ex.Message);
-        }
-        catch (Exception ex) when (ex is SocketException || ex is TimeoutException)
-        {
-            // Expected network errors on first attempt (no retries)
-            _connectionId = 0;
-            _logger.LogWarning(ex, "Tracker {Url} announce failed - {Message}", Url, ex.Message);
-            RaiseAnnounceResult(false, new AnnounceResponse(), ex.Message);
-        }
-        catch (Exception ex)
-        {
-            // Unexpected exception
-            _connectionId = 0;
-            _logger.LogError(ex, "Tracker {Url} announce failed (unexpected)", Url);
-            RaiseAnnounceResult(false, new AnnounceResponse(), ex.Message);
+            if (responses.Count > 0)
+            {
+                RaiseAnnounceResult(true, MergeAnnounceResponses(responses));
+            }
+            else
+            {
+                _connectionId = 0;
+                string message = errors.LastOrDefault()?.Message ?? "Tracker announce failed";
+                _logger.LogWarning(errors.LastOrDefault(), "Tracker {Url} announce failed over all eligible address families - {Message}", Url, message);
+                RaiseAnnounceResult(false, new AnnounceResponse(), message);
+            }
         }
         finally
         {
+            _requestedAddressFamily = null;
             _syncLock.Release();
         }
+    }
+
+    private async Task<AnnounceResponse> AnnounceSingleFamilyAsync(TrackerEvent evt, CancellationToken ct)
+    {
+        for (int attempt = 0; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                if (attempt > 0)
+                {
+                    int delayMs = RetryDelaysMs[Math.Min(attempt - 1, RetryDelaysMs.Length - 1)];
+                    _logger.LogDebug("Announce retry {Attempt}/{MaxRetries} after {Delay}ms delay", attempt, MaxRetries, delayMs);
+                    await Task.Delay(TimeSpan.FromMilliseconds(delayMs), _timeProvider, ct).ConfigureAwait(false);
+                    ResetClientUnsafe();
+                }
+
+                await EnsureConnectedAsyncUnsafeAsync(ct).ConfigureAwait(false);
+                long connId = await GetConnectionIdAsyncUnsafeAsync(ct).ConfigureAwait(false);
+                return await SendAnnounceAsync(connId, evt, ct).ConfigureAwait(false);
+            }
+            catch (UdpTrackerException ex) when (ex.IsTransient && attempt < MaxRetries)
+            {
+                _logger.LogDebug(ex, "Announce transient error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
+            }
+            catch (TimeoutException ex) when (attempt < MaxRetries)
+            {
+                _logger.LogDebug(ex, "Announce timeout (attempt {Attempt}/{MaxRetries})", attempt + 1, MaxRetries);
+            }
+            catch (SocketException ex) when (attempt < MaxRetries)
+            {
+                _logger.LogDebug(ex, "Announce socket error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
+            }
+        }
+
+        throw new InvalidOperationException("UDP tracker retry loop completed without a response or exception.");
     }
 
     // Exponential backoff
     public override void Deinit()
     {
+        ResetClientUnsafe();
+    }
+
+    private IReadOnlyList<AddressFamily?> GetAnnounceAddressFamilies()
+    {
+        var bindAddress = Torrent.Settings.Connection.BindAddress;
+        if (bindAddress != null)
+        {
+            return [bindAddress.AddressFamily];
+        }
+
+        var proxy = Torrent.Settings.Proxy;
+        bool proxyIsActive = proxy.Type == ProxyType.Socks5
+            && proxy.ProxyTrackers
+            && !string.IsNullOrEmpty(proxy.Host);
+        if (proxyIsActive)
+        {
+            return [null];
+        }
+
+        if (IPAddress.TryParse(new Uri(Url).Host, out var literal))
+        {
+            return [literal.AddressFamily];
+        }
+
+        return [AddressFamily.InterNetwork, AddressFamily.InterNetworkV6];
+    }
+
+    private static AnnounceResponse MergeAnnounceResponses(IReadOnlyList<AnnounceResponse> responses)
+    {
+        var merged = new AnnounceResponse
+        {
+            Interval = responses.Min(response => response.Interval),
+            SeedCount = responses.Max(response => response.SeedCount),
+            LeechCount = responses.Max(response => response.LeechCount)
+        };
+
+        var minIntervals = responses
+            .Where(response => response.MinInterval.HasValue)
+            .Select(response => response.MinInterval!.Value)
+            .ToArray();
+        merged.MinInterval = minIntervals.Length == 0 ? null : minIntervals.Min();
+
+        var peers = new HashSet<IPEndPoint>();
+        foreach (var response in responses)
+        {
+            foreach (var peer in response.Peers)
+            {
+                if (peers.Add(peer))
+                {
+                    merged.Peers.Add(peer);
+                }
+            }
+        }
+
+        return merged;
+    }
+
+    private void ResetClientUnsafe()
+    {
         _client?.Close();
         _client = null;
         _proxyControlClient?.Dispose();
         _proxyControlClient = null;
+        _proxyUdpEndPoint = null;
+        _endpoint = null;
+        _connectedAddressFamily = null;
         _connectionId = 0;
         _connectionIdTimestamp = DateTimeOffset.MinValue;
     }
@@ -495,26 +575,54 @@ internal class UdpTracker : TrackerBase, IDisposable
                 if (proxy.Type == ProxyType.Socks5 && proxy.ProxyTrackers && !string.IsNullOrEmpty(proxy.Host))
                 {
                     _logger.LogDebug("Connecting to UDP tracker {Url} via SOCKS5 proxy {ProxyHost}:{ProxyPort}", Url, proxy.Host, proxy.Port);
-                    var result = await ProxyHelper.ConnectSocks5UdpAsync(proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, ct).ConfigureAwait(false);
+                    var result = await ProxyHelper.ConnectSocks5UdpAsync(
+                        proxy.Host,
+                        proxy.Port,
+                        proxy.Username,
+                        proxy.Password,
+                        _logger,
+                        Torrent.Settings.Connection.BindAddress,
+                        ct).ConfigureAwait(false);
                     _client = new UdpSocketAdapter(result.UdpClient, true);
+                    _connectedAddressFamily = null;
                     _proxyUdpEndPoint = result.ProxyUdpEndPoint;
                     _proxyControlClient = result.ControlClient;
 
-                    var ips = await Dns.GetHostAddressesAsync(uri.Host, ct).ConfigureAwait(false);
+                    var ips = await _resolveAddressesAsync(uri.Host, ct).ConfigureAwait(false);
                     var preferredIp = ips.FirstOrDefault(ip => ip.AddressFamily == result.ProxyUdpEndPoint.AddressFamily) ?? ips[0];
                     _endpoint = new IPEndPoint(preferredIp, uri.Port);
                 }
                 else
                 {
-                    var ips = await Dns.GetHostAddressesAsync(uri.Host, ct).ConfigureAwait(false);
+                    var ips = await _resolveAddressesAsync(uri.Host, ct).ConfigureAwait(false);
                     if (ips.Length == 0)
                     {
                         throw new UdpTrackerException($"DNS resolution failed: no addresses found for {uri.Host}", isTransient: true);
                     }
 
-                    var preferredIp = ips.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork) ?? ips[0];
+                    var bindAddress = Torrent.Settings.Connection.BindAddress;
+                    var preferredFamily = bindAddress?.AddressFamily
+                        ?? _requestedAddressFamily
+                        ?? AddressFamily.InterNetwork;
+                    var preferredIp = ips.FirstOrDefault(ip => ip.AddressFamily == preferredFamily);
+                    if (preferredIp == null)
+                    {
+                        if (bindAddress != null || _requestedAddressFamily != null)
+                        {
+                            throw new UdpTrackerException(
+                                $"Tracker {uri.Host} has no {preferredFamily} address compatible with this announce.",
+                                isTransient: false);
+                        }
+
+                        preferredIp = ips[0];
+                    }
                     _endpoint = new IPEndPoint(preferredIp, uri.Port);
                     _client = _socketFactory.Create(_endpoint.AddressFamily);
+                    _connectedAddressFamily = _endpoint.AddressFamily;
+                    if (bindAddress != null)
+                    {
+                        _client.Client.Bind(new IPEndPoint(bindAddress, 0));
+                    }
                 }
             }
             catch (SocketException ex)

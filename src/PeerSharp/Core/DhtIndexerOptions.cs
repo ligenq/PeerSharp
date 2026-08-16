@@ -6,6 +6,16 @@ namespace PeerSharp.Core;
 public sealed class DhtIndexerOptions
 {
     /// <summary>
+    /// Whether to emit a hash again when a different sampled node reports it. Default is
+    /// <see langword="false"/>, preserving the distinct stream. Repeat sightings are an untrusted
+    /// ranking hint, not proof of popularity, availability, or safety.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="MaxInfoHashes"/> continues to count unique hashes, not emitted sightings.
+    /// </remarks>
+    public bool ReturnDuplicateSightings { get; set; }
+
+    /// <summary>
     /// How many nodes are queried at once. The crawl is entirely network-bound, so this is the main
     /// throughput knob - and the main politeness one, since it caps how much traffic the swarm sees
     /// from this process.

@@ -43,19 +43,15 @@ public class TorrentConfigurationTests
     }
 
     [Fact]
-    public void DownloadLimit_SetNegative_ClampsToZero()
+    public void DownloadLimit_SetNegative_Throws()
     {
-        _config.DownloadLimitBytesPerSecond = -100;
-        Assert.Equal(0, _config.DownloadLimitBytesPerSecond);
-        Assert.Equal(0, _bandwidthManager.LastDownloadLimit);
+        Assert.Throws<ArgumentOutOfRangeException>(() => _config.DownloadLimitBytesPerSecond = -100);
     }
 
     [Fact]
-    public void UploadLimit_SetNegative_ClampsToZero()
+    public void UploadLimit_SetNegative_Throws()
     {
-        _config.UploadLimitBytesPerSecond = -50;
-        Assert.Equal(0, _config.UploadLimitBytesPerSecond);
-        Assert.Equal(0, _bandwidthManager.LastUploadLimit);
+        Assert.Throws<ArgumentOutOfRangeException>(() => _config.UploadLimitBytesPerSecond = -50);
     }
 
     [Fact]
@@ -77,13 +73,13 @@ public class TorrentConfigurationTests
     private class MockBandwidthManager : IBandwidthManager
     {
         private readonly Dictionary<string, BandwidthChannel> _channels = [];
-        public int LastDownloadLimit { get; private set; }
+        public long LastDownloadLimit { get; private set; }
         public int LastDiskReadLimit { get; private set; }
         public int LastDiskWriteLimit { get; private set; }
-        public int LastUploadLimit { get; private set; }
+        public long LastUploadLimit { get; private set; }
         public ITorrent? LastTorrent { get; private set; }
 
-        public void SetTorrentLimits(ITorrent torrent, int downloadLimit, int uploadLimit)
+        public void SetTorrentLimits(ITorrent torrent, long downloadLimit, long uploadLimit)
         {
             LastTorrent = torrent;
             LastDownloadLimit = downloadLimit;
@@ -110,12 +106,12 @@ public class TorrentConfigurationTests
             _channels[name] = channel;
             return channel;
         }
-        public (int DownloadLimit, int UploadLimit) GetTorrentLimits(ITorrent torrent) => (0, 0);
+        public (long DownloadLimit, long UploadLimit) GetTorrentLimits(ITorrent torrent) => (0, 0);
         public (int ReadLimit, int WriteLimit) GetTorrentDiskLimits(ITorrent torrent) => (0, 0);
         public Task<int> RequestBandwidthAsync(IBandwidthUser user, int amount, int priority, string[] channelNames, CancellationToken ct = default) => Task.FromResult(0);
         public void ReturnBandwidth(int amount, string[] channelNames) { }
         public void RemoveTorrentChannels(ITorrent torrent) { }
-        public void SetGlobalLimits(int downloadLimit, int uploadLimit) { }
+        public void SetGlobalLimits(long downloadLimit, long uploadLimit) { }
         public void SetGlobalDiskLimits(int readLimit, int writeLimit) { }
         public void Start() { }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

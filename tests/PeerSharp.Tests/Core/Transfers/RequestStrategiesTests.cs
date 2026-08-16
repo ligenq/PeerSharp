@@ -200,22 +200,22 @@ public class RequestStrategiesTests
     }
 
     /// <summary>
-    /// End game is exempt. Broad duplication is the whole strategy there - it runs only when the last
-    /// few blocks are outstanding, where finishing matters more than the wasted copies.
+    /// End game still duplicates broadly, but stops after four peers owe the block. That preserves
+    /// several independent chances to finish without broadcasting every final block to the swarm.
     /// </summary>
     [Fact]
-    public void EndGameStrategy_IsNotSubjectToTheDuplicationCap()
+    public void EndGameStrategy_CapsBroadDuplicationAtFourPeers()
     {
         var tracker = new BlockRequestTracker();
         var strategy = new EndGameBlockRequestStrategy(tracker, 16384);
         var pieceState = new PieceState(0, 1);
 
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 4; i++)
         {
             tracker.AddBlockRequest(0, 0, CreatePeer(), new BlockRequest());
         }
 
-        Assert.True(strategy.IsBlockRequestable(pieceState, 0, 0, CreatePeer(), isPeerFast: false));
+        Assert.False(strategy.IsBlockRequestable(pieceState, 0, 0, CreatePeer(), isPeerFast: false));
     }
 
     [Fact]

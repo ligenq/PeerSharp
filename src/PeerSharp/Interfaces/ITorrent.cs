@@ -35,7 +35,10 @@ public interface ITorrent
     /// <summary>
     /// Gets or sets the per-torrent download limit in bytes per second. 0 means unlimited.
     /// </summary>
-    int DownloadLimitBytesPerSecond { get; set; }
+    long DownloadLimitBytesPerSecond { get; set; }
+
+    /// <summary>Gets the current aggregate download speed in bytes per second.</summary>
+    long DownloadSpeed => 0;
 
     /// <summary>
     /// Gets or sets the per-torrent disk read limit in bytes per second. 0 means unlimited.
@@ -46,6 +49,9 @@ public interface ITorrent
     /// Gets or sets the per-torrent disk write limit in bytes per second. 0 means unlimited.
     /// </summary>
     int DiskWriteLimitBytesPerSecond { get; set; }
+
+    /// <summary>Gets the current aggregate upload speed in bytes per second.</summary>
+    long UploadSpeed => 0;
 
     /// <summary>
     /// Gets or sets the download strategy for piece selection.
@@ -107,6 +113,23 @@ public interface ITorrent
     /// False for magnet links until metadata is downloaded.
     /// </summary>
     bool HasMetadata { get; }
+
+    /// <summary>
+    /// Determines whether this torrent and another share a non-empty V1 or V2 info hash. Empty hashes
+    /// represent an unavailable hash version and are never treated as identity evidence.
+    /// </summary>
+    /// <param name="other">The torrent to compare.</param>
+    /// <returns><see langword="true"/> when a non-empty hash version matches.</returns>
+    bool HasSameIdentity(ITorrent? other)
+    {
+        if (other == null)
+        {
+            return false;
+        }
+
+        return (!Hash.IsEmpty && !other.Hash.IsEmpty && Hash == other.Hash)
+            || (!HashV2.IsEmpty && !other.HashV2.IsEmpty && HashV2 == other.HashV2);
+    }
 
     /// <summary>
     /// Gets whether this torrent contains streamable media files.
@@ -224,7 +247,7 @@ public interface ITorrent
     /// <summary>
     /// Gets or sets the per-torrent upload limit in bytes per second. 0 means unlimited.
     /// </summary>
-    int UploadLimitBytesPerSecond { get; set; }
+    long UploadLimitBytesPerSecond { get; set; }
 
     /// <summary>
     /// Forces a full recheck of all pieces against their hashes.

@@ -150,14 +150,14 @@ public class PeerManagerInfoTests
     {
         public void Configure(int updateIntervalMs) { }
         public BandwidthChannel GetChannel(string name) => new BandwidthChannel(TimeProvider.System);
-        public (int DownloadLimit, int UploadLimit) GetTorrentLimits(ITorrent torrent) => (0, 0);
+        public (long DownloadLimit, long UploadLimit) GetTorrentLimits(ITorrent torrent) => (0, 0);
         public (int ReadLimit, int WriteLimit) GetTorrentDiskLimits(ITorrent torrent) => (0, 0);
         public Task<int> RequestBandwidthAsync(IBandwidthUser user, int amount, int priority, string[] channelNames, CancellationToken ct = default) => Task.FromResult(amount);
         public void ReturnBandwidth(int amount, string[] channelNames) { }
         public void RemoveTorrentChannels(ITorrent torrent) { }
-        public void SetGlobalLimits(int downloadLimit, int uploadLimit) { }
+        public void SetGlobalLimits(long downloadLimit, long uploadLimit) { }
         public void SetGlobalDiskLimits(int readLimit, int writeLimit) { }
-        public void SetTorrentLimits(ITorrent torrent, int downloadLimit, int uploadLimit) { }
+        public void SetTorrentLimits(ITorrent torrent, long downloadLimit, long uploadLimit) { }
         public void SetTorrentDiskLimits(ITorrent torrent, int readLimit, int writeLimit) { }
         public void Start() { }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -181,7 +181,6 @@ public class PeerManagerInfoTests
         public Task PortReceivedAsync(IPeerCommunication peer, ushort dhtPort) => Task.CompletedTask;
     }
 }
-
 
 
 

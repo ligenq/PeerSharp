@@ -488,10 +488,16 @@ internal sealed class WebSeedManager : IAsyncDisposable
         {
             // Direct connection if proxying peers is disabled
             var directSettings = new ProxySettings { Type = ProxyType.None };
-            return new DefaultHttpClient(_httpClientFactory.CreateClient(directSettings, false));
+            return new DefaultHttpClient(_httpClientFactory.CreateClient(
+                directSettings,
+                false,
+                _torrent.Settings.Connection.BindAddress));
         }
 
-        return new DefaultHttpClient(_httpClientFactory.CreateClient(settings, false));
+        return new DefaultHttpClient(_httpClientFactory.CreateClient(
+            settings,
+            false,
+            _torrent.Settings.Connection.BindAddress));
     }
 
     private void RecordFailure(WebSeedSource source)

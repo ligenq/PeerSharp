@@ -36,7 +36,7 @@ internal static class BandwidthTestDoubles
             return new BandwidthChannel(TimeProvider.System);
         }
 
-        public (int DownloadLimit, int UploadLimit) GetTorrentLimits(ITorrent torrent)
+        public (long DownloadLimit, long UploadLimit) GetTorrentLimits(ITorrent torrent)
         {
             return (0, 0);
         }
@@ -65,7 +65,7 @@ internal static class BandwidthTestDoubles
 
         public void RemoveTorrentChannels(ITorrent torrent) { }
 
-        public void SetGlobalLimits(int downloadLimit, int uploadLimit)
+        public void SetGlobalLimits(long downloadLimit, long uploadLimit)
         {
         }
 
@@ -73,7 +73,7 @@ internal static class BandwidthTestDoubles
         {
         }
 
-        public void SetTorrentLimits(ITorrent torrent, int downloadLimit, int uploadLimit)
+        public void SetTorrentLimits(ITorrent torrent, long downloadLimit, long uploadLimit)
         {
         }
 

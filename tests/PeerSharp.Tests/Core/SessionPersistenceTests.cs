@@ -52,7 +52,14 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
             QueuePriority: 2,
             RatioLimit: 1.5f,
             SeedTimeLimit: TimeSpan.FromMinutes(10),
-            DownloadStrategy: DownloadStrategy.Sequential);
+            DownloadStrategy: DownloadStrategy.Sequential)
+        {
+            PeerPreferences =
+            [
+                new SavedPeerPreference("192.0.2.10", 6881, UtpSupported: false),
+                new SavedPeerPreference("2001:db8::10", 6882, OfferEncryptionNext: false)
+            ]
+        };
 
         var entry = new SavedTorrentEntry(hash, torrentBytes, magnet, resume, options);
         await persistence.SaveAsync(entry);
@@ -76,6 +83,7 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
         Assert.Equal(options.RatioLimit, loaded.Options?.RatioLimit);
         Assert.Equal(options.SeedTimeLimit, loaded.Options?.SeedTimeLimit);
         Assert.Equal(options.DownloadStrategy, loaded.Options?.DownloadStrategy);
+        Assert.Equal(options.PeerPreferences, loaded.Options?.PeerPreferences);
     }
 
     [Fact]

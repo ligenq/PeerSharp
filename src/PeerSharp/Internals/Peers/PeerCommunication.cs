@@ -8,6 +8,7 @@ using PeerSharp.Internals.Utp;
 using System.Buffers;
 using System.Diagnostics;
 using System.IO.Pipelines;
+using System.Net;
 using System.Net.Sockets;
 using System.Threading.Channels;
 using PeerSharp.Messages;
@@ -194,9 +195,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private const int SendQueueCapacityMin = 200;
     private const int SendQueueTimeoutMs = ProtocolConstants.SendQueueTimeoutMs;
     private readonly HashSet<int> _allowedFastPieces = [];
+    private readonly Lock _availabilityLock = new();
     private readonly Lock _fastPiecesLock = new();
     private readonly int _lastLoggedPipelineDepth = 0;
     private readonly ILogger<PeerCommunication> _logger;
+    private IPeerListener _listener;
     private readonly MessageQueue _sendQueue;
     private readonly List<int> _suggestedPieces = [];
     private readonly Torrent _torrent;
@@ -239,6 +242,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private int _peerInterested;
     private byte[]? _plaintextBuffer;
     private byte[] _preReadHandshake = [];
+    private byte[]? _deferredBitfield;
+    private readonly HashSet<int> _deferredHavePieces = [];
+    private DeferredAvailabilityKind _deferredAvailabilityKind;
 
     /// <summary>
     /// Bytes that arrived after the handshake but were pulled off the socket along with it.
@@ -262,7 +268,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     // Smoothed speed uses exponential moving average to prevent feedback loops
     // where a peer becomes "slow" just because they finished their requests
-    private int _smoothedDownloadSpeed;
+    private long _smoothedDownloadSpeed;
 
     // RTT tracking for adaptive request pipelining
     private int _smoothedRttMs = 100;
@@ -283,7 +289,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         _torrent = torrent;
         _logger = loggerFactory.CreateLogger<PeerCommunication>();
-        Listener = listener;
+        Volatile.Write(ref _listener, listener);
         this._timeProvider = timeProvider;
         PeerPieces = new PiecesProgress(torrent.Pieces.Count);
         UtPex = new UtPex(this);
@@ -322,13 +328,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public long UploadedSinceUnchoked => Uploaded - Interlocked.Read(ref _uploadedAtLastUnchoke);
     public string Country { get; set; } = "";
     public long Downloaded => Interlocked.Read(ref _downloaded);
-    public int DownloadSpeed { get; private set; }
+    public long DownloadSpeed { get; private set; }
     public long LastActivityTicks => Interlocked.Read(ref _lastActivityTicksValue);
 
     /// <summary>When we last sent anything. Distinct from receive activity: a peer drops us for being
     /// silent, regardless of how chatty it has been.</summary>
     public long LastSentTicks => Interlocked.Read(ref _lastSentTicksValue);
-    public IPeerListener Listener { get; }
+    public IPeerListener Listener => Volatile.Read(ref _listener);
     public string Name => RemoteEndPoint?.ToString() ?? "Unknown";
 
     public bool PeerChoking
@@ -359,6 +365,100 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </para>
     /// </summary>
     public bool HasReportedPieces { get; private set; }
+
+    private enum DeferredAvailabilityKind
+    {
+        None,
+        Bitfield,
+        HaveAll,
+        HaveNone
+    }
+
+    /// <summary>
+    /// Moves an established connection to the peer manager created after magnet metadata arrives.
+    /// The socket and its receive/send loops remain live; listener reads are ordinary reference reads,
+    /// so replacing the target is atomic.
+    /// </summary>
+    internal void RetargetListener(IPeerListener listener)
+    {
+        ArgumentNullException.ThrowIfNull(listener);
+        _listener = listener;
+    }
+
+    /// <summary>
+    /// Resizes the peer bitfield once a magnet learns its piece count and replays availability that
+    /// arrived while the count was zero. Returns false when the saved report cannot be interpreted
+    /// safely, in which case the caller must reconnect because BEP 3 offers no way to request the
+    /// initial bitfield again.
+    /// </summary>
+    internal bool TryApplyDeferredAvailability(int pieceCount)
+    {
+        // A retained connection cannot send a new BEP 3 initial bitfield: that message is only valid
+        // as the first post-handshake message. Magnets normally have no local pieces, but if resume
+        // data restored some, reconnect so the peer receives an accurate initial bitfield. Legacy
+        // Merkle support is likewise fixed when PeerCommunication is constructed and cannot be added
+        // safely to an already-negotiated connection.
+        if (pieceCount <= 0 || _torrent.Pieces.ReceivedCount > 0 ||
+            (_torrent.InfoFile.Info.IsMerkle && UtHashPiece == null))
+        {
+            return false;
+        }
+
+        lock (_availabilityLock)
+        {
+            if (!HasReportedPieces)
+            {
+                return false;
+            }
+
+            var resized = new PiecesProgress(pieceCount);
+            switch (_deferredAvailabilityKind)
+            {
+                case DeferredAvailabilityKind.HaveAll:
+                    resized.SetHaveAll();
+                    break;
+                case DeferredAvailabilityKind.HaveNone:
+                    resized.SetHaveNone();
+                    break;
+                case DeferredAvailabilityKind.Bitfield:
+                    int expectedBytes = (pieceCount + 7) / 8;
+                    if (_deferredBitfield is not { } bitfield || bitfield.Length != expectedBytes ||
+                        HasNonZeroSpareBits(bitfield, pieceCount))
+                    {
+                        return false;
+                    }
+                    resized.FromBitfield(bitfield);
+                    break;
+                case DeferredAvailabilityKind.None:
+                    // A sequence of HAVE messages without a bitfield is valid and starts from empty.
+                    break;
+            }
+
+            foreach (int index in _deferredHavePieces)
+            {
+                if ((uint)index >= (uint)pieceCount)
+                {
+                    return false;
+                }
+                resized.AddPiece(index);
+            }
+
+            PeerPieces = resized;
+            _deferredBitfield = null;
+            _deferredHavePieces.Clear();
+            _deferredAvailabilityKind = DeferredAvailabilityKind.None;
+            return true;
+        }
+    }
+
+    private static bool HasNonZeroSpareBits(byte[] bitfield, int pieceCount)
+    {
+        int spareBits = 8 - (pieceCount & 7);
+        return spareBits < 8 && (bitfield[^1] & ((1 << spareBits) - 1)) != 0;
+    }
+
+    internal Task RefreshExtendedHandshakeAfterMetadataAsync() =>
+        RemoteSupportsExtensions ? SendExtendedHandshakeAsync() : Task.CompletedTask;
 
     /// <summary>
     /// BEP 40: Canonical peer priority. Higher values indicate more preferred peers.
@@ -450,7 +550,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     public bool RemoteSupportsV2 { get; internal set; }
 
-    public int SmoothedDownloadSpeed => Volatile.Read(ref _smoothedDownloadSpeed);
+    public long SmoothedDownloadSpeed => Volatile.Read(ref _smoothedDownloadSpeed);
 
     public int SmoothedRttMs => Interlocked.CompareExchange(ref _smoothedRttMs, 0, 0);
 
@@ -462,7 +562,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     public long Uploaded => Interlocked.Read(ref _uploaded);
 
-    public int UploadSpeed { get; private set; }
+    public long UploadSpeed { get; private set; }
 
     /// <summary>
     /// BEP 30: ut_hash_piece extension for Merkle hash torrents.
@@ -492,7 +592,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     internal int Connected { get => _connected; set => _connected = value; }
 
     /// <summary>Test hook: overrides the smoothed download speed used by choke/transport decisions.</summary>
-    internal void SetSmoothedDownloadSpeedForTesting(int speed) => Volatile.Write(ref _smoothedDownloadSpeed, speed);
+    internal void SetSmoothedDownloadSpeedForTesting(long speed) => Volatile.Write(ref _smoothedDownloadSpeed, speed);
 
     /// <summary>Test hook: overrides the remote peer's interested state.</summary>
     internal void SetPeerInterestedForTesting(bool interested) => Volatile.Write(ref _peerInterested, interested ? 1 : 0);
@@ -749,13 +849,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             if (!useUtp)
             {
                 var proxy = _torrent.Settings.Proxy;
+                var bindAddress = _torrent.Settings.Connection.BindAddress;
                 if (proxy.Type != ProxyType.None && proxy.ProxyPeers && !string.IsNullOrEmpty(proxy.Host))
                 {
                     _logger.LogDebug("Connecting to {Ip}:{Port} via {ProxyType} proxy {ProxyHost}:{ProxyPort}", ip, port, proxy.Type, proxy.Host, proxy.Port);
                     var result = proxy.Type switch
                     {
-                        ProxyType.Socks5 => await ProxyHelper.ConnectSocks5Async(ip, port, proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, linkedCts.Token).ConfigureAwait(false),
-                        ProxyType.Http => await ProxyHelper.ConnectHttpProxyAsync(ip, port, proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, linkedCts.Token).ConfigureAwait(false),
+                        ProxyType.Socks5 => await ProxyHelper.ConnectSocks5Async(ip, port, proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, bindAddress, linkedCts.Token).ConfigureAwait(false),
+                        ProxyType.Http => await ProxyHelper.ConnectHttpProxyAsync(ip, port, proxy.Host, proxy.Port, proxy.Username, proxy.Password, _logger, bindAddress, linkedCts.Token).ConfigureAwait(false),
                         _ => throw new NotSupportedException($"Proxy type {proxy.Type} not supported")
                     };
 
@@ -770,7 +871,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
                 else
                 {
-                    Client = new TcpClient();
+                    Client = bindAddress == null
+                        ? new TcpClient()
+                        : new TcpClient(bindAddress.AddressFamily);
+                    if (bindAddress != null)
+                    {
+                        Client.Client.Bind(new IPEndPoint(bindAddress, 0));
+                    }
                     ConfigureTcpClient(Client, _torrent.Settings, _logger);
                     await Client.ConnectAsync(ip, port, linkedCts.Token).ConfigureAwait(false);
                     Stream = Client.GetStream();
@@ -866,9 +973,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             // Connection timeout (not explicit cancellation via CloseAsync()) - expected in BitTorrent
             int elapsedMs = GetConnectionElapsedMs();
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, ex.GetType().Name);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
@@ -876,36 +983,36 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             // OS-level connection timeout (timeoutMs > OS timeout)
             int elapsedMs = GetConnectionElapsedMs();
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, ex.GetType().Name);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (OperationCanceledException)
         {
             // Explicit cancellation via CloseAsync()
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect cancelled {Ip}:{Port}", ip, port);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (SocketException ex)
         {
             // Expected network errors - log without stack trace at Debug level
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, ex.Message);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (IOException ex) when (ex.InnerException is SocketException)
         {
             // Expected network errors wrapped in IOException - log without stack trace
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, ex.InnerException.Message);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
@@ -917,9 +1024,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             // below, where it was being reported as an unexpected fault, at error level, with a stack
             // trace, twice per peer: once here and once from the uTP layer.
             int elapsedMs = GetConnectionElapsedMs();
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Message})", ip, port, elapsedMs, ex.Message);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
@@ -1019,7 +1126,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public int GetOptimalPipelineDepth()
     {
         var transferSettings = _torrent.Settings.Transfer;
-        int speedBytesPerSec = Math.Max(DownloadSpeed, SmoothedDownloadSpeed);
+        int speedBytesPerSec = (int)Math.Min(int.MaxValue, Math.Max(DownloadSpeed, SmoothedDownloadSpeed));
         int rttMs = SmoothedRttMs;
 
         return PipelineDepthCalculator.CalculateOptimal(
@@ -1392,8 +1499,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         long totalDown = Downloaded;
         long totalUp = Uploaded;
 
-        DownloadSpeed = (int)(totalDown - _lastDownloaded);
-        UploadSpeed = (int)(totalUp - _lastUploaded);
+        DownloadSpeed = Math.Max(0, totalDown - _lastDownloaded);
+        UploadSpeed = Math.Max(0, totalUp - _lastUploaded);
 
         _lastDownloaded = totalDown;
         _lastUploaded = totalUp;
@@ -1403,7 +1510,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // 2. Adopts lower speeds SLOWLY (to ignore momentary stalls/jitter)
         // This prevents the "sawtooth" pattern where one bad second drops the average too much.
 
-        int currentSmoothed, newSmoothed;
+        long currentSmoothed, newSmoothed;
         do
         {
             currentSmoothed = SmoothedDownloadSpeed;
@@ -1525,15 +1632,15 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private int GetAdaptiveSendQueueLimit()
     {
-        int speed = SmoothedDownloadSpeed;
-        int extra = speed / 200_000 * 50;
-        int limit = SendQueueBaseSoftLimit + extra;
+        long speed = SmoothedDownloadSpeed;
+        long extra = speed / 200_000 * 50;
+        int limit = (int)Math.Min(SendQueueCapacityMax, SendQueueBaseSoftLimit + extra);
         return Math.Clamp(limit, SendQueueCapacityMin, SendQueueCapacityMax);
     }
 
     private int GetOptimalPipelineDepthForRtt(int rttMs)
     {
-        int speedBytesPerSec = Math.Max(DownloadSpeed, SmoothedDownloadSpeed);
+        int speedBytesPerSec = (int)Math.Min(int.MaxValue, Math.Max(DownloadSpeed, SmoothedDownloadSpeed));
         return PipelineDepthCalculator.CalculateOptimalForRtt(speedBytesPerSec, rttMs);
     }
 
@@ -1743,9 +1850,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
         catch (IOException ex)
         {
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Incoming handshake I/O error for {PeerName} - {Message}", Name, ex.Message);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1775,9 +1882,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
         catch (IOException ex)
         {
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Outgoing connected handshake I/O error for {PeerName} - {Message}", Name, ex.Message);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             await CloseAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1822,9 +1929,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
                 catch (OperationCanceledException)
                 {
-                    #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
                     _logger.LogDebug("Encryption handshake timeout for {PeerName}", Name);
-                    #pragma warning restore S6667
+#pragma warning restore S6667
                     return EncryptionHandshakeResult.Failed;
                 }
 
@@ -1899,16 +2006,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // pairs in two minutes, roughly 3% of all connection attempts.
         catch (SocketException ex)
         {
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Encryption handshake failed for {PeerName} - {Message}", Name, ex.Message);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             return EncryptionHandshakeResult.ConnectionClosed;
         }
         catch (IOException ex)
         {
-            #pragma warning disable S6667 // Deliberately no stack trace: see note above.
+#pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Encryption handshake I/O failure for {PeerName} - {Message}", Name, ex.Message);
-            #pragma warning restore S6667
+#pragma warning restore S6667
             return EncryptionHandshakeResult.ConnectionClosed;
         }
         catch (ObjectDisposedException ex)
@@ -1997,25 +2104,72 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 break;
 
             case MessageId.Have:
-                PeerPieces.AddPiece(msg.HavePieceIndex);
-                HasReportedPieces = true;
+                lock (_availabilityLock)
+                {
+                    if (PeerPieces.Count == 0)
+                    {
+                        _deferredHavePieces.Add(msg.HavePieceIndex);
+                    }
+                    else
+                    {
+                        PeerPieces.AddPiece(msg.HavePieceIndex);
+                    }
+                    HasReportedPieces = true;
+                }
                 break;
 
             case MessageId.Bitfield:
-                PeerPieces.FromBitfield(msg.Data.Length > 0 ? msg.Data : msg.Payload.Span);
-                HasReportedPieces = true;
+                ReadOnlySpan<byte> receivedBitfield = msg.Data.Length > 0 ? msg.Data : msg.Payload.Span;
+                lock (_availabilityLock)
+                {
+                    if (PeerPieces.Count == 0)
+                    {
+                        _deferredBitfield = receivedBitfield.ToArray();
+                        _deferredHavePieces.Clear();
+                        _deferredAvailabilityKind = DeferredAvailabilityKind.Bitfield;
+                    }
+                    else
+                    {
+                        PeerPieces.FromBitfield(receivedBitfield);
+                    }
+                    HasReportedPieces = true;
+                }
                 _logger.LogDebug("{PeerName} sent bitfield: {Count} pieces", Name, PeerPieces.ReceivedCount);
                 break;
 
             case MessageId.HaveAll:
-                PeerPieces.SetHaveAll();
-                HasReportedPieces = true;
+                lock (_availabilityLock)
+                {
+                    if (PeerPieces.Count == 0)
+                    {
+                        _deferredBitfield = null;
+                        _deferredHavePieces.Clear();
+                        _deferredAvailabilityKind = DeferredAvailabilityKind.HaveAll;
+                    }
+                    else
+                    {
+                        PeerPieces.SetHaveAll();
+                    }
+                    HasReportedPieces = true;
+                }
                 _logger.LogDebug("{PeerName} has ALL pieces (FastExt)", Name);
                 break;
 
             case MessageId.HaveNone:
-                PeerPieces.SetHaveNone();
-                HasReportedPieces = true;
+                lock (_availabilityLock)
+                {
+                    if (PeerPieces.Count == 0)
+                    {
+                        _deferredBitfield = null;
+                        _deferredHavePieces.Clear();
+                        _deferredAvailabilityKind = DeferredAvailabilityKind.HaveNone;
+                    }
+                    else
+                    {
+                        PeerPieces.SetHaveNone();
+                    }
+                    HasReportedPieces = true;
+                }
                 _logger.LogDebug("{PeerName} has NO pieces (FastExt)", Name);
                 break;
 

@@ -10,10 +10,10 @@ internal sealed class TorrentConfiguration
     private readonly IBandwidthManager _bandwidth;
     private readonly ITorrent _torrent; // Back-reference needed for BandwidthManager calls
 
-    private int _downloadLimitBytesPerSecond;
+    private long _downloadLimitBytesPerSecond;
     private int _diskReadLimitBytesPerSecond;
     private int _diskWriteLimitBytesPerSecond;
-    private int _uploadLimitBytesPerSecond;
+    private long _uploadLimitBytesPerSecond;
 
     public TorrentConfiguration(ITorrent torrent, IBandwidthManager bandwidth)
     {
@@ -21,12 +21,13 @@ internal sealed class TorrentConfiguration
         _bandwidth = bandwidth;
     }
 
-    public int DownloadLimitBytesPerSecond
+    public long DownloadLimitBytesPerSecond
     {
         get => _downloadLimitBytesPerSecond;
         set
         {
-            _downloadLimitBytesPerSecond = Math.Max(0, value);
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _downloadLimitBytesPerSecond = value;
             _bandwidth.SetTorrentLimits(_torrent, _downloadLimitBytesPerSecond, _uploadLimitBytesPerSecond);
         }
     }
@@ -36,7 +37,8 @@ internal sealed class TorrentConfiguration
         get => _diskReadLimitBytesPerSecond;
         set
         {
-            _diskReadLimitBytesPerSecond = Math.Max(0, value);
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _diskReadLimitBytesPerSecond = value;
             _bandwidth.SetTorrentDiskLimits(_torrent, _diskReadLimitBytesPerSecond, _diskWriteLimitBytesPerSecond);
         }
     }
@@ -46,7 +48,8 @@ internal sealed class TorrentConfiguration
         get => _diskWriteLimitBytesPerSecond;
         set
         {
-            _diskWriteLimitBytesPerSecond = Math.Max(0, value);
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _diskWriteLimitBytesPerSecond = value;
             _bandwidth.SetTorrentDiskLimits(_torrent, _diskReadLimitBytesPerSecond, _diskWriteLimitBytesPerSecond);
         }
     }
@@ -59,12 +62,13 @@ internal sealed class TorrentConfiguration
     public float? RatioLimit { get; set; }
     public TimeSpan? SeedTimeLimit { get; set; }
 
-    public int UploadLimitBytesPerSecond
+    public long UploadLimitBytesPerSecond
     {
         get => _uploadLimitBytesPerSecond;
         set
         {
-            _uploadLimitBytesPerSecond = Math.Max(0, value);
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _uploadLimitBytesPerSecond = value;
             _bandwidth.SetTorrentLimits(_torrent, _downloadLimitBytesPerSecond, _uploadLimitBytesPerSecond);
         }
     }

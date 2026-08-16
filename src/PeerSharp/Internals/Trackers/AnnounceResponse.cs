@@ -16,6 +16,12 @@ internal class AnnounceResponse
     public IPAddress? ExternalIp { get; set; }
 
     /// <summary>
+    /// All external addresses reported by independent address-family announces. Empty for the normal
+    /// single-announce path; <see cref="ExternalIp"/> remains the compatibility value.
+    /// </summary>
+    public List<IPAddress> ExternalAddresses { get; set; } = [];
+
+    /// <summary>
     /// BEP 3 <c>tracker id</c>: an opaque string the tracker asks us to quote back on later
     /// announces, so it can recognise the same session. Null when the tracker did not issue one,
     /// which most do not.

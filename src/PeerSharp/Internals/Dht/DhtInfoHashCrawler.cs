@@ -140,14 +140,15 @@ internal sealed class DhtInfoHashCrawler
                     // batch must not receive the rest of it first.
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    if (!seen.Add(hash))
+                    bool firstSighting = seen.Add(hash);
+                    if (!firstSighting && !_options.ReturnDuplicateSightings)
                     {
                         continue;
                     }
 
                     yield return new DiscoveredInfoHash(hash, batch[i], now, reply.TotalInfoHashes);
 
-                    if (_options.MaxInfoHashes is { } limit && seen.Count >= limit)
+                    if (firstSighting && _options.MaxInfoHashes is { } limit && seen.Count >= limit)
                     {
                         _logger.LogDebug("BEP 51 crawl reached its limit of {Limit} info-hash(es)", limit);
                         yield break;

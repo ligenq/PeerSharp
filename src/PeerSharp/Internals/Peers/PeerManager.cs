@@ -122,7 +122,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// </summary>
     private int _holepunchRefused = 0;
 
-    private int _lastAggregateSpeed = 0;
+    private long _lastAggregateSpeed = 0;
 
 
     private DateTimeOffset _lastSpeedLog = DateTimeOffset.MinValue;
@@ -131,7 +131,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private Task? _mainLoopTask;
 
-    private int _peakSpeed = 0;
+    private long _peakSpeed = 0;
 
     private DateTimeOffset _stableSpeedSince = DateTimeOffset.MinValue;
 
@@ -470,6 +470,18 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             Interlocked.Decrement(ref _connectedPeersCount);
             // Release global connection slot
             _governor.ReleaseConnectionSlot();
+
+            _torrent.Alerts.PostAlert(new PeerDisconnectedAlert
+            {
+                Id = AlertId.PeerDisconnected,
+                Torrent = _torrent,
+                Endpoint = p.RemoteEndPoint,
+                ClientName = p.Name,
+                Downloaded = p.Downloaded,
+                Uploaded = p.Uploaded,
+                ReasonCode = code,
+                Timestamp = _timeProvider.GetUtcNow()
+            });
         }
         _peerHealth.Remove(p);
 
@@ -1010,6 +1022,63 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return _connectedPeers.Select(x => x.Key);
     }
 
+    /// <summary>
+    /// Returns only learned preferences that differ from a new peer's defaults. The known-peer cache
+    /// is already bounded, and excluding default entries prevents ordinary discovery from bloating the
+    /// session file.
+    /// </summary>
+    internal IReadOnlyList<SavedPeerPreference> ExportConnectionPreferences()
+    {
+        return _knownPeersCache.Values
+            .Where(history => history.IsListenAddress && (!history.UtpSupported || !history.OfferEncryptionNext))
+            .OrderBy(history => history.EndPoint.Address.ToString(), StringComparer.Ordinal)
+            .ThenBy(history => history.EndPoint.Port)
+            .Select(history => new SavedPeerPreference(
+                history.EndPoint.Address.ToString(),
+                history.EndPoint.Port,
+                history.UtpSupported,
+                history.OfferEncryptionNext))
+            .ToArray();
+    }
+
+    /// <summary>Restores validated endpoint preferences into the known-peer cache.</summary>
+    internal void ImportConnectionPreferences(IEnumerable<SavedPeerPreference>? preferences)
+    {
+        if (preferences == null)
+        {
+            return;
+        }
+
+        foreach (var preference in preferences)
+        {
+            if (preference == null
+                || (preference.UtpSupported && preference.OfferEncryptionNext)
+                || !IPAddress.TryParse(preference.Address, out var address)
+                || address.Equals(IPAddress.Any)
+                || address.Equals(IPAddress.IPv6Any)
+                || preference.Port is <= 0 or > ushort.MaxValue)
+            {
+                continue;
+            }
+
+            var endpoint = NetworkUtils.NormalizeEndPoint(new IPEndPoint(address, preference.Port));
+            if (endpoint == null)
+            {
+                continue;
+            }
+
+            if (!_knownPeersCache.ContainsKey(endpoint)
+                && _knownPeersCache.Count >= Math.Max(0, _settings.MaxKnownPeersCache))
+            {
+                continue;
+            }
+
+            var history = GetOrAddKnownPeerHistory(endpoint);
+            history.UtpSupported = preference.UtpSupported;
+            history.OfferEncryptionNext = preference.OfferEncryptionNext;
+        }
+    }
+
     public int[] GetPieceAvailability()
     {
         int piecesCount = _torrent.Pieces.Count;
@@ -1413,6 +1482,180 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 _logger.LogError(ex, "PeerManager.StopAsync: error while closing peers");
             }
         }
+    }
+
+    /// <summary>
+    /// Stops this manager's scheduling work but transfers ownership of established sockets to the
+    /// metadata rebuild instead of closing them. Each returned peer still owns one global connection
+    /// slot; the adopting manager must either register it or release that slot before closing it.
+    /// </summary>
+    internal async Task<IReadOnlyList<PeerCommunication>> DetachConnectedPeersForMetadataRebuildAsync()
+    {
+        if (_mainLoopCts != null)
+        {
+            await _mainLoopCts.CancelAsync().ConfigureAwait(false);
+        }
+
+        if (_mainLoopTask is { } mainLoopTask)
+        {
+            await mainLoopTask.ConfigureAwait(false);
+        }
+        if (_connectionQueueTask is { } connectionQueueTask)
+        {
+            await connectionQueueTask.ConfigureAwait(false);
+        }
+
+        try
+        {
+            if (!_activeConnectionTasks.IsEmpty)
+            {
+                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
+            }
+        }
+        catch (TimeoutException)
+        {
+            // A still-running dial is not transferable and will be closed with the connecting set.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Connection attempt ended while preparing metadata peer handoff");
+        }
+
+        _activeConnectionTasks.Clear();
+        _pendingConnections.Clear();
+
+        // In-progress handshakes are not safe to transfer: their callbacks and duplicate gates can
+        // still be changing. Established peers are stable and have already paid for a governor slot.
+        var connecting = _connectingPeers.Keys.ToArray();
+        _connectingPeers.Clear();
+        Interlocked.Exchange(ref _connectingPeersCount, 0);
+        if (connecting.Length > 0)
+        {
+            await Task.WhenAll(connecting.Select(peer => peer.CloseAsync())).ConfigureAwait(false);
+        }
+
+        var retained = new List<PeerCommunication>(_connectedPeers.Count);
+        foreach (PeerCommunication peer in _connectedPeers.Keys)
+        {
+            // Removal wins ownership against ConnectionClosedAsync. If the callback won first, it
+            // already released the governor slot and this connection must not be handed off.
+            if (!_connectedPeers.TryRemove(peer, out _))
+            {
+                continue;
+            }
+
+            Interlocked.Decrement(ref _connectedPeersCount);
+            UnregisterConnectedEndpoint(peer);
+            UnregisterConnectedPeerId(peer);
+            _peerHealth.Remove(peer);
+            peer.RetargetListener(MetadataRebuildPeerListener.Instance);
+            retained.Add(peer);
+        }
+
+        return retained;
+    }
+
+    /// <summary>Adopts live magnet peers after their saved availability has been resized.</summary>
+    internal async Task<int> AdoptPeersAfterMetadataRebuildAsync(IEnumerable<PeerCommunication> peers)
+    {
+        int adopted = 0;
+        foreach (PeerCommunication peer in peers)
+        {
+            if (peer.Connected == 0 || !peer.TryApplyDeferredAvailability(_torrent.Pieces.Count))
+            {
+                await ReleaseTransferredPeerAsync(peer).ConfigureAwait(false);
+                continue;
+            }
+
+            peer.RetargetListener(this);
+            if (!TryRegisterConnectedEndpoint(peer))
+            {
+                await ReleaseTransferredPeerAsync(peer).ConfigureAwait(false);
+                continue;
+            }
+
+            string? peerIdKey = IsPeerIdSet(peer.PeerId) ? Convert.ToHexString(peer.PeerId) : null;
+            if (peerIdKey != null && !_connectedPeerIds.TryAdd(peerIdKey, peer))
+            {
+                UnregisterConnectedEndpoint(peer);
+                await ReleaseTransferredPeerAsync(peer).ConfigureAwait(false);
+                continue;
+            }
+
+            _connectedPeers.TryAdd(peer, 0);
+            Interlocked.Increment(ref _connectedPeersCount);
+
+            // A close can race between retargeting the callback and registration. Re-run the callback
+            // after registration when that happened so the dictionary and governor slot are settled.
+            if (peer.Connected == 0)
+            {
+                await ConnectionClosedAsync(peer, 0).ConfigureAwait(false);
+                continue;
+            }
+
+            try
+            {
+                // The first handshake was sent before metadata existed and therefore omitted the
+                // metadata size. BEP 10 permits an updated extended handshake; advertise the now-known
+                // state without renegotiating the BitTorrent handshake or socket.
+                await peer.RefreshExtendedHandshakeAfterMetadataAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not refresh the extended handshake for adopted peer {RemoteEndPoint}", peer.RemoteEndPoint);
+                await peer.CloseAsync().ConfigureAwait(false);
+                continue;
+            }
+
+            if (peer.RemoteEndPoint is { } endpoint)
+            {
+                GetOrAddKnownPeerHistory(endpoint, isListenAddress: peer.IsOutgoing);
+            }
+            _torrent.FileTransferInternal.RegisterPeerAvailability(peer);
+            adopted++;
+        }
+
+        if (adopted > 0)
+        {
+            _logger.LogInformation("Preserved {Count} live peer connection(s) across metadata initialization", adopted);
+        }
+        return adopted;
+    }
+
+    private async Task ReleaseTransferredPeerAsync(PeerCommunication peer)
+    {
+        // The old manager deliberately retained this slot and this peer has not been registered in the
+        // new manager, so CloseAsync cannot release it through ConnectionClosedAsync.
+        _governor.ReleaseConnectionSlot();
+        peer.RetargetListener(this);
+        try
+        {
+            await peer.CloseAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to close a magnet peer that could not be adopted");
+        }
+    }
+
+    /// <summary>
+    /// Brief handoff target used while the old torrent subsystems are disposed and their replacements
+    /// are constructed. PeerCommunication still records protocol and availability state itself; this
+    /// listener prevents messages racing through the disposed old manager or being counted twice by
+    /// the new file-transfer availability index before adoption.
+    /// </summary>
+    private sealed class MetadataRebuildPeerListener : IPeerListener
+    {
+        public static MetadataRebuildPeerListener Instance { get; } = new();
+
+        public Task ConnectionClosedAsync(IPeerCommunication peer, int code) => Task.CompletedTask;
+        public Task ExtendedHandshakeFinishedAsync(IPeerCommunication peer, ExtensionHandshake handshake) => Task.CompletedTask;
+        public Task ExtendedMessageReceivedAsync(IPeerCommunication peer, int type, byte[] data) => Task.CompletedTask;
+        public Task HandshakeFinishedAsync(IPeerCommunication peer) => Task.CompletedTask;
+        public Task HolepunchMessageReceivedAsync(IPeerCommunication peer, UtHolepunch.MsgId id, IPEndPoint endpoint, UtHolepunch.ErrorCode error) => Task.CompletedTask;
+        public Task MessageReceivedAsync(IPeerCommunication peer, PeerMessage msg) => Task.CompletedTask;
+        public Task PexReceivedAsync(IPeerCommunication peer, List<IPEndPoint> added, List<byte> addedFlags, List<IPEndPoint> dropped) => Task.CompletedTask;
+        public Task PortReceivedAsync(IPeerCommunication peer, ushort dhtPort) => Task.CompletedTask;
     }
 
     private static void ApplyPexFlags(PeerHistory history, byte flags) => PeerExchangeCoordinator.ApplyFlags(history, flags);
@@ -2604,13 +2847,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     internal void UnchokePeers() => _choker.Rechoke(_connectedPeers.Keys, ConnectedCount);
     private async Task UpdateSpeedsAsync()
     {
-        int totalDownloadSpeed = 0;
-        int totalUploadSpeed = 0;
+        long totalDownloadSpeed = 0;
+        long totalUploadSpeed = 0;
         int unchokedCount = 0;
         int fastPeerCount = 0; // Peers > 1 MB/s
         int utpConnectedCount = 0;
         PeerCommunication? fastestPeer = null;
-        int fastestSpeed = 0;
+        long fastestSpeed = 0;
         var now = _timeProvider.GetUtcNow();
         int utpMinSpeed = _settings.Connection.UtpDegradeMinDownloadSpeedBytesPerSec;
         int utpGraceMs = Math.Max(0, _settings.Connection.UtpDegradeGraceSeconds * 1000);
@@ -2712,7 +2955,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    private void UpdateStableSpeedState(DateTimeOffset now, int totalDownloadSpeed)
+    private void UpdateStableSpeedState(DateTimeOffset now, long totalDownloadSpeed)
     {
         int threshold = _settings.Connection.StableSpeedThresholdBytesPerSec;
         if (threshold <= 0)

@@ -10,6 +10,40 @@ public class TorrentTests
     private readonly FakeTimeProvider _timeProvider = new();
 
     [Fact]
+    public void TransferSpeeds_AreReadableOnDemand()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        Volatile.Write(ref torrent._lastReportedDownloadSpeed, 1234);
+        Volatile.Write(ref torrent._lastReportedUploadSpeed, 5678);
+
+        Assert.Equal(1234, torrent.DownloadSpeed);
+        Assert.Equal(5678, torrent.UploadSpeed);
+    }
+
+    [Fact]
+    public void HasSameIdentity_IgnoresEmptyHashesAndMatchesAvailableVersion()
+    {
+        var shared = InfoHash.CreateRandom();
+        var firstMetadata = new TorrentFileMetadata();
+        firstMetadata.Info.Hash = shared;
+        var secondMetadata = new TorrentFileMetadata();
+        secondMetadata.Info.Hash = shared;
+        var unrelatedMetadata = new TorrentFileMetadata();
+        unrelatedMetadata.Info.Hash = InfoHash.CreateRandom();
+
+        var first = TorrentTestUtility.CreateMinimal(firstMetadata);
+        var second = TorrentTestUtility.CreateMinimal(secondMetadata);
+        var unrelated = TorrentTestUtility.CreateMinimal(unrelatedMetadata);
+
+        Assert.True(first.HasSameIdentity(second));
+        Assert.False(first.HasSameIdentity(unrelated));
+        Assert.False(first.HasSameIdentity(null));
+        Assert.False(
+            TorrentTestUtility.CreateMinimal().HasSameIdentity(TorrentTestUtility.CreateMinimal()),
+            "Two absent V1/V2 hashes must not identify unrelated torrents.");
+    }
+
+    [Fact]
     public void GetAllFileInfo_ReturnsMappedFileInfo()
     {
         var info = new TorrentFileMetadata();

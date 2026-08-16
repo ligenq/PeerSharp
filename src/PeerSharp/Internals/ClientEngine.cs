@@ -18,7 +18,6 @@ namespace PeerSharp.Internals;
 
 internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorrentResolver
 {
-    private static readonly ConcurrentDictionary<ProxySettings, HttpClient> MagnetClientCache = new();
     private static readonly ProxySettings NoProxy = new();
     private readonly IAlertsManager _alerts;
     private readonly IBandwidthManager _bandwidth;
@@ -322,8 +321,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         _disposal.ThrowIfDisposed(this);
 
-        int dlSpeed = 0;
-        int ulSpeed = 0;
+        long dlSpeed = 0;
+        long ulSpeed = 0;
         long totalDl = 0;
         long totalUl = 0;
         int active = 0;
@@ -900,6 +899,26 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
     private async Task InitAsync(CancellationToken cancellationToken)
     {
+        var bindAddress = Settings.Connection.BindAddress;
+        if (bindAddress != null &&
+            (bindAddress.Equals(IPAddress.Any) || bindAddress.Equals(IPAddress.IPv6Any)))
+        {
+            throw new InvalidOperationException(
+                "Connection.BindAddress must be a specific local address; use null to listen on all interfaces.");
+        }
+
+        // Gateway discovery and mapping open their own interface-selected sockets. They cannot honor a
+        // strict bind without changing the meaning of gateway discovery, and a VPN-facing address
+        // normally has no mappable NAT gateway anyway. Keep the bind guarantee by not starting them.
+        if (bindAddress != null &&
+            (Settings.Connection.UpnpPortMapping || Settings.Connection.NatPmpPortMapping))
+        {
+            _logger.LogInformation(
+                "A local bind address is configured; disabling UPnP and NAT-PMP port mapping to keep all traffic bound");
+            Settings.Connection.UpnpPortMapping = false;
+            Settings.Connection.NatPmpPortMapping = false;
+        }
+
         // Disable UPnP if ForceProxy is enabled
         if (Settings.Proxy.ForceProxy && Settings.Proxy.Type != ProxyType.None)
         {
@@ -949,7 +968,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             var utpManager = new UtpManager(_timeProvider, _loggerFactory);
 
             var dhtManager = DhtManager.Create(Settings.PeerId, udpListener, Settings, _timeProvider, this, new SystemDnsResolver(), _loggerFactory);
-            var portListener = new PortListener(this, _loggerFactory);
+            var portListener = new PortListener(this, _loggerFactory, Settings.Connection.BindAddress);
             var lsdManager = new LsdManager(Settings, this, _timeProvider, socketFactory, _loggerFactory);
             var portMapperFactory = new PortMapperFactory(_loggerFactory);
 
@@ -988,8 +1007,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
             // Initialize Bandwidth Limits
             _bandwidth.SetGlobalLimits(
-                (int)Settings.Transfer.MaxDownloadSpeed,
-                (int)Settings.Transfer.MaxUploadSpeed);
+                Settings.Transfer.MaxDownloadSpeed,
+                Settings.Transfer.MaxUploadSpeed);
             _bandwidth.SetGlobalDiskLimits(
                 (int)Settings.Files.MaxDiskReadSpeed,
                 (int)Settings.Files.MaxDiskWriteSpeed);
@@ -1134,7 +1153,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (entry.TorrentFileData is { Length: > 0 })
         {
             var torrentFile = TorrentFile.Parse(entry.TorrentFileData);
-            torrent = await AddTorrentCoreAsync(torrentFile, options, persistToDisk: false, rebalanceQueue: false, cancellationToken).ConfigureAwait(false);
+            torrent = await AddTorrentCoreAsync(torrentFile, options, persistToDisk: false, rebalanceQueue: false, entry.Options?.PeerPreferences, cancellationToken).ConfigureAwait(false);
 
             // Store raw data for future persistence
             _sessionManager?.RegisterTorrentData(torrent.Hash, entry.TorrentFileData, null);
@@ -1142,7 +1161,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         else if (!string.IsNullOrEmpty(entry.MagnetLink))
         {
             var magnet = MagnetLink.Parse(entry.MagnetLink);
-            torrent = await AddMagnetCoreAsync(magnet, options, persistToDisk: false, rebalanceQueue: false, transient: false, cancellationToken).ConfigureAwait(false);
+            torrent = await AddMagnetCoreAsync(magnet, options, persistToDisk: false, rebalanceQueue: false, transient: false, entry.Options?.PeerPreferences, cancellationToken).ConfigureAwait(false);
 
             // Store magnet for future persistence
             _sessionManager?.RegisterTorrentData(torrent.Hash, null, entry.MagnetLink);
@@ -1286,7 +1305,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         MagnetLink magnetLink,
         AddTorrentOptions? options = null,
         CancellationToken cancellationToken = default)
-        => AddMagnetCoreAsync(magnetLink, options, persistToDisk: true, rebalanceQueue: true, transient: false, cancellationToken);
+        => AddMagnetCoreAsync(magnetLink, options, persistToDisk: true, rebalanceQueue: true, transient: false, restoredPeerPreferences: null, cancellationToken);
 
     private async Task<ITorrent> AddMagnetCoreAsync(
         MagnetLink magnetLink,
@@ -1294,6 +1313,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         bool persistToDisk,
         bool rebalanceQueue,
         bool transient,
+        IReadOnlyList<SavedPeerPreference>? restoredPeerPreferences,
         CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
@@ -1321,6 +1341,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // still failing the next add of the same hash with TorrentAlreadyExistsException.
         try
         {
+            torrent.PeersInternal.ImportConnectionPreferences(restoredPeerPreferences);
+
             if (magnetLink.Peers.Count > 0)
             {
                 try
@@ -1332,6 +1354,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                     _logger.LogDebug(ex, "Failed to add magnet peers");
                 }
             }
+
+            AddOptionPeers(torrent, options);
 
             // Add additional trackers from options
             if (options?.AdditionalTrackers != null)
@@ -1413,7 +1437,24 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         return torrent;
     }
 
-    public async Task<TorrentFile> GetMagnetMetadataAsync(MagnetLink magnetLink, CancellationToken cancellationToken = default)
+    public Task<TorrentFile> GetMagnetMetadataAsync(
+        MagnetLink magnetLink,
+        CancellationToken cancellationToken = default)
+        => GetMagnetMetadataCoreAsync(magnetLink, progress: null, cancellationToken);
+
+    public Task<TorrentFile> GetMagnetMetadataWithProgressAsync(
+        MagnetLink magnetLink,
+        IProgress<MetadataProgress> progress,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(progress);
+        return GetMagnetMetadataCoreAsync(magnetLink, progress, cancellationToken);
+    }
+
+    private async Task<TorrentFile> GetMagnetMetadataCoreAsync(
+        MagnetLink magnetLink,
+        IProgress<MetadataProgress>? progress,
+        CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(magnetLink);
@@ -1429,10 +1470,19 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // is unaffected.
         var torrent = (Torrent)await AddMagnetCoreAsync(
             magnetLink,
-            new AddTorrentOptions { StopAfterMetadata = true },
+            new AddTorrentOptions
+            {
+                StopAfterMetadata = true,
+                Events = progress == null
+                    ? null
+                    : new TorrentEventsBuilder()
+                        .OnMetadataProgress((_, value) => progress.Report(value))
+                        .Build()
+            },
             persistToDisk: false,
             rebalanceQueue: false,
             transient: true,
+            restoredPeerPreferences: null,
             cancellationToken).ConfigureAwait(false);
 
         try
@@ -1567,56 +1617,24 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             settings = NoProxy;
         }
 
-        return new DefaultHttpClient(MagnetClientCache.GetOrAdd(settings, CreateMagnetClient));
-    }
-
-    private static HttpClient CreateMagnetClient(ProxySettings proxy)
-    {
-        var handler = new SocketsHttpHandler
-        {
-            PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-            PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5),
-            MaxConnectionsPerServer = 10,
-            ConnectTimeout = TimeSpan.FromSeconds(5)
-        };
-
-        if (proxy.Type != ProxyType.None && !string.IsNullOrEmpty(proxy.Host))
-        {
-            string proxyUri = proxy.Type switch
-            {
-                ProxyType.Socks5 => $"socks5://{proxy.Host}:{proxy.Port}",
-                ProxyType.Http => $"http://{proxy.Host}:{proxy.Port}",
-                _ => string.Empty
-            };
-
-            if (!string.IsNullOrEmpty(proxyUri))
-            {
-                var webProxy = new WebProxy(proxyUri);
-                if (!string.IsNullOrEmpty(proxy.Username))
-                {
-                    webProxy.Credentials = new NetworkCredential(proxy.Username, proxy.Password);
-                }
-                handler.Proxy = webProxy;
-            }
-        }
-
-        return new HttpClient(handler)
-        {
-            Timeout = TimeSpan.FromSeconds(15)
-        };
+        return new DefaultHttpClient(new HttpClientFactory().CreateClient(
+            settings,
+            isTracker: true,
+            Settings.Connection.BindAddress));
     }
 
     public Task<ITorrent> AddTorrentAsync(
         TorrentFile torrentFile,
         AddTorrentOptions? options = null,
         CancellationToken cancellationToken = default)
-        => AddTorrentCoreAsync(torrentFile, options, persistToDisk: true, rebalanceQueue: true, cancellationToken);
+        => AddTorrentCoreAsync(torrentFile, options, persistToDisk: true, rebalanceQueue: true, restoredPeerPreferences: null, cancellationToken);
 
     private async Task<ITorrent> AddTorrentCoreAsync(
         TorrentFile torrentFile,
         AddTorrentOptions? options,
         bool persistToDisk,
         bool rebalanceQueue,
+        IReadOnlyList<SavedPeerPreference>? restoredPeerPreferences,
         CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
@@ -1629,6 +1647,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // token from here on has to unregister it again.
         try
         {
+            torrent.PeersInternal.ImportConnectionPreferences(restoredPeerPreferences);
+
+            AddOptionPeers(torrent, options);
+
             // Apply options
             if (options != null)
             {
@@ -1684,6 +1706,23 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
 
         return torrent;
+    }
+
+    private void AddOptionPeers(Torrent torrent, AddTorrentOptions? options)
+    {
+        if (options?.AdditionalPeers is not { Count: > 0 })
+        {
+            return;
+        }
+
+        try
+        {
+            torrent.PeersInternal.AddPeers(options.AdditionalPeers, PeerSourceKind.Resume, null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to add option peers");
+        }
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
