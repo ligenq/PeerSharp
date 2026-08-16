@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Time.Testing;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
@@ -7,6 +8,7 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Collections.Concurrent;
 
 namespace PeerSharp.Tests.Core.Trackers;
 
@@ -190,6 +192,22 @@ public class UdpTrackerTests
         }
     }
 
+    private sealed class FamilyUdpSocketFactory : IUdpSocketFactory
+    {
+        public ConcurrentDictionary<AddressFamily, MockUdpSocket> Sockets { get; } = [];
+        public ConcurrentQueue<AddressFamily> RequestedFamilies { get; } = [];
+
+        public IUdpSocket Create(int port) => Create(AddressFamily.InterNetwork);
+
+        public IUdpSocket Create(AddressFamily family)
+        {
+            RequestedFamilies.Enqueue(family);
+            var socket = new MockUdpSocket();
+            Sockets[family] = socket;
+            return socket;
+        }
+    }
+
     private class MockCallback : ITrackerCallback
     {
         public bool Success { get; private set; }
@@ -225,6 +243,108 @@ public class UdpTrackerTests
     public UdpTrackerTests()
     {
         _torrent = TorrentTestUtility.CreateMinimal();
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_UnboundHostname_AnnouncesBothFamiliesAndMergesPeers()
+    {
+        int resolutions = 0;
+        var factory = new FamilyUdpSocketFactory();
+        var tracker = new UdpTracker(
+            _timeProvider,
+            factory,
+            NullLoggerFactory.Instance,
+            (_, _) =>
+            {
+                Interlocked.Increment(ref resolutions);
+                return Task.FromResult(new[] { IPAddress.Loopback, IPAddress.IPv6Loopback });
+            });
+        tracker.Init("udp://tracker.example:80/announce", _torrent, _callback);
+
+        Task announce = tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        if (announce.IsCompleted)
+        {
+            await announce;
+            Assert.Fail($"Announce completed before creating an IPv4 socket: {_callback.AnnounceErrorMessage}");
+        }
+        await TorrentTestUtility.WaitUntilAsync(
+            () => factory.Sockets.ContainsKey(AddressFamily.InterNetwork),
+            because: $"IPv4 tracker socket (DNS calls after startup: {Volatile.Read(ref resolutions)})");
+        await CompleteFamilyAnnounceAsync(
+            factory.Sockets[AddressFamily.InterNetwork],
+            interval: 1800,
+            [1, 2, 3, 4, 0x1A, 0xE1]);
+        await TorrentTestUtility.WaitUntilAsync(() => factory.Sockets.ContainsKey(AddressFamily.InterNetworkV6));
+        await CompleteFamilyAnnounceAsync(
+            factory.Sockets[AddressFamily.InterNetworkV6],
+            interval: 900,
+            [.. IPAddress.IPv6Loopback.GetAddressBytes(), 0x1A, 0xE2]);
+        await announce;
+
+        Assert.True(_callback.Success);
+        Assert.Equal(
+            [AddressFamily.InterNetwork, AddressFamily.InterNetworkV6],
+            factory.RequestedFamilies);
+        Assert.Equal(900u, _callback.AnnounceResponse?.Interval);
+        Assert.Equal(2, _callback.AnnounceResponse?.Peers.Count);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_WhenHostnameHasNoIPv6_KeepsSuccessfulIPv4Announce()
+    {
+        int resolutions = 0;
+        var factory = new FamilyUdpSocketFactory();
+        var tracker = new UdpTracker(
+            _timeProvider,
+            factory,
+            NullLoggerFactory.Instance,
+            (_, _) =>
+            {
+                Interlocked.Increment(ref resolutions);
+                return Task.FromResult(new[] { IPAddress.Loopback });
+            });
+        tracker.Init("udp://tracker.example:80/announce", _torrent, _callback);
+
+        Task announce = tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        if (announce.IsCompleted)
+        {
+            await announce;
+            Assert.Fail($"Announce completed before creating an IPv4 socket: {_callback.AnnounceErrorMessage}");
+        }
+        await TorrentTestUtility.WaitUntilAsync(
+            () => factory.Sockets.ContainsKey(AddressFamily.InterNetwork),
+            because: $"IPv4 tracker socket (DNS calls after startup: {Volatile.Read(ref resolutions)})");
+        await CompleteFamilyAnnounceAsync(factory.Sockets[AddressFamily.InterNetwork], 1800, []);
+        await announce;
+
+        Assert.True(_callback.Success);
+        Assert.Equal(2, resolutions);
+        Assert.Equal([AddressFamily.InterNetwork], factory.RequestedFamilies);
+    }
+
+    private static async Task CompleteFamilyAnnounceAsync(
+        MockUdpSocket socket,
+        int interval,
+        byte[] compactPeer)
+    {
+        byte[] connect = await socket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
+        int connectTransaction = BinaryPrimitives.ReadInt32BigEndian(connect.AsSpan(12));
+        byte[] connectResponse = new byte[16];
+        BinaryPrimitives.WriteInt32BigEndian(connectResponse.AsSpan(0), 0);
+        BinaryPrimitives.WriteInt32BigEndian(connectResponse.AsSpan(4), connectTransaction);
+        BinaryPrimitives.WriteInt64BigEndian(connectResponse.AsSpan(8), 0x1234);
+        socket.TriggerResponse(connectResponse);
+
+        byte[] request = await socket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
+        int announceTransaction = BinaryPrimitives.ReadInt32BigEndian(request.AsSpan(12));
+        byte[] response = new byte[20 + compactPeer.Length];
+        BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(0), 1);
+        BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(4), announceTransaction);
+        BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(8), interval);
+        compactPeer.CopyTo(response, 20);
+        socket.TriggerResponse(response);
     }
 
     [Fact(Timeout = 30000)]
@@ -1546,8 +1666,4 @@ public class UdpTrackerTests
 
 
 }
-
-
-
-
 

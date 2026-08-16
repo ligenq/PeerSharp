@@ -272,12 +272,13 @@ public class MetadataDownloadTests
         Assert.Contains(0, ((MockUtMetadata)peer2.UtMetadata).RequestedPieces);
 
         int beforeReject = ((MockUtMetadata)peer2.UtMetadata).RequestedPieces.Count;
+        int peer1BeforeReject = ((MockUtMetadata)peer1.UtMetadata).RequestedPieces.Count;
 
         download.MetadataRejectReceived(peer1, 0); // reject from peer1 → re-request from peer2
 
-        Assert.True(
-            ((MockUtMetadata)peer2.UtMetadata).RequestedPieces.Count > beforeReject,
-            "A reject should hand the piece to another peer, not simply drop it.");
+        Assert.Equal(beforeReject, ((MockUtMetadata)peer2.UtMetadata).RequestedPieces.Count);
+        Assert.Equal(peer1BeforeReject, ((MockUtMetadata)peer1.UtMetadata).RequestedPieces.Count);
+        Assert.Contains(download.GetPendingRequestsForTesting(), request => request.Peer == peer2 && request.Piece == 0);
     }
 
     [Fact]
@@ -427,7 +428,7 @@ public class MetadataDownloadTests
     }
 
     [Fact]
-    public async Task MetadataPieceReceivedAsync_MalformedCompleteMetadataIsResetAndRetried()
+    public async Task MetadataPieceReceivedAsync_MalformedCompleteMetadataIsResetWithoutReaskingPoisoningPeer()
     {
         var torrent = TorrentTestUtility.CreateMinimal();
         torrent.Settings.Transfer.MetadataRequestPipeline = 1;
@@ -442,7 +443,7 @@ public class MetadataDownloadTests
 
         Assert.False(download.Finished);
         Assert.Equal(0.0f, download.Progress);
-        Assert.Equal(1, download.PendingRequestCountForTesting);
+        Assert.Equal(0, download.PendingRequestCountForTesting);
     }
 
     // ── MetadataPieceReceivedAsync – completion paths ─────────────────────────

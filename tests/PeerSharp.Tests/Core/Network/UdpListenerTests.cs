@@ -97,6 +97,24 @@ public class UdpListenerTests
         await listener.DisposeAsync();
     }
 
+    [Fact]
+    public async Task StartAsync_WithBindAddress_BindsSharedSocketToThatAddress()
+    {
+        var bindAddress = IPAddress.Parse("127.0.0.2");
+        var settings = new Settings
+        {
+            Connection = { BindAddress = bindAddress }
+        };
+        var factory = new MockUdpSocketFactory();
+        var listener = new UdpListener(0, factory, settings);
+
+        await listener.StartAsync(TestContext.Current.CancellationToken);
+
+        var endpoint = Assert.IsType<IPEndPoint>(factory.LastSocket.Client.LocalEndPoint);
+        Assert.Equal(bindAddress, endpoint.Address);
+        await listener.DisposeAsync();
+    }
+
     [Fact(Timeout = 30000)]
     public async Task StopAsync_DoesNotWaitForNonCooperativeReceiveTask()
     {

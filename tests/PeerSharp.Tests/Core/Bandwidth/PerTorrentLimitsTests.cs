@@ -13,17 +13,17 @@ public class PerTorrentLimitsTests
     private sealed class TrackingBandwidthManager : IBandwidthManager
     {
         private readonly Dictionary<string, BandwidthChannel> _channels = [];
-        public int DownloadLimit { get; private set; }
+        public long DownloadLimit { get; private set; }
         public int DiskReadLimit { get; private set; }
         public int DiskWriteLimit { get; private set; }
-        public int UploadLimit { get; private set; }
+        public long UploadLimit { get; private set; }
         public int Calls { get; private set; }
         public int DiskCalls { get; private set; }
 
-        public void SetGlobalLimits(int downloadLimit, int uploadLimit) { }
+        public void SetGlobalLimits(long downloadLimit, long uploadLimit) { }
         public void SetGlobalDiskLimits(int readLimit, int writeLimit) { }
 
-        public void SetTorrentLimits(ITorrent torrent, int downloadLimit, int uploadLimit)
+        public void SetTorrentLimits(ITorrent torrent, long downloadLimit, long uploadLimit)
         {
             DownloadLimit = downloadLimit;
             UploadLimit = uploadLimit;
@@ -37,7 +37,7 @@ public class PerTorrentLimitsTests
             DiskCalls++;
         }
 
-        public (int DownloadLimit, int UploadLimit) GetTorrentLimits(ITorrent torrent)
+        public (long DownloadLimit, long UploadLimit) GetTorrentLimits(ITorrent torrent)
         {
             return (DownloadLimit, UploadLimit);
         }
@@ -84,7 +84,7 @@ public class PerTorrentLimitsTests
         public void ConfigAlert(AlertId id, string message) { }
         public void PieceCompletedAlert(ITorrent torrent, int pieceIndex, int totalPieces, int receivedPieces) { }
         public void ProgressChangedAlert(ITorrent torrent, float progress, float selectionProgress, ulong downloaded, ulong selectedDownloaded, int downloadSpeed, int uploadSpeed) { }
-        public void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, int downloadSpeed, int uploadSpeed, int peerCount) { }
+        public void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, long downloadSpeed, long uploadSpeed, int peerCount) { }
         public void StateChangedAlert(ITorrent torrent, TorrentState oldState, TorrentState newState) { }
         public void TorrentErrorAlert(ITorrent torrent, Exception ex) { }
         public void RegisterAlerts(uint categories) { }
@@ -243,6 +243,20 @@ public class PerTorrentLimitsTests
         Assert.True(bandwidth.Calls >= 2);
     }
 
+    [Fact]
+    public void DownloadUploadLimits_PreserveValuesAboveInt32()
+    {
+        var bandwidth = new TrackingBandwidthManager();
+        var torrent = CreateMinimalTorrent(bandwidth);
+        long limit = (long)int.MaxValue + 1;
+
+        torrent.DownloadLimitBytesPerSecond = limit;
+        torrent.UploadLimitBytesPerSecond = limit;
+
+        Assert.Equal(limit, bandwidth.DownloadLimit);
+        Assert.Equal(limit, bandwidth.UploadLimit);
+    }
+
     private static Torrent CreateMinimalTorrent(IBandwidthManager bandwidth)
     {
         var metadata = new TorrentFileMetadata();
@@ -270,8 +284,6 @@ public class PerTorrentLimitsTests
             TimeProvider.System);
     }
 }
-
-
 
 
 

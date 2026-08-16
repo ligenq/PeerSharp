@@ -80,6 +80,45 @@ public class SessionManagerTests
     }
 
     [Fact]
+    public async Task SaveTorrentEntryAsync_PersistsOnlyLearnedPeerPreferences()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.PeersInternal.ImportConnectionPreferences(
+        [
+            new SavedPeerPreference("192.0.2.10", 6881, UtpSupported: false),
+            new SavedPeerPreference("192.0.2.11", 6882),
+            new SavedPeerPreference("2001:db8::10", 6883, OfferEncryptionNext: false)
+        ]);
+
+        await _sessionManager.SaveTorrentEntryAsync(torrent);
+
+        var saved = Assert.Single(_persistence.SavedEntries);
+        Assert.Collection(
+            saved.Options!.PeerPreferences!.OrderBy(preference => preference.Port),
+            preference => Assert.False(preference.UtpSupported),
+            preference => Assert.False(preference.OfferEncryptionNext));
+    }
+
+    [Fact]
+    public void ImportConnectionPreferences_ValidatesAndBoundsPersistedData()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.MaxKnownPeersCache = 1;
+
+        torrent.PeersInternal.ImportConnectionPreferences(
+        [
+            new SavedPeerPreference("not-an-address", 6880, UtpSupported: false),
+            new SavedPeerPreference("0.0.0.0", 6880, UtpSupported: false),
+            new SavedPeerPreference("192.0.2.10", 6881),
+            new SavedPeerPreference("192.0.2.11", 6882, UtpSupported: false),
+            new SavedPeerPreference("192.0.2.12", 6883, OfferEncryptionNext: false)
+        ]);
+
+        var preference = Assert.Single(torrent.PeersInternal.ExportConnectionPreferences());
+        Assert.Equal("192.0.2.11", preference.Address);
+    }
+
+    [Fact]
     public async Task DeleteAsync_RemovesFromPersistenceAndMemory()
     {
         var hash = new InfoHash(new byte[20]);

@@ -3,6 +3,8 @@ using PeerSharp.Internals.Peers;
 using System.Net;
 using System.Reflection;
 using PeerSharp.Messages;
+using Microsoft.Extensions.Time.Testing;
+using PeerSharp.Internals;
 
 namespace PeerSharp.Tests.Core.Extensions;
 
@@ -66,20 +68,7 @@ public class MetadataDownloadUpdateTests
 
     private static void InjectPendingRequest(MetadataDownload download, int pieceIndex, IPeerCommunication peer, DateTimeOffset timestamp, int attempts = 1)
     {
-        var pendingType = typeof(MetadataDownload)
-            .GetNestedType("PendingMetadataRequest", BindingFlags.NonPublic)!;
-
-        // AskedCount is passed explicitly: reflection does not apply the parameter's default, so an
-        // argument per constructor parameter is required. One means "only the owning peer holds it",
-        // which is what a request injected for a single peer represents.
-        var pending = pendingType.GetConstructors()[0]
-            .Invoke([peer, timestamp, attempts, 1]);
-
-        var field = typeof(MetadataDownload)
-            .GetField("_pendingRequests", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        var dict = field.GetValue(download) as System.Collections.IDictionary
-            ?? throw new InvalidOperationException("_pendingRequests not found");
-        dict[pieceIndex] = pending;
+        download.SetPendingRequestForTesting(peer, pieceIndex, timestamp, attempts);
     }
 
     [Fact]
@@ -109,8 +98,7 @@ public class MetadataDownloadUpdateTests
     public void Update_TimedOutMaxAttempts_DoesNotReRequest()
     {
         var torrent = TorrentTestUtility.CreateMinimal();
-        // Pipeline=1 (clamped min); fill it with a fresh piece-1 request so FillMissingRequests
-        // sees the pipeline as full and skips piece 0 after the timeout handler drops it.
+        // Pipeline=1 keeps piece 1 as the only active distinct piece after piece 0 times out.
         torrent.Settings.Transfer.MetadataRequestPipeline = 1;
         torrent.Settings.Transfer.MetadataMaxRequestAttempts = 1; // max 1 attempt
         var download = new MetadataDownload(torrent);
@@ -131,7 +119,7 @@ public class MetadataDownloadUpdateTests
         download.Update();
 
         // Timeout handler drops piece 0 (max attempts exceeded) without re-requesting.
-        // FillMissingRequests sees _pendingRequests.Count(1) >= pipeline(1) and returns early.
+        // The peer-driven scheduler sees one active distinct piece at the pipeline limit.
         // So peer2 should receive no new SendRequest calls.
         Assert.Empty(((MockUtMetadata)peer2.UtMetadata).RequestedPieces);
     }
@@ -154,6 +142,35 @@ public class MetadataDownloadUpdateTests
         var utMeta = (MockUtMetadata)peer.UtMetadata;
         Assert.Contains(0, utMeta.RequestedPieces);
         Assert.Contains(1, utMeta.RequestedPieces);
+    }
+
+    [Fact]
+    public void Update_AfterRepeatedSilence_PostsOneDiagnosticAlert()
+    {
+        var time = new FakeTimeProvider();
+        var alerts = new AlertsManager(time);
+        alerts.RegisterAlerts((uint)AlertId.MetadataDownloadStalled);
+        var torrent = TorrentTestUtility.CreateMinimal(timeProvider: time, alerts: alerts);
+        torrent.Settings.Transfer.MetadataRequestPipeline = 1;
+        var download = new MetadataDownload(torrent);
+        download.Start();
+        download.InitializeMetadataBuffer(UtMetadata.PieceSize);
+
+        InjectActivePeer(download, MakePeer(UtMetadata.PieceSize));
+        InjectActivePeer(download, MakePeer(UtMetadata.PieceSize));
+        InjectActivePeer(download, MakePeer(UtMetadata.PieceSize));
+
+        download.Update();
+        time.Advance(TimeSpan.FromSeconds(11));
+        download.Update();
+        time.Advance(TimeSpan.FromSeconds(20));
+        download.Update();
+        download.Update();
+
+        var alert = Assert.IsType<MetadataDownloadStalledAlert>(Assert.Single(alerts.PopAlerts()));
+        Assert.Equal(3, alert.CapablePeers);
+        Assert.True(alert.RequestsSent >= 6);
+        Assert.True(alert.Elapsed >= TimeSpan.FromSeconds(30));
     }
 
     [Fact]

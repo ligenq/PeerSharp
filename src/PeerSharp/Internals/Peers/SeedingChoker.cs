@@ -2,7 +2,7 @@ namespace PeerSharp.Internals.Peers;
 
 internal readonly struct SeedingRankEntry
 {
-    public required int UploadSpeed { get; init; }
+    public required long UploadSpeed { get; init; }
     public required bool IsChoked { get; init; }
     public required long UploadedSinceUnchoked { get; init; }
     public required DateTimeOffset LastUnchokedAt { get; init; }
@@ -41,8 +41,8 @@ internal static class SeedingChoker
 
         // Higher upload rate first. Choked peers are treated as rate=0 to prevent
         // residual in-flight bytes from inflating the rank of a just-choked peer.
-        int xRate = x.IsChoked ? 0 : x.UploadSpeed;
-        int yRate = y.IsChoked ? 0 : y.UploadSpeed;
+        long xRate = x.IsChoked ? 0 : x.UploadSpeed;
+        long yRate = y.IsChoked ? 0 : y.UploadSpeed;
         if (xRate != yRate)
         {
             return yRate.CompareTo(xRate); // descending

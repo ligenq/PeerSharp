@@ -20,8 +20,8 @@ namespace PeerSharp.Internals;
 
 internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, IFileSelectionObserver
 {
-    internal int _lastReportedDownloadSpeed;
-    internal int _lastReportedUploadSpeed;
+    internal long _lastReportedDownloadSpeed;
+    internal long _lastReportedUploadSpeed;
     private readonly IFileSelectionManager _fileSelectionManager;
     private readonly ILogger<Torrent> _logger;
 
@@ -105,7 +105,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     // Public Facade Properties
     public IDhtManager? DhtManager { get => Network.Dht; set => Network.Dht = value; }
 
-    public int DownloadLimitBytesPerSecond { get => Configuration.DownloadLimitBytesPerSecond; set => Configuration.DownloadLimitBytesPerSecond = value; }
+    public long DownloadLimitBytesPerSecond { get => Configuration.DownloadLimitBytesPerSecond; set => Configuration.DownloadLimitBytesPerSecond = value; }
+
+    public long DownloadSpeed => Volatile.Read(ref _lastReportedDownloadSpeed);
 
     public int DiskReadLimitBytesPerSecond { get => Configuration.DiskReadLimitBytesPerSecond; set => Configuration.DiskReadLimitBytesPerSecond = value; }
 
@@ -155,6 +157,17 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public bool HasMetadata => (InfoFile.Info.Pieces?.Count > 0 && InfoFile.Info.FullSize > 0)
                                  || (InfoFile.Info.IsMerkle && InfoFile.Info.FullSize > 0);
+
+    public bool HasSameIdentity(ITorrent? other)
+    {
+        if (other == null)
+        {
+            return false;
+        }
+
+        return (!Hash.IsEmpty && !other.Hash.IsEmpty && Hash == other.Hash)
+            || (!HashV2.IsEmpty && !other.HashV2.IsEmpty && HashV2 == other.HashV2);
+    }
 
     public bool HasStreamableFiles => Streaming.HasStreamableFiles;
 
@@ -215,6 +228,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public Settings Settings { get; }
     public bool Started => Interlocked.CompareExchange(ref _started, 0, 0) == 1;
 
+    public long UploadSpeed => Volatile.Read(ref _lastReportedUploadSpeed);
+
     public TorrentState State
     {
         get
@@ -254,7 +269,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public long TotalSize => InfoFile.Info.FullSize;
     public TrackerManager TrackerManager { get; private set; } = null!;
     public ITrackers Trackers => TrackerManager;
-    public int UploadLimitBytesPerSecond { get => Configuration.UploadLimitBytesPerSecond; set => Configuration.UploadLimitBytesPerSecond = value; }
+    public long UploadLimitBytesPerSecond { get => Configuration.UploadLimitBytesPerSecond; set => Configuration.UploadLimitBytesPerSecond = value; }
     public IUtpManager? UtpManager { get => Network.Utp; set => Network.Utp = value; }
 
     /// <summary>
@@ -591,15 +606,34 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public async Task ReinitializeAfterMetadataAsync(CancellationToken ct = default)
     {
         bool wasStarted = Started;
+        var peerPreferences = PeersInternal.ExportConnectionPreferences();
+        IReadOnlyList<PeerCommunication> retainedPeers = [];
+
+        // Only preserve peers when the torrent will resume. Preview mode intentionally leaves the
+        // torrent stopped, so keeping live sockets there would violate its public state contract.
+        bool preservePeers = wasStarted && !StopAfterMetadata;
+        if (preservePeers)
+        {
+            retainedPeers = await PeersInternal.DetachConnectedPeersForMetadataRebuildAsync().ConfigureAwait(false);
+        }
 
         // Not a stop, a rebuild: the info hash was verified against the metadata we just received, so
         // the tracker session is still valid and a started announce follows immediately. Sending the
         // courtesy stopped announce here would claim otherwise, and it is bounded by a timeout that one
         // unresponsive UDP tracker runs out in full - 2.5 of the 5.75 seconds a real magnet spent
         // between its last metadata byte and its first block.
-        await StopInternalAsync(disposing: false, sendStoppedAnnounce: false, ct).ConfigureAwait(false);
+        await StopInternalAsync(
+            disposing: false,
+            sendStoppedAnnounce: false,
+            peerManagerAlreadyStopped: preservePeers,
+            ct).ConfigureAwait(false);
         Initialize();
+        PeersInternal.ImportConnectionPreferences(peerPreferences);
         await ApplyPendingSelectOnlyFileIndicesAsync(ct).ConfigureAwait(false);
+        if (retainedPeers.Count > 0)
+        {
+            await PeersInternal.AdoptPeersAfterMetadataRebuildAsync(retainedPeers).ConfigureAwait(false);
+        }
         if (wasStarted && !StopAfterMetadata)
         {
             await StartAsync(ct).ConfigureAwait(false);
@@ -1023,8 +1057,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             return;
         }
 
-        int downloadSpeed = 0;
-        int uploadSpeed = 0;
+        long downloadSpeed = 0;
+        long uploadSpeed = 0;
 
         foreach (var peer in PeersInternal?.GetConnectedPeersInternal() ?? [])
         {
@@ -1037,8 +1071,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             return;
         }
 
-        _lastReportedDownloadSpeed = downloadSpeed;
-        _lastReportedUploadSpeed = uploadSpeed;
+        Volatile.Write(ref _lastReportedDownloadSpeed, downloadSpeed);
+        Volatile.Write(ref _lastReportedUploadSpeed, uploadSpeed);
 
         long downloaded = FileTransferInternal.Downloader.Downloaded;
         long uploaded = FileTransferInternal.Uploader.Uploaded;
@@ -1381,9 +1415,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     }
 
     private Task StopInternalAsync(bool disposing, CancellationToken ct = default)
-        => StopInternalAsync(disposing, sendStoppedAnnounce: true, ct);
+        => StopInternalAsync(disposing, sendStoppedAnnounce: true, peerManagerAlreadyStopped: false, ct);
 
-    private async Task StopInternalAsync(bool disposing, bool sendStoppedAnnounce, CancellationToken ct = default)
+    private async Task StopInternalAsync(
+        bool disposing,
+        bool sendStoppedAnnounce,
+        bool peerManagerAlreadyStopped = false,
+        CancellationToken ct = default)
     {
         if (!disposing)
         {
@@ -1409,7 +1447,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
             try
             {
-                if (PeersInternal != null)
+                if (PeersInternal != null && !peerManagerAlreadyStopped)
                 {
                     await PeersInternal.StopAsync().ConfigureAwait(false);
                 }

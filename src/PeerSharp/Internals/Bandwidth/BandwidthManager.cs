@@ -115,7 +115,7 @@ internal class BandwidthManager : IBandwidthManager
         return _channels.GetOrAdd(name, _ => new BandwidthChannel(_timeProvider));
     }
 
-    public (int DownloadLimit, int UploadLimit) GetTorrentLimits(ITorrent torrent)
+    public (long DownloadLimit, long UploadLimit) GetTorrentLimits(ITorrent torrent)
     {
         string hash = torrent.Hash.ToHexStringUpper();
         return (
@@ -128,8 +128,8 @@ internal class BandwidthManager : IBandwidthManager
     {
         string hash = torrent.Hash.ToHexStringUpper();
         return (
-            GetChannel($"{hash}_DR").GetLimit(),
-            GetChannel($"{hash}_DW").GetLimit()
+            checked((int)GetChannel($"{hash}_DR").GetLimit()),
+            checked((int)GetChannel($"{hash}_DW").GetLimit())
         );
     }
 
@@ -283,8 +283,10 @@ internal class BandwidthManager : IBandwidthManager
         _channels.TryRemove($"{hash}_DW", out _);
     }
 
-    public void SetGlobalLimits(int downloadLimit, int uploadLimit)
+    public void SetGlobalLimits(long downloadLimit, long uploadLimit)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(downloadLimit);
+        ArgumentOutOfRangeException.ThrowIfNegative(uploadLimit);
         GetChannel(GlobalDownload).SetLimit(downloadLimit);
         GetChannel(GlobalUpload).SetLimit(uploadLimit);
     }
@@ -295,8 +297,10 @@ internal class BandwidthManager : IBandwidthManager
         GetChannel(GlobalDiskWrite).SetLimit(writeLimit);
     }
 
-    public void SetTorrentLimits(ITorrent torrent, int downloadLimit, int uploadLimit)
+    public void SetTorrentLimits(ITorrent torrent, long downloadLimit, long uploadLimit)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(downloadLimit);
+        ArgumentOutOfRangeException.ThrowIfNegative(uploadLimit);
         string hash = torrent.Hash.ToHexStringUpper();
         GetChannel($"{hash}_DL").SetLimit(downloadLimit);
         GetChannel($"{hash}_UL").SetLimit(uploadLimit);

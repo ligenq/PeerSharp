@@ -4,7 +4,10 @@ using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
 using PeerSharp.BEncoding;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
+using Microsoft.Extensions.Logging.Abstractions;
+using System.Collections.Concurrent;
 
 namespace PeerSharp.Tests.Core.Trackers;
 
@@ -53,6 +56,37 @@ public class HttpTrackerTests
         }
     }
 
+    private sealed class FamilyHttpClientFactory(
+        Func<AddressFamily?, HttpResponseMessage> responseFactory) : IHttpClientFactory
+    {
+        public ConcurrentQueue<AddressFamily?> RequestedFamilies { get; } = [];
+
+        public HttpClient CreateClient(
+            ProxySettings proxy,
+            bool isTracker,
+            IPAddress? bindAddress = null,
+            AddressFamily? addressFamily = null)
+        {
+            RequestedFamilies.Enqueue(addressFamily);
+            return new HttpClient(new FamilyHandler(() => responseFactory(addressFamily)));
+        }
+    }
+
+    private sealed class FamilyHandler(Func<HttpResponseMessage> responseFactory) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            try
+            {
+                return Task.FromResult(responseFactory());
+            }
+            catch (Exception ex)
+            {
+                return Task.FromException<HttpResponseMessage>(ex);
+            }
+        }
+    }
+
     private class MockCallback : ITrackerCallback
     {
         public bool Success { get; private set; }
@@ -88,6 +122,82 @@ public class HttpTrackerTests
     public HttpTrackerTests()
     {
         _torrent = TorrentTestUtility.CreateMinimal();
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_UnboundDirectTracker_AnnouncesBothFamiliesAndMergesResponses()
+    {
+        byte[] ipv4Response = BuildAnnounceResponse(
+            interval: 1800,
+            peersKey: "peers",
+            peerBytes: [1, 2, 3, 4, 0x1A, 0xE1]);
+        byte[] ipv6Peer = [.. IPAddress.IPv6Loopback.GetAddressBytes(), 0x1A, 0xE2];
+        byte[] ipv6Response = BuildAnnounceResponse(900, "peers6", ipv6Peer);
+        var factory = new FamilyHttpClientFactory(family => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(family == AddressFamily.InterNetwork ? ipv4Response : ipv6Response)
+        });
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory);
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        Assert.Equal(
+            [AddressFamily.InterNetwork, AddressFamily.InterNetworkV6],
+            factory.RequestedFamilies.OrderBy(family => family).ToArray());
+        Assert.Equal(900u, _callback.AnnounceResponse?.Interval);
+        Assert.Equal(2, _callback.AnnounceResponse?.Peers.Count);
+        Assert.Contains(_callback.AnnounceResponse!.Peers, peer => peer.Address.Equals(IPAddress.Parse("1.2.3.4")));
+        Assert.Contains(_callback.AnnounceResponse.Peers, peer => peer.Address.Equals(IPAddress.IPv6Loopback));
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_WhenIPv6Fails_KeepsSuccessfulIPv4Announce()
+    {
+        byte[] response = BuildAnnounceResponse(1800, "peers", [1, 2, 3, 4, 0x1A, 0xE1]);
+        var factory = new FamilyHttpClientFactory(family =>
+        {
+            if (family == AddressFamily.InterNetworkV6)
+            {
+                throw new HttpRequestException("IPv6 unavailable");
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(response) };
+        });
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory);
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        Assert.Equal(2, factory.RequestedFamilies.Count);
+        Assert.Single(_callback.AnnounceResponse!.Peers);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_WithExplicitBind_UsesOnlyBoundFamily()
+    {
+        _torrent.Settings.Connection.BindAddress = IPAddress.Loopback;
+        byte[] response = BuildAnnounceResponse(1800, "peers", []);
+        var factory = new FamilyHttpClientFactory(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(response)
+        });
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory);
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        Assert.Equal([AddressFamily.InterNetwork], factory.RequestedFamilies);
+    }
+
+    private static byte[] BuildAnnounceResponse(uint interval, string peersKey, byte[] peerBytes)
+    {
+        var response = new BDict();
+        response.Dict["interval"] = new BNumber(interval);
+        response.Dict[peersKey] = new BString(peerBytes);
+        return BencodeWriter.Write(response);
     }
 
     [Fact(Timeout = 30000)]
@@ -819,6 +929,4 @@ public class HttpTrackerTests
         return count;
     }
 }
-
-
 

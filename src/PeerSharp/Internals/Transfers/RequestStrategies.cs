@@ -79,6 +79,7 @@ internal sealed class StandardBlockRequestStrategy : IBlockRequestStrategy
 
 internal sealed class EndGameBlockRequestStrategy : IBlockRequestStrategy
 {
+    private const int MaxConcurrentRequestsPerBlock = 4;
     private readonly BlockRequestTracker _requestTracker;
     private readonly int _blockSize;
 
@@ -96,6 +97,7 @@ internal sealed class EndGameBlockRequestStrategy : IBlockRequestStrategy
         }
 
         int offset = blockIndex * _blockSize;
-        return !_requestTracker.HasPendingRequestFromPeer(pieceIndex, offset, peer);
+        return !_requestTracker.HasPendingRequestFromPeer(pieceIndex, offset, peer)
+            && _requestTracker.GetPendingRequestCount(pieceIndex, offset) < MaxConcurrentRequestsPerBlock;
     }
 }

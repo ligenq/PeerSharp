@@ -79,7 +79,7 @@ internal sealed class NullAlertsManager : IAlertsManager
     {
     }
 
-    public void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, int downloadSpeed, int uploadSpeed, int connectedPeers)
+    public void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, long downloadSpeed, long uploadSpeed, int connectedPeers)
     {
     }
 }

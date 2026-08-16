@@ -113,38 +113,63 @@ internal class LsdManager : ILsdManager
             _running = true;
             _cts?.Dispose();
             _cts = new CancellationTokenSource();
+            var bindAddress = _settings.Connection.BindAddress;
 
             // Setup IPv4 Multicast Socket
-            try
+            if (bindAddress == null || bindAddress.AddressFamily == AddressFamily.InterNetwork)
             {
-                _ipv4Client = _socketFactory.Create(AddressFamily.InterNetwork);
-                _ipv4Client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                _ipv4Client.Client.Bind(new IPEndPoint(IPAddress.Any, LsdPort));
-                _ipv4Client.JoinMulticastGroup(IPAddress.Parse(MulticastIpV4));
-                _ipv4Client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true);
+                try
+                {
+                    _ipv4Client = _socketFactory.Create(AddressFamily.InterNetwork);
+                    _ipv4Client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                    _ipv4Client.Client.Bind(new IPEndPoint(bindAddress ?? IPAddress.Any, LsdPort));
+                    if (bindAddress != null)
+                    {
+                        _ipv4Client.Client.SetSocketOption(
+                            SocketOptionLevel.IP,
+                            SocketOptionName.MulticastInterface,
+                            bindAddress.GetAddressBytes());
+                    }
+                    _ipv4Client.JoinMulticastGroup(IPAddress.Parse(MulticastIpV4));
+                    _ipv4Client.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastLoopback, true);
 
-                _ = ReceiveLoopAsync(_ipv4Client, _cts.Token);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to setup IPv4 LSD");
+                    _ = ReceiveLoopAsync(_ipv4Client, _cts.Token);
+                }
+                catch (Exception ex)
+                {
+                    _ipv4Client?.Dispose();
+                    _ipv4Client = null;
+                    _logger.LogWarning(ex, "Failed to setup IPv4 LSD");
+                }
             }
 
             // Setup IPv6 Multicast Socket
-            try
+            if (bindAddress == null || bindAddress.AddressFamily == AddressFamily.InterNetworkV6)
             {
-                _ipv6Client = _socketFactory.Create(AddressFamily.InterNetworkV6);
-                _ipv6Client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                _ipv6Client.Client.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.IPv6Only, true);
-                _ipv6Client.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, LsdPort));
-                _ipv6Client.JoinMulticastGroup(IPAddress.Parse(MulticastIpV6));
-                _ipv6Client.Client.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.MulticastLoopback, true);
+                try
+                {
+                    _ipv6Client = _socketFactory.Create(AddressFamily.InterNetworkV6);
+                    _ipv6Client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                    _ipv6Client.Client.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.IPv6Only, true);
+                    _ipv6Client.Client.Bind(new IPEndPoint(bindAddress ?? IPAddress.IPv6Any, LsdPort));
+                    if (bindAddress is { ScopeId: > 0 })
+                    {
+                        _ipv6Client.Client.SetSocketOption(
+                            SocketOptionLevel.IPv6,
+                            SocketOptionName.MulticastInterface,
+                            checked((int)bindAddress.ScopeId));
+                    }
+                    _ipv6Client.JoinMulticastGroup(IPAddress.Parse(MulticastIpV6));
+                    _ipv6Client.Client.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.MulticastLoopback, true);
 
-                _ = ReceiveLoopAsync(_ipv6Client, _cts.Token);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to setup IPv6 LSD");
+                    _ = ReceiveLoopAsync(_ipv6Client, _cts.Token);
+                }
+                catch (Exception ex)
+                {
+                    _ipv6Client?.Dispose();
+                    _ipv6Client = null;
+                    _logger.LogWarning(ex, "Failed to setup IPv6 LSD");
+                }
             }
 
             if (_ipv4Client == null && _ipv6Client == null)

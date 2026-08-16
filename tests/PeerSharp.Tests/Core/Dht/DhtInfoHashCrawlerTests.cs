@@ -97,6 +97,32 @@ public class DhtInfoHashCrawlerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task Crawl_CanReturnRepeatSightingsWithoutChangingTheUniqueLimit()
+    {
+        await using var fixture = await DhtLoopbackFixture.CreateAsync();
+        var stored = SeedServerStore(fixture, 1);
+        var crawler = CreateCrawler(fixture, new DhtIndexerOptions
+        {
+            MaxInfoHashes = null,
+            MinNodeRequeryInterval = TimeSpan.Zero,
+            ReturnDuplicateSightings = true
+        });
+
+        var found = new List<DiscoveredInfoHash>();
+        await foreach (var discovered in crawler.CrawlAsync(TestContext.Current.CancellationToken))
+        {
+            found.Add(discovered);
+            if (found.Count == 2)
+            {
+                break;
+            }
+        }
+
+        Assert.Equal(2, found.Count);
+        Assert.All(found, item => Assert.Equal(stored[0], item.InfoHash));
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task Crawl_StopsWhenCancelled()
     {
         await using var fixture = await DhtLoopbackFixture.CreateAsync();

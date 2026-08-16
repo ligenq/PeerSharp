@@ -278,7 +278,7 @@ public class HttpStreamServerTests
         }
 
         public long DataLeft => 0;
-        public int DownloadLimitBytesPerSecond { get; set; }
+        public long DownloadLimitBytesPerSecond { get; set; }
         public int DiskReadLimitBytesPerSecond { get; set; }
         public int DiskWriteLimitBytesPerSecond { get; set; }
         public DownloadStrategy DownloadStrategy { get; set; }
@@ -314,7 +314,7 @@ public class HttpStreamServerTests
         public DateTimeOffset TimeAdded => DateTimeOffset.UtcNow;
         public long TotalSize => _data.Length;
         public ITrackers Trackers => throw new NotImplementedException();
-        public int UploadLimitBytesPerSecond { get; set; }
+        public long UploadLimitBytesPerSecond { get; set; }
 
         public Task<int> ForceRecheckAsync(IProgress<PieceCheckProgress>? progress = null, CancellationToken cancellationToken = default) =>
             throw new NotImplementedException();

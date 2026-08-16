@@ -26,7 +26,7 @@ internal interface IAlertsManager : IAlerts
 
     void TorrentErrorAlert(ITorrent torrent, Exception exception);
 
-    void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, int downloadSpeed, int uploadSpeed, int connectedPeers);
+    void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, long downloadSpeed, long uploadSpeed, int connectedPeers);
 }
 
 internal class AlertsManager : IAlertsManager
@@ -270,7 +270,7 @@ internal class AlertsManager : IAlertsManager
         });
     }
 
-    public void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, int downloadSpeed, int uploadSpeed, int connectedPeers)
+    public void TransferStatsAlert(ITorrent torrent, long downloaded, long uploaded, long downloadSpeed, long uploadSpeed, int connectedPeers)
     {
         if (!IsAlertRegistered(AlertId.TransferStatsUpdated))
         {

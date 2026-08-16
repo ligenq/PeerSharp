@@ -132,6 +132,10 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <summary>
     /// Loads a .torrent file from disk asynchronously.
     /// </summary>
+    /// <remarks>
+    /// This method reads the local file system. For torrent bytes downloaded from a URL or another
+    /// remote source, fetch them with the caller's HTTP stack and pass them to <see cref="Parse(byte[])"/>.
+    /// </remarks>
     /// <param name="path">Path to the .torrent file.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A parsed TorrentFile instance.</returns>
@@ -201,7 +205,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <param name="data">The raw .torrent file bytes.</param>
     /// <param name="result">The parsed TorrentFile if successful.</param>
     /// <returns>True if parsing succeeded, false otherwise.</returns>
-    public static bool TryParse(byte[]? data, out TorrentFile? result)
+    public static bool TryParse(byte[]? data, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TorrentFile? result)
     {
         return TryParse(data, out result, out _);
     }
@@ -213,7 +217,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <param name="result">The parsed TorrentFile if successful.</param>
     /// <param name="error">Error message if parsing failed.</param>
     /// <returns>True if parsing succeeded, false otherwise.</returns>
-    public static bool TryParse(byte[]? data, out TorrentFile? result, out string? error)
+    public static bool TryParse(byte[]? data, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TorrentFile? result, out string? error)
     {
         result = null;
         error = null;
@@ -381,4 +385,3 @@ public readonly struct TorrentFileEntry
         return $"{Path} ({Size:N0} bytes)";
     }
 }
-

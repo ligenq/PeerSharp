@@ -7,7 +7,7 @@ using System.Reflection;
 namespace PeerSharp.Tests.Core.Extensions;
 
 /// <summary>
-/// Choosing which peer to ask for metadata, once there is evidence about who answers.
+/// Peer-local metadata request ownership.
 ///
 /// <para>
 /// Advertising ut_metadata with a size says a peer holds the metadata, not that it will part with it,
@@ -19,9 +19,8 @@ namespace PeerSharp.Tests.Core.Extensions;
 /// </para>
 ///
 /// <para>
-/// So a peer that has answered is preferred, a peer that has been asked repeatedly and stayed silent is
-/// a last resort, and a peer nobody has tried yet sits between them - which is also what keeps the
-/// proven set growing rather than freezing around whoever answered first.
+/// Each peer now owns and times out its own requests. One silent peer therefore cannot occupy a
+/// piece-owned slot on behalf of other peers or make a larger swarm slower.
 /// </para>
 /// </summary>
 public class MetadataPeerPreferenceTests
@@ -29,7 +28,85 @@ public class MetadataPeerPreferenceTests
     private const int PieceSize = UtMetadata.PieceSize;
 
     [Fact]
-    public async Task APeerThatHasAnsweredIsPreferredOverOnesThatNeverDid()
+    public void LeastRequestedScheduling_BalancesPiecesAndHonorsRedundancyCap()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 4;
+        torrent.Settings.Transfer.MetadataRequestRedundancy = 3;
+        var download = new MetadataDownload(torrent);
+        download.Start();
+
+        var peers = Enumerable.Range(0, 10).Select(_ => MakePeer(PieceSize * 4)).ToList();
+        foreach (var peer in peers)
+        {
+            InjectActivePeer(download, peer);
+        }
+        download.InitializeMetadataBuffer(PieceSize * 4);
+
+        var counts = download.GetPendingRequestsForTesting()
+            .GroupBy(request => request.Piece)
+            .ToDictionary(group => group.Key, group => group.Count());
+        Assert.Equal(4, counts.Count);
+        Assert.All(counts.Values, count => Assert.Equal(3, count));
+        Assert.All(
+            download.GetPendingRequestsForTesting().GroupBy(request => (request.Peer, request.Piece)),
+            ownership => Assert.Single(ownership));
+    }
+
+    [Fact]
+    public void PeerDisconnected_RemovesOnlyThatPeersOwnershipAndRefillsFromSurvivors()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 2;
+        torrent.Settings.Transfer.MetadataRequestRedundancy = 2;
+        var download = new MetadataDownload(torrent);
+        download.Start();
+        var peers = Enumerable.Range(0, 3).Select(_ => MakePeer(PieceSize * 2)).ToList();
+        foreach (var peer in peers)
+        {
+            InjectActivePeer(download, peer);
+        }
+        download.InitializeMetadataBuffer(PieceSize * 2);
+
+        download.PeerDisconnected(peers[0]);
+
+        var pending = download.GetPendingRequestsForTesting();
+        Assert.DoesNotContain(pending, request => request.Peer == peers[0]);
+        Assert.Contains(pending, request => request.Peer == peers[1]);
+        Assert.Contains(pending, request => request.Peer == peers[2]);
+        Assert.All(
+            pending.GroupBy(request => request.Piece),
+            piece => Assert.InRange(piece.Count(), 1, 2));
+    }
+
+    [Fact]
+    public async Task LateDuplicateResponse_DoesNotClearPeersNewerRequestForAnotherPiece()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Transfer.MetadataRequestPipeline = 2;
+        torrent.Settings.Transfer.MetadataRequestRedundancy = 2;
+        var download = new MetadataDownload(torrent);
+        download.Start();
+        var first = MakePeer(PieceSize * 2);
+        var late = MakePeer(PieceSize * 2);
+        InjectActivePeer(download, first);
+        InjectActivePeer(download, late);
+        download.InitializeMetadataBuffer(PieceSize * 2);
+
+        await download.MetadataPieceReceivedAsync(first, 0, new byte[PieceSize]);
+        Assert.Contains(
+            download.GetPendingRequestsForTesting(),
+            request => request.Peer == late && request.Piece == 1);
+
+        await download.MetadataPieceReceivedAsync(late, 0, new byte[PieceSize]);
+
+        Assert.Contains(
+            download.GetPendingRequestsForTesting(),
+            request => request.Peer == late && request.Piece == 1);
+    }
+
+    [Fact]
+    public async Task EveryEligiblePeerCanOwnAnIndependentRequest()
     {
         var torrent = TorrentTestUtility.CreateMinimal();
         var download = new MetadataDownload(torrent);
@@ -57,17 +134,13 @@ public class MetadataPeerPreferenceTests
 
         download.Update();
 
-        // Ownership rather than "was sent anything": the redundant asks in AskAdditionalPeers
-        // deliberately spill into the lower tiers once the better ones are exhausted, so a silent peer
-        // seeing some traffic is correct. What tiering decides is who gets asked first, and that is the
-        // peer recorded against each pending request.
         var owners = PendingOwners(download);
-        Assert.NotEmpty(owners);
-        Assert.All(owners, owner => Assert.Same(willing, owner));
+        Assert.Contains(willing, owners);
+        Assert.All(silent, peer => Assert.Contains(peer, owners));
     }
 
     [Fact]
-    public void AnUntriedPeerIsPreferredOverOneKnownToBeSilent()
+    public void AKnownSilentPeerDoesNotBlockAnUntriedPeer()
     {
         var torrent = TorrentTestUtility.CreateMinimal();
         var download = new MetadataDownload(torrent);
@@ -83,12 +156,9 @@ public class MetadataPeerPreferenceTests
 
         download.Update();
 
-        // Nothing here depends on a peer having answered: the middle tier is what lets the proven set
-        // grow past whoever happened to answer first, so an untried peer must outrank a known-silent
-        // one on no evidence at all.
         var owners = PendingOwners(download);
-        Assert.NotEmpty(owners);
-        Assert.All(owners, owner => Assert.Same(untried, owner));
+        Assert.Contains(untried, owners);
+        Assert.Contains(silent, owners);
     }
 
     [Fact]
@@ -141,17 +211,7 @@ public class MetadataPeerPreferenceTests
     /// <summary>The peer recorded against each outstanding request - the one the tiers chose.</summary>
     private static List<IPeerCommunication> PendingOwners(MetadataDownload download)
     {
-        var pendingType = typeof(MetadataDownload)
-            .GetNestedType("PendingMetadataRequest", BindingFlags.NonPublic)!;
-        var peerProperty = pendingType.GetProperty("Peer")!;
-
-        var owners = new List<IPeerCommunication>();
-        foreach (System.Collections.DictionaryEntry entry in Pending(download))
-        {
-            owners.Add((IPeerCommunication)peerProperty.GetValue(entry.Value)!);
-        }
-
-        return owners;
+        return download.GetPendingRequestsForTesting().Select(request => request.Peer).Distinct().ToList();
     }
 
     private static void InjectActivePeer(MetadataDownload download, IPeerCommunication peer)

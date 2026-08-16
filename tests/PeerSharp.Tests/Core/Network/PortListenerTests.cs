@@ -53,9 +53,11 @@ public class PortListenerTests
 
     private class MockTcpListenerFactory : ITcpListenerFactory
     {
+        public IPAddress? LastAddress { get; private set; }
         public MockTcpListener? LastListener { get; private set; }
         public ITcpListener Create(IPAddress address, int port)
         {
+            LastAddress = address;
             LastListener = new MockTcpListener(port);
             return LastListener;
         }
@@ -83,6 +85,23 @@ public class PortListenerTests
         listener.Start(5000);
 
         Assert.Equal(5000, listener.Port);
+        listener.Stop();
+    }
+
+    [Fact]
+    public void Start_WithBindAddress_PassesSpecificAddressToListenerFactory()
+    {
+        var factory = new MockTcpListenerFactory();
+        var bindAddress = IPAddress.Parse("127.0.0.2");
+        var listener = new PortListener(
+            new MockResolver(),
+            factory,
+            Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
+            bindAddress);
+
+        listener.Start(5000);
+
+        Assert.Equal(bindAddress, factory.LastAddress);
         listener.Stop();
     }
 

@@ -202,7 +202,10 @@ internal sealed class SessionManager : IAsyncDisposable
                 torrent.QueuePriority,
                 torrent.RatioLimit,
                 torrent.SeedTimeLimit,
-                torrent.DownloadStrategy));
+                torrent.DownloadStrategy)
+            {
+                PeerPreferences = torrent.PeersInternal.ExportConnectionPreferences()
+            });
 
         await _persistence.SaveAsync(entry, cancellationToken).ConfigureAwait(false);
     }

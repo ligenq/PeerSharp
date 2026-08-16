@@ -10,10 +10,10 @@ internal interface IBandwidthUser
 internal class BandwidthChannel
 {
     // Multiple threads can call UpdateQuota, UseQuota, ReturnQuota simultaneously
-    private int _limit;
+    private long _limit;
 
-    private int _quota;
-    private int _subQuota;
+    private long _quota;
+    private long _subQuota;
 
     public BandwidthChannel(TimeProvider timeProvider)
     {
@@ -25,31 +25,31 @@ internal class BandwidthChannel
     {
         get
         {
-            int limit = Interlocked.CompareExchange(ref _limit, 0, 0);
+            long limit = Interlocked.Read(ref _limit);
             if (limit == 0)
             {
                 return int.MaxValue;
             }
 
-            return Interlocked.CompareExchange(ref _quota, 0, 0);
+            return (int)Math.Clamp(Interlocked.Read(ref _quota), int.MinValue, int.MaxValue);
         }
     }
 
     public bool CanUse(int amount)
     {
-        int limit = Interlocked.CompareExchange(ref _limit, 0, 0);
+        long limit = Interlocked.Read(ref _limit);
         if (limit == 0)
         {
             return true;
         }
 
-        int quota = Interlocked.CompareExchange(ref _quota, 0, 0);
+        long quota = Interlocked.Read(ref _quota);
         return quota >= amount;
     }
 
-    public int GetLimit()
+    public long GetLimit()
     {
-        return Interlocked.CompareExchange(ref _limit, 0, 0);
+        return Interlocked.Read(ref _limit);
     }
 
     /// <summary>
@@ -58,23 +58,23 @@ internal class BandwidthChannel
     /// </summary>
     public void ReturnQuota(int amount)
     {
-        int limit = Interlocked.CompareExchange(ref _limit, 0, 0);
+        long limit = Interlocked.Read(ref _limit);
         if (limit == 0 || amount <= 0)
         {
             return;
         }
 
-        int newQuota = Interlocked.Add(ref _quota, amount);
+        long newQuota = AddSaturating(ref _quota, amount);
 
         // Cap to prevent quota from growing unboundedly
-        int maxQuota = limit * 3;
+        long maxQuota = SaturatingTriple(limit);
         if (maxQuota > 0 && newQuota > maxQuota)
         {
             // Atomically clamp to max using CompareExchange loop
-            int current;
+            long current;
             do
             {
-                current = Interlocked.CompareExchange(ref _quota, 0, 0);
+                current = Interlocked.Read(ref _quota);
                 if (current <= maxQuota)
                 {
                     break;
@@ -83,14 +83,15 @@ internal class BandwidthChannel
         }
     }
 
-    public void SetLimit(int limit)
+    public void SetLimit(long limit)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(limit);
         Interlocked.Exchange(ref _limit, limit);
     }
 
     public void UpdateQuota(int dt)
     {
-        int limit = Interlocked.CompareExchange(ref _limit, 0, 0);
+        long limit = Interlocked.Read(ref _limit);
         if (limit == 0)
         {
             return;
@@ -100,17 +101,17 @@ internal class BandwidthChannel
         // limit is bytes/sec. dt is ms.
         // quota += limit * dt / 1000
 
-        long newQuota = (long)limit * dt;
-        int quotaDelta = (int)(newQuota / 1000);
-        int subQuotaDelta = (int)(newQuota % 1000);
+        long newQuota = limit > long.MaxValue / dt ? long.MaxValue : limit * dt;
+        long quotaDelta = newQuota / 1000;
+        long subQuotaDelta = newQuota % 1000;
 
-        int newSubQuota = Interlocked.Add(ref _subQuota, subQuotaDelta);
+        long newSubQuota = Interlocked.Add(ref _subQuota, subQuotaDelta);
 
         // Handle overflow from subQuota to quota
         if (newSubQuota >= 1000)
         {
             // Atomically transfer overflow: subQuota -= 1000, quota += 1
-            int actualSubQuota = Interlocked.Add(ref _subQuota, -1000);
+            long actualSubQuota = Interlocked.Add(ref _subQuota, -1000);
             if (actualSubQuota >= 0)
             {
                 quotaDelta++; // Add overflow to quota delta
@@ -123,18 +124,18 @@ internal class BandwidthChannel
         }
 
         // Add quota delta
-        int newTotalQuota = Interlocked.Add(ref _quota, quotaDelta);
+        long newTotalQuota = AddSaturating(ref _quota, quotaDelta);
 
         // Cap quota to avoid huge bursts after idle time
         // libtorrent caps at 3 * limit usually
-        int maxQuota = limit * 3;
+        long maxQuota = SaturatingTriple(limit);
         if (maxQuota > 0 && newTotalQuota > maxQuota)
         {
             // Atomically clamp to max using CompareExchange
-            int current;
+            long current;
             do
             {
-                current = Interlocked.CompareExchange(ref _quota, 0, 0);
+                current = Interlocked.Read(ref _quota);
                 if (current <= maxQuota)
                 {
                     break;
@@ -145,7 +146,7 @@ internal class BandwidthChannel
 
     public void UseQuota(int amount)
     {
-        int limit = Interlocked.CompareExchange(ref _limit, 0, 0);
+        long limit = Interlocked.Read(ref _limit);
         if (limit == 0)
         {
             return;
@@ -154,17 +155,17 @@ internal class BandwidthChannel
         // Note: Quota can go negative if multiple threads check-then-use simultaneously
         // This is acceptable - it represents temporary over-allocation that will be
         // corrected on the next UpdateQuota cycle. We only prevent extreme negative values.
-        int newQuota = Interlocked.Add(ref _quota, -amount);
+        long newQuota = AddSaturating(ref _quota, -amount);
 
         // Prevent quota from going below -maxQuota (prevents unbounded debt)
-        int minQuota = -(limit * 3);
+        long minQuota = -SaturatingTriple(limit);
         if (newQuota < minQuota)
         {
             // Clamp to minimum using CompareExchange loop
-            int current;
+            long current;
             do
             {
-                current = Interlocked.CompareExchange(ref _quota, 0, 0);
+                current = Interlocked.Read(ref _quota);
                 if (current >= minQuota)
                 {
                     break;
@@ -172,4 +173,31 @@ internal class BandwidthChannel
             } while (Interlocked.CompareExchange(ref _quota, minQuota, current) != current);
         }
     }
+
+    private static long AddSaturating(ref long location, long value)
+    {
+        long current;
+        long next;
+        do
+        {
+            current = Interlocked.Read(ref location);
+            if (value > 0 && current > long.MaxValue - value)
+            {
+                next = long.MaxValue;
+            }
+            else if (value < 0 && current < long.MinValue - value)
+            {
+                next = long.MinValue;
+            }
+            else
+            {
+                next = current + value;
+            }
+        }
+        while (Interlocked.CompareExchange(ref location, next, current) != current);
+
+        return next;
+    }
+
+    private static long SaturatingTriple(long value) => value > long.MaxValue / 3 ? long.MaxValue : value * 3;
 }

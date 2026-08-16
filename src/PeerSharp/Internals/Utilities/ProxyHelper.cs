@@ -10,14 +10,14 @@ internal static class ProxyHelper
 {
     public static Task<(Stream Stream, TcpClient Client)> ConnectHttpProxyAsync(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
     {
-        return ConnectHttpProxyAsync(targetHost, targetPort, proxyHost, proxyPort, username, password, NullLogger.Instance, cancellationToken);
+        return ConnectHttpProxyAsync(targetHost, targetPort, proxyHost, proxyPort, username, password, NullLogger.Instance, null, cancellationToken);
     }
 
-    public static async Task<(Stream Stream, TcpClient Client)> ConnectHttpProxyAsync(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, ILogger logger, CancellationToken cancellationToken)
+    public static async Task<(Stream Stream, TcpClient Client)> ConnectHttpProxyAsync(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, ILogger logger, IPAddress? bindAddress, CancellationToken cancellationToken)
     {
         logger.LogDebug("HTTP Proxy: Connecting to proxy {ProxyHost}:{ProxyPort} for target {TargetHost}:{TargetPort}", proxyHost, proxyPort, targetHost, targetPort);
 
-        var tcpClient = new TcpClient();
+        var tcpClient = CreateTcpClient(bindAddress);
         try
         {
             await tcpClient.ConnectAsync(proxyHost, proxyPort, cancellationToken).ConfigureAwait(false);
@@ -92,14 +92,14 @@ internal static class ProxyHelper
 
     public static Task<(Stream Stream, TcpClient Client)> ConnectSocks5Async(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
     {
-        return ConnectSocks5Async(targetHost, targetPort, proxyHost, proxyPort, username, password, NullLogger.Instance, cancellationToken);
+        return ConnectSocks5Async(targetHost, targetPort, proxyHost, proxyPort, username, password, NullLogger.Instance, null, cancellationToken);
     }
 
-    public static async Task<(Stream Stream, TcpClient Client)> ConnectSocks5Async(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, ILogger logger, CancellationToken cancellationToken)
+    public static async Task<(Stream Stream, TcpClient Client)> ConnectSocks5Async(string targetHost, int targetPort, string proxyHost, int proxyPort, string? username, string? password, ILogger logger, IPAddress? bindAddress, CancellationToken cancellationToken)
     {
         logger.LogDebug("SOCKS5 TCP: Connecting to proxy {ProxyHost}:{ProxyPort} for target {TargetHost}:{TargetPort}", proxyHost, proxyPort, targetHost, targetPort);
 
-        var tcpClient = new TcpClient();
+        var tcpClient = CreateTcpClient(bindAddress);
         try
         {
             await tcpClient.ConnectAsync(proxyHost, proxyPort, cancellationToken).ConfigureAwait(false);
@@ -246,19 +246,19 @@ internal static class ProxyHelper
 
     public static Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> ConnectSocks5UdpAsync(string proxyHost, int proxyPort, string? username, string? password, CancellationToken cancellationToken)
     {
-        return ConnectSocks5UdpAsync(proxyHost, proxyPort, username, password, NullLogger.Instance, cancellationToken);
+        return ConnectSocks5UdpAsync(proxyHost, proxyPort, username, password, NullLogger.Instance, null, cancellationToken);
     }
 
-    public static async Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> ConnectSocks5UdpAsync(string proxyHost, int proxyPort, string? username, string? password, ILogger logger, CancellationToken cancellationToken)
+    public static async Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> ConnectSocks5UdpAsync(string proxyHost, int proxyPort, string? username, string? password, ILogger logger, IPAddress? bindAddress, CancellationToken cancellationToken)
     {
         logger.LogDebug("SOCKS5 UDP: Initiating UDP ASSOCIATE with proxy {ProxyHost}:{ProxyPort}", proxyHost, proxyPort);
 
-        var tcpClient = new TcpClient();
+        var tcpClient = CreateTcpClient(bindAddress);
         try
         {
             await tcpClient.ConnectAsync(proxyHost, proxyPort, cancellationToken).ConfigureAwait(false);
             var stream = tcpClient.GetStream();
-            return await NegotiateSocks5UdpAsync(stream, tcpClient, proxyHost, username, password, logger, cancellationToken).ConfigureAwait(false);
+            return await NegotiateSocks5UdpAsync(stream, tcpClient, proxyHost, username, password, logger, bindAddress, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -273,7 +273,7 @@ internal static class ProxyHelper
         string? username, string? password,
         CancellationToken cancellationToken)
     {
-        return NegotiateSocks5UdpAsync(stream, client, proxyHost, username, password, NullLogger.Instance, cancellationToken);
+        return NegotiateSocks5UdpAsync(stream, client, proxyHost, username, password, NullLogger.Instance, null, cancellationToken);
     }
 
     internal static async Task<(UdpClient UdpClient, IPEndPoint ProxyUdpEndPoint, TcpClient ControlClient)> NegotiateSocks5UdpAsync(
@@ -281,6 +281,7 @@ internal static class ProxyHelper
         string proxyHost,
         string? username, string? password,
         ILogger logger,
+        IPAddress? bindAddress,
         CancellationToken cancellationToken)
     {
         // 1. Handshake (Method Selection)
@@ -372,10 +373,41 @@ internal static class ProxyHelper
         }
 
         var proxyUdpEndPoint = new IPEndPoint(proxyUdpAddress, proxyUdpPort);
-        var udpClient = new UdpClient(proxyUdpAddress.AddressFamily);
+        if (bindAddress != null && bindAddress.AddressFamily != proxyUdpAddress.AddressFamily)
+        {
+            throw new IOException($"SOCKS5 UDP relay uses {proxyUdpAddress.AddressFamily}, which is incompatible with bind address {bindAddress}.");
+        }
+
+        var udpClient = new UdpClient(bindAddress?.AddressFamily ?? proxyUdpAddress.AddressFamily);
+        if (bindAddress != null)
+        {
+            udpClient.Client.Bind(new IPEndPoint(bindAddress, 0));
+        }
 
         logger.LogDebug("SOCKS5 UDP: Association established, relay endpoint {ProxyUdpEndPoint}", proxyUdpEndPoint);
         return (udpClient, proxyUdpEndPoint, client);
+    }
+
+    private static TcpClient CreateTcpClient(IPAddress? bindAddress)
+    {
+        var client = bindAddress == null
+            ? new TcpClient()
+            : new TcpClient(bindAddress.AddressFamily);
+        client.ReceiveTimeout = 30_000;
+        client.SendTimeout = 30_000;
+        try
+        {
+            if (bindAddress != null)
+            {
+                client.Client.Bind(new IPEndPoint(bindAddress, 0));
+            }
+            return client;
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
     }
 
     public static byte[] GetSocks5UdpPacket(byte[] payload, IPEndPoint target)

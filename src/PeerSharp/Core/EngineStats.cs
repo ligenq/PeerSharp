@@ -11,8 +11,8 @@ namespace PeerSharp.Core;
 /// <param name="ActiveTorrents">The number of torrents that are currently active.</param>
 /// <param name="TotalPeers">The total number of connected peers across all torrents.</param>
 public sealed record EngineStats(
-    int DownloadSpeed = 0,
-    int UploadSpeed = 0,
+    long DownloadSpeed = 0,
+    long UploadSpeed = 0,
     long TotalDownloaded = 0,
     long TotalUploaded = 0,
     int TorrentCount = 0,

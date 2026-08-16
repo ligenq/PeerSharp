@@ -169,7 +169,7 @@ public readonly struct TransferStats
     public long Downloaded { get; init; }
 
     /// <summary>Current download speed in bytes per second.</summary>
-    public int DownloadSpeed { get; init; }
+    public long DownloadSpeed { get; init; }
 
     /// <summary>Share ratio (Uploaded / Downloaded).</summary>
     public float Ratio => Downloaded > 0 ? (float)Uploaded / Downloaded : 0f;
@@ -178,7 +178,7 @@ public readonly struct TransferStats
     public long Uploaded { get; init; }
 
     /// <summary>Current upload speed in bytes per second.</summary>
-    public int UploadSpeed { get; init; }
+    public long UploadSpeed { get; init; }
 }
 
 /// <summary>

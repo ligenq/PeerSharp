@@ -108,6 +108,21 @@ public class AdaptiveTimeoutTests
     }
 
     [Fact]
+    public void EndpointHistory_DoesNotLeakAcrossPortsOnTheSameAddress()
+    {
+        var adaptive = new AdaptiveTimeout(1000, 30000, 10000, _timeProvider);
+        var learned = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 80);
+        var unrelated = new IPEndPoint(IPAddress.Parse("1.1.1.1"), 443);
+
+        adaptive.RecordSuccess(5000, learned);
+        adaptive.RecordSuccess(5000, learned);
+        adaptive.RecordSuccess(5000, learned);
+
+        Assert.True(adaptive.HasHistory(learned));
+        Assert.False(adaptive.HasHistory(unrelated));
+    }
+
+    [Fact]
     public void GetConservativeTimeoutMs_TenSamples_Returns95thPercentile()
     {
         // Arrange

@@ -63,11 +63,17 @@ public enum AlertId : uint
     /// <summary>The torrent encountered an error.</summary>
     TorrentError = 1 << 12,
 
+    /// <summary>A peer connection closed and its final transfer totals are available.</summary>
+    PeerDisconnected = 1 << 13,
+
     /// <summary>Metadata was fetched from the swarm, so the file list is now known.</summary>
     MetadataInitialized = 1 << 16,
 
     /// <summary>Progress of an in-flight metadata download changed.</summary>
     MetadataProgressChanged = 1 << 17,
+
+    /// <summary>Metadata-capable peers have repeatedly ignored requests for an extended period.</summary>
+    MetadataDownloadStalled = 1 << 18,
 
     /// <summary>A configuration value was changed at runtime.</summary>
     ConfigChanged = 1 << 20,
@@ -207,17 +213,39 @@ public sealed record TransferStatsAlert : TorrentAlert
     /// <summary>
     /// Gets the current download speed in bytes per second.
     /// </summary>
-    public required int DownloadSpeed { get; init; }
+    public required long DownloadSpeed { get; init; }
 
     /// <summary>
     /// Gets the current upload speed in bytes per second.
     /// </summary>
-    public required int UploadSpeed { get; init; }
+    public required long UploadSpeed { get; init; }
 
     /// <summary>
     /// Gets the current number of connected peers.
     /// </summary>
     public required int ConnectedPeers { get; init; }
+}
+
+/// <summary>
+/// Alert fired when a peer disconnects, carrying the counters that would otherwise disappear from
+/// the current-peer snapshot.
+/// </summary>
+public sealed record PeerDisconnectedAlert : TorrentAlert
+{
+    /// <summary>Gets the peer endpoint, when the connection reached endpoint discovery.</summary>
+    public required System.Net.IPEndPoint? Endpoint { get; init; }
+
+    /// <summary>Gets the client name inferred from the peer ID.</summary>
+    public required string ClientName { get; init; }
+
+    /// <summary>Gets the final number of bytes downloaded from this peer.</summary>
+    public required long Downloaded { get; init; }
+
+    /// <summary>Gets the final number of bytes uploaded to this peer.</summary>
+    public required long Uploaded { get; init; }
+
+    /// <summary>Gets the internal reason code supplied when the connection closed.</summary>
+    public required int ReasonCode { get; init; }
 }
 
 /// <summary>
@@ -266,5 +294,21 @@ public sealed record MetadataProgressAlert : MetadataAlert
     /// Gets the total number of metadata pieces to download.
     /// </summary>
     public required int TotalPieces { get; init; }
+}
+
+/// <summary>
+/// Alert fired once when a metadata download has made many requests to apparently capable peers
+/// without receiving a single piece.
+/// </summary>
+public sealed record MetadataDownloadStalledAlert : MetadataAlert
+{
+    /// <summary>Gets the number of connected peers advertising that they hold the metadata.</summary>
+    public required int CapablePeers { get; init; }
+
+    /// <summary>Gets the total number of metadata piece requests sent.</summary>
+    public required long RequestsSent { get; init; }
+
+    /// <summary>Gets the time elapsed since the first request.</summary>
+    public required TimeSpan Elapsed { get; init; }
 }
 

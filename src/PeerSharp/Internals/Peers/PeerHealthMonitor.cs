@@ -61,7 +61,7 @@ internal sealed class PeerHealthMonitor
                 continue;
             }
 
-            int speed = isSeeding ? peer.UploadSpeed : peer.SmoothedDownloadSpeed;
+            long speed = isSeeding ? peer.UploadSpeed : peer.SmoothedDownloadSpeed;
             if (speed >= threshold)
             {
                 Remove(peer);

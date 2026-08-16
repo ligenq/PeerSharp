@@ -3,6 +3,7 @@ using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Utp;
 using Microsoft.Extensions.Time.Testing;
+using System.Net;
 
 namespace PeerSharp.Tests.Core;
 
@@ -84,6 +85,22 @@ public class ClientEngineTests
         Assert.Equal("test", torrent.Name);
         Assert.Single(engine.GetTorrents());
         Assert.Equal(torrent, engine.GetTorrent(torrent.Hash));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddTorrentAsync_SeedsAdditionalPeerHints()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+        var info = new TorrentFileMetadata();
+        info.Info.Hash = InfoHash.CreateRandom();
+        var endpoint = new IPEndPoint(IPAddress.Loopback, 51413);
+
+        var torrent = await engine.AddTorrentAsync(
+            new TorrentFile(info),
+            new AddTorrentOptions { StartImmediately = false, AdditionalPeers = [endpoint] });
+
+        Assert.Equal(0, torrent.Peers.Add([endpoint]));
     }
 
     [Fact(Timeout = 30000)]

@@ -317,7 +317,17 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
                 MarkTierSuccess(info.TierIndex);
 
-                ReportExternalIp(info, response.ExternalIp);
+                if (response.ExternalAddresses.Count > 0)
+                {
+                    foreach (var address in response.ExternalAddresses)
+                    {
+                        ReportExternalIp(info, address);
+                    }
+                }
+                else
+                {
+                    ReportExternalIp(info, response.ExternalIp);
+                }
 
                 // Add peers to peer manager
                 try
@@ -410,12 +420,10 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     /// </summary>
     private void ReportExternalIp(TrackerInfo info, IPAddress? address)
     {
-        if (address == null || address.Equals(info.LastReportedExternalIp))
+        if (address == null || !info.ReportedExternalIps.Add(address))
         {
             return;
         }
-
-        info.LastReportedExternalIp = address;
 
         var dht = _torrent.DhtManager;
         if (dht == null)
@@ -889,7 +897,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         /// BEP 24: the last external address this tracker reported, so a single tracker can only
         /// contribute one vote per distinct address.
         /// </summary>
-        public IPAddress? LastReportedExternalIp { get; set; }
+        public HashSet<IPAddress> ReportedExternalIps { get; } = [];
 
         // Default 10 mins
         // For resetting backoff history

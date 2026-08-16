@@ -70,7 +70,7 @@ internal sealed class PeerChoker
 
         int slots = GetUploadSlots(connectedCount);
         int regularSlots = _candidates.Count > slots ? slots - 1 : slots;
-        int bestSpeed = 0;
+        long bestSpeed = 0;
         if (_candidates.Count > 0)
         {
             bestSpeed = isSeeding ? _candidates[0].UploadSpeed : _candidates[0].SmoothedDownloadSpeed;
@@ -83,7 +83,7 @@ internal sealed class PeerChoker
         {
             if (!peer.AmChoking && peer.PeerInterested && !_selected.Contains(peer))
             {
-                int speed = isSeeding ? peer.UploadSpeed : peer.SmoothedDownloadSpeed;
+                long speed = isSeeding ? peer.UploadSpeed : peer.SmoothedDownloadSpeed;
                 if (speed >= gradualThreshold && _selected.Count < slots + 2)
                 {
                     _selected.Add(peer);
@@ -136,8 +136,8 @@ internal sealed class PeerChoker
     {
         int minSlots = Math.Max(1, _torrent.Settings.Connection.UploadSlotsMin);
         int maxSlots = Math.Max(minSlots, _torrent.Settings.Connection.UploadSlotsMax);
-        int uploadLimit = _torrent.UploadLimitBytesPerSecond;
-        if (uploadLimit <= 0) uploadLimit = (int)_torrent.Settings.Transfer.MaxUploadSpeed;
+        long uploadLimit = _torrent.UploadLimitBytesPerSecond;
+        if (uploadLimit <= 0) uploadLimit = _torrent.Settings.Transfer.MaxUploadSpeed;
         if (uploadLimit <= 0) return Math.Min(maxSlots, Math.Max(minSlots, connectedCount));
         int targetPerSlot = Math.Max(8000, _torrent.Settings.Connection.TargetUploadPerSlotBytesPerSec);
         int slots = Math.Clamp((int)Math.Ceiling(uploadLimit / (double)targetPerSlot), minSlots, maxSlots);

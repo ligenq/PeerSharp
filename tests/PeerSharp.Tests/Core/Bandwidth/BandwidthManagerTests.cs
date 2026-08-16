@@ -23,6 +23,15 @@ public class BandwidthManagerTests
         Assert.Equal(2000, manager.GetChannel(BandwidthManager.GlobalUpload).GetLimit());
     }
 
+    [Fact]
+    public void SetGlobalLimits_RejectsNegativeValues()
+    {
+        var manager = new BandwidthManager(10, _timeProvider);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => manager.SetGlobalLimits(-1, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => manager.SetGlobalLimits(0, -1));
+    }
+
     [Fact(Timeout = 30000)]
     public async Task RequestBandwidthAsync_FastPath_SucceedsImmediately()
     {

@@ -44,6 +44,19 @@ public enum ProxyType
 public sealed class ConnectionSettings
 {
     /// <summary>
+    /// Local address to bind network traffic to. <see langword="null"/> uses the operating system's
+    /// default routing and listens on all available interfaces.
+    /// </summary>
+    /// <remarks>
+    /// Set this before initializing the engine. When set, socket creation fails rather than falling
+    /// back to an unbound socket if the address is unavailable; this allows a host to enforce a VPN
+    /// interface as a kill switch. The address family also limits connections to that family.
+    /// Operating-system DNS resolution is outside this socket binding and follows the host's resolver
+    /// policy.
+    /// </remarks>
+    public System.Net.IPAddress? BindAddress { get; set; }
+
+    /// <summary>
     /// Maximum number of connection attempts per second.
     /// Default is 18 (aligned with libtransmission). Prevents the client from being flagged as a port scanner.
     /// </summary>
@@ -631,6 +644,9 @@ public sealed class SessionSettings
 /// </summary>
 public sealed class TransferSettings
 {
+    private long _maxDownloadSpeed;
+    private long _maxUploadSpeed;
+
     /// <summary>Bandwidth allocation update interval in milliseconds.</summary>
     public int BandwidthUpdateIntervalMs { get; set; } = 10;
 
@@ -658,7 +674,7 @@ public sealed class TransferSettings
     public int MaxRequestsPerPeer { get; set; } = 128;
 
     /// <summary>
-    /// Number of parallel metadata piece requests allowed (ut_metadata).
+    /// Maximum number of distinct metadata pieces requested in parallel (ut_metadata).
     ///
     /// <para>
     /// Default is 32, the most the pipeline is clamped to, which covers metadata up to 512 KiB in a
@@ -671,7 +687,7 @@ public sealed class TransferSettings
     public int MetadataRequestPipeline { get; set; } = 32;
 
     /// <summary>
-    /// How long to wait for a metadata piece before asking someone else. Default is 1.
+    /// How long an individual peer-owned metadata request may remain unanswered. Default is 1.
     ///
     /// <para>
     /// A metadata piece is at most 16 KiB and a magnet cannot start without it, so this trades a little
@@ -694,10 +710,17 @@ public sealed class TransferSettings
     public int MetadataRequestTimeoutSeconds { get; set; } = 1;
 
     /// <summary>
-    /// Maximum retry attempts per metadata piece request.
+    /// Maximum attempts for the same metadata piece against the same peer.
     /// Default is 5.
     /// </summary>
     public int MetadataMaxRequestAttempts { get; set; } = 5;
+
+    /// <summary>
+    /// Maximum peer-owned requests for the same metadata piece at once. Each eligible peer chooses a
+    /// least-requested missing piece independently; this value bounds duplicate traffic. Default is 3.
+    /// Values are clamped to 1-16 by the downloader.
+    /// </summary>
+    public int MetadataRequestRedundancy { get; set; } = 3;
 
     /// <summary>
     /// Maximum accepted ut_metadata size in bytes.
@@ -705,11 +728,31 @@ public sealed class TransferSettings
     /// </summary>
     public int MaxMetadataSizeBytes { get; set; } = 8 * 1024 * 1024;
 
-    /// <summary>Global download speed limit in bytes per second. 0 for unlimited.</summary>
-    public uint MaxDownloadSpeed { get; set; } = 0;
+    /// <summary>
+    /// Global download speed limit in bytes per second. 0 for unlimited. Negative values are rejected.
+    /// </summary>
+    public long MaxDownloadSpeed
+    {
+        get => _maxDownloadSpeed;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _maxDownloadSpeed = value;
+        }
+    }
 
-    /// <summary>Global upload speed limit in bytes per second. 0 for unlimited.</summary>
-    public uint MaxUploadSpeed { get; set; } = 0;
+    /// <summary>
+    /// Global upload speed limit in bytes per second. 0 for unlimited. Negative values are rejected.
+    /// </summary>
+    public long MaxUploadSpeed
+    {
+        get => _maxUploadSpeed;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _maxUploadSpeed = value;
+        }
+    }
 }
 
 /// <summary>

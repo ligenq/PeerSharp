@@ -1195,7 +1195,7 @@ public class WebTorrentSessionTests
         public long DataDownloaded { get; set; }
         public long DataLeft { get; set; } = 1024;
         public long DataUploaded { get; set; }
-        public int DownloadLimitBytesPerSecond { get; set; }
+        public long DownloadLimitBytesPerSecond { get; set; }
         public int DiskReadLimitBytesPerSecond { get; set; }
         public int DiskWriteLimitBytesPerSecond { get; set; }
         public DownloadStrategy DownloadStrategy { get; set; }
@@ -1232,7 +1232,7 @@ public class WebTorrentSessionTests
         public DateTimeOffset TimeAdded { get; } = DateTimeOffset.UtcNow;
         public long TotalSize => DataLeft;
         public ITrackers Trackers { get; }
-        public int UploadLimitBytesPerSecond { get; set; }
+        public long UploadLimitBytesPerSecond { get; set; }
 
         public Task AttachPeerTransportAsync(Stream stream, bool initiator, CancellationToken cancellationToken = default)
         {

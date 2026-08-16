@@ -24,6 +24,18 @@ public class BandwidthChannelTests
     }
 
     [Fact]
+    public void SetLimit_PreservesValuesAboveInt32AndRejectsNegativeValues()
+    {
+        var channel = new BandwidthChannel(_timeProvider);
+        long limit = (long)int.MaxValue + 1;
+
+        channel.SetLimit(limit);
+
+        Assert.Equal(limit, channel.GetLimit());
+        Assert.Throws<ArgumentOutOfRangeException>(() => channel.SetLimit(-1));
+    }
+
+    [Fact]
     public void UpdateQuota_WithLimit_IncrementsQuota()
     {
         var channel = new BandwidthChannel(_timeProvider);
