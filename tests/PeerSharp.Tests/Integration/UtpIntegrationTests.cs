@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
@@ -37,7 +37,8 @@ public sealed class UtpIntegrationTests
 
         byte[] received = new byte[payload.Length];
         int offset = 0;
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
         while (offset < received.Length)
         {
             int read = await serverStream.ReadAsync(received.AsMemory(offset), cts.Token);
@@ -80,7 +81,7 @@ public sealed class UtpIntegrationTests
         await clientA.SendAsync(synPacket, serverEndpoint);
         await clientB.SendAsync(synPacket, serverEndpoint);
 
-        await connectedTcs.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await connectedTcs.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
 
         var streams = connections.ToArray();
         Assert.Equal(2, streams.Length);
@@ -112,13 +113,13 @@ public sealed class UtpIntegrationTests
 
         byte[] resetWrong = CreatePacket(MessageType.ST_RESET, recvId, seq: 0, ack: ackNr);
         await clientListener.SendAsync(resetWrong, new IPEndPoint(IPAddress.Loopback, serverListener.Port), CancellationToken.None);
-        await Task.Delay(100);
+        await Task.Delay(100, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal("Connected", GetPrivateEnum(serverStream, "_state"));
 
         byte[] resetRight = CreatePacket(MessageType.ST_RESET, sendId, seq: 0, ack: ackNr);
         await clientListener.SendAsync(resetRight, new IPEndPoint(IPAddress.Loopback, serverListener.Port), CancellationToken.None);
-        await Task.Delay(100);
+        await Task.Delay(100, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal("Closed", GetPrivateEnum(serverStream, "_state"));
     }

@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utp;
@@ -42,7 +42,7 @@ public class PortMappingTests
         await manager.StartAsync();
 
         // Allow background task to run
-        await Task.Delay(100);
+        await Task.Delay(100, cancellationToken: TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(_upnpMapper.StartCalled);
@@ -69,13 +69,13 @@ public class PortMappingTests
         // Act
 
         await manager.StartAsync();
-        await Task.Delay(50); // Let mapping start
+        await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken); // Let mapping start
 
         // Act
         await manager.StopAsync();
 
         // Allow background task to run
-        await Task.Delay(100);
+        await Task.Delay(100, cancellationToken: TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(_upnpMapper.UnmapCalled);
@@ -87,7 +87,7 @@ public class PortMappingTests
         var settings = new Settings { Connection = { UpnpPortMapping = true } };
         var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
         await manager.StartAsync();
-        await Task.Delay(50);
+        await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
 
         await manager.StopAsync();
         await manager.DisposeAsync();
@@ -102,11 +102,11 @@ public class PortMappingTests
         var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
 
         await manager.StartAsync();
-        await Task.Delay(50);
+        await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
         await manager.StopAsync();
 
         await manager.StartAsync();
-        await Task.Delay(50);
+        await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
         await manager.StopAsync();
 
         Assert.Equal(2, _upnpMapper.UnmapCallCount);
@@ -119,8 +119,9 @@ public class PortMappingTests
         var settings = new Settings { Connection = { UpnpPortMapping = true } };
         var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
         await manager.StartAsync();
-        await Task.Delay(50);
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cancellation.CancelAfter(TimeSpan.FromMilliseconds(100));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => manager.StopAsync(cancellation.Token));
         _upnpMapper.BlockUnmapUntilCancelled = false;
@@ -136,7 +137,7 @@ public class PortMappingTests
         var settings = new Settings { Connection = { UpnpPortMapping = true } };
         var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
         await manager.StartAsync();
-        await Task.Delay(50);
+        await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         await manager.StopAsync();
@@ -164,7 +165,7 @@ public class PortMappingTests
         // Act & Assert
         // Should not throw
         await manager.StartAsync();
-        await Task.Delay(100);
+        await Task.Delay(100, cancellationToken: TestContext.Current.CancellationToken);
     }
 
     private static NetworkServices CreateMockServices(IPortMapperFactory mapperFactory)

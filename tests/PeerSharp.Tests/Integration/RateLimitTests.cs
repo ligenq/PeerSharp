@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using System.Diagnostics;
 using System.Net;
@@ -63,7 +63,7 @@ public class RateLimitTests : IDisposable
     [InlineData(Encryption.Require)]
     public async Task GlobalDownloadLimit_IsEnforced(Encryption encryption)
     {
-        var measured = await MeasureAsync(encryption, settings => settings.Transfer.MaxDownloadSpeed = LimitBytesPerSecond);
+        var measured = await MeasureAsync(encryption, settings => settings.Transfer.MaxDownloadSpeed = LimitBytesPerSecond, cancellationToken: TestContext.Current.CancellationToken);
 
         AssertWithinLimit(measured, encryption);
     }
@@ -76,7 +76,7 @@ public class RateLimitTests : IDisposable
         var measured = await MeasureAsync(
             encryption,
             configureSettings: null,
-            configureTorrent: torrent => torrent.DownloadLimitBytesPerSecond = LimitBytesPerSecond);
+            configureTorrent: torrent => torrent.DownloadLimitBytesPerSecond = LimitBytesPerSecond, cancellationToken: TestContext.Current.CancellationToken);
 
         AssertWithinLimit(measured, encryption);
     }
@@ -93,7 +93,7 @@ public class RateLimitTests : IDisposable
             encryption,
             configureSettings: null,
             configureTorrent: null,
-            configureSeedSettings: settings => settings.Transfer.MaxUploadSpeed = LimitBytesPerSecond);
+            configureSeedSettings: settings => settings.Transfer.MaxUploadSpeed = LimitBytesPerSecond, cancellationToken: TestContext.Current.CancellationToken);
 
         AssertWithinLimit(measured, encryption);
     }
@@ -107,7 +107,7 @@ public class RateLimitTests : IDisposable
             encryption,
             configureSettings: null,
             configureTorrent: null,
-            configureSeedTorrent: torrent => torrent.UploadLimitBytesPerSecond = LimitBytesPerSecond);
+            configureSeedTorrent: torrent => torrent.UploadLimitBytesPerSecond = LimitBytesPerSecond, cancellationToken: TestContext.Current.CancellationToken);
 
         AssertWithinLimit(measured, encryption);
     }
@@ -117,7 +117,7 @@ public class RateLimitTests : IDisposable
     {
         // The control. Without it a limiter that simply broke the transfer would pass every assertion
         // above, since "downloaded almost nothing" also satisfies "stayed under the cap".
-        var measured = await MeasureAsync(Encryption.Refuse, configureSettings: null);
+        var measured = await MeasureAsync(Encryption.Refuse, configureSettings: null, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(
             measured.BytesDownloaded > LimitBytesPerSecond * MeasureWindow.TotalSeconds,
@@ -148,13 +148,14 @@ public class RateLimitTests : IDisposable
         Action<Settings>? configureSettings,
         Action<ITorrent>? configureTorrent = null,
         Action<Settings>? configureSeedSettings = null,
-        Action<ITorrent>? configureSeedTorrent = null)
+        Action<ITorrent>? configureSeedTorrent = null,
+        CancellationToken cancellationToken = default)
     {
         const string fileName = "payload.bin";
         byte[] payload = new byte[PayloadBytes];
         Random.Shared.NextBytes(payload);
 
-        await File.WriteAllBytesAsync(Path.Combine(_seedPath, fileName), payload, TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(Path.Combine(_seedPath, fileName), payload, cancellationToken: TestContext.Current.CancellationToken);
 
         var torrentFile = new ApiTorrentFileBuilder()
             .WithName(fileName)
@@ -174,17 +175,17 @@ public class RateLimitTests : IDisposable
         var leechTorrent = await leechEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = true });
         configureTorrent?.Invoke(leechTorrent);
 
-        await EnsureConnectedAsync(leechEngine, leechTorrent, seedEngine, ConnectionTimeout);
+        await EnsureConnectedAsync(leechEngine, leechTorrent, seedEngine, ConnectionTimeout, cancellationToken);
 
         // Time from first byte, so connection setup does not inflate the allowance.
         var clock = Stopwatch.StartNew();
-        while (leechTorrent.FinishedBytes == 0 && clock.Elapsed < ConnectionTimeout)
+        while (leechTorrent.FinishedBytes == 0 && clock.Elapsed < ConnectionTimeout && !cancellationToken.IsCancellationRequested)
         {
-            await Task.Delay(50, TestContext.Current.CancellationToken);
+            await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
         }
 
         clock.Restart();
-        await Task.Delay(MeasureWindow, TestContext.Current.CancellationToken);
+        await Task.Delay(MeasureWindow, cancellationToken: TestContext.Current.CancellationToken);
         var elapsed = clock.Elapsed;
         long downloaded = (long)leechTorrent.FinishedBytes;
 
@@ -226,13 +227,13 @@ public class RateLimitTests : IDisposable
         return engine;
     }
 
-    private static async Task EnsureConnectedAsync(ClientEngine leechEngine, ITorrent leechTorrent, ClientEngine seedEngine, TimeSpan timeout)
+    private static async Task EnsureConnectedAsync(ClientEngine leechEngine, ITorrent leechTorrent, ClientEngine seedEngine, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         var portListener = seedEngine.PortListener ?? throw new InvalidOperationException("Seed engine has no port listener.");
         var seedEndpoint = new IPEndPoint(IPAddress.Loopback, portListener.Port);
 
         var clock = Stopwatch.StartNew();
-        while (leechTorrent.Peers.ConnectedCount == 0 && clock.Elapsed < timeout)
+        while (leechTorrent.Peers.ConnectedCount == 0 && clock.Elapsed < timeout && !cancellationToken.IsCancellationRequested)
         {
             leechEngine.OnPeersFound(leechTorrent.Hash, [seedEndpoint]);
             await Task.Delay(200);

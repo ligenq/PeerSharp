@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using System.Buffers.Binary;
 using System.Net;
@@ -39,7 +39,7 @@ public class MseConformanceTests : IDisposable
     [Fact(Timeout = 90000)]
     public async Task OutgoingHandshake_IsReadableByAnIndependentImplementation()
     {
-        var result = await RunAsync();
+        var result = await RunAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(result.Failure);
         Assert.True(result.HandshakeCompleted, "The MSE handshake never completed against an independent responder.");
@@ -50,7 +50,7 @@ public class MseConformanceTests : IDisposable
     {
         // MSE attaches the BitTorrent handshake as IA, so the peer can verify the info hash without an
         // extra round trip. Sending it separately still works with lenient peers but wastes one.
-        var result = await RunAsync();
+        var result = await RunAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(result.Failure);
         Assert.True(
@@ -65,7 +65,7 @@ public class MseConformanceTests : IDisposable
     [Fact(Timeout = 90000)]
     public async Task OutgoingHandshake_OffersRc4()
     {
-        var result = await RunAsync();
+        var result = await RunAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(result.Failure);
         Assert.True(
@@ -79,7 +79,7 @@ public class MseConformanceTests : IDisposable
     {
         // The handshake is only half of it: the payload stream that follows has to decrypt to well
         // formed BitTorrent messages, in the order a strict peer expects.
-        var result = await RunAsync();
+        var result = await RunAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(result.Failure);
         Assert.NotEmpty(result.Messages);
@@ -127,12 +127,12 @@ public class MseConformanceTests : IDisposable
         IReadOnlyList<(byte Id, int Length)> Messages,
         string? Failure);
 
-    private async Task<Result> RunAsync()
+    private async Task<Result> RunAsync(CancellationToken cancellationToken)
     {
         const string fileName = "mse.bin";
         byte[] payload = new byte[256 * 1024];
         Random.Shared.NextBytes(payload);
-        await File.WriteAllBytesAsync(Path.Combine(_path, fileName), payload, TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(Path.Combine(_path, fileName), payload, cancellationToken: TestContext.Current.CancellationToken);
 
         var torrentFile = new ApiTorrentFileBuilder()
             .WithName(fileName)
@@ -159,7 +159,8 @@ public class MseConformanceTests : IDisposable
             {
                 using var client = await listener.AcceptTcpClientAsync();
                 using var stream = client.GetStream();
-                using var idle = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                idle.CancelAfter(TimeSpan.FromSeconds(20));
 
                 var mse = new MseResponder(infoHash);
                 await mse.AcceptAsync(stream, idle.Token);

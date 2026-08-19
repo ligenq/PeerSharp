@@ -1,4 +1,4 @@
-using PeerSharp.Internals;
+﻿using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
 using System.Net;
@@ -33,9 +33,10 @@ public class PeerCommunicationIntegrationTests
         tcpListener.Start();
         int port = ((IPEndPoint)tcpListener.LocalEndpoint).Port;
 
+        var cancellationToken = TestContext.Current.CancellationToken;
         var acceptTask = Task.Run(async () =>
         {
-            var client = await tcpListener.AcceptTcpClientAsync();
+            var client = await tcpListener.AcceptTcpClientAsync(cancellationToken);
             serverPeer.Start(client.GetStream());
         });
 

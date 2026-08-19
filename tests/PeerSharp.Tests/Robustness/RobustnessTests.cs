@@ -269,7 +269,10 @@ public class RobustnessTests
 
         var stream = manager.CreateStream(remote);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        // Linked rather than standalone: the 100 ms deadline is what this test is about, and the
+        // link is what lets the test's own timeout stop the work instead of only failing the verdict.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMilliseconds(100));
 
         // Connect should fail due to timeout (no response from remote)
         var connectTask = stream.ConnectAsync(cts.Token);
@@ -294,7 +297,8 @@ public class RobustnessTests
         var remote = new IPEndPoint(IPAddress.Loopback, 12345);
         var stream = new UtpStream(manager, remote, 1, 2, TimeProvider.System);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMilliseconds(500));
 
         // First connect starts
         var task1 = stream.ConnectAsync(cts.Token);
@@ -466,6 +470,7 @@ public class RobustnessTests
         const int cacheCapacity = blockSize * 4; // Only 4 blocks fit
         const int totalBlocks = 20;
 
+        var ct = TestContext.Current.CancellationToken;
         var storage = new MockStorage(blockSize * totalBlocks);
         var cache = new BlockCache(cacheCapacity, readAheadBlocks: 0, readAheadEnabled: false, totalSize: blockSize * totalBlocks);
         cache.Initialize(storage);
@@ -478,7 +483,7 @@ public class RobustnessTests
         {
             var data = new byte[blockSize];
             Array.Fill(data, (byte)(i + 1));
-            await cache.WriteAsync(i * blockSize, data);
+            await cache.WriteAsync(i * blockSize, data, ct);
         }
 
         // Concurrent reads causing eviction
@@ -494,7 +499,7 @@ public class RobustnessTests
                         int blockIdx = Random.Shared.Next(totalBlocks);
                         long offset = blockIdx * blockSize;
 
-                        await cache.ReadAsync(offset, buffer);
+                        await cache.ReadAsync(offset, buffer, ct);
 
                         // Verify data integrity
                         byte expected = (byte)(blockIdx + 1);

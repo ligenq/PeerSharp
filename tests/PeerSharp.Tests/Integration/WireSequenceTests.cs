@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using System.Buffers.Binary;
 using System.Net;
@@ -48,7 +48,7 @@ public class WireSequenceTests : IDisposable
     [Fact(Timeout = 90000)]
     public async Task SeedingToAFreshPeer_SendsAConformantOpeningSequence()
     {
-        var captured = await CaptureOpeningSequenceAsync();
+        var captured = await CaptureOpeningSequenceAsync(TestContext.Current.CancellationToken);
 
         Assert.NotEmpty(captured);
 
@@ -114,7 +114,7 @@ public class WireSequenceTests : IDisposable
     {
         // Advertising "have all" is what makes a leecher interested in us. Sending nothing, or an empty
         // bitfield, is the difference between being a useful seed and being ignored.
-        var captured = await CaptureOpeningSequenceAsync();
+        var captured = await CaptureOpeningSequenceAsync(TestContext.Current.CancellationToken);
 
         Assert.True(
             captured.Any(static m => m.Id is 14 or 5),
@@ -136,12 +136,12 @@ public class WireSequenceTests : IDisposable
     /// Stands up a complete seeding engine, points it at a stub peer, and decodes everything it sends
     /// after the handshake.
     /// </summary>
-    private async Task<IReadOnlyList<(byte Id, int Length)>> CaptureOpeningSequenceAsync()
+    private async Task<IReadOnlyList<(byte Id, int Length)>> CaptureOpeningSequenceAsync(CancellationToken cancellationToken)
     {
         const string fileName = "wire.bin";
         byte[] payload = new byte[256 * 1024];
         Random.Shared.NextBytes(payload);
-        await File.WriteAllBytesAsync(Path.Combine(_path, fileName), payload, TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(Path.Combine(_path, fileName), payload, cancellationToken: TestContext.Current.CancellationToken);
 
         var torrentFile = new ApiTorrentFileBuilder()
             .WithName(fileName)
@@ -183,7 +183,8 @@ public class WireSequenceTests : IDisposable
 
             // Decode length-prefixed messages until the peer goes quiet.
             byte[] header = new byte[4];
-            using var idle = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            idle.CancelAfter(TimeSpan.FromSeconds(8));
             try
             {
                 while (!idle.IsCancellationRequested)
