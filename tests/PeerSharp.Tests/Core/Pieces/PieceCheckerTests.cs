@@ -24,6 +24,8 @@ public class PieceCheckerTests
 
         public void DeleteFiles() { }
 
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
+
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
         {
             Writes.Add((offset, data.ToArray()));

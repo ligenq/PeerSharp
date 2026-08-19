@@ -37,6 +37,7 @@ sealed class PeerSharp.Config.ConnectionSettings
     Int32 InitialConnectionTimeoutMs { get; set; }
     Int32 MaxConnectionQueueSize { get; set; }
     Int32 MaxConnectionTimeoutMs { get; set; }
+    Int32 MaxConnectionsPerIp { get; set; }
     Int32 MaxHolepunchPerMinute { get; set; }
     Int32 MaxPeersPerTorrent { get; set; }
     Int32 MaxPendingConnections { get; set; }
@@ -643,6 +644,15 @@ sealed class PeerSharp.Core.TransferStatsAlert
     Int64 Uploaded { get; init; }
     PeerSharp.Core.TransferStatsAlert <Clone>$()
     String ToString()
+static class PeerSharp.Diagnostics.PeerSharpMetrics
+    String ActiveTorrentsInstrument
+    String ConnectedPeersInstrument
+    String DownloadSpeedInstrument
+    String DownloadedInstrument
+    String MeterName
+    String TorrentsInstrument
+    String UploadSpeedInstrument
+    String UploadedInstrument
 class PeerSharp.Exceptions.TorrentAlreadyExistsException
     .ctor(PeerSharp.Interfaces.ITorrent existingTorrent)
     PeerSharp.Interfaces.ITorrent ExistingTorrent { get; }

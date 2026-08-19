@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 
 namespace PeerSharp.Internals;
 
@@ -17,6 +17,14 @@ internal sealed class SessionManager : IAsyncDisposable
     // Store raw .torrent bytes and magnet links for persistence
     // These are needed because the active Torrent object might only have parsed metadata
     private readonly Dictionary<InfoHash, byte[]> _torrentRawData = [];
+
+    /// <summary>
+    /// One save at a time per torrent. The persistence layer already serialises the file writes, but
+    /// that is not enough on its own: two saves that captured their snapshots in one order can reach
+    /// the writes in the other, leaving the older bitfield on disk. Holding this across capture,
+    /// flush and write makes the sequence indivisible, so the copy that lands is always the newer.
+    /// </summary>
+    private readonly Dictionary<InfoHash, SemaphoreSlim> _saveGates = [];
 
     private CancellationTokenSource? _autoSaveCts;
     private Task? _autoSaveTask;
@@ -59,7 +67,7 @@ internal sealed class SessionManager : IAsyncDisposable
                     // only drains the already-cancelled auto-save loop. Bound it so a
                     // stalled in-flight save (e.g. on hung storage) cannot block shutdown
                     // indefinitely.
-                    await _autoSaveTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                    await _autoSaveTask.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (TimeoutException ex)
                 {
@@ -107,7 +115,7 @@ internal sealed class SessionManager : IAsyncDisposable
         {
             try
             {
-                await previousTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                await previousTask.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
                 previousCts?.Dispose();
             }
             catch (TimeoutException ex)
@@ -182,6 +190,34 @@ internal sealed class SessionManager : IAsyncDisposable
 
     public async Task SaveTorrentEntryAsync(Torrent torrent, byte[]? torrentFileData = null, string? magnetLink = null, CancellationToken cancellationToken = default)
     {
+        var gate = GetSaveGate(torrent.Hash);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await SaveTorrentEntryCoreAsync(torrent, torrentFileData, magnetLink, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private SemaphoreSlim GetSaveGate(InfoHash hash)
+    {
+        lock (_lock)
+        {
+            if (!_saveGates.TryGetValue(hash, out var gate))
+            {
+                gate = new SemaphoreSlim(1, 1);
+                _saveGates[hash] = gate;
+            }
+
+            return gate;
+        }
+    }
+
+    private async Task SaveTorrentEntryCoreAsync(Torrent torrent, byte[]? torrentFileData, string? magnetLink, CancellationToken cancellationToken)
+    {
         // Get stored raw data or magnet link
         lock (_lock)
         {
@@ -189,11 +225,34 @@ internal sealed class SessionManager : IAsyncDisposable
             magnetLink ??= _magnetLinks.GetValueOrDefault(torrent.Hash);
         }
 
+        // The bitfield about to be written is a claim that those pieces are on the disk, so the
+        // pieces have to reach the disk first. Resume data is itself written durably, which is
+        // exactly what makes the ordering matter: without this the durable half would be the claim
+        // and the volatile half would be the data it claims.
+        //
+        // Snapshot first, then flush - not the other way round. A piece is marked complete only
+        // after its bytes have been handed to storage, so everything this snapshot claims has
+        // already dirtied a file and the flush that follows necessarily covers it. Flushing first
+        // leaves a window instead: a piece finishing between the flush and the snapshot is claimed
+        // by a resume file that was never durable.
+        TorrentResumeData? resumeData = torrent.HasMetadata ? torrent.GetResumeData() : null;
+        if (resumeData != null
+            && torrent.FilesInternal is { } files
+            && !await files.FlushAsync(cancellationToken).ConfigureAwait(false))
+        {
+            // Leave the previous resume file alone. It is older, so it claims no more than this one
+            // would have, and the next save will try again.
+            _logger.LogWarning(
+                "Skipping resume data for {Name}: piece data could not be flushed to disk",
+                torrent.Name);
+            resumeData = null;
+        }
+
         var entry = new SavedTorrentEntry(
             torrent.Hash,
             torrentFileData,
             magnetLink,
-            torrent.HasMetadata ? torrent.GetResumeData() : null,
+            resumeData,
             new SavedTorrentOptions(
                 torrent.FilesInternal?.DownloadPath ?? torrent.Settings.Files.DefaultDownloadPath,
                 torrent.Started,
@@ -216,6 +275,11 @@ internal sealed class SessionManager : IAsyncDisposable
         {
             _torrentRawData.Remove(hash);
             _magnetLinks.Remove(hash);
+
+            // Dropped rather than disposed: a save for this torrent may still be holding it, and
+            // disposing a semaphore out from under its owner throws on release. Letting it go
+            // unreferenced costs nothing and cannot race.
+            _saveGates.Remove(hash);
         }
     }
 

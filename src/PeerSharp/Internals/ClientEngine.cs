@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Dht;
@@ -78,6 +78,50 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _geoIp = new GeoIpService();
         _peerFactory = new PeerCommunicationFactory(loggerFactory);
         _trackerFactory = new TrackerFactory(loggerFactory);
+
+        // Reads through GetStats, which refuses a disposed engine - hence the guard rather than the
+        // call alone. Nothing is measured unless something subscribes to the meter.
+        _metrics = new EngineMetrics(
+            () => _disposal.IsDisposed ? null : GetStats(),
+            () => _disposal.IsDisposed ? null : GetLifetimeTotals(),
+            _engineId,
+            scope: this);
+    }
+
+    /// <summary>
+    /// Distinguishes this engine's measurements from another's in the same process. Not derived from
+    /// settings: two engines can legitimately share a configuration.
+    /// </summary>
+    private readonly string _engineId = Guid.NewGuid().ToString("N")[..8];
+
+    private readonly EngineMetrics _metrics;
+
+    // GetStats sums the torrents currently registered, which is the right answer for "what is this
+    // engine doing now" and the wrong one for a counter. These are the counter's figures, and the
+    // removal and the read are kept indivisible - see LifetimeByteTotals for why that matters more
+    // than the arithmetic does.
+    private LifetimeByteTotals? _lifetimeTotals;
+
+    private LifetimeByteTotals LifetimeTotals =>
+        _lifetimeTotals ??= new LifetimeByteTotals(
+            () => _registry.GetAll().Select(torrent => (torrent.TotalDownloaded, torrent.TotalUploaded)));
+
+    /// <summary>
+    /// Bytes moved over the engine's whole life, including by torrents that have been removed. Only
+    /// ever increases, which is what a counter has to promise.
+    /// </summary>
+    internal (long Downloaded, long Uploaded) GetLifetimeTotals() => LifetimeTotals.Read();
+
+    /// <summary>
+    /// Takes a torrent out of the registry and folds its totals into the engine's lifetime figures,
+    /// as one step. Returns whether this call is the one that removed it.
+    /// </summary>
+    private bool RemoveAndRetire(Torrent torrent, bool transient = false)
+    {
+        return LifetimeTotals.RemoveAndRetire(
+            () => transient ? _registry.RemoveTransient(torrent) : _registry.Remove(torrent.Hash, out _),
+            torrent.TotalDownloaded,
+            torrent.TotalUploaded);
     }
 
     public IAlerts Alerts => _alerts;
@@ -256,7 +300,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 try
                 {
                     _logger.LogInformation("Saving session data before shutdown...");
-                    await _sessionManager.SaveAllResumeDataAsync().ConfigureAwait(false);
+                    await _sessionManager.SaveAllResumeDataAsync(CancellationToken.None).ConfigureAwait(false);
                     _logger.LogInformation("Session data saved successfully");
                 }
                 catch (Exception ex)
@@ -282,7 +326,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 {
                     // 15s: torrent disposal flushes the block cache and closes file handles,
                     // which can take several seconds on slow storage or large write queues.
-                    await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                    await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(15), CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -302,6 +346,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             _logger.LogDebug("Shutdown phase network completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
 
             phaseStopwatch.Restart();
+            _metrics.Dispose();
             _fileHandleCache.Dispose();
 
             // Dispose bandwidth manager
@@ -760,7 +805,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             _sessionManager?.RegisterTorrentData(torrent.Hash, bytes, null);
             if (Settings.Session.Enabled && _sessionManager != null)
             {
-                await _sessionManager.SaveTorrentEntryAsync(torrent, bytes, null).ConfigureAwait(false);
+                await _sessionManager.SaveTorrentEntryAsync(torrent, bytes, null, CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
@@ -1529,15 +1574,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         {
             // By identity for a transient one: removing by hash could take a real torrent the
             // caller holds for the same hash.
-            if (transient)
-            {
-                _registry.RemoveTransient(torrent);
-            }
-            else
-            {
-                _registry.Remove(torrent.Hash, out _);
-            }
-
+            RemoveAndRetire(torrent, transient);
             _bandwidth.RemoveTorrentChannels(torrent);
             await torrent.DisposeAsync().ConfigureAwait(false);
         }
@@ -1790,7 +1827,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 continue;
             }
 
-            _registry.Remove(torrent.Hash, out _);
+            RemoveAndRetire(torrent);
             _bandwidth.RemoveTorrentChannels(torrent);
             try
             {
@@ -1850,7 +1887,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // removals both running the teardown. Everything past it is uncancellable, so a tripped
         // token can never leave a torrent that is stopped but still registered, or removed but
         // still holding bandwidth channels and its session entry.
-        if (!_registry.Remove(t.Hash, out _))
+        if (!RemoveAndRetire(t))
         {
             throw new TorrentNotFoundException(t.Hash);
         }

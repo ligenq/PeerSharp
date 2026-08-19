@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Dht;
@@ -1009,20 +1009,147 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return StopInternalAsync(false, cancellationToken);
     }
 
+    /// <summary>
+    /// The highest <see cref="TorrentStateData.Version"/> this build understands. Resume data
+    /// written by a newer version is discarded rather than half-read: the fields we recognise may
+    /// no longer mean what they did, and a bitfield interpreted under the wrong rules is worse than
+    /// no bitfield at all.
+    /// </summary>
+    private const uint SupportedResumeVersion = 1;
+
     internal void ApplyResumeData(TorrentResumeData resumeData)
     {
+        // Identity before anything else. The geometry checks below can only catch resume data from a
+        // torrent shaped differently to this one - two torrents of the same total size and piece size
+        // pass every one of them, and the bitfield would then be believed, advertised and served from
+        // whatever bytes happen to be on disk. An empty hash means "not recorded", which is what
+        // resume data hand-built by a caller looks like.
+        if (ResumeHashConflicts(resumeData.Hash))
+        {
+            _logger.LogWarning(
+                "Discarding resume data for {TorrentName}: it was saved for torrent {SavedHash}. The torrent starts from an empty bitfield instead.",
+                Name,
+                resumeData.Hash);
+            return;
+        }
+
+        TorrentStateData? state;
         try
         {
-            var state = JsonSerializer.Deserialize(resumeData.Data, PeerSharpJsonContext.Default.TorrentStateData);
-            if (state != null)
-            {
-                LocalState = state;
-            }
+            state = JsonSerializer.Deserialize(resumeData.Data, PeerSharpJsonContext.Default.TorrentStateData);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to apply resume data for {TorrentName}", Name);
+            _logger.LogError(ex, "Failed to parse resume data for {TorrentName}", Name);
+            return;
         }
+
+        if (state == null)
+        {
+            return;
+        }
+
+        if (!IsResumeDataUsable(state, out string? rejection))
+        {
+            // Starting from nothing costs a re-download. Adopting a bitfield that does not describe
+            // this torrent costs correctness: the engine would claim pieces it never verified and
+            // then serve them.
+            _logger.LogWarning(
+                "Discarding resume data for {TorrentName}: {Reason}. The torrent starts from an empty bitfield instead.",
+                Name,
+                rejection);
+            return;
+        }
+
+        LocalState = state;
+    }
+
+    /// <summary>
+    /// Whether a saved hash positively names a <em>different</em> torrent.
+    ///
+    /// <para>
+    /// Only a genuine conflict counts. An empty saved hash means the field was not recorded, and a
+    /// torrent with no hash of its own has nothing to compare against - answering "conflict" in
+    /// either case would reject resume data over missing information rather than over disagreement.
+    /// Either hash of a hybrid torrent identifies it, which is the rule
+    /// <see cref="HasSameIdentity"/> already applies: resume data saved before the other form was
+    /// known still describes the same content.
+    /// </para>
+    /// </summary>
+    private bool ResumeHashConflicts(InfoHash savedHash)
+    {
+        if (savedHash.IsEmpty || (Hash.IsEmpty && HashV2.IsEmpty))
+        {
+            return false;
+        }
+
+        bool matches = (!Hash.IsEmpty && Hash == savedHash)
+            || (!HashV2.IsEmpty && HashV2 == savedHash);
+
+        return !matches;
+    }
+
+    /// <summary>
+    /// Checks resume data against the torrent it claims to describe. The fields being compared here
+    /// were written on every save and read by nothing, which is the same as not having them.
+    /// </summary>
+    private bool IsResumeDataUsable(TorrentStateData state, out string? reason)
+    {
+        if (state.Version > SupportedResumeVersion)
+        {
+            reason = $"it was written by a newer version (format {state.Version}, this build understands {SupportedResumeVersion})";
+            return false;
+        }
+
+        // A magnet has no metadata to check against yet. Its resume data is validated when the
+        // metadata arrives and the torrent is rebuilt around it.
+        if (!HasMetadata)
+        {
+            reason = null;
+            return true;
+        }
+
+        var info = InfoFile.Info;
+
+        // Zero means "not recorded" rather than "recorded as zero": resume data from before a field
+        // was written should not be thrown away for lacking it.
+        if (state.Info.PieceSize != 0 && state.Info.PieceSize != info.PieceSize)
+        {
+            reason = $"it was saved for a {state.Info.PieceSize}-byte piece size, this torrent uses {info.PieceSize}";
+            return false;
+        }
+
+        if (state.Info.FullSize != 0 && state.Info.FullSize != info.FullSize)
+        {
+            reason = $"it was saved for {state.Info.FullSize} bytes of content, this torrent has {info.FullSize}";
+            return false;
+        }
+
+        if (state.Pieces.Length > 0)
+        {
+            int expectedPieces = info.PieceSize > 0
+                ? (int)((info.FullSize + info.PieceSize - 1) / info.PieceSize)
+                : 0;
+            int expectedBytes = (expectedPieces + 7) / 8;
+            if (state.Pieces.Length != expectedBytes)
+            {
+                reason = $"its bitfield is {state.Pieces.Length} bytes, but {expectedPieces} pieces need {expectedBytes}";
+                return false;
+            }
+        }
+
+        // A name change on its own cannot make the bitfield wrong, so it is worth saying out loud
+        // without refusing the data over it.
+        if (!string.IsNullOrEmpty(state.Info.Name) && state.Info.Name != info.Name)
+        {
+            _logger.LogInformation(
+                "Resume data for {TorrentName} was saved under the name '{SavedName}'",
+                Name,
+                state.Info.Name);
+        }
+
+        reason = null;
+        return true;
     }
 
     internal void FireErrorEvent(Exception exception)
@@ -1164,6 +1291,27 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private void ApplyLoadedState()
     {
+        // Second gate, and the one that catches magnets. ApplyResumeData runs before a magnet knows
+        // its geometry, so it has nothing to check the bitfield against and lets it through; this
+        // runs from Initialize, which is also what the metadata rebuild calls once the geometry is
+        // known. Without it, resume data that would have been rejected outright for a .torrent is
+        // silently trusted for the same content fetched by magnet.
+        if (HasMetadata && !IsResumeDataUsable(LocalState, out string? rejection))
+        {
+            _logger.LogWarning(
+                "Discarding resume state for {TorrentName} now that its metadata is known: {Reason}.",
+                Name,
+                rejection);
+
+            // Keep only what makes no claim about piece contents. The download path is where the
+            // files already are, and when the torrent was added is not a statement about them.
+            LocalState = new TorrentStateData
+            {
+                DownloadPath = LocalState.DownloadPath,
+                AddedTime = LocalState.AddedTime
+            };
+        }
+
         if (LocalState.Pieces?.Length > 0)
         {
             Pieces.FromBitfield(LocalState.Pieces);
