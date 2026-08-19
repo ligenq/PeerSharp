@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Time.Testing;
+﻿using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using System.Net;
@@ -24,9 +24,10 @@ public class PeerManagerIntegrationTests
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
 
+        var cancellationToken = TestContext.Current.CancellationToken;
         using var client = new TcpClient();
-        await client.ConnectAsync(IPAddress.Loopback, port);
-        using var serverClient = await listener.AcceptTcpClientAsync();
+        await client.ConnectAsync(IPAddress.Loopback, port, cancellationToken);
+        using var serverClient = await listener.AcceptTcpClientAsync(cancellationToken);
 
         byte[] handshake = BuildHandshake(metadata.Info.Hash.Span, torrent.Settings.PeerId);
         await manager.AddIncomingPeerAsync(serverClient, handshake);
@@ -69,7 +70,7 @@ public class PeerManagerIntegrationTests
         await leftManager.AddConnectedPeerAsync(leftClient.GetStream(), initiator: true, remote: (IPEndPoint?)leftClient.Client.RemoteEndPoint, sourceKind: PeerSourceKind.WebTorrent);
         await rightManager.AddConnectedPeerAsync(rightClient.GetStream(), initiator: false, remote: (IPEndPoint?)rightClient.Client.RemoteEndPoint, sourceKind: PeerSourceKind.WebTorrent);
 
-        await AssertEventuallyAsync(() => leftManager.ConnectedCount == 1 && rightManager.ConnectedCount == 1, TimeSpan.FromSeconds(5));
+        await AssertEventuallyAsync(() => leftManager.ConnectedCount == 1 && rightManager.ConnectedCount == 1, TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
         listener.Stop();
         await leftManager.StopAsync();
@@ -121,10 +122,10 @@ public class PeerManagerIntegrationTests
         }
     }
 
-    private static async Task AssertEventuallyAsync(Func<bool> predicate, TimeSpan timeout)
+    private static async Task AssertEventuallyAsync(Func<bool> predicate, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow.Add(timeout);
-        while (DateTimeOffset.UtcNow < deadline)
+        while (DateTimeOffset.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
         {
             if (predicate())
             {

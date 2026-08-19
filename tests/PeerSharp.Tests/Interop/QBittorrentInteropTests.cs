@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -122,7 +122,8 @@ public sealed class QBittorrentInteropTests : IAsyncLifetime
                 var f = new FileInfo(destination);
                 return f.Exists ? $"{f.Length / 1024d / 1024d:F1} MiB on disk" : "no file yet";
             },
-            "qBittorrent");
+            "qBittorrent",
+            TestContext.Current.CancellationToken);
 
         ReportPeerSharpView(seedTorrent);
         Assert.True(elapsed.HasValue, $"qBittorrent never completed the file at {destination}.");
@@ -161,7 +162,8 @@ public sealed class QBittorrentInteropTests : IAsyncLifetime
             torrentFile.InfoHash,
             () => Task.FromResult(leechTorrent.Progress >= 1.0f),
             () => $"{leechTorrent.Progress:P1} peers={leechTorrent.Peers.ConnectedCount}",
-            "PeerSharp");
+            "PeerSharp",
+            TestContext.Current.CancellationToken);
 
         ReportPeerSharpView(leechTorrent);
         Assert.True(elapsed.HasValue, $"PeerSharp stalled at {leechTorrent.Progress:P1}.");
@@ -177,12 +179,17 @@ public sealed class QBittorrentInteropTests : IAsyncLifetime
     /// Keeps offering qBittorrent's endpoint until <paramref name="isComplete"/> says the transfer
     /// finished, and times the part that actually moved data rather than the wait before it.
     /// </summary>
+    /// <param name="cancellationToken">
+    /// The test's own token. The loop below has its own deadline, but observing this as well is what
+    /// lets an outer timeout stop the transfer instead of leaving it running past the verdict.
+    /// </param>
     private async Task<TimeSpan?> DriveAsync(
         ClientEngine engine,
         InfoHash infoHash,
         Func<Task<bool>> isComplete,
         Func<string> describe,
-        string watching)
+        string watching,
+        CancellationToken cancellationToken)
     {
         var endpoint = new IPEndPoint(IPAddress.Loopback, QBittorrentPeerPort);
         var overall = Stopwatch.StartNew();
@@ -190,7 +197,7 @@ public sealed class QBittorrentInteropTests : IAsyncLifetime
         var lastLog = TimeSpan.Zero;
         TimeSpan? connectedAt = null;
 
-        while (overall.Elapsed < timeout)
+        while (overall.Elapsed < timeout && !cancellationToken.IsCancellationRequested)
         {
             engine.OnPeersFound(infoHash, [endpoint]);
 

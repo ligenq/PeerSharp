@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
@@ -56,16 +56,16 @@ public class LifecycleTests : IDisposable
         await using var leecherEngine = await CreateEngineAsync(_pathB, config);
         var leecherTorrent = await leecherEngine.AddTorrentAsync(torrentFile);
 
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10));
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
-        await WaitForProgressOrCompletionAsync(leecherTorrent, TimeSpan.FromSeconds(15));
+        await WaitForProgressOrCompletionAsync(leecherTorrent, TimeSpan.FromSeconds(15), cancellationToken: TestContext.Current.CancellationToken);
 
         await leecherTorrent.StopAsync();
         Assert.Equal(TorrentState.Stopped, leecherTorrent.State);
 
         await leecherTorrent.StartAsync();
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10));
-        await WaitForConditionAsync(leecherTorrent, t => t.Finished, TimeSpan.FromSeconds(30), "restart download completion");
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
+        await WaitForConditionAsync(leecherTorrent, t => t.Finished, TimeSpan.FromSeconds(30), "restart download completion", cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(0, leecherTorrent.DataLeft);
 
@@ -98,13 +98,13 @@ public class LifecycleTests : IDisposable
         await WriteFileAsync(_pathA, fileName, data);
 
         await torrent.ForceRecheckAsync();
-        await WaitForConditionAsync(torrent, t => t.Finished, TimeSpan.FromSeconds(10), "recheck completion");
+        await WaitForConditionAsync(torrent, t => t.Finished, TimeSpan.FromSeconds(10), "recheck completion", cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(File.Exists(filePath));
 
         await engine.RemoveTorrentAsync(torrent, RemoveOptions.DeleteFiles);
 
-        await WaitForFileDeletionAsync(filePath, TimeSpan.FromSeconds(5));
+        await WaitForFileDeletionAsync(filePath, TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         Assert.False(File.Exists(filePath));
     }
 
@@ -146,9 +146,9 @@ public class LifecycleTests : IDisposable
         await leecherTorrent.SetFileSelectionAsync(1, new FileSelection { Selected = false, Priority = Priority.DoNotDownload });
 
         await leecherTorrent.StartAsync();
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10));
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
-        await WaitForConditionAsync(leecherTorrent, t => t.SelectionFinished, TimeSpan.FromSeconds(30), "selection download completion");
+        await WaitForConditionAsync(leecherTorrent, t => t.SelectionFinished, TimeSpan.FromSeconds(30), "selection download completion", cancellationToken: TestContext.Current.CancellationToken);
 
         string selectedPath = Path.Combine(_pathB, fileNameA);
         string unselectedPath = Path.Combine(_pathB, fileNameB);
@@ -216,13 +216,16 @@ public class LifecycleTests : IDisposable
         await File.WriteAllBytesAsync(fullPath, data);
     }
 
-    private static async Task EnsureConnectedAsync(ClientEngine leecherEngine, ITorrent leecherTorrent, ClientEngine seedEngine, TimeSpan timeout)
+    private static async Task EnsureConnectedAsync(ClientEngine leecherEngine, ITorrent leecherTorrent, ClientEngine seedEngine, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         int port = seedEngine.Settings.Connection.TcpPort;
         Assert.True(port > 0, "Seed engine port not bound");
 
         var seedEndpoint = new IPEndPoint(IPAddress.Loopback, port);
-        var cts = new CancellationTokenSource(timeout);
+        // Linked to the caller's token, so a test timeout ends the poll rather than leaving it
+        // running out its own deadline after the verdict is already in.
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
 
         while (leecherTorrent.Peers.ConnectedCount == 0 && !cts.IsCancellationRequested)
         {
@@ -234,9 +237,12 @@ public class LifecycleTests : IDisposable
             $"Timed out waiting for peer connection. {IntegrationTestDiagnostics.DescribeTorrent(leecherTorrent)}");
     }
 
-    private static async Task WaitForProgressOrCompletionAsync(ITorrent torrent, TimeSpan timeout)
+    private static async Task WaitForProgressOrCompletionAsync(ITorrent torrent, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        var cts = new CancellationTokenSource(timeout);
+        // Linked to the caller's token, so a test timeout ends the poll rather than leaving it
+        // running out its own deadline after the verdict is already in.
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
         while (!cts.IsCancellationRequested)
         {
             if (torrent.PiecesReceived > 0 && torrent.PiecesReceived < torrent.PieceCount)
@@ -260,9 +266,12 @@ public class LifecycleTests : IDisposable
         }
     }
 
-    private static async Task WaitForConditionAsync(ITorrent torrent, Func<ITorrent, bool> condition, TimeSpan timeout, string description)
+    private static async Task WaitForConditionAsync(ITorrent torrent, Func<ITorrent, bool> condition, TimeSpan timeout, string description, CancellationToken cancellationToken = default)
     {
-        var cts = new CancellationTokenSource(timeout);
+        // Linked to the caller's token, so a test timeout ends the poll rather than leaving it
+        // running out its own deadline after the verdict is already in.
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
         while (!condition(torrent) && !cts.IsCancellationRequested)
         {
             if (torrent.LastException != null)
@@ -278,9 +287,12 @@ public class LifecycleTests : IDisposable
             $"Timed out waiting for {description}. {IntegrationTestDiagnostics.DescribeTorrent(torrent)}");
     }
 
-    private static async Task WaitForFileDeletionAsync(string path, TimeSpan timeout)
+    private static async Task WaitForFileDeletionAsync(string path, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        var cts = new CancellationTokenSource(timeout);
+        // Linked to the caller's token, so a test timeout ends the poll rather than leaving it
+        // running out its own deadline after the verdict is already in.
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
         while (File.Exists(path) && !cts.IsCancellationRequested)
         {
             try { await Task.Delay(100, cts.Token); } catch { break; }

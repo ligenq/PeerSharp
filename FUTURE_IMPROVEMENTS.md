@@ -8,21 +8,27 @@ requirement named in its entry: each remaining change is architectural or has an
 
 ---
 
-## 1. xUnit1069: 471 tests with a timeout that never observe its token
+## 1. xUnit1069: 398 Core tests with a timeout that never observe its token
 
-**Impact: low per test, and it is real.** `xunit.v3` 4.0 added xUnit1069: a test with `Timeout` should
-reference `TestContext.Current.CancellationToken`, so the timeout can stop the work rather than only
-failing the verdict while it keeps running. 471 existing tests trip it. The rule is held at
-`suggestion` in `.editorconfig` so a `-warnaserror` build stays green; new tests should follow it.
+**Impact: low, and deliberately deferred.** `xunit.v3` 4.0 added xUnit1069: a test with `Timeout`
+should reference `TestContext.Current.CancellationToken`, so the timeout can stop the work rather than
+only fail the verdict while it keeps running. 471 tests tripped it; the 73 in the lanes where that
+costs something - integration, interop, concurrency and robustness - are fixed. Those bind sockets,
+spawn client processes and repeat scenarios across threads, so a test that overruns its deadline holds
+a port or a core while the next one starts.
 
-**Why it was not bulk-fixed.** The correct edit is per test: the token has to be threaded into
-whichever awaited calls accept one, which needs the compiler's view of each signature. There is no
-safe textual transformation - only 43 of the 471 even contain a `Task.Delay` - and rewriting 471 test
-bodies on a guess is how a suite keeps compiling while quietly asserting less.
+The remaining 398 are in `Core`: in-memory, deterministic, and finishing in milliseconds. The timeout
+rarely fires there, and when it does the abandoned work is a few allocations. The rule is held at
+`suggestion` in `.editorconfig`; new tests should follow it.
 
-**Resume when:** someone wants to do it properly, with a Roslyn-based pass that resolves each call's
-parameters, in reviewable batches. The slow suites (Integration, Concurrency, Interop) are where the
-timeouts actually matter, so those are worth doing first.
+**How the fixed ones were done**, for whoever picks up the rest: the token is threaded into whichever
+awaited call accepts one, and where a test owns a `CancellationTokenSource` for its own deadline that
+source is linked to the test's token rather than replaced - the deliberate deadline is usually the
+point of the test. Shared polling helpers took a `CancellationToken` parameter and observe it in their
+loop condition rather than in `Task.Delay`, so the descriptive `Assert.Fail` message survives.
+
+**Resume when:** someone wants the Core lane tidy. There is no safe bulk edit - the token goes where a
+signature accepts it, which needs the compiler's view of each call.
 
 ---
 

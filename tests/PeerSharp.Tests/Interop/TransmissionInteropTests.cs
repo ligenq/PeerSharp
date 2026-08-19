@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
@@ -170,7 +170,8 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         await AddTorrentToTransmissionAsync(torrentPath, downloadDir);
 
         var transmissionEndpoint = new IPEndPoint(IPAddress.Loopback, TransmissionPeerPort);
-        var result = await DriveTransferAsync(engine, seedTorrent, torrentFile.InfoHash, transmissionEndpoint);
+        var result = await DriveTransferAsync(
+            engine, seedTorrent, torrentFile.InfoHash, transmissionEndpoint, TestContext.Current.CancellationToken);
 
         ReportPeerSharpView(seedTorrent);
 
@@ -318,7 +319,8 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         Stopwatch? transferring = null;
         var lastLog = TimeSpan.Zero;
 
-        while (overall.Elapsed < timeout && leechTorrent.Progress < 1.0f)
+        var cancellationToken = TestContext.Current.CancellationToken;
+        while (overall.Elapsed < timeout && leechTorrent.Progress < 1.0f && !cancellationToken.IsCancellationRequested)
         {
             engine.OnPeersFound(torrentFile.InfoHash, [transmissionEndpoint]);
 
@@ -597,7 +599,8 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
         Stopwatch? transferring = null;
         var timeout = TimeSpan.FromMinutes(IntFromEnvironment("PEERSHARP_TRANSMISSION_TIMEOUT_MINUTES", 10));
 
-        while (sw.Elapsed < timeout && leechTorrent.Progress < 1.0f)
+        var controlToken = TestContext.Current.CancellationToken;
+        while (sw.Elapsed < timeout && leechTorrent.Progress < 1.0f && !controlToken.IsCancellationRequested)
         {
             leechEngine.OnPeersFound(torrentFile.InfoHash, [seedEndpoint]);
             if (transferring == null && leechTorrent.Progress > 0)
@@ -623,11 +626,16 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
             $"({mib / elapsed.TotalSeconds:F1} MiB/s)");
     }
 
+    /// <param name="cancellationToken">
+    /// The test's own token. The loop has its own deadline, but observing this as well is what lets
+    /// an outer timeout stop the transfer rather than leave it running past the verdict.
+    /// </param>
     private async Task<TransferResult> DriveTransferAsync(
         ClientEngine engine,
         ITorrent seedTorrent,
         InfoHash infoHash,
-        IPEndPoint transmissionEndpoint)
+        IPEndPoint transmissionEndpoint,
+        CancellationToken cancellationToken)
     {
         var overall = Stopwatch.StartNew();
         var timeout = TimeSpan.FromMinutes(IntFromEnvironment("PEERSHARP_TRANSMISSION_TIMEOUT_MINUTES", 10));
@@ -651,7 +659,7 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
             _output.WriteLine($"Holding off the peer introduction for {connectDelay.TotalSeconds:F0}s");
         }
 
-        while (overall.Elapsed < timeout)
+        while (overall.Elapsed < timeout && !cancellationToken.IsCancellationRequested)
         {
             // Transmission has no "add peer" API, so we dial it. Repeated because the announce is
             // the only introduction there is: DHT, PEX and LSD are all off.

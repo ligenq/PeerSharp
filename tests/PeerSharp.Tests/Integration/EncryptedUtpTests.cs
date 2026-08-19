@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using System.Diagnostics;
 using System.Net;
@@ -57,7 +57,7 @@ public class EncryptedUtpTests : IDisposable
         const string fileName = "utp-mse.bin";
         byte[] payload = new byte[128 * 1024];
         Random.Shared.NextBytes(payload);
-        await File.WriteAllBytesAsync(Path.Combine(_seedPath, fileName), payload, TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(Path.Combine(_seedPath, fileName), payload, cancellationToken: TestContext.Current.CancellationToken);
 
         var torrentFile = new ApiTorrentFileBuilder()
             .WithName(fileName)

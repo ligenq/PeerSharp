@@ -80,7 +80,10 @@ stranger can make the DHT server spend, and what a consumer can see from outside
   into the platform's own mode via `global.json` and the CI lanes use its filter and TRX options.
   SonarAnalyzer 10.32 added two rules that a `-warnaserror` build treats as errors; all 37 sites are
   fixed, one of which was a false positive and is suppressed with the reason recorded. xunit's new
-  xUnit1069 fires on 471 existing tests and is held at `suggestion` while they are worked through.
+  xUnit1069 fires on 471 existing tests; the 73 in the lanes that hold real resources - integration,
+  interop, concurrency and robustness - now observe the token, so a test that overruns its deadline
+  stops instead of holding a port while the next one starts. The 398 in-memory Core tests are held at
+  `suggestion`, where an overrun costs a few allocations.
 - **Microsoft Coyote removed.** Its last release was March 2024, but the reason for dropping it is
   what measurement showed rather than its release cadence: nothing ran `coyote rewrite`, so the engine
   was executing each scenario repeatedly rather than exploring interleavings, and Coyote 1.7.11 does

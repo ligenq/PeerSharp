@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using System.Diagnostics;
 using System.Net;
@@ -85,7 +85,7 @@ public class ResumeIntegrityTests : IDisposable
         {
             string full = Path.Combine(_seedPath, path);
             Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-            await File.WriteAllBytesAsync(full, data, TestContext.Current.CancellationToken);
+            await File.WriteAllBytesAsync(full, data, cancellationToken: TestContext.Current.CancellationToken);
         }
 
         var builder = new ApiTorrentFileBuilder().WithName("multi").WithPieceLength(PieceLength);
@@ -109,7 +109,7 @@ public class ResumeIntegrityTests : IDisposable
         for (int i = 0; i < files.Length; i++)
         {
             string actualPath = Path.Combine(_leechPath, leech.GetFileInfo(i).Path);
-            byte[] actual = await File.ReadAllBytesAsync(actualPath, TestContext.Current.CancellationToken);
+            byte[] actual = await File.ReadAllBytesAsync(actualPath, cancellationToken: TestContext.Current.CancellationToken);
 
             var expected = files.Single(f => Path.GetFileName(f.Item1) == Path.GetFileName(actualPath));
             Assert.Equal(SHA256.HashData(expected.Item2), SHA256.HashData(actual));
@@ -192,7 +192,7 @@ public class ResumeIntegrityTests : IDisposable
             corrupted[100 + i] ^= 0xFF;
         }
 
-        await File.WriteAllBytesAsync(seededFile, corrupted, TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(seededFile, corrupted, cancellationToken: TestContext.Current.CancellationToken);
 
         int validAfterCorruption = await torrent.ForceRecheckAsync();
 
@@ -212,7 +212,7 @@ public class ResumeIntegrityTests : IDisposable
     private async Task<(TorrentFile TorrentFile, byte[] Payload)> CreatePayloadAsync(string name, int size)
     {
         byte[] payload = RandomBytes(size);
-        await File.WriteAllBytesAsync(Path.Combine(_seedPath, name), payload, TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(Path.Combine(_seedPath, name), payload, cancellationToken: TestContext.Current.CancellationToken);
 
         var torrentFile = new ApiTorrentFileBuilder()
             .WithName(name)

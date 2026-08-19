@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
@@ -47,7 +47,7 @@ public class PeerDiscoveryTests : IDisposable
         await WaitForConditionAsync(() =>
             torrentA.Peers.ConnectedCount > 0 || torrentB.Peers.ConnectedCount > 0,
             TimeSpan.FromSeconds(5),
-            "LSD Discovery");
+            "LSD Discovery", cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(torrentA.Peers.ConnectedCount > 0 || torrentB.Peers.ConnectedCount > 0);
     }
@@ -106,12 +106,12 @@ public class PeerDiscoveryTests : IDisposable
              .Build();
     }
 
-    private static async Task WaitForConditionAsync(Func<bool> condition, TimeSpan timeout, string description)
+    private static async Task WaitForConditionAsync(Func<bool> condition, TimeSpan timeout, string description, CancellationToken cancellationToken = default)
     {
         using var cts = new CancellationTokenSource(timeout);
         try
         {
-            while (!condition())
+            while (!condition() && !cancellationToken.IsCancellationRequested)
             {
                 await Task.Delay(100, cts.Token);
             }
