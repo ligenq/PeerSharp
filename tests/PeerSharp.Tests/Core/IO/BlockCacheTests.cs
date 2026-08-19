@@ -38,6 +38,8 @@ public class BlockCacheTests
         }
 
         public void Init(IReadOnlyList<FileSelection>? selection = null) { }
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
+
         public Task InitAsync(IReadOnlyList<FileSelection>? selection = null, CancellationToken ct = default)
         {
             return Task.CompletedTask;

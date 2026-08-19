@@ -84,6 +84,18 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
         GC.SuppressFinalize(this);
     }
 
+    public Task<bool> FlushAsync(CancellationToken ct = default)
+    {
+        // Writes are write-through (see BlockCache.WriteAsync), so there is no cache layer to drain
+        // first - the storage flush is the whole barrier.
+        if (_disposal.IsDisposed)
+        {
+            return Task.FromResult(false);
+        }
+
+        return _storage.FlushAsync(ct);
+    }
+
     public Task InitializeAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default)
     {
         return _storage.InitAsync(selection, ct);

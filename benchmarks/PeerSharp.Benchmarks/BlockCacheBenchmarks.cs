@@ -76,6 +76,8 @@ public class BlockCacheBenchmarks
     {
         public Task DeleteAllAsync(CancellationToken ct = default) => Task.CompletedTask;
 
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
+
         public Task InitAsync(IReadOnlyList<FileSelection>? selection = null, CancellationToken ct = default)
             => Task.CompletedTask;
 

@@ -83,6 +83,34 @@ public sealed class ConnectionSettings
     public bool AllowMultipleConnectionsPerIp { get; set; } = true;
 
     /// <summary>
+    /// How many connections one IP address may hold on a single torrent. Zero, the default, means no
+    /// limit. Ignored when <see cref="AllowMultipleConnectionsPerIp"/> is <see langword="false"/>,
+    /// which is the stricter policy.
+    ///
+    /// <para>
+    /// This is the middle ground the flag above lacks. Allowing many connections per address is the
+    /// right default because of carrier-grade NAT, but on a host you control - a seedbox, or an
+    /// engine facing a swarm you do not trust - "many" should not have to mean "all of them": one
+    /// host cycling source ports can otherwise hold every slot a torrent has, and
+    /// <see cref="MaxConnections"/> bounds only how much of the engine that costs, not how much of
+    /// one swarm.
+    /// </para>
+    ///
+    /// <para>
+    /// Off by default, because the number that is safe depends on the deployment and a wrong guess
+    /// refuses real peers. What this counts is live connection <em>registrations</em>, and a single
+    /// logical peer can briefly hold more than one: a dial may try uTP and TCP, a handshake in
+    /// progress is already registered, and a reconnect overlaps the connection it replaces. Anywhere
+    /// peers genuinely share an address the count therefore sits well above the peer count - most
+    /// sharply on loopback, where every local engine is <c>127.0.0.1</c> and a swarm of twenty-four
+    /// leechers is twenty-four connections from one address before any of that. Set it from what the
+    /// deployment looks like: a public seedbox can afford a small number, a client behind CGNAT
+    /// should leave it off.
+    /// </para>
+    /// </summary>
+    public int MaxConnectionsPerIp { get; set; }
+
+    /// <summary>
     /// How often, at most, one peer is told about swarm changes over ut_pex (BEP 11).
     ///
     /// <para>

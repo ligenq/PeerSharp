@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32.SafeHandles;
 using PeerSharp.Internals;
@@ -79,6 +79,10 @@ internal sealed class Storage : IStorage
     private FileEntry[] _files = default!;
 
     private bool[] _fileSkipped = default!; // Tracks which files are skipped due to DoNotDownload
+
+    // Files written since the last successful flush. Only these are pushed to the physical device,
+    // so a periodic flush costs nothing on a torrent that is seeding or idle.
+    private bool[] _fileDirty = default!;
 
     // Graceful shutdown tracking
     private int _inFlightWrites = 0;
@@ -274,6 +278,7 @@ internal sealed class Storage : IStorage
                 _files = new FileEntry[count];
                 _fileSkipped = new bool[count];
                 _fileFailed = new bool[count];
+                _fileDirty = new bool[count];
                 _fileLocks = new SemaphoreSlim[count];
                 _fileMapper = new FileMapper(files.ConvertAll(f => f.Size));
 
@@ -574,6 +579,7 @@ internal sealed class Storage : IStorage
         _files = [];
         _fileSkipped = [];
         _fileFailed = [];
+        _fileDirty = [];
         _fileLocks = [];
         _fileMapper = null;
         _initialized = 0;
@@ -637,6 +643,9 @@ internal sealed class Storage : IStorage
                         {
                             using var lease = await _handleCache.GetHandleAsync(entry.FullPath, true, ct).ConfigureAwait(false);
                             await WriteWithThrottleAsync(lease.Handle, data.Slice(dataOffset, writeSize), fileOffset, ct).ConfigureAwait(false);
+                            // Set under the file lock that FlushAsync also takes, so a flush cannot
+                            // observe the write and clear the flag before this marks it.
+                            _fileDirty[fileIdx] = true;
                             Interlocked.Exchange(ref _consecutiveErrors, 0);
                         }
                         catch (IOException ex) when (ex.HResult == unchecked((int)0x80070070)) // ERROR_DISK_FULL
@@ -669,6 +678,106 @@ internal sealed class Storage : IStorage
         {
             EndWrite();
         }
+    }
+
+    /// <summary>
+    /// Forces every file written since the last flush out to the physical device, and reports
+    /// whether all of them made it.
+    ///
+    /// <para>
+    /// This exists to order two things that were previously unordered. Resume data is written
+    /// durably - temp file, flush, atomic rename - while piece data was handed to the operating
+    /// system and never flushed, so a power loss could leave a bitfield claiming pieces whose bytes
+    /// were still in the write cache. Verification runs on the way in, so nothing downstream would
+    /// have caught it: the engine would restart, believe the bitfield, and serve whatever the disk
+    /// happened to contain. Flushing before the claim is written is what makes the bitfield a
+    /// statement about the disk rather than about the cache.
+    /// </para>
+    ///
+    /// <para>
+    /// Returns <see langword="false"/> rather than throwing when a file cannot be flushed. The
+    /// caller's correct response is to skip this round of resume saving and leave the older copy in
+    /// place - older resume data claims fewer pieces, so it is always the safe direction - and a
+    /// flush failure is not by itself a reason to fault the torrent.
+    /// </para>
+    /// </summary>
+    public async Task<bool> FlushAsync(CancellationToken ct = default)
+    {
+        if (_disposal.IsDisposed || Volatile.Read(ref _initialized) == 0)
+        {
+            return false;
+        }
+
+        // Snapshot the arrays: a concurrent shutdown may replace them while this runs, and taking
+        // the references once means the loop cannot see a torn pair of dirty flags and locks.
+        var dirty = _fileDirty;
+        var locks = _fileLocks;
+        var files = _files;
+        bool allFlushed = true;
+
+        for (int i = 0; i < dirty.Length && i < locks.Length && i < files.Length; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (!Volatile.Read(ref dirty[i]))
+            {
+                continue;
+            }
+
+            var fileLock = locks[i];
+            try
+            {
+                await fileLock.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Shutting down underneath us; nothing left to promise about this file.
+                return false;
+            }
+
+            try
+            {
+                // Re-check under the lock: another flush may have cleared it in between.
+                if (!dirty[i])
+                {
+                    continue;
+                }
+
+                // Deliberately not conditioned on _fileSkipped. A file can be written while selected
+                // and deselected before the next save, and deselecting it does not retract the
+                // completed pieces covering it - those stay in the bitfield and get persisted as
+                // present. Clearing the flag without the barrier would leave exactly the claim this
+                // whole mechanism exists to prevent. Only a padding entry, which has no path and is
+                // never written, can be cleared for free.
+                string? path = files[i].FullPath;
+                if (path == null)
+                {
+                    dirty[i] = false;
+                    continue;
+                }
+
+                using var lease = await _handleCache.GetHandleAsync(path, true, ct).ConfigureAwait(false);
+                RandomAccess.FlushToDisk(lease.Handle);
+                dirty[i] = false;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Leave the flag set so the next flush retries this file.
+                allFlushed = false;
+                _logger.LogWarning(ex, "Failed to flush '{FilePath}' to disk", files[i].FullPath);
+            }
+            finally
+            {
+                try { fileLock.Release(); }
+                catch (ObjectDisposedException) { /* Ignored - storage shutting down */ }
+            }
+        }
+
+        return allFlushed;
     }
 
     /// <summary>

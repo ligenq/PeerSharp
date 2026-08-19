@@ -398,6 +398,191 @@ public class PeerManagerDuplicateConnectionTests
         }
     }
 
+    // ── Per-address limits ───────────────────────────────────────────────────
+    //
+    // The endpoint gate above stops the same address *and port* twice. One host dialling from a new
+    // source port each time walks straight past it, and the only thing above it was an all-or-
+    // nothing switch: allow every connection an address asks for, or allow exactly one. The default
+    // has to stay permissive because carrier-grade NAT puts unrelated subscribers behind one
+    // address - but "permissive" should not mean "the whole swarm".
+
+    [Fact]
+    public void MaxConnectionsPerIp_IsOffByDefault()
+    {
+        // Deliberate, and measured rather than assumed: enabling it at eight rejected real
+        // connections in the three-engine PEX interop test, which failed one run in six until the
+        // default came back off. What the cap counts is live registrations, and one logical peer can
+        // hold more than one - a dial trying uTP and TCP, a handshake still in progress, a reconnect
+        // overlapping the connection it replaces. Wherever peers share an address that count runs
+        // well ahead of the peer count, and on loopback every engine shares one. The engine's own
+        // twenty-four-leecher soak would be the next thing to break.
+        Assert.Equal(0, new ConnectionSettings().MaxConnectionsPerIp);
+    }
+
+    [Fact]
+    public async Task AddIncomingPeer_ConnectionsFromOneAddress_AreCappedAtTheConfiguredLimit()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            ctx.Torrent.Settings.Connection.MaxConnectionsPerIp = 3;
+
+            var streams = new List<HangingStream>();
+            for (int port = 6881; port < 6881 + 6; port++)
+            {
+                var stream = new HangingStream();
+                streams.Add(stream);
+                await ctx.Manager.AddIncomingPeerAsync(
+                    stream,
+                    BuildHandshake(MakePeerId((byte)port)),
+                    new IPEndPoint(IPAddress.Parse("1.2.3.4"), port));
+            }
+
+            Assert.Equal(3, ctx.Manager.ConnectedCount);
+
+            // The first three are kept and the rest closed: a peer already transferring is worth
+            // more than one that has just arrived.
+            Assert.All(streams.Take(3), stream => Assert.False(stream.Disposed));
+            Assert.All(streams.Skip(3), stream => Assert.True(stream.Disposed));
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
+    [Fact]
+    public async Task AddIncomingPeer_TheCapIsPerAddress_NotGlobal()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            ctx.Torrent.Settings.Connection.MaxConnectionsPerIp = 2;
+
+            for (int port = 6881; port < 6881 + 4; port++)
+            {
+                await ctx.Manager.AddIncomingPeerAsync(
+                    new HangingStream(),
+                    BuildHandshake(MakePeerId((byte)port)),
+                    new IPEndPoint(IPAddress.Parse("1.2.3.4"), port));
+            }
+
+            Assert.Equal(2, ctx.Manager.ConnectedCount);
+
+            // A different host is unaffected by the first one's behaviour.
+            for (int port = 6881; port < 6881 + 4; port++)
+            {
+                await ctx.Manager.AddIncomingPeerAsync(
+                    new HangingStream(),
+                    BuildHandshake(MakePeerId((byte)(port + 100))),
+                    new IPEndPoint(IPAddress.Parse("5.6.7.8"), port));
+            }
+
+            Assert.Equal(4, ctx.Manager.ConnectedCount);
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
+    [Fact]
+    public async Task AddIncomingPeer_ZeroMeansNoPerAddressLimit()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            ctx.Torrent.Settings.Connection.MaxConnectionsPerIp = 0;
+
+            for (int port = 6881; port < 6881 + 6; port++)
+            {
+                await ctx.Manager.AddIncomingPeerAsync(
+                    new HangingStream(),
+                    BuildHandshake(MakePeerId((byte)port)),
+                    new IPEndPoint(IPAddress.Parse("1.2.3.4"), port));
+            }
+
+            Assert.Equal(6, ctx.Manager.ConnectedCount);
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
+    [Fact]
+    public async Task AddIncomingPeer_DisallowingMultiplePerIp_StillMeansExactlyOne()
+    {
+        // The stricter switch wins over the cap, whatever the cap says.
+        var ctx = CreateContext();
+        try
+        {
+            ctx.Torrent.Settings.Connection.AllowMultipleConnectionsPerIp = false;
+            ctx.Torrent.Settings.Connection.MaxConnectionsPerIp = 10;
+
+            for (int port = 6881; port < 6881 + 4; port++)
+            {
+                await ctx.Manager.AddIncomingPeerAsync(
+                    new HangingStream(),
+                    BuildHandshake(MakePeerId((byte)port)),
+                    new IPEndPoint(IPAddress.Parse("1.2.3.4"), port));
+            }
+
+            Assert.Equal(1, ctx.Manager.ConnectedCount);
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
+    [Fact]
+    public async Task AddIncomingPeer_ClosingAConnection_FreesItsSlotForThatAddress()
+    {
+        // The cap counts live connections, not connections ever made. A NAT gateway whose peers come
+        // and go must not run out of room permanently.
+        var ctx = CreateContext();
+        try
+        {
+            ctx.Torrent.Settings.Connection.MaxConnectionsPerIp = 1;
+
+            var first = new HangingStream();
+            await ctx.Manager.AddIncomingPeerAsync(
+                first,
+                BuildHandshake(MakePeerId(1)),
+                new IPEndPoint(IPAddress.Parse("1.2.3.4"), 6881));
+
+            Assert.Equal(1, ctx.Manager.ConnectedCount);
+
+            var rejected = new HangingStream();
+            await ctx.Manager.AddIncomingPeerAsync(
+                rejected,
+                BuildHandshake(MakePeerId(2)),
+                new IPEndPoint(IPAddress.Parse("1.2.3.4"), 6882));
+
+            Assert.Equal(1, ctx.Manager.ConnectedCount);
+            Assert.True(rejected.Disposed);
+
+            await Assert.Single(ctx.Manager.GetConnectedPeersInternal()).CloseAsync();
+            await TorrentTestUtility.WaitUntilAsync(
+                () => ctx.Manager.ConnectedCount == 0,
+                because: "the first connection to be removed");
+
+            var replacement = new HangingStream();
+            await ctx.Manager.AddIncomingPeerAsync(
+                replacement,
+                BuildHandshake(MakePeerId(3)),
+                new IPEndPoint(IPAddress.Parse("1.2.3.4"), 6883));
+
+            Assert.Equal(1, ctx.Manager.ConnectedCount);
+            Assert.False(replacement.Disposed);
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
     private static byte[] MakePeerId(byte fill)
     {
         var id = new byte[20];

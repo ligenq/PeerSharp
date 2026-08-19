@@ -1439,7 +1439,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             if (!_activeConnectionTasks.IsEmpty)
             {
-                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
+                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500), CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (TimeoutException) { /* Ignore timeout */ }
@@ -1471,7 +1471,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             var closeTasks = toClose.Select(p => p.CloseAsync()).ToArray();
             try
             {
-                await Task.WhenAll(closeTasks).WaitAsync(TimeSpan.FromMilliseconds(250)).ConfigureAwait(false);
+                await Task.WhenAll(closeTasks).WaitAsync(TimeSpan.FromMilliseconds(250), CancellationToken.None).ConfigureAwait(false);
             }
             catch (TimeoutException)
             {
@@ -1509,7 +1509,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             if (!_activeConnectionTasks.IsEmpty)
             {
-                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
+                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500), CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (TimeoutException)
@@ -1832,7 +1832,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     remainingTimeoutMs, hasFallback, fallbackTimeoutMs);
 
                 bool attemptUtp = transport == TransportPreference.Utp;
-                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption).ConfigureAwait(false);
+                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, CancellationToken.None).ConfigureAwait(false);
 
                 if (success)
                 {
@@ -2505,9 +2505,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // The endpoint gate above only stops the exact same address and port twice. One host
             // dialling from a different source port each time gets past it, and can take as many slots
             // as it likes. libtorrent matches on address alone for the same reason.
-            if (!_settings.Connection.AllowMultipleConnectionsPerIp && SharesAddressWithAnotherPeer(peer))
+            int allowedPerAddress = _settings.Connection.AllowMultipleConnectionsPerIp
+                ? _settings.Connection.MaxConnectionsPerIp
+                : 1;
+
+            if (allowedPerAddress > 0 && CountPeersSharingAddress(peer) >= allowedPerAddress)
             {
                 _connectedEndpoints.TryRemove(KeyValuePair.Create(peer.RemoteEndPoint, peer));
+                _logger.LogDebug(
+                    "Rejecting {RemoteEndPoint}: its address already holds {Allowed} connections on this torrent",
+                    peer.RemoteEndPoint,
+                    allowedPerAddress);
                 return false;
             }
 
@@ -2515,19 +2523,20 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    /// <summary>Whether some other live connection is already using this peer's address.</summary>
-    private bool SharesAddressWithAnotherPeer(PeerCommunication peer)
+    /// <summary>How many other live connections are already using this peer's address.</summary>
+    private int CountPeersSharingAddress(PeerCommunication peer)
     {
         var address = peer.RemoteEndPoint!.Address;
+        int count = 0;
         foreach (var (endpoint, other) in _connectedEndpoints)
         {
             if (!ReferenceEquals(other, peer) && endpoint.Address.Equals(address))
             {
-                return true;
+                count++;
             }
         }
 
-        return false;
+        return count;
     }
 
     /// <summary>

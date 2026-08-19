@@ -11,6 +11,12 @@ internal interface IInternalFiles : IFiles
     /// </summary>
     new bool Checking { get; set; }
 
+    /// <summary>
+    /// Forces written piece data out to the physical device. Returns <see langword="false"/> if any
+    /// file could not be flushed; see <see cref="IStorage.FlushAsync"/> for why the caller cares.
+    /// </summary>
+    Task<bool> FlushAsync(CancellationToken ct = default);
+
     Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct);
 
     Task ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct);
