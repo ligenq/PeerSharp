@@ -28,7 +28,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 - **Proxy Support:** SOCKS5 and HTTP proxy support with authentication.
 - **IP Blocklist & GeoIP:** Block peers by IP range or country.
 - **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.
-- **Enterprise-Grade Testing:** Rigorous validation using **Microsoft Coyote** for concurrency testing, architecture tests for design integrity, fuzzing for robustness, and [BenchmarkDotNet suites](https://github.com/ligenq/PeerSharp/blob/main/benchmarks/PeerSharp.Benchmarks/README.md) covering the engine's hot paths.
+- **Thoroughly Tested:** Repeated concurrency stress over the shared-state paths, architecture tests for design integrity, fuzzing for robustness, byte-for-byte resume and interop checks against real clients, and [BenchmarkDotNet suites](https://github.com/ligenq/PeerSharp/blob/main/benchmarks/PeerSharp.Benchmarks/README.md) covering the engine's hot paths.
 
 ## Getting Started
 
@@ -97,6 +97,39 @@ var events = new TorrentEventsBuilder()
 
 var options = new AddTorrentOptions("./downloads") { Events = events };
 ```
+
+### Metrics
+
+Alerts and events tell an application what just happened. For what is happening *now*, across a
+process, the engine publishes to a `Meter` named `PeerSharp`:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => metrics.AddMeter(PeerSharpMetrics.MeterName));
+```
+
+| Instrument | Unit | Meaning |
+|---|---|---|
+| `peersharp.download.speed` | By/s | Aggregate download rate |
+| `peersharp.upload.speed` | By/s | Aggregate upload rate |
+| `peersharp.downloaded` | By | Lifetime total downloaded |
+| `peersharp.uploaded` | By | Lifetime total uploaded |
+| `peersharp.torrents` | {torrent} | Torrents being managed |
+| `peersharp.torrents.active` | {torrent} | Downloading, checking or fetching metadata |
+| `peersharp.peers.connected` | {peer} | Connected peers across all torrents |
+
+Every instrument is observable, so nothing is measured until a collector asks and a process that never
+subscribes pays nothing — which is why there is no switch to turn this on. The gauges read the same
+aggregate `engine.GetStats()` returns, which describes the torrents present now. The two byte counters
+deliberately do not: they cover the engine's whole life, including torrents since removed, because a
+counter that falls when a torrent is removed reads to a metrics backend as a process restart.
+
+Measurements are tagged `peersharp.engine.id`, and each engine's meter carries the engine itself as
+`Meter.Scope`, so several engines in one process stay apart.
+
+Per-piece and per-connection outcomes are deliberately not here yet: they live inside per-torrent
+components with no route to engine-level state, and adding them means plumbing rather than another
+observable instrument.
 
 ### Previewing Magnet Links Before Downloading
 
@@ -347,10 +380,16 @@ of the speed it should, for reasons nothing local will surface.
 | `Seeding_HowRealClientsRequestFromUs` | The other direction — whether real clients request from us when we hold the data, and whether we actually deliver |
 
 These are diagnostics, not pass/fail gates — swarm composition is not ours to control, so the numbers
-are the deliverable and the assertions cover only what would make the numbers meaningless. They are
-opt-in twice: the `PeerSharp.Tests.Interop` namespace is excluded from every CI job, and each test
-also requires `PEERSHARP_SOAK=1`, separately from the DHT probes' `PEERSHARP_INTEROP=1`, because these
-transfer real data for a long time.
+are the deliverable and the assertions cover only what would make the numbers meaningless. They stay
+opt-in: each requires `PEERSHARP_SOAK=1`, separately from the DHT probes' `PEERSHARP_INTEROP=1`,
+because they transfer real data for a long time against a swarm of strangers.
+
+The rest of `PeerSharp.Tests.Interop` — the local counterpart-client tests and the loopback ones —
+runs nightly in CI (`.github/workflows/interop.yml`), not on pull requests. It needs real client
+binaries and real transfers, which is too slow and too dependent on an apt mirror to sit in front of
+every change, but leaving it entirely to a human meant an interop regression could sit unnoticed for
+as long as nobody happened to run it. A test whose counterpart client is not installed skips rather
+than fails, so read the skip count: a run where everything skipped proves nothing.
 
 **You choose the content.** Nothing is hardcoded; the tests skip until you point them somewhere.
 Use something you have the right to distribute. Projects that publish their own releases over

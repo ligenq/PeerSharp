@@ -1,7 +1,104 @@
-# Changelog
+﻿# Changelog
 
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
+
+## Unreleased
+
+A review of the engine outside its protocol code: what happens when the host dies mid-write, what a
+stranger can make the DHT server spend, and what a consumer can see from outside the process.
+
+### Upgrade notes
+
+- **Resume data is now validated before it is adopted.** A resume file whose recorded info hash names
+  a different torrent, or whose recorded piece size, content length or bitfield length disagrees with
+  the torrent, is discarded, and the torrent starts from an empty bitfield rather than claiming pieces
+  it never verified. Resume data written by a newer format version is discarded for the same reason.
+  A magnet cannot be checked when it is added, so the same validation runs again once its metadata
+  arrives. Files written by 3.2.0 and earlier are accepted unchanged — they already carried the fields
+  this checks, nothing read them. A missing hash or geometry field means "not recorded" and is not
+  grounds for rejection.
+- **Saving resume data now flushes piece data to the disk first.** Saves cost an fsync of the files
+  written since the last save. If the flush fails, that torrent's resume data is skipped for that
+  round and the previous copy is left in place; the save is retried on the next interval.
+- **Partial pieces in resume data are capped at 16 MiB in total**, not just at 32 pieces. Torrents
+  with piece sizes above 512 KiB carry fewer partial pieces across a restart than before and
+  re-request those blocks. Torrents at ordinary piece sizes are unaffected.
+- **A DHT node stores peers for at most 2000 info-hashes.** Beyond that, announces for hashes not
+  already held are answered but not recorded. This bounds the store; it does not change what the
+  engine's own torrents can find.
+- **Inbound DHT queries are budgeted at 60 per source address per minute.** Over-budget queries are
+  dropped without a reply, and the sender is not added to the routing table. Well above what an
+  iterative lookup from one node costs. Once more than 20,000 addresses are being tracked at once,
+  sources that cannot be tracked individually draw on a shared allowance of 600 queries per minute
+  rather than being waved through.
+
+### Added
+
+- `ConnectionSettings.MaxConnectionsPerIp` — how many connections one address may hold on a torrent.
+  The middle ground `AllowMultipleConnectionsPerIp` lacked, which could only allow one connection per
+  address or unlimited. **Off by default**: it counts live registrations, and a single logical peer
+  briefly holds more than one while a dial tries both transports or a reconnect overlaps the
+  connection it replaces, so any non-zero value has to be set from what the deployment looks like.
+- Metrics, on a `Meter` named `PeerSharp` — aggregate rates, lifetime byte totals, torrent counts and
+  connected peers. Subscribe with `builder.AddMeter(PeerSharpMetrics.MeterName)`. Every instrument is
+  observable, so nothing is measured unless a collector polls and a process that never subscribes
+  pays nothing. Each engine's meter carries itself as `Meter.Scope`, so several engines in one
+  process stay distinguishable. The byte counters cover the engine's whole life, including torrents
+  since removed, so they only ever increase — `EngineStats` still reports the torrents present now.
+
+### Fixed
+
+- **An unclean shutdown could leave resume data claiming pieces whose bytes were never written.**
+  Resume data was written durably — temp file, flush to device, atomic rename — while piece data was
+  handed to the operating system and never flushed, so the durable half was the claim and the
+  volatile half was the data it claimed. Piece verification runs when a piece arrives and never
+  again, so nothing downstream would have caught it: the engine would restart, trust the bitfield and
+  serve whatever the disk held.
+- **A malformed or stale resume file could throw while loading partial pieces.** Piece indices and
+  block counts read out of the file were used to index arrays without being checked against the
+  torrent, so a truncated write produced a negative copy length rather than a rejected piece.
+- **The number of info-hashes a DHT node stored peers for was unbounded.** Peers per hash were capped
+  at 200 and the number of hashes was not, so the size of the table was decided by whoever was
+  announcing.
+- **Inbound DHT queries had no per-source budget.** Answering costs a parse, a routing-table walk and
+  a reply larger than the query, and the source address of a UDP datagram is unverified.
+- **Sequential downloads rescanned the completed prefix on every pick**, so the scan grew with
+  progress and was longest when the torrent was nearly done.
+- **Resume data could claim a piece that finished during the save.** The bitfield was captured after
+  the flush rather than before it, leaving a window in which a piece completing in between was
+  recorded as durable without having been flushed. Saves for one torrent are also serialised now, so
+  two overlapping saves cannot write their snapshots in the opposite order to the one they were taken.
+- **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
+  save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
+  stayed in the bitfield and were persisted as present.
+
+### Changed
+
+- **Dependencies updated across the solution**, which needed three follow-ups. `xunit.v3` 4.0 moved to
+  Microsoft.Testing.Platform and dropped VSTest support on the .NET 10 SDK, so `dotnet test` is opted
+  into the platform's own mode via `global.json` and the CI lanes use its filter and TRX options.
+  SonarAnalyzer 10.32 added two rules that a `-warnaserror` build treats as errors; all 37 sites are
+  fixed, one of which was a false positive and is suppressed with the reason recorded. xunit's new
+  xUnit1069 fires on 471 existing tests and is held at `suggestion` while they are worked through.
+- **Microsoft Coyote removed.** Its last release was March 2024, but the reason for dropping it is
+  what measurement showed rather than its release cadence: nothing ran `coyote rewrite`, so the engine
+  was executing each scenario repeatedly rather than exploring interleavings, and Coyote 1.7.11 does
+  not model `System.Threading.Lock`, which this engine uses almost everywhere. A test passed against an
+  implementation with its synchronisation deleted outright. The scenarios and their assertions are
+  unchanged and now run through a plain repetition harness, so what the suite actually detected is
+  exactly what it detected before - it is just no longer described as something it was not.
+- **Mutation testing added**, weekly and non-blocking, via `stryker-config.json` and a `Mutation`
+  workflow. Scoped to seven small pure-logic units - the DHT query rate limiter, the lifetime byte
+  counters and the connection calculators - where a surviving mutant is unambiguously a test gap. The
+  first run killed all 147 mutants. Three things make it work and are documented where they are set:
+  `--test-runner mtp` (xunit.v3 4.0 is MTP-only, and Stryker's VSTest runner hangs), the integration
+  lane compiled out of the assembly for mutation runs (Stryker's runner cancels an initial run of about
+  three minutes), and `"coverage-analysis": "off"` (its per-test attribution reports covered code as
+  uncovered here, producing a fictional score).
+- The interop suite runs nightly in CI. It is the lane that found the late bitfield, the dead-socket
+  plaintext fallback and the inbound uTP rejection, and no CI job ran it. Tests whose counterpart
+  client is not installed skip rather than fail.
 
 ## 3.2.0 — 2026-08-16
 

@@ -1,4 +1,4 @@
-# Investigation Notes
+﻿# Investigation Notes
 
 Settled investigations, negative results and measurement baselines. These are retained because they
 explain decisions and prevent old questions from being mistaken for new defects. They are not pending
@@ -32,6 +32,177 @@ observability risks:
   rejected, and quota arithmetic saturates instead of overflowing.
 
 The public API snapshot and deterministic tests were updated with these contracts.
+
+---
+
+## Making Stryker run at all: three constraints, each measured
+
+**Settled.** Mutation testing is worth having here - applied by hand it twice overturned a conclusion,
+once where 100% line coverage hid an untested branch and once where a concurrency test passed against
+an implementation with its synchronisation deleted. Getting `dotnet-stryker` to run against this
+repository took three specific accommodations, all of them recorded in configuration rather than
+folklore.
+
+**1. The VSTest runner hangs; MTP is required.** `xunit.v3` 4.0 runs on Microsoft.Testing Platform and
+the .NET 10 SDK dropped the VSTest bridge. Stryker's default runner discovers all 2505 tests and then
+sits there: measured at twenty minutes with every `testhost` and `vstest.console` process accumulating
+under five seconds of CPU. `--test-runner mtp` works, and is marked preview by Stryker.
+
+**2. The MTP runner cancels an initial test run that takes about three minutes.** The failure surfaces
+as `Stryker.NET failed to mutate your project ... No test result reported`, which reads like a
+discovery problem and is not one. The debug log names it exactly:
+
+```
+[DBG] "MtpRunner-0": Test run for "PeerSharp.Tests.dll" failed on attempt 1/2; discarding crashed server
+System.Threading.Tasks.TaskCanceledException: A task was canceled.
+   at Stryker.TestRunner.MicrosoftTestPlatform.AssemblyTestServer.RunTestsAsync(...)
+```
+
+Two attempts, roughly three minutes each. The whole suite takes 3m25s, so it never finishes. The
+integration lane accounts for almost all of that, and it is compiled out of the assembly for mutation
+runs only - `<Compile Remove="Integration/**">` under `StrykerRun`. What remains runs in 46 seconds.
+
+**Excluding more than that is counterproductive, and this was measured too.** A first attempt also
+removed the concurrency, robustness and interop lanes; every mutant in `LifetimeByteTotals` then came
+back `NoCoverage`, because the tests that cover it live in the concurrency lane. Removing a lane
+removes its coverage, and mutants report as untested rather than as findings.
+
+**3. Half the mutants would not compile.** Nullable analysis is escalated to errors here, so Stryker's
+rewrites trip CS8602 and friends and its "Safe Mode" discards the whole enclosing method: 11,992 of
+25,169 mutants on the first run. `StrykerRun` reaches MSBuild as a global property and relaxes exactly
+that list for the mutation job; ordinary builds stay strict, which
+`dotnet msbuild -getProperty:WarningsAsErrors` confirms either way.
+
+**4. Per-test coverage attribution is broken, and the default configuration reports a fictional
+score.** A first full run over thirteen files returned 678 `NoCoverage`, 30 `Killed`, 0 `Survived` -
+a 4.24% score. It is not a verdict on the tests: `PiecePicker` was reported as 215 uncovered mutants
+while `PiecePickerTests` has 31 passing tests against it. The check that settles it:
+
+| `coverage-analysis` | `LifetimeByteTotals` result |
+| --- | --- |
+| `perTest` (default) | 9 `NoCoverage` |
+| `off` | 9 `Killed` |
+
+Identical mutants, identical tests. So the tests do kill them and Stryker's MTP runner is failing to
+attribute which test covers which mutant. `"coverage-analysis": "off"` is therefore mandatory here,
+not a tuning choice, and a score produced without it should be discarded rather than investigated.
+
+**Which is what bounds the scope.** Without per-test selection every mutant runs the whole 46-second
+lane, so `stryker-config.json` names only small units where that arithmetic finishes: the rate
+limiter, the lifetime counters, and the connection calculators. `PiecePicker`, `PathValidator`,
+`DhtSecurity`, `DhtItemStore`, `FileMapper` and `PeerPriority` are all worth mutating and are left out
+purely on runtime - roughly 700 mutants at 46 seconds each. Add them back the moment per-test coverage
+works, not before.
+
+Independently of the runtime limit, the transfer and networking paths are a poor fit regardless: a
+mutant that merely makes a timing-dependent test flaky is reported as survived, which is noise wearing
+the costume of a finding.
+
+**The first real result: 147 mutants, 147 killed, 0 survived, in 56 minutes.** Every mutant across the
+seven configured files was detected by an existing test - the rate limiter's budget arithmetic, the
+lifetime counters, and all four connection calculators. Worth stating plainly because a perfect score
+is usually a smell: it is not vacuous here, since each of the 147 ran the whole 46-second lane and
+`Survived`, `NoCoverage` and `Timeout` were all zero. Eleven further mutants still fail to compile even
+with the relaxed nullable settings, ten of them in `DhtQueryRateLimiter`; those are untested rather
+than killed and are the honest asterisk on the number.
+
+The result is a baseline, not a victory lap. These seven files were chosen partly *because* they are
+well covered, so 100% says the configuration works and these units are genuinely pinned - not that the
+engine as a whole would score anywhere near it. The files left out on runtime are where the interesting
+answer is.
+
+---
+
+## Why Microsoft Coyote was removed
+
+**Settled, by mutation testing. Historical: Coyote is no longer a dependency.** The decision was not
+about its release cadence - it was that the suite explored far less than its presence implied, and the
+cause was a version gap rather than anything about how the tests were written. The scenarios and
+assertions survive unchanged behind `ConcurrencyStress`, so what the suite detects is exactly what it
+detected before.
+
+**Two things have to be true for a Coyote test to mean anything**, and neither holds by default here:
+
+1. *The assembly must be rewritten.* Nothing runs `coyote rewrite` - not CI, not the build - so an
+   ordinary `dotnet test` runs these as repeated stress runs on real threads. Rewritten, the engine
+   reports controlling 4-5 operations; unrewritten, 1.
+2. *The synchronisation under test must be a primitive Coyote recognises.* Coyote 1.7.11 targets
+   .NET 8 and does not know `System.Threading.Lock` (.NET 9+), which is what this codebase uses almost
+   everywhere. Without a scheduling point at the acquisition, a critical section is atomic as far as
+   the explorer is concerned, and the interleaving that would break it is never generated.
+
+**Measured, not inferred.** Against `LifetimeByteTotals`, whose whole purpose is that a removal and a
+read cannot interleave:
+
+| Implementation | Lock type | Systematic run |
+| --- | --- | --- |
+| correct | `Lock` | passes |
+| removal and retirement as two steps | `Lock` | **passes** - the bug is invisible |
+| no synchronisation at all | `Lock` | **passes** - still invisible |
+| removal and retirement as two steps | `object` (Monitor) | fails, correctly |
+
+A test that passes against an implementation with the locking deleted is not testing the locking.
+`LifetimeByteTotals` was briefly switched to a `Monitor` lock to make that row reproducible; it went
+back to `Lock` with the rest of the codebase once Coyote was removed, since nothing observes the
+difference any more.
+
+**Rewriting the library is not currently a way out.** Adding `PeerSharp.dll` to `rewrite.coyote.json`
+does give Coyote scheduling points inside production code - it is what makes the `Monitor` row above
+fail as it should - but classes that use `System.Threading.Lock` then block a controlled thread and
+the deadlock monitor reports a hang. `DhtQueryRateLimiter` does exactly that. So the choice today is
+between vacuous exploration and spurious hangs, and the config is left as it was.
+
+**The two join patterns are mutually exclusive, which is worth knowing before anyone "fixes" one.**
+Unrewritten, `Task.Run` is not controlled, so awaiting `Task.WhenAll` leaves the main operation
+waiting on something Coyote cannot see and it reports a deadlock; every test fails. Rewritten, the
+blocking `Task.WaitAll` that the whole suite uses is itself reported as a hang. So `WaitAll` is not a
+mistake in the existing tests - it is the only pattern that works in the path CI runs. Converting to
+`WhenAll` is a prerequisite for rewriting rather than an improvement on its own, and doing it without
+also rewriting turns the suite red.
+
+**What would change the picture:** a systematic explorer that models `System.Threading.Lock` - a
+maintained Coyote, or a fork such as InterleaveX once it publishes packages. The scenarios are
+unchanged, so adopting one means replacing `ConcurrencyStress.Run` and nothing else. Until then, read
+the concurrency suite as stress rather than proof.
+
+**Reproducing the table above** now requires restoring the dependency: add `Microsoft.Coyote` and
+`Microsoft.Coyote.Test` to the test project and `microsoft.coyote.cli` to the tool manifest, write a
+`rewrite.coyote.json` naming both `PeerSharp.Tests.dll` and `PeerSharp.dll`, then build, run
+`dotnet coyote rewrite`, and run the `LifetimeTotals` tests. The measurements are recorded here
+precisely so nobody has to.
+
+---
+
+## A per-IP connection cap cannot be defaulted on
+
+**Settled, by measurement.** `ConnectionSettings.MaxConnectionsPerIp` was added to give
+`AllowMultipleConnectionsPerIp` a middle ground - the flag can only permit one connection per address
+or unlimited - and was initially defaulted to 8. That default rejects real connections.
+
+`PexLiveExchangeTests` failed one run in six with it on, and passed 8 out of 8 with it off. The
+mechanism was isolated rather than guessed at, by separating the two things the setting controls:
+
+| Default | Address scan runs | Rejection possible | Result |
+| --- | --- | --- | --- |
+| 8 | yes | yes | 1 failure in 6 |
+| 100000 | yes | no | 0 in 8 |
+| 0 | no | no | 0 in 8 |
+| (pristine, before the change) | n/a | n/a | 0 in 6 |
+
+So it is the rejection firing, not the cost of the scan or a race it perturbs.
+
+**Why 8 is reachable with three peers.** The cap counts live entries in `_connectedEndpoints`, and one
+logical peer holds more than one for a while: a dial may try uTP and TCP, a handshake in progress is
+already registered, and a reconnect overlaps the connection it replaces. Wherever peers genuinely
+share an address the count runs well ahead of the peer count - and on loopback every engine is
+`127.0.0.1`, so a local swarm is the worst case there is. `ManyPeerSoakTests` puts 24 leechers on one
+address against a single seeder, which is the clearest statement of why no small default can be safe:
+the engine's own test suite would be the first thing it broke.
+
+**Left off by default.** The knob is worth having for a seedbox or an engine facing a swarm it does
+not trust, where the operator knows what the address distribution looks like. A default cannot know
+that, and the cost of guessing low is refusing real peers silently. Do not turn it on globally without
+measuring against the deployment it is meant for.
 
 ---
 
