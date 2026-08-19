@@ -1,12 +1,10 @@
-using Microsoft.Coyote;
-using Microsoft.Coyote.SystematicTesting;
-using PeerSharp.PieceWriter;
+﻿using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Bandwidth;
 using Microsoft.Extensions.Time.Testing;
 
 namespace PeerSharp.Tests.Concurrency;
 
-[Collection("Coyote")]
+[Collection("Concurrency")]
 public class DiskBandwidthLimiterTests
 {
     private readonly ITestOutputHelper _output;
@@ -16,28 +14,13 @@ public class DiskBandwidthLimiterTests
         _output = output;
     }
 
-    private void RunCoyoteTest(Action test, uint iterations = 100)
-    {
-        var config = Configuration.Create()
-            .WithTestingIterations(iterations)
-            .WithMaxSchedulingSteps(1000);
-
-        using var engine = TestingEngine.Create(config, test);
-        engine.Run();
-
-        var report = engine.TestReport;
-        if (report.NumOfFoundBugs > 0)
-        {
-            _output.WriteLine($"Found {report.NumOfFoundBugs} bug(s)!");
-            _output.WriteLine(engine.GetReport());
-            Assert.Fail($"Coyote found {report.NumOfFoundBugs} concurrency bug(s). See test output for details.");
-        }
-    }
+    private void RunConcurrencyStress(Action scenario, uint iterations = 100)
+        => ConcurrencyStress.Run(scenario, iterations, _output);
 
     [Fact]
     public void DiskBandwidthLimiter_ConcurrentRequests_Safe()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var bandwidth = new BandwidthManager(10, timeProvider);

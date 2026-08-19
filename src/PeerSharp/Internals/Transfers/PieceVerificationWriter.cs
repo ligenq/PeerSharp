@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Utilities;
 
@@ -106,7 +106,7 @@ internal sealed class PieceVerificationWriter
             valid = _torrent.MerkleTree!.VerifyPiece(pieceToProcess.Index, fullData.AsSpan(0, pieceSize));
             hashMs = (_timeProvider.GetUtcNow() - hashCalcStart).TotalMilliseconds;
 
-            if (!valid && !_torrent.MerkleTree!.CanVerifyPiece(pieceToProcess.Index))
+            if (!valid && !_torrent.MerkleTree.CanVerifyPiece(pieceToProcess.Index))
             {
                 _logger.LogDebug("BEP 30: Missing hashes for piece {PieceIndex}, requesting from peers", pieceToProcess.Index);
                 _requestMerkleHashes(pieceToProcess.Index);

@@ -1,10 +1,7 @@
-using Microsoft.Coyote;
-using Microsoft.Coyote.Specifications;
-using Microsoft.Coyote.SystematicTesting;
-
+﻿
 namespace PeerSharp.Tests.Concurrency;
 
-[Collection("Coyote")]
+[Collection("Concurrency")]
 public class FileTransferConcurrencyTests
 {
     private readonly ITestOutputHelper _output;
@@ -14,23 +11,8 @@ public class FileTransferConcurrencyTests
         _output = output;
     }
 
-    private void RunCoyoteTest(Action test, uint iterations = 100)
-    {
-        var config = Configuration.Create()
-            .WithTestingIterations(iterations)
-            .WithMaxSchedulingSteps(1000);
-
-        using var engine = TestingEngine.Create(config, test);
-        engine.Run();
-
-        var report = engine.TestReport;
-        if (report.NumOfFoundBugs > 0)
-        {
-            _output.WriteLine($"Found {report.NumOfFoundBugs} bug(s)!");
-            _output.WriteLine(engine.GetReport());
-            Assert.Fail($"Coyote found {report.NumOfFoundBugs} concurrency bug(s). See test output for details.");
-        }
-    }
+    private void RunConcurrencyStress(Action scenario, uint iterations = 100)
+        => ConcurrencyStress.Run(scenario, iterations, _output);
 
     // Since FileTransfer is hard to instantiate due to dependencies, we'll verify the semaphore logic
     // by creating a simplified model that mimics the exact logic in FileTransfer.
@@ -71,7 +53,7 @@ public class FileTransferConcurrencyTests
     [Fact]
     public void FileTransfer_OverflowSemaphore_LimitsConcurrency()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int maxConcurrency = 4;
             var model = new OverflowModel(maxConcurrency);
@@ -101,7 +83,7 @@ public class FileTransferConcurrencyTests
 
             Task.WaitAll(tasks.ToArray());
 
-            Specification.Assert(maxObservedInFlight <= maxConcurrency,
+            Assert.True(maxObservedInFlight <= maxConcurrency,
                 $"Exceeded max concurrency: {maxObservedInFlight} > {maxConcurrency}");
         });
     }

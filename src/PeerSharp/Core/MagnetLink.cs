@@ -1,4 +1,4 @@
-using PeerSharp.Internals.Utilities;
+﻿using PeerSharp.Internals.Utilities;
 using System.Text;
 using System.Web;
 
@@ -143,7 +143,7 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
             throw new FormatException(error);
         }
 
-        return result!;
+        return result;
     }
 
     /// <summary>

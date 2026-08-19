@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
@@ -58,7 +58,7 @@ internal class UdpListener : IUdpListener
     {
         if (_disposal.MarkDisposed())
         {
-            await StopAsync().ConfigureAwait(false);
+            await StopAsync(CancellationToken.None).ConfigureAwait(false);
         }
         GC.SuppressFinalize(this);
     }
@@ -169,7 +169,7 @@ internal class UdpListener : IUdpListener
         // Wait for processing task to complete synchronously
         try
         {
-            _processTask?.Wait(TimeSpan.FromSeconds(2));
+            _processTask?.Wait(TimeSpan.FromSeconds(2), CancellationToken.None);
         }
         catch (AggregateException ex)
         {
@@ -179,7 +179,7 @@ internal class UdpListener : IUdpListener
         // Wait for receive task to complete synchronously
         try
         {
-            _receiveTask?.Wait(TimeSpan.FromSeconds(2));
+            _receiveTask?.Wait(TimeSpan.FromSeconds(2), CancellationToken.None);
         }
         catch (AggregateException ex)
         {
@@ -304,7 +304,7 @@ internal class UdpListener : IUdpListener
 
                 if (_receiveChannel != null)
                 {
-                    await _receiveChannel.Writer.WriteAsync((data, remoteEndPoint)).ConfigureAwait(false);
+                    await _receiveChannel.Writer.WriteAsync((data, remoteEndPoint), CancellationToken.None).ConfigureAwait(false);
                 }
             }
             catch (ObjectDisposedException)

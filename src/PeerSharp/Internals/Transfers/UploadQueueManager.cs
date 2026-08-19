@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using System.Collections.Concurrent;
@@ -60,7 +60,7 @@ internal sealed class UploadQueueManager : IAsyncDisposable
         {
             try
             {
-                await Task.WhenAll(pumpTasks).WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+                await Task.WhenAll(pumpTasks).WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is TimeoutException or OperationCanceledException or AggregateException) { /* shutdown */ }
         }

@@ -1,4 +1,4 @@
-using PeerSharp.Internals.Framework;
+﻿using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
@@ -139,7 +139,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
             _buffer = newBuf;
         }
 
-        Array.Copy(data, 0, _buffer!, _bufferCount, data.Length);
+        Array.Copy(data, 0, _buffer, _bufferCount, data.Length);
         _bufferCount += data.Length;
 
         if (_initiator)
@@ -152,7 +152,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
                 }
 
                 byte[] keyB = new byte[96];
-                Array.Copy(_buffer!, 0, keyB, 0, 96);
+                Array.Copy(_buffer, 0, keyB, 0, 96);
                 _dh.ComputeSharedSecret(keyB);
 
                 Encryption = new ProtocolEncryption();
@@ -187,7 +187,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
                 }
 
                 byte[] keyA = new byte[96];
-                Array.Copy(_buffer!, 0, keyA, 0, 96);
+                Array.Copy(_buffer, 0, keyA, 0, 96);
                 _dh.ComputeSharedSecret(keyA);
 
                 Encryption = new ProtocolEncryption();
