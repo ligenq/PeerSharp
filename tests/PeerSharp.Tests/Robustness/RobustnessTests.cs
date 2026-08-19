@@ -1,8 +1,5 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
-using Microsoft.Coyote;
-using Microsoft.Coyote.Specifications;
-using Microsoft.Coyote.SystematicTesting;
 using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
@@ -11,6 +8,7 @@ using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utp;
 using PeerSharp.Internals.Network;
 using PeerSharp.Messages;
+using PeerSharp.Tests.Concurrency;
 
 namespace PeerSharp.Tests.Robustness;
 
@@ -18,7 +16,7 @@ namespace PeerSharp.Tests.Robustness;
 /// Robustness tests designed to hammer out remaining bugs through stress testing,
 /// edge cases, and concurrency exploration.
 /// </summary>
-[Collection("Coyote")]
+[Collection("Concurrency")]
 public class RobustnessTests
 {
     private readonly ITestOutputHelper _output;
@@ -30,23 +28,8 @@ public class RobustnessTests
 
     #region Test Infrastructure
 
-    private void RunCoyoteTest(Action test, uint iterations = 100)
-    {
-        var config = Configuration.Create()
-            .WithTestingIterations(iterations)
-            .WithMaxSchedulingSteps(1000);
-
-        using var engine = TestingEngine.Create(config, test);
-        engine.Run();
-
-        var report = engine.TestReport;
-        if (report.NumOfFoundBugs > 0)
-        {
-            _output.WriteLine($"Found {report.NumOfFoundBugs} bug(s)!");
-            _output.WriteLine(engine.GetReport());
-            Assert.Fail($"Coyote found {report.NumOfFoundBugs} concurrency bug(s). See test output for details.");
-        }
-    }
+    private void RunConcurrencyStress(Action scenario, uint iterations = 100)
+        => ConcurrencyStress.Run(scenario, iterations, _output);
 
     private class MockStorage : IStorage
     {
@@ -103,6 +86,8 @@ public class RobustnessTests
         }
 
         public void Init(IReadOnlyList<FileSelection>? selection = null) { }
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
+
         public Task InitAsync(IReadOnlyList<FileSelection>? selection = null, CancellationToken ct = default)
         {
             return Task.CompletedTask;
@@ -169,7 +154,7 @@ public class RobustnessTests
     [Fact]
     public void FileTransfer_ConcurrentPieceCompletion_OnlyOneWriteClaim()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int blocksPerPiece = 16;
             var piece = new PieceState(0, blocksPerPiece);
@@ -211,11 +196,11 @@ public class RobustnessTests
             Task.WaitAll(tasks.ToArray());
 
             // Invariant: exactly one thread should claim write responsibility
-            Specification.Assert(writeClaimCount == 1,
+            Assert.True(writeClaimCount == 1,
                 $"Expected 1 write claim, got {writeClaimCount}");
 
             // All blocks should be received
-            Specification.Assert(piece.ReceivedCount == blocksPerPiece,
+            Assert.True(piece.ReceivedCount == blocksPerPiece,
                 $"Expected {blocksPerPiece} blocks, got {piece.ReceivedCount}");
         });
     }
@@ -226,7 +211,7 @@ public class RobustnessTests
     [Fact]
     public void FileTransfer_DuplicateBlocks_OnlyOneAccepted()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int blocksPerPiece = 4;
             var piece = new PieceState(0, blocksPerPiece);
@@ -263,7 +248,7 @@ public class RobustnessTests
             Task.WaitAll(tasks.ToArray());
 
             // Each block index should only be added once
-            Specification.Assert(addSuccessCount == blocksPerPiece,
+            Assert.True(addSuccessCount == blocksPerPiece,
                 $"Expected {blocksPerPiece} successful adds, got {addSuccessCount}");
         });
     }
@@ -380,7 +365,7 @@ public class RobustnessTests
     [Fact]
     public void PeerManager_RapidConnectDisconnect_NoLeak()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var model = new PeerTrackingModel();
             var usedIds = new ConcurrentDictionary<int, bool>();
@@ -413,11 +398,11 @@ public class RobustnessTests
             // After all connect/disconnect cycles, should have no leaked resources
             var (peers, endpoints, count) = model.GetCounts();
 
-            Specification.Assert(peers == 0,
+            Assert.True(peers == 0,
                 $"Leaked {peers} peers");
-            Specification.Assert(endpoints == 0,
+            Assert.True(endpoints == 0,
                 $"Leaked {endpoints} endpoints");
-            Specification.Assert(count == 0,
+            Assert.True(count == 0,
                 $"Count mismatch: {count}");
         });
     }
@@ -428,7 +413,7 @@ public class RobustnessTests
     [Fact]
     public void PeerManager_DuplicateEndpoint_Rejected()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var model = new PeerTrackingModel();
             var sharedEndpoint = new IPEndPoint(IPAddress.Loopback, 6881);
@@ -458,11 +443,11 @@ public class RobustnessTests
             Task.WaitAll(tasks.ToArray());
 
             // Only one should succeed (endpoint is shared)
-            Specification.Assert(successCount == 1,
+            Assert.True(successCount == 1,
                 $"Expected 1 successful connection, got {successCount}");
 
             var (peers, endpoints, count) = model.GetCounts();
-            Specification.Assert(peers == 1 && endpoints == 1 && count == 1,
+            Assert.True(peers == 1 && endpoints == 1 && count == 1,
                 $"Inconsistent state: peers={peers}, endpoints={endpoints}, count={count}");
         });
     }
@@ -538,7 +523,7 @@ public class RobustnessTests
     [Fact]
     public void BlockCache_LruDictSync_MaintainsConsistency()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int blockSize = 16 * 1024;
             const int cacheCapacity = blockSize * 2; // Only 2 blocks fit
@@ -569,7 +554,7 @@ public class RobustnessTests
             // Cache should still be in valid state (no exceptions during dispose)
             cache.Dispose();
 
-            Specification.Assert(true, "Cache operations completed without corruption");
+            Assert.True(true, "Cache operations completed without corruption");
         });
     }
 
@@ -670,13 +655,13 @@ public class RobustnessTests
     }
 
     /// <summary>
-    /// Tests concurrent Start/Stop calls (Coyote).
+    /// Tests concurrent Start/Stop calls.
     /// Note: This test may find real concurrency issues in the Torrent state machine.
     /// </summary>
     [Fact]
     public void Torrent_ConcurrentStartStop_NoCorruption()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var metadata = new TorrentFileMetadata
             {
@@ -726,12 +711,12 @@ public class RobustnessTests
 
             // Should end in valid state
             var state = torrent.State;
-            Specification.Assert(
+            Assert.True(
                 state == TorrentState.Active || state == TorrentState.Stopped,
                 $"Invalid final state: {state}");
 
             // No unexpected exceptions
-            Specification.Assert(exceptions.IsEmpty,
+            Assert.True(exceptions.IsEmpty,
                 $"Unexpected exceptions: {string.Join(", ", exceptions.Select(e => e.Message))}");
 
             torrent.DisposeAsync().AsTask().GetAwaiter().GetResult();

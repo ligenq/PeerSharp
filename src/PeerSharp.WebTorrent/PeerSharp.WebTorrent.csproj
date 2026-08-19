@@ -1,11 +1,17 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<TargetFramework>net10.0</TargetFramework>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<WarningsAsErrors>CS8600;CS8602;CS8603;CS8604;CS8618;CS8620;CS8625;CS8655;CS8669</WarningsAsErrors>
+		<!-- Nullable analysis is escalated to errors so a null-flow mistake cannot merge. Mutation
+		     testing is the one context where that backfires: Stryker rewrites expressions to probe the
+		     tests, many rewrites produce a nullable warning, and an error makes the whole method
+		     unmutatable - 48% of generated mutants were discarded as compile errors on the first run.
+		     StrykerRun is set as an environment variable by the mutation job and reaches MSBuild as a
+		     global property; every ordinary build, local or CI, is unaffected. -->
+		<WarningsAsErrors Condition="'$(StrykerRun)' != 'true'">CS8600;CS8602;CS8603;CS8604;CS8618;CS8620;CS8625;CS8655;CS8669</WarningsAsErrors>
 		<Authors>Peerfluence</Authors>
 		<Copyright>Copyright (c) 2026 ligenq</Copyright>
 		<Description>Optional WebTorrent over WebRTC support for PeerSharp.</Description>
@@ -33,9 +39,9 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
 		<PackageReference Include="RtcForge" Version="1.0.0" />
-		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.29.0.143774">
+		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.32.0.713">
 			<PrivateAssets>all</PrivateAssets>
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>

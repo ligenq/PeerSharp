@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Extensions;
@@ -1153,7 +1153,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             {
                 try
                 {
-                    await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                    await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -1998,7 +1998,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 byte[] handshake = CreateHandshakeBuffer();
                 pe.InitialPayload = handshake;
                 var msg = pe.Initiate();
-                await stream.WriteAsync(msg).ConfigureAwait(false);
+                await stream.WriteAsync(msg, CancellationToken.None).ConfigureAwait(false);
             }
 
             byte[] buffer = new byte[4096];
@@ -2044,7 +2044,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
                 if (resp.Length > 0)
                 {
-                    await stream.WriteAsync(resp).ConfigureAwait(false);
+                    await stream.WriteAsync(resp, CancellationToken.None).ConfigureAwait(false);
                 }
             }
 
@@ -2790,7 +2790,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
-        await Stream!.WriteAsync(CreateHandshakeBuffer()).ConfigureAwait(false);
+        await Stream.WriteAsync(CreateHandshakeBuffer(), CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task SendLoopAsync(CancellationToken token)

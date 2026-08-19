@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using PeerSharp.WebTorrent.Configuration;
@@ -253,7 +253,11 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
     {
         try
         {
+            // S8969 is wrong here: removing the null-forgiving operator produces CS8602, so the
+            // compiler demonstrably does not know this is non-null. Verified by doing it.
+#pragma warning disable S8969
             await pending.Channel!.WaitUntilOpenAsync(cancellationToken).ConfigureAwait(false);
+#pragma warning restore S8969
             _onChannelOpened(pending, pending.Channel);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

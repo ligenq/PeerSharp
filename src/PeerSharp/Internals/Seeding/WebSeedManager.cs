@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
@@ -109,7 +109,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         {
             try
             {
-                await _workerTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                await _workerTask.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception)
             {

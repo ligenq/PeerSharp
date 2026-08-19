@@ -1,6 +1,4 @@
-using Microsoft.Coyote;
-using Microsoft.Coyote.SystematicTesting;
-using Microsoft.Extensions.Time.Testing;
+﻿using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using PeerSharp.BEncoding;
@@ -9,7 +7,7 @@ using System.Collections.Concurrent;
 
 namespace PeerSharp.Tests.Concurrency;
 
-[Collection("Coyote")]
+[Collection("Concurrency")]
 public class DhtConcurrencyTests
 {
     private readonly ITestOutputHelper _output;
@@ -19,23 +17,8 @@ public class DhtConcurrencyTests
         _output = output;
     }
 
-    private void RunCoyoteTest(Action test, uint iterations = 100)
-    {
-        var config = Configuration.Create()
-            .WithTestingIterations(iterations)
-            .WithMaxSchedulingSteps(1000);
-
-        using var engine = TestingEngine.Create(config, test);
-        engine.Run();
-
-        var report = engine.TestReport;
-        if (report.NumOfFoundBugs > 0)
-        {
-            _output.WriteLine($"Found {report.NumOfFoundBugs} bug(s)!");
-            _output.WriteLine(engine.GetReport());
-            Assert.Fail($"Coyote found {report.NumOfFoundBugs} concurrency bug(s). See test output for details.");
-        }
-    }
+    private void RunConcurrencyStress(Action scenario, uint iterations = 100)
+        => ConcurrencyStress.Run(scenario, iterations, _output);
 
     private class MockUdpListener : IUdpListener
     {
@@ -63,7 +46,7 @@ public class DhtConcurrencyTests
     [Fact]
     public void Dht_ConcurrentAddNode_MaintainsRoutingTableConsistency()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var listener = new MockUdpListener();
             var settings = new Settings();
@@ -71,7 +54,7 @@ public class DhtConcurrencyTests
 
             // Create manager via secure factory
             var dht = DhtManager.CreateSecure(listener, settings, null, timeProvider);
-            // DhtManager.StartAsync is usually awaited, but in Coyote test we might fire and forget or await
+            // DhtManager.StartAsync is usually awaited; here it may be fired and forgotten or awaited
             // StartAsync starts background maintenance loop.
             _ = dht.StartAsync();
 
@@ -123,7 +106,7 @@ public class DhtConcurrencyTests
     [Fact]
     public void Dht_ConcurrentGetPeers_NoDeadlocks()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var listener = new MockUdpListener();
             var settings = new Settings();

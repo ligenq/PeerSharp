@@ -1,4 +1,4 @@
-using PeerSharp.BEncoding;
+﻿using PeerSharp.BEncoding;
 using PeerSharp.Messages;
 
 namespace PeerSharp.Internals.Extensions;
@@ -45,7 +45,7 @@ internal class UtMetadata : IUtMetadata
         dict.Dict["piece"] = new BNumber(piece);
         dict.Dict["total_size"] = new BNumber(totalSize);
 
-        SendMessage(dict, data, RemoteMessageId!.Value);
+        SendMessage(dict, data, RemoteMessageId.Value);
     }
 
     public void SendReject(int piece)
@@ -59,7 +59,7 @@ internal class UtMetadata : IUtMetadata
         dict.Dict["msg_type"] = new BNumber((int)MessageType.Reject);
         dict.Dict["piece"] = new BNumber(piece);
 
-        SendMessage(dict, null, RemoteMessageId!.Value);
+        SendMessage(dict, null, RemoteMessageId.Value);
     }
 
     public void SendRequest(int piece)
