@@ -65,7 +65,7 @@ var settings = new Settings
         EnableLsd = options.LocalDiscovery,
         // Both, or two instances on one machine collide on UDP while appearing to have separate
         // ports - which is how the first IPv6 test ran with the leecher's DHT and uTP silently
-        // fighting the seeder's for 55125.
+        // fighting the seeder's for the default port.
         TcpPort = options.Port ?? new ConnectionSettings().TcpPort,
         UdpPort = options.Port ?? new ConnectionSettings().UdpPort,
         UpnpPortMapping = options.PortMap,

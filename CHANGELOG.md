@@ -32,6 +32,17 @@ stranger can make the DHT server spend, and what a consumer can see from outside
   iterative lookup from one node costs. Once more than 20,000 addresses are being tracked at once,
   sources that cannot be tracked individually draw on a shared allowance of 600 queries per minute
   rather than being waved through.
+- **The default listen port is now 6881, was 55125**, for both TCP and UDP. 55125 sat inside the
+  dynamic range (49152-65535), which the OS allocates outbound connections from and which Windows
+  reserves blocks of for Hyper-V, WSL and Docker; a bind inside a reserved block fails with a
+  permission error although nothing is listening, and the blocks move between reboots. 6881 is the
+  first of the range BitTorrent has used since the original client and the default in libtorrent,
+  qBittorrent and Deluge. Anyone forwarding a port through a router, or relying on the old default
+  from outside the process, should set `ConnectionSettings.TcpPort` and `UdpPort` explicitly.
+- **A listen port that cannot be bound no longer stops the engine starting.** The configured port is
+  tried, then the next ten, then an OS-assigned one, with a warning naming the port actually bound.
+  The bound port is written back to the settings and announced from there, so trackers and the DHT
+  stay consistent. Previously a busy or reserved UDP port failed startup outright.
 
 ### Added
 

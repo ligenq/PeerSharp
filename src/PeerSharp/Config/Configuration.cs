@@ -344,16 +344,31 @@ public sealed class ConnectionSettings
     public int StableSpeedThresholdBytesPerSec { get; set; } = 2_000_000;
 
     /// <summary>
-    /// The TCP port to listen on for incoming connections. Set to 0 for OS-assigned port.
-    /// Default is 55125. Use a value in the range 49152-65535 to avoid conflicts with system services.
+    /// The TCP port to listen on for incoming connections. Set to 0 for an OS-assigned port.
+    /// Default is 6881.
     /// </summary>
-    public ushort TcpPort { get; set; } = 55125;
+    /// <remarks>
+    /// <para>
+    /// 6881 is the first of the range BitTorrent has used since the original client, and the
+    /// default in libtorrent, qBittorrent and Deluge. Prefer a port below 49152. The range above it
+    /// is the dynamic range, which the OS hands out to outbound connections and which Windows
+    /// reserves blocks of for Hyper-V, WSL and Docker; a bind inside one of those reserved blocks
+    /// fails with a permission error even though nothing is listening, and the blocks move between
+    /// reboots. An earlier default of 55125 sat in that range.
+    /// </para>
+    /// <para>
+    /// If the port cannot be bound the engine tries the next few and then falls back to an
+    /// OS-assigned one rather than refusing to start, so a busy or reserved port costs inbound
+    /// reachability at worst. Set an explicit port when forwarding one through a router.
+    /// </para>
+    /// </remarks>
+    public ushort TcpPort { get; set; } = 6881;
 
     /// <summary>
-    /// The UDP port to listen on for DHT, uTP, and LSD. Set to 0 for OS-assigned port.
-    /// Default is 55125. It is recommended to use the same value as TcpPort for simplicity.
+    /// The UDP port to listen on for DHT, uTP, and LSD. Set to 0 for an OS-assigned port.
+    /// Default is 6881, matching <see cref="TcpPort"/>; see its remarks for how the port is chosen.
     /// </summary>
-    public ushort UdpPort { get; set; } = 55125;
+    public ushort UdpPort { get; set; } = 6881;
 
     /// <summary>
     /// Whether to attempt UPnP port mapping. Default is false.
