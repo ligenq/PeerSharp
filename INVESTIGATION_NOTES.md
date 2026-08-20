@@ -47,6 +47,32 @@ lock-free version was neither correct nor fast; the assumption that it was cheap
 
 ---
 
+## What generative testing found that the examples did not
+
+Two properties were added over pure, non-concurrent code, on the argument that the existing tests
+were thin for the arithmetic involved - `FileMapper` had four tests for the offset arithmetic of
+every read and write in the engine.
+
+`FileMapper` failed immediately, and CsCheck shrank the counterexample to something a person can
+check by hand: files of `[18, 0, 15]`, a 20-byte range from 0, of which only 18 bytes were covered.
+An empty file shares its cumulative offset with the file after it, so the binary search resolving an
+offset can return either; landing on the empty one gave a chunk size of zero, which the enumerator
+read as the end of the range. The remaining bytes were dropped silently. That is a data-loss bug in
+the write path - see the CHANGELOG entry - and it needs three files in a particular arrangement,
+which is why no example test had it.
+
+`PathValidator` did not fail, over 20,000 generated paths built from traversal sequences, UNC and
+drive-rooted prefixes, reserved device names, unstorable characters and trailing dots. That is worth
+recording as a negative result: the defences there are layered, and on Windows `..` is removed by the
+trailing-dot rewrite before the explicit traversal check ever sees it. Removing any single guard
+still yields a safe result, so the properties were confirmed to have teeth by removing all three at
+once, which they caught.
+
+The general lesson is the one the mutation work already suggested: the value is in the code where
+arithmetic meets an awkward edge case, not in the code that looks most dangerous.
+
+---
+
 ## The default listen port was unbindable, and nothing was listening on it
 
 Two tests began failing with `SocketException: An attempt was made to access a socket in a way

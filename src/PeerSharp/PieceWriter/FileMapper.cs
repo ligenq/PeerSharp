@@ -45,7 +45,7 @@ internal class FileMapper
                 return (_fileSizes.Length - 1, _fileSizes[^1]);
             }
 
-            return (idx, 0);
+            return (SkipEmptyFiles(idx), 0);
         }
 
         // Not found: ~idx is the index of the first element LARGER than globalOffset.
@@ -63,7 +63,36 @@ internal class FileMapper
             fileIndex = _fileSizes.Length - 1;
         }
 
+        fileIndex = SkipEmptyFiles(fileIndex);
+
         return (fileIndex, globalOffset - _cumulativeOffsets[fileIndex]);
+    }
+
+    /// <summary>
+    /// Moves past any empty files starting at this index.
+    /// </summary>
+    /// <remarks>
+    /// A zero-length file - which torrents may legitimately contain - shares its cumulative offset
+    /// with the file after it, so a binary search for that offset can settle on either. Landing on
+    /// the empty one used to end the walk: it has no room, the enumerator read that as the end of
+    /// the range, and every byte after the empty file was dropped from the operation list without
+    /// an error. Storage writes exactly what that list contains, so the tail of the block was never
+    /// written while the piece it belonged to still verified in memory and was recorded as present.
+    ///
+    /// <para>
+    /// Skipping forward is safe for any offset: a file with no bytes cannot be the one holding the
+    /// byte at this offset, and its successor starts at the very same cumulative offset, so the
+    /// offset within the file stays 0.
+    /// </para>
+    /// </remarks>
+    private int SkipEmptyFiles(int fileIndex)
+    {
+        while (fileIndex < _fileSizes.Length - 1 && _fileSizes[fileIndex] == 0)
+        {
+            fileIndex++;
+        }
+
+        return fileIndex;
     }
 
     /// <summary>
