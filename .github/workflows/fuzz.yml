@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [bencode, peer-message, torrent-metadata]
+        target: [bencode, peer-message, torrent-metadata, dht-compact]
 
     steps:
       - name: Checkout
