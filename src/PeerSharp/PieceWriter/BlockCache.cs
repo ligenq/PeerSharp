@@ -95,26 +95,27 @@ internal class BlockCache : IBlockCache
         // Write-Through: Write to storage first
         await _storage.WriteAsync(offset, data, ct).ConfigureAwait(false);
 
-        // Populate cache
-        // Data might be large (Piece Size e.g. 4MB). Slice it into blocks.
-        int len = data.Length;
-        int pos = 0;
-        long currentOffset = offset;
-
-        while (pos < len)
+        // Populate the cache, walking the aligned blocks this write touches rather than the write's
+        // own chunks. Every touched block ends up in one of two states and never in between: fully
+        // rewritten by this data and therefore refreshed, or only partly covered and therefore
+        // dropped.
+        //
+        // Dropping the partial ones is the part that matters. Only whole aligned blocks are cached,
+        // so an earlier version simply skipped a partial write here - leaving any block it overlapped
+        // holding pre-write bytes, which the next aligned read served in preference to storage. The
+        // last block of a torrent is partial, and repair and end-game rewrite blocks that have
+        // already been read, so this is reachable and it hands stale data to peers.
+        long end = offset + data.Length;
+        for (long blockOffset = offset / BlockSize * BlockSize; blockOffset < end; blockOffset += BlockSize)
         {
-            int chunkSize = Math.Min(BlockSize, len - pos);
-
-            // Only cache full 16KB blocks to maintain alignment invariant
-            if (chunkSize == BlockSize && currentOffset % BlockSize == 0)
+            if (blockOffset >= offset && blockOffset + BlockSize <= end)
             {
-                AddToCache(currentOffset, data.Slice(pos, chunkSize).Span);
+                AddToCache(blockOffset, data.Slice((int)(blockOffset - offset), BlockSize).Span);
             }
-            // If we strictly enforce 16KB, we skip partials at end of file/piece.
-            // This is acceptable for a block cache.
-
-            pos += chunkSize;
-            currentOffset += chunkSize;
+            else
+            {
+                Invalidate(blockOffset);
+            }
         }
     }
 
@@ -247,6 +248,22 @@ internal class BlockCache : IBlockCache
             var node = _lruList.AddLast(offset);
             _blocks.Add(offset, new CachedBlock(buffer, node));
             _currentBytes += BlockSize;
+        }
+    }
+
+    /// <summary>
+    /// Drops one block, if it is held, so the next read for it goes to storage.
+    /// </summary>
+    private void Invalidate(long offset)
+    {
+        lock (_lock)
+        {
+            if (_blocks.Remove(offset, out var block))
+            {
+                _lruList.Remove(block.Node);
+                _currentBytes -= BlockSize;
+                CachePool.Return(block.Data);
+            }
         }
     }
 
