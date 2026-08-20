@@ -83,6 +83,14 @@ stranger can make the DHT server spend, and what a consumer can see from outside
 - **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
   save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
   stayed in the bitfield and were persisted as present.
+- **The block cache could serve bytes that had since been overwritten.** Only whole aligned 16 KiB
+  blocks are cached, so a write that covered part of a block was written through to storage and then
+  skipped - leaving any cached copy of that block holding pre-write bytes, which the next aligned read
+  returned in preference to storage. Reachable whenever a partly-covered block had been read before:
+  the last block of a torrent is partial, and repair and end-game rewrite blocks that have already
+  been served. The stale bytes went to whichever peer asked for that block. Every block a write
+  touches is now either refreshed in full or dropped from the cache. Found by the new property tests
+  over `BlockCache`.
 - **A torrent containing an empty file could silently lose data.** Empty files are legal and nothing
   filtered them out, but one sitting between two other files shares a cumulative offset with its
   neighbour, and the binary search resolving an offset to a file could settle on the empty one. It
