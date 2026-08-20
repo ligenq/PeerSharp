@@ -83,6 +83,13 @@ stranger can make the DHT server spend, and what a consumer can see from outside
 - **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
   save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
   stayed in the bitfield and were persisted as present.
+- **A torrent containing an empty file could silently lose data.** Empty files are legal and nothing
+  filtered them out, but one sitting between two other files shares a cumulative offset with its
+  neighbour, and the binary search resolving an offset to a file could settle on the empty one. It
+  has no room, which the range walk read as the end of the range: every byte after the empty file was
+  dropped from the operation list without an error. Storage writes exactly that list, so the tail of
+  each affected block was never written, while the piece it belonged to was hashed in memory,
+  verified and recorded as present. Found by the new property tests over `FileMapper`.
 - **Bandwidth quota could be spent past its floor.** Spending added and then clamped as two separate
   interlocked steps, so a spend large enough to break the debt floor could be lifted back above it by
   a refund arriving in between; the clamp re-read a value that no longer needed clamping and the floor
