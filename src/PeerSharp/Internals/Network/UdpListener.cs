@@ -137,15 +137,7 @@ internal class UdpListener : IUdpListener
         else
         {
             var bindAddress = _settings.Connection.BindAddress;
-            if (bindAddress == null)
-            {
-                _client = _socketFactory.Create(_port);
-            }
-            else
-            {
-                _client = _socketFactory.Create(bindAddress.AddressFamily);
-                _client.Client.Bind(new IPEndPoint(bindAddress, _port));
-            }
+            _client = ListenPortBinder.Bind(_port, port => CreateBoundSocket(bindAddress, port), _logger, "UDP");
             _logger.LogInformation("UDP listener bound to {LocalEndPoint}", _client.Client.LocalEndPoint);
         }
 
@@ -160,6 +152,30 @@ internal class UdpListener : IUdpListener
 
         _processTask = ProcessLoopAsync(_cts.Token);
         _receiveTask = ReceiveLoopAsync();
+    }
+
+    /// <summary>
+    /// Creates a socket bound to one candidate port, leaking nothing if the bind fails.
+    /// </summary>
+    private IUdpSocket CreateBoundSocket(IPAddress? bindAddress, int port)
+    {
+        if (bindAddress == null)
+        {
+            return _socketFactory.Create(port);
+        }
+
+        var client = _socketFactory.Create(bindAddress.AddressFamily);
+        try
+        {
+            client.Client.Bind(new IPEndPoint(bindAddress, port));
+            return client;
+        }
+        catch
+        {
+            // The binder retries on the next port, so this socket must not outlive the attempt.
+            client.Dispose();
+            throw;
+        }
     }
 
     public void Stop()

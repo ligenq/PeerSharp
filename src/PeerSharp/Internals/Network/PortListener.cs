@@ -72,8 +72,7 @@ internal class PortListener : IPortListener
         Port = port;
         try
         {
-            _tcpListener = _tcpFactory.Create(_bindAddress ?? IPAddress.Any, port);
-            _tcpListener.Start();
+            _tcpListener = ListenPortBinder.Bind(port, CreateStartedListener, _logger, "TCP");
             var cts = new CancellationTokenSource();
             _acceptCts = cts;
 
@@ -95,6 +94,25 @@ internal class PortListener : IPortListener
             {
                 throw;
             }
+        }
+    }
+
+    /// <summary>
+    /// Creates and starts a listener on one candidate port, leaking nothing if the bind fails.
+    /// </summary>
+    private ITcpListener CreateStartedListener(int port)
+    {
+        var listener = _tcpFactory.Create(_bindAddress ?? IPAddress.Any, port);
+        try
+        {
+            listener.Start();
+            return listener;
+        }
+        catch
+        {
+            // The binder retries on the next port, so this listener must not outlive the attempt.
+            listener.Stop();
+            throw;
         }
     }
 

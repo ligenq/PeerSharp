@@ -47,6 +47,42 @@ lock-free version was neither correct nor fast; the assumption that it was cheap
 
 ---
 
+## The default listen port was unbindable, and nothing was listening on it
+
+Two tests began failing with `SocketException: An attempt was made to access a socket in a way
+forbidden by its access permissions` (`WSAEACCES`) on a machine where they had passed hours earlier,
+with no relevant code change in between.
+
+The cause was the host, not the engine. Windows reserves blocks of the dynamic port range for
+Hyper-V, WSL and Docker, and `netsh int ipv4 show excludedportrange protocol=udp` showed
+54981-55280 reserved — which contains the then-default `UdpPort` of 55125. Binding it directly:
+
+| UDP port | result |
+| --- | --- |
+| 55125 (old default) | `AccessDenied` |
+| 55080, 55181 | `AccessDenied` |
+| 6881 (new default) | binds |
+
+Nothing was listening on any of them. These reservations are assigned at boot and move, so a port
+that works today can be unbindable tomorrow, which makes any fixed default in 49152-65535 a
+liability rather than a choice. What other implementations do:
+
+| Implementation | Default |
+| --- | --- |
+| libtorrent | 6881, then the next ports, then OS-assigned |
+| qBittorrent | 6881 |
+| Deluge | 6881-6891 |
+| Transmission | 51413 (inside the dynamic range) |
+| MonoTorrent | 0 — OS-assigned |
+| PeerSharp, previously | 55125, no fallback, hard failure |
+
+The number was changed to 6881, but the number is the smaller half of the fix: libtorrent's
+behaviour of walking forward and then falling back to an OS-assigned port is what makes the choice
+survive a host that has taken it. PeerSharp already writes the bound port back into settings and
+announces from there, so the fallback needed no other plumbing.
+
+---
+
 ## August 2026 improvement cleanup: implemented
 
 The following former future-work entries were implemented together, starting with privacy and
