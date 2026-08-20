@@ -49,21 +49,52 @@ internal sealed class PieceStateManager : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Adds a piece, replacing and disposing any piece already held for that index.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Written as an explicit add-or-update loop rather than with
+    /// <see cref="ConcurrentDictionary{TKey, TValue}.AddOrUpdate(TKey, Func{TKey, TValue}, Func{TKey, TValue, TValue})"/>,
+    /// because that method's factories carry no promise of running once, or of the branch that ran
+    /// being the branch that won. An earlier version set a flag inside the add factory and
+    /// incremented the count from it, which counted additions that had in fact become updates: the
+    /// count drifted upwards under concurrent starts, and only upwards. It gates how many pieces may
+    /// be in flight, so drifting up means the engine gradually stops starting pieces it has room
+    /// for. <c>TryAdd</c> and <c>TryUpdate</c> each report what they actually did.
+    /// </para>
+    /// <para>
+    /// The replaced piece is disposed here. It leaves the dictionary unreachable, and it owns pooled
+    /// block buffers that are never returned otherwise.
+    /// </para>
+    /// </remarks>
     public void AddOrReplacePiece(PieceState state)
     {
-        bool added = false;
-        _activePieces.AddOrUpdate(
-            state.Index,
-            _ =>
-            {
-                added = true;
-                return state;
-            },
-            (_, __) => state);
-
-        if (added)
+        while (true)
         {
-            Interlocked.Increment(ref _activePiecesCount);
+            if (_activePieces.TryAdd(state.Index, state))
+            {
+                Interlocked.Increment(ref _activePiecesCount);
+                return;
+            }
+
+            if (!_activePieces.TryGetValue(state.Index, out var existing))
+            {
+                // Removed between the two calls; go round and add it.
+                continue;
+            }
+
+            if (ReferenceEquals(existing, state))
+            {
+                return;
+            }
+
+            if (_activePieces.TryUpdate(state.Index, state, existing))
+            {
+                // One piece replaced one piece, so the count is unchanged.
+                existing.Dispose();
+                return;
+            }
         }
     }
 

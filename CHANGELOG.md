@@ -83,6 +83,15 @@ stranger can make the DHT server spend, and what a consumer can see from outside
 - **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
   save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
   stayed in the bitfield and were persisted as present.
+- **The count of pieces in flight drifted upwards, and only upwards.** Replacing an active piece used
+  `ConcurrentDictionary.AddOrUpdate` and incremented a separate counter from inside the add factory,
+  which neither runs exactly once nor necessarily belongs to the branch that won - so concurrent
+  starts counted additions that had in fact been updates. That counter caps how many pieces may be
+  downloaded at once, so as it drifted the engine started fewer and fewer pieces than it had room
+  for, and pruning fired when it should not have. Blocks arrive on whichever peer's thread received
+  them, so the race is ordinary rather than rare. The same path also dropped the piece it replaced
+  without disposing it, leaking its pooled block buffers for the life of the process. Found by the
+  new property tests over `PieceStateManager`.
 - **The block cache could serve bytes that had since been overwritten.** Only whole aligned 16 KiB
   blocks are cached, so a write that covered part of a block was written through to storage and then
   skipped - leaving any cached copy of that block holding pre-write bytes, which the next aligned read
