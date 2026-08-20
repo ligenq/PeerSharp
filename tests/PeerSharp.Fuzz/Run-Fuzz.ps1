@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('bencode', 'peer-message')]
+    [ValidateSet('bencode', 'peer-message', 'torrent-metadata')]
     [string] $Target,
 
     [string] $Configuration = 'Release',

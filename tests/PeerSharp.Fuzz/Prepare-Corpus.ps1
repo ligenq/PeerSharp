@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('bencode', 'peer-message')]
+    [ValidateSet('bencode', 'peer-message', 'torrent-metadata')]
     [string] $Target,
 
     [Parameter(Mandatory = $true)]
@@ -15,7 +15,7 @@ $resolvedOutput = [System.IO.Path]::GetFullPath($OutputDirectory)
 Get-ChildItem -LiteralPath $sourceDirectory -File | ForEach-Object {
     $destination = Join-Path $resolvedOutput ($_.BaseName + '.seed')
 
-    if ($Target -eq 'peer-message') {
+    if ($Target -ne 'bencode') {
         $hex = (Get-Content -LiteralPath $_.FullName -Raw) -replace '\s', ''
         [System.IO.File]::WriteAllBytes($destination, [Convert]::FromHexString($hex))
     }
