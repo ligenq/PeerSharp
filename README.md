@@ -40,6 +40,14 @@ dotnet add package PeerSharp --version 3.2.0
 
 Requires .NET 10.0 or later.
 
+### Release integrity
+
+Each GitHub release includes SPDX SBOMs for `PeerSharp` and `PeerSharp.WebTorrent` alongside the NuGet and symbol packages. Release packages have signed GitHub build-provenance and SBOM attestations. After downloading a package, verify its origin with the GitHub CLI:
+
+```bash
+gh attestation verify PeerSharp.3.2.0.nupkg --repo ligenq/PeerSharp
+```
+
 ### Basic Usage
 
 ```csharp

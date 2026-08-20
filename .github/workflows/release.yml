@@ -11,6 +11,7 @@ on:
 permissions:
   contents: write
   id-token: write # required for Trusted Publishing: enables GitHub OIDC token issuance
+  attestations: write
 
 concurrency:
   group: release
@@ -58,19 +59,61 @@ jobs:
           fi
 
       - name: Restore
-        run: dotnet restore PeerSharp.slnx
+        run: |
+          dotnet restore PeerSharp.slnx
+          dotnet tool restore
 
       - name: Build (warnings as errors)
         run: dotnet build PeerSharp.slnx --no-restore --configuration Release -warnaserror
 
       - name: Test
-        run: dotnet test PeerSharp.slnx --no-build --configuration Release --logger "console;verbosity=minimal"
+        # The repository uses Microsoft.Testing.Platform. Its .NET 10 CLI requires an explicit
+        # solution option and does not support VSTest's --logger argument.
+        run: dotnet test --solution PeerSharp.slnx --no-build --configuration Release --no-ansi --output Normal
 
       - name: Pack
         run: |
           dotnet pack src/PeerSharp/PeerSharp.csproj --no-build --configuration Release --output packages
           dotnet pack src/PeerSharp.WebTorrent/PeerSharp.WebTorrent.csproj --no-build --configuration Release --output packages
           ls -l packages
+
+      - name: Generate and validate release SBOMs
+        shell: pwsh
+        run: ./tools/generate-release-sboms.ps1 -Version '${{ steps.version.outputs.version }}'
+
+      - name: Upload release candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: PeerSharp-${{ steps.version.outputs.version }}-release
+          path: packages/*
+          if-no-files-found: error
+
+      - name: Attest release provenance
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            packages/*.nupkg
+            packages/*.snupkg
+            packages/*.spdx.json
+
+      - name: Attest PeerSharp SBOM
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            packages/PeerSharp.${{ steps.version.outputs.version }}.nupkg
+            packages/PeerSharp.${{ steps.version.outputs.version }}.snupkg
+          sbom-path: packages/PeerSharp.${{ steps.version.outputs.version }}.spdx.json
+
+      - name: Attest PeerSharp.WebTorrent SBOM
+        if: ${{ !inputs.dry_run }}
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            packages/PeerSharp.WebTorrent.${{ steps.version.outputs.version }}.nupkg
+            packages/PeerSharp.WebTorrent.${{ steps.version.outputs.version }}.snupkg
+          sbom-path: packages/PeerSharp.WebTorrent.${{ steps.version.outputs.version }}.spdx.json
 
       # Trusted Publishing: exchange the GitHub OIDC token for a short-lived (1h) NuGet API
       # key. No stored secrets; nuget.org validates this workflow against the trusted
@@ -102,6 +145,7 @@ jobs:
           gh release create "v${{ steps.version.outputs.version }}"
           packages/*.nupkg
           packages/*.snupkg
+          packages/*.spdx.json
           --title "v${{ steps.version.outputs.version }}"
           --generate-notes
           --target "${{ github.sha }}"
