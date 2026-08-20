@@ -87,6 +87,24 @@ The routing table turned up only a contract wart - `GetAllNodes(0)` returned one
 loop adds before testing its limit. Its one caller already refuses a limit of zero, so nothing was
 reachable, but a limit a method does not keep is a trap for the next caller.
 
+### A property test that exercised nothing
+
+The file handle cache came through clean, and the check that this meant anything very nearly did not
+happen. Deleting the reference-count guard from its eviction path - the mutation that should let it
+close a handle somebody was still holding - failed no generated sequence at all, while an existing
+example test caught it immediately.
+
+Two reasons, both worth remembering. The cache floors its limit with `Math.Max(32, maxOpenFiles)`, so
+the limit of 2 the test asked for was silently 32, and with five files eviction never ran once. And
+even after raising the file count, the case where a careless eviction differs from a careful one only
+arises when the *least recently used* handle is still leased, which needs more handles held at once
+than the cache will keep - so the generator had to be weighted heavily towards acquiring before it
+reached the state at all.
+
+The lesson is not about this cache. A property test can pass for the same reason an empty test file
+passes, and nothing in the output distinguishes the two. Only mutating the code says which one
+happened, and it is worth doing before believing a clean run means anything.
+
 The general lesson is the one the mutation work already suggested: the value is in the code where
 arithmetic meets an awkward edge case, not in the code that looks most dangerous. Three of the five
 subjects picked on that basis had a bug in them; the two chosen because they sounded dangerous, the
