@@ -6,6 +6,47 @@ work; genuinely open items live in [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENT
 
 ---
 
+## Property-based concurrency testing: what the parameters have to be to find anything
+
+CsCheck's `SampleParallel` checks linearizability: it runs generated operations concurrently, then
+asks whether the observed final state matches *any* sequential ordering of them. Whether it finds
+anything depends entirely on how much interleaving the parameters buy.
+
+Measured against `BandwidthChannel` with its atomicity deleted (`AddSaturating`'s compare-and-swap
+loop replaced by a plain read-modify-write):
+
+| `maxParallelOperations` | `iter` | `threads` | mutant | runtime |
+| --- | --- | --- | --- | --- |
+| 4 | 200 | 2 | **survived** | 0.7 s |
+| 8 | 5000 | 4 | killed 5/5 | 0.9 s |
+
+The first row is the Coyote failure repeating: a concurrency test that passes against an
+implementation with its synchronisation removed. The cost of the second row is nil, so there is no
+trade-off to weigh here — the weak settings simply bought nothing. `PieceState` needed the same
+treatment: at `iter: 300` it killed its mutant 4 times in 5, at `iter: 2000` 8 times in 8.
+
+Strengthening the bandwidth test then failed against unmodified code, roughly twice in thirteen runs,
+which was a real defect rather than flakiness — see the CHANGELOG entry on the quota floor. CsCheck
+shrank it to three operations and printed the valid orderings beside the observed state, which is
+what made it diagnosable at all.
+
+### The fix was also faster
+
+Replacing the interlocked add-then-clamp with one short critical section, measured against the
+previous implementation on the same machine, 80% spends / 18% refunds / 2% refills:
+
+| threads | interlocked | `Lock` | |
+| --- | --- | --- | --- |
+| 1 | 43.8M ops/s | 57.4M ops/s | 1.31x |
+| 2 | 14.0M ops/s | 27.6M ops/s | 1.97x |
+| 4 | 11.3M ops/s | 25.7M ops/s | 2.26x |
+| 8 | 7.8M ops/s | 23.3M ops/s | 2.98x |
+
+Two nested compare-and-swap retry loops per call cost more under contention than taking a lock. The
+lock-free version was neither correct nor fast; the assumption that it was cheaper is what kept it.
+
+---
+
 ## August 2026 improvement cleanup: implemented
 
 The following former future-work entries were implemented together, starting with privacy and

@@ -7,11 +7,29 @@ internal interface IBandwidthUser
     void AssignBandwidth(int amount);
 }
 
+/// <summary>
+/// A token bucket of transfer quota for one direction of one torrent.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Callers are concurrent by design: <see cref="BandwidthManager"/> spends quota from a deliberately
+/// lock-free fast path, on whichever peer thread wants to send, while its tick loop refills every
+/// channel from another thread entirely.
+/// </para>
+/// <para>
+/// Each mutator therefore commits as one step. An earlier version added and then clamped in a
+/// separate interlocked operation, which is not the same thing: a spend large enough to break the
+/// debt floor could be lifted back above it by a concurrent refund arriving between the two, so the
+/// clamp re-read a value that no longer needed clamping and the floor went unenforced. The property
+/// test in PropertyBasedConcurrencyTests reproduces exactly that interleaving, and no combination of
+/// separate interlocked steps fixes it, because the pair is what has to be atomic - not each half.
+/// </para>
+/// </remarks>
 internal class BandwidthChannel
 {
-    // Multiple threads can call UpdateQuota, UseQuota, ReturnQuota simultaneously
-    private long _limit;
+    private readonly Lock _lock = new();
 
+    private long _limit;
     private long _quota;
     private long _subQuota;
 
@@ -21,6 +39,13 @@ internal class BandwidthChannel
         _quota = 0;
     }
 
+    /// <summary>
+    /// The quota available to spend now, or <see cref="int.MaxValue"/> when the channel is unlimited.
+    /// </summary>
+    /// <remarks>
+    /// Read without taking the lock. Every mutator commits <c>_quota</c> in a single store, so this
+    /// observes a value the channel genuinely held rather than a torn or half-applied one.
+    /// </remarks>
     public int AvailableQuota
     {
         get
@@ -43,8 +68,7 @@ internal class BandwidthChannel
             return true;
         }
 
-        long quota = Interlocked.Read(ref _quota);
-        return quota >= amount;
+        return Interlocked.Read(ref _quota) >= amount;
     }
 
     public long GetLimit()
@@ -53,150 +77,112 @@ internal class BandwidthChannel
     }
 
     /// <summary>
-    /// Returns unused bandwidth quota back to the channel.
-    /// Thread-safe using Interlocked operations.
+    /// Returns unused quota to the channel, up to the burst ceiling.
     /// </summary>
     public void ReturnQuota(int amount)
     {
-        long limit = Interlocked.Read(ref _limit);
-        if (limit == 0 || amount <= 0)
+        if (amount <= 0)
         {
             return;
         }
 
-        long newQuota = AddSaturating(ref _quota, amount);
-
-        // Cap to prevent quota from growing unboundedly
-        long maxQuota = SaturatingTriple(limit);
-        if (maxQuota > 0 && newQuota > maxQuota)
+        lock (_lock)
         {
-            // Atomically clamp to max using CompareExchange loop
-            long current;
-            do
+            if (_limit == 0)
             {
-                current = Interlocked.Read(ref _quota);
-                if (current <= maxQuota)
-                {
-                    break;
-                }
-            } while (Interlocked.CompareExchange(ref _quota, maxQuota, current) != current);
+                return;
+            }
+
+            Interlocked.Exchange(ref _quota, Math.Min(SaturatingTriple(_limit), AddSaturating(_quota, amount)));
         }
     }
 
+    /// <summary>
+    /// Sets the channel's rate in bytes per second, or 0 for unlimited.
+    /// </summary>
+    /// <remarks>
+    /// Takes the lock like the other mutators. The limit is what every one of them clamps against,
+    /// so changing it outside would let a spend read one limit and enforce a ceiling derived from
+    /// another - the same split-step problem the mutators exist to avoid, and reachable in practice
+    /// because limits are reconfigured while transfers are running.
+    /// </remarks>
     public void SetLimit(long limit)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(limit);
-        Interlocked.Exchange(ref _limit, limit);
+
+        lock (_lock)
+        {
+            Interlocked.Exchange(ref _limit, limit);
+        }
     }
 
+    /// <summary>
+    /// Refills the channel for <paramref name="dt"/> milliseconds of elapsed time.
+    /// </summary>
     public void UpdateQuota(int dt)
     {
-        long limit = Interlocked.Read(ref _limit);
-        if (limit == 0)
+        lock (_lock)
         {
-            return;
-        }
-
-        // Add to quota based on time passed and limit
-        // limit is bytes/sec. dt is ms.
-        // quota += limit * dt / 1000
-
-        long newQuota = limit > long.MaxValue / dt ? long.MaxValue : limit * dt;
-        long quotaDelta = newQuota / 1000;
-        long subQuotaDelta = newQuota % 1000;
-
-        long newSubQuota = Interlocked.Add(ref _subQuota, subQuotaDelta);
-
-        // Handle overflow from subQuota to quota
-        if (newSubQuota >= 1000)
-        {
-            // Atomically transfer overflow: subQuota -= 1000, quota += 1
-            long actualSubQuota = Interlocked.Add(ref _subQuota, -1000);
-            if (actualSubQuota >= 0)
+            if (_limit == 0)
             {
-                quotaDelta++; // Add overflow to quota delta
+                return;
             }
-            else
+
+            // _limit is bytes/sec and dt is ms, so the refill is limit * dt / 1000. The remainder is
+            // carried in _subQuota rather than discarded, or a channel ticked often enough would be
+            // rounded down to a standstill.
+            long generated = _limit > long.MaxValue / dt ? long.MaxValue : _limit * dt;
+            long delta = generated / 1000;
+
+            long subQuota = _subQuota + (generated % 1000);
+            if (subQuota >= 1000)
             {
-                // Race: another thread already processed overflow, undo our subtraction
-                Interlocked.Add(ref _subQuota, 1000);
+                delta += subQuota / 1000;
+                subQuota %= 1000;
             }
-        }
 
-        // Add quota delta
-        long newTotalQuota = AddSaturating(ref _quota, quotaDelta);
+            _subQuota = subQuota;
 
-        // Cap quota to avoid huge bursts after idle time
-        // libtorrent caps at 3 * limit usually
-        long maxQuota = SaturatingTriple(limit);
-        if (maxQuota > 0 && newTotalQuota > maxQuota)
-        {
-            // Atomically clamp to max using CompareExchange
-            long current;
-            do
-            {
-                current = Interlocked.Read(ref _quota);
-                if (current <= maxQuota)
-                {
-                    break;
-                }
-            } while (Interlocked.CompareExchange(ref _quota, maxQuota, current) != current);
+            // Cap the bucket so an idle channel cannot bank an unbounded burst. libtorrent uses the
+            // same 3x ceiling.
+            Interlocked.Exchange(ref _quota, Math.Min(SaturatingTriple(_limit), AddSaturating(_quota, delta)));
         }
     }
 
+    /// <summary>
+    /// Spends quota, allowing bounded debt.
+    /// </summary>
+    /// <remarks>
+    /// Quota may go negative: callers check and spend as two steps, so concurrent senders can commit
+    /// to more than the bucket held. That is temporary over-allocation and the next refill absorbs
+    /// it. The floor is what stops the debt growing without bound.
+    /// </remarks>
     public void UseQuota(int amount)
     {
-        long limit = Interlocked.Read(ref _limit);
-        if (limit == 0)
+        lock (_lock)
         {
-            return;
-        }
-
-        // Note: Quota can go negative if multiple threads check-then-use simultaneously
-        // This is acceptable - it represents temporary over-allocation that will be
-        // corrected on the next UpdateQuota cycle. We only prevent extreme negative values.
-        long newQuota = AddSaturating(ref _quota, -amount);
-
-        // Prevent quota from going below -maxQuota (prevents unbounded debt)
-        long minQuota = -SaturatingTriple(limit);
-        if (newQuota < minQuota)
-        {
-            // Clamp to minimum using CompareExchange loop
-            long current;
-            do
+            if (_limit == 0)
             {
-                current = Interlocked.Read(ref _quota);
-                if (current >= minQuota)
-                {
-                    break;
-                }
-            } while (Interlocked.CompareExchange(ref _quota, minQuota, current) != current);
+                return;
+            }
+
+            Interlocked.Exchange(ref _quota, Math.Max(-SaturatingTriple(_limit), AddSaturating(_quota, -amount)));
         }
     }
 
-    private static long AddSaturating(ref long location, long value)
+    private static long AddSaturating(long current, long value)
     {
-        long current;
-        long next;
-        do
+        if (value > 0 && current > long.MaxValue - value)
         {
-            current = Interlocked.Read(ref location);
-            if (value > 0 && current > long.MaxValue - value)
-            {
-                next = long.MaxValue;
-            }
-            else if (value < 0 && current < long.MinValue - value)
-            {
-                next = long.MinValue;
-            }
-            else
-            {
-                next = current + value;
-            }
+            return long.MaxValue;
         }
-        while (Interlocked.CompareExchange(ref location, next, current) != current);
 
-        return next;
+        if (value < 0 && current < long.MinValue - value)
+        {
+            return long.MinValue;
+        }
+
+        return current + value;
     }
 
     private static long SaturatingTriple(long value) => value > long.MaxValue / 3 ? long.MaxValue : value * 3;

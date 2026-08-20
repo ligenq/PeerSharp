@@ -72,6 +72,12 @@ stranger can make the DHT server spend, and what a consumer can see from outside
 - **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
   save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
   stayed in the bitfield and were persisted as present.
+- **Bandwidth quota could be spent past its floor.** Spending added and then clamped as two separate
+  interlocked steps, so a spend large enough to break the debt floor could be lifted back above it by
+  a refund arriving in between; the clamp re-read a value that no longer needed clamping and the floor
+  went unenforced. Quota is spent from a deliberately lock-free path while a tick loop refills it, so
+  the interleaving is reachable. Each operation now commits in one step, which also made the channel
+  faster under contention — the previous version retried two nested compare-and-swap loops per call.
 
 ### Changed
 
