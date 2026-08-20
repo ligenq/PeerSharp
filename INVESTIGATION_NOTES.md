@@ -68,8 +68,29 @@ trailing-dot rewrite before the explicit traversal check ever sees it. Removing 
 still yields a safe result, so the properties were confirmed to have teeth by removing all three at
 once, which they caught.
 
+A second round covered bencode's round trip, the DHT routing table and the block cache. The cache
+failed the same way, and shrank just as usefully: read a 16 KiB block, write 16383 bytes over it,
+read it again and get the bytes from before the write. Only whole aligned blocks are cached, so the
+partial write was written through to storage and skipped here - without dropping the copy the cache
+was still holding. Again a data bug, again in arithmetic around an edge case, again three operations
+to reproduce and none of them exotic.
+
+Bencode passed, which was worth confirming for one property in particular: keys must be written in
+ascending *byte* order, because an info hash is the hash of the encoded dictionary and an encoder
+that orders keys its own way computes a hash no other client agrees with. The current code sorts with
+`StringComparer.Ordinal` over keys the parser decoded as Latin1, where one char is one byte, so
+ordinal order is byte order. That is correct and it is fragile: changing the key encoding to UTF-8
+would look like a tidy-up and would silently break every info hash the engine computes. The property
+now pins it.
+
+The routing table turned up only a contract wart - `GetAllNodes(0)` returned one node, because the
+loop adds before testing its limit. Its one caller already refuses a limit of zero, so nothing was
+reachable, but a limit a method does not keep is a trap for the next caller.
+
 The general lesson is the one the mutation work already suggested: the value is in the code where
-arithmetic meets an awkward edge case, not in the code that looks most dangerous.
+arithmetic meets an awkward edge case, not in the code that looks most dangerous. Three of the five
+subjects picked on that basis had a bug in them; the two chosen because they sounded dangerous, the
+path validator and the DHT codecs, did not.
 
 ---
 

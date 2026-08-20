@@ -284,6 +284,15 @@ internal class RoutingTable
     public List<NodeInfo> GetAllNodes(int maxNodes = 500)
     {
         var nodes = new List<NodeInfo>();
+
+        // The loop below adds a node and then tests the limit, which is right for any positive
+        // limit and returns one node for a limit of zero. No caller asks for none today - the only
+        // one there is refuses that itself - but a limit is the method's own promise to keep.
+        if (maxNodes <= 0)
+        {
+            return nodes;
+        }
+
         lock (_lock)
         {
             foreach (var bucket in _buckets)
