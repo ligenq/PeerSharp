@@ -23,7 +23,6 @@ internal class MockUdpListener : IUdpListener, IDisposable
         return Task.CompletedTask;
     }
 
-    public void Stop() { }
 
     public Task StopAsync(CancellationToken cancellationToken = default)
     {

@@ -38,7 +38,6 @@ public class DhtConcurrencyTests
         }
 
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public void Stop() { }
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

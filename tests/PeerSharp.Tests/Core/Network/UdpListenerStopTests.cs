@@ -6,7 +6,7 @@ using System.Net.Sockets;
 namespace PeerSharp.Tests.Core.Network;
 
 /// <summary>
-/// The synchronous shutdown of the UDP listener.
+/// Shutting down the UDP listener.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -16,15 +16,14 @@ namespace PeerSharp.Tests.Core.Network;
 /// never returns holds up shutdown.
 /// </para>
 /// <para>
-/// <see cref="UdpListener.Stop"/> is on the listener interface but the engine only calls
-/// <c>StopAsync</c>, so nothing was exercising it - which is exactly how a synchronous variant rots
-/// into something that deadlocks the first time somebody reaches for it.
+/// The listener used to carry a synchronous <c>Stop</c> beside this one that nothing called; it was
+/// removed rather than tested, and these assertions moved onto the method the engine actually uses.
 /// </para>
 /// </remarks>
 public class UdpListenerStopTests
 {
     [Fact(Timeout = 30_000)]
-    public async Task StopEndsBothLoopsAndReleasesTheSocket()
+    public async Task StoppingEndsBothLoopsAndReleasesTheSocket()
     {
         var factory = new StopTestSocketFactory();
         var listener = new UdpListener(0, factory, new Settings());
@@ -41,13 +40,13 @@ public class UdpListenerStopTests
             await Task.Delay(10, TestContext.Current.CancellationToken);
         }
 
-        listener.Stop();
+        await listener.StopAsync(TestContext.Current.CancellationToken);
 
         Assert.True(factory.Socket.Closed, "the socket was left open after Stop");
     }
 
     [Fact(Timeout = 30_000)]
-    public async Task StopReturnsEvenWhenAReceiveIgnoresCancellation()
+    public async Task StoppingReturnsEvenWhenAReceiveIgnoresCancellation()
     {
         // A socket implementation that does not honour the token is the case the timed waits exist
         // for. Stop must give up on the loops rather than block shutdown behind them.
@@ -57,7 +56,7 @@ public class UdpListenerStopTests
 
         await listener.StartAsync(TestContext.Current.CancellationToken);
 
-        listener.Stop();
+        await listener.StopAsync(TestContext.Current.CancellationToken);
 
         Assert.True(factory.Socket.Closed);
     }
@@ -72,32 +71,31 @@ public class UdpListenerStopTests
 
         await listener.StartAsync(TestContext.Current.CancellationToken);
 
-        listener.Stop();
-        listener.Stop();
+        await listener.StopAsync(TestContext.Current.CancellationToken);
+        await listener.StopAsync(TestContext.Current.CancellationToken);
 
         Assert.True(factory.Socket.Closed);
     }
 
     [Fact(Timeout = 30_000)]
-    public void StopBeforeStartIsHarmless()
+    public async Task StoppingBeforeStartingIsHarmless()
     {
         // Nothing has been created yet, so there is nothing to wait on and nothing to close.
         var listener = new UdpListener(0, new StopTestSocketFactory(), new Settings());
 
-        listener.Stop();
+        await listener.StopAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact(Timeout = 30_000)]
-    public async Task StopFollowedByStopAsyncStillCompletes()
+    public async Task StoppingAfterDisposalStillCompletes()
     {
-        // Both variants exist and the engine uses the asynchronous one, so the pair has to compose:
-        // whichever ran first, the second must return rather than wait on loops already gone.
+        // Shutdown paths overlap, so a stop can follow a disposal that already tore everything down.
         var factory = new StopTestSocketFactory();
         var listener = new UdpListener(0, factory, new Settings());
 
         await listener.StartAsync(TestContext.Current.CancellationToken);
 
-        listener.Stop();
+        await listener.DisposeAsync();
         await listener.StopAsync(TestContext.Current.CancellationToken);
 
         Assert.True(factory.Socket.Closed);

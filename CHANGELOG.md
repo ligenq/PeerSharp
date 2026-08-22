@@ -39,7 +39,9 @@ stranger can make the DHT server spend, and what a consumer can see from outside
   first of the range BitTorrent has used since the original client and the default in libtorrent,
   qBittorrent and Deluge. Anyone forwarding a port through a router, or relying on the old default
   from outside the process, should set `ConnectionSettings.TcpPort` and `UdpPort` explicitly.
-- **A listen port that cannot be bound no longer stops the engine starting.** The configured port is
+- **A listen port that cannot be bound no longer stops the engine starting.** Reported against 3.2.0
+  as a `SocketException` out of `ClientEngine.InitializeAsync`: "an attempt was made to access a
+  socket in a way forbidden by its access permissions", with nothing listening on the port. The configured port is
   tried, then the next ten, then an OS-assigned one, with a warning naming the port actually bound.
   The bound port is written back to the settings and announced from there, so trackers and the DHT
   stay consistent. Previously a busy or reserved UDP port failed startup outright.

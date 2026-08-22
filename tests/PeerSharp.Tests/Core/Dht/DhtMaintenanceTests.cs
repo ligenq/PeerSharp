@@ -20,7 +20,6 @@ internal sealed class NullUdpListener : IUdpListener
     public Task StartAsync(CancellationToken cancellationToken = default)
         => Task.CompletedTask;
 
-    public void Stop() { }
 
     public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
