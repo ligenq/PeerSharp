@@ -37,6 +37,36 @@ internal class DiffieHellman
         PublicKey = BigInteger.ModPow(G, _privateKey, P);
     }
 
+    /// <summary>
+    /// Creates an exchange with a caller-supplied private key. For replaying a recorded handshake,
+    /// never for a live one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A recorded handshake is only replayable if this side brings the same private key back: the
+    /// shared secret is derived from it and the far side's recorded public key, and every key and
+    /// hash after that follows from the secret. With a fresh key the recording decrypts to nothing.
+    /// </para>
+    /// <para>
+    /// This exists so the wire format can be checked against bytes a different implementation
+    /// actually produced, rather than only against our own. It must never be reachable from a live
+    /// connection - a predictable private key removes the entire point of the exchange.
+    /// </para>
+    /// </remarks>
+    internal DiffieHellman(ReadOnlySpan<byte> privateKey)
+    {
+        if (privateKey.Length != 96)
+        {
+            throw new ArgumentException("A Diffie-Hellman private key is 96 bytes.", nameof(privateKey));
+        }
+
+        byte[] priv = privateKey.ToArray();
+        priv[0] &= 0x7F;
+
+        _privateKey = FromBigEndian(priv);
+        PublicKey = BigInteger.ModPow(G, _privateKey, P);
+    }
+
     public BigInteger PublicKey { get; private set; }
     public BigInteger SharedSecret { get; private set; }
 

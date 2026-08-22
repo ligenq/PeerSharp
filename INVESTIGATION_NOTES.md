@@ -112,6 +112,47 @@ path validator and the DHT codecs, did not.
 
 ---
 
+## Testing encryption against ourselves proved less than it looked
+
+Every test of the MSE handshake ran our initiator against our own responder. That shows the two
+halves agree with each other. It cannot show that either agrees with any other client, and the two
+are not the same claim - a change that moves both halves the same way leaves every such test green.
+
+Measured, by mutating the implementation and running both kinds of test against it:
+
+| Mutation | Loopback tests (12) | Recorded qBittorrent handshake |
+| --- | --- | --- |
+| RC4 discard 1024 -> 1023 | 5 failed | failed |
+| **keyA/keyB swapped in `InitRC4`** | **0 failed** | **failed** |
+
+The second row is the whole argument. Swapping which derived key encrypts and which decrypts is
+symmetric: run it against itself and everything still works, because both ends made the same
+substitution. Run it against qBittorrent and nothing works at all. Twelve tests, none of which could
+see it.
+
+### Replaying a recording needs the key back
+
+The handshake is randomised on both sides - private keys, padding lengths, padding contents - so a
+captured exchange cannot simply be replayed: with a fresh private key the shared secret differs and
+the recording decrypts to noise. `DiffieHellman` therefore gained an internal constructor taking a
+private key, used only to replay, and the fixed key is written into the fixture. Our own outgoing
+bytes are still not reproducible, and are not asserted; what the far side replied to was our public
+key, which the fixed private key reproduces exactly.
+
+Two things the capture got wrong first, both worth knowing before recording a protocol:
+
+- RC4 decrypts **in place**. The first recording stored the same array it then decrypted, so the
+  fixture held plaintext where it claimed ciphertext and replay decrypted it a second time. Record a
+  copy.
+- qBittorrent sends its BitTorrent handshake in a **separate segment** after the key exchange. A
+  capture that stopped at `IsComplete` recorded the exchange and never the first thing the keys are
+  actually used on, which is the part that proves the derivation.
+
+The counterparty is a local qBittorrent rather than the public swarm: repeatable, version-stamped in
+the fixture, and no stranger's bytes in the repository.
+
+---
+
 ## The default listen port was unbindable, and nothing was listening on it
 
 Two tests began failing with `SocketException: An attempt was made to access a socket in a way
