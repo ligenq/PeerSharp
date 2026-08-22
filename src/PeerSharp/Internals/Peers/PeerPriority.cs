@@ -113,28 +113,27 @@ internal static class PeerPriority
     }
 
     /// <summary>
-    /// The BEP 40 mask for a pair of addresses: whole bytes for the prefix they share plus one
-    /// more, then 0x55 for the rest.
+    /// The BEP 40 mask for a pair of addresses, followed by 0x55 bytes for the remaining suffix.
     /// </summary>
     /// <remarks>
-    /// Stated in the BEP as a table - FF.FF.55.55, FF.FF.FF.55 for a shared /16 and FF.FF.FF.FF for
-    /// a shared /24, with the IPv6 equivalents anchored at /48 and /56 - which is this one rule
-    /// written out. Keeping a byte beyond the shared prefix is what stops every peer inside our own
-    /// network masking down to the same value and so sorting identically.
+    /// IPv4 keeps at least two whole bytes and includes the first byte that differs. IPv6 keeps at
+    /// least six whole bytes and, as libtorrent's BEP 40 implementation does, one byte beyond the
+    /// first differing byte. The latter then advances through /48, /56, /64, /72 and so on rather
+    /// than stopping at /64. Keeping bytes beyond the shared prefix is what stops every peer inside
+    /// our own network masking down to the same value and so sorting identically.
     /// </remarks>
     private static byte[] MaskFor(byte[] ours, byte[] peer)
     {
-        bool ipv6 = ours.Length == 16;
-        int minimumWholeBytes = ipv6 ? 6 : 2;
-        int maximumWholeBytes = ipv6 ? 8 : 4;
-
         int shared = 0;
         while (shared < ours.Length && ours[shared] == peer[shared])
         {
             shared++;
         }
 
-        int wholeBytes = Math.Clamp(shared + 1, minimumWholeBytes, maximumWholeBytes);
+        bool ipv6 = ours.Length == 16;
+        int wholeBytes = ipv6
+            ? Math.Clamp(shared + 2, 6, 16)
+            : Math.Clamp(shared + 1, 2, 4);
 
         byte[] mask = new byte[ours.Length];
         for (int i = 0; i < mask.Length; i++)

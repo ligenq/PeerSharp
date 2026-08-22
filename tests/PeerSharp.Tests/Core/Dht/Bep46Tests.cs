@@ -2,7 +2,10 @@ using PeerSharp.BEncoding;
 using PeerSharp.Core;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Dht;
+using PeerSharp.Internals.Network;
+using PeerSharp.Internals.Utp;
 using PeerSharp.Internals.Utilities;
+using System.Net;
 
 namespace PeerSharp.Tests.Core.Dht;
 
@@ -17,6 +20,22 @@ namespace PeerSharp.Tests.Core.Dht;
 /// </summary>
 public class Bep46Tests
 {
+    private sealed class EngineNetworkManager(DhtManager dht) : INetworkManager
+    {
+        public IpBlocklist Blocklist { get; } = new();
+        public int BoundTcpPort => 0;
+        public int BoundUdpPort => 0;
+        public IDhtManager Dht { get; } = dht;
+        public ILsdManager Lsd { get; } = null!;
+        public IPortListener PortListener { get; } = null!;
+        public IUtpManager Utp { get; } = null!;
+
+        public IReadOnlyList<PortMappingStatus> GetPortMappingStatus() => [];
+        public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     [Fact(Timeout = 30000)]
     public async Task Publish_ThenResolve_ReturnsTheInfoHash()
     {
@@ -112,6 +131,43 @@ public class Bep46Tests
         Assert.Equal(1, resolved.Value.SequenceNumber);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task ClientEngine_PublishesResolvesAndStopsMaintainingARecord()
+    {
+        await using var fixture = await DhtLoopbackFixture.CreateAsync(settings =>
+        {
+            settings.Dht.InitialState = new DhtState(
+                InfoHash.CreateRandom().ToArray(),
+                Enumerable.Range(1, 6)
+                    .Select(index => new DhtNode(
+                        NodeId(index),
+                        new IPEndPoint(IPAddress.Parse($"192.0.2.{index + 10}"), 7000 + index)))
+                    .ToArray());
+        });
+        await using var engine = ClientEngine.Create(
+            new Settings(),
+            networkManager: new EngineNetworkManager(fixture.Client),
+            takeOwnership: false);
+        await engine.InitializeAsync();
+
+        var publisher = TorrentPublisherKey.Create();
+        var infoHash = InfoHash.CreateRandom();
+
+        var published = await engine.PublishSelfUpdatingTorrentAsync(publisher, infoHash);
+        var resolved = await engine.ResolveSelfUpdatingTorrentAsync(
+            TorrentPublisherKey.FromPublicKey(publisher.PublicKey.Span));
+        var magnet = MagnetLink.Parse(
+            $"magnet:?xs=urn:btpk:{Convert.ToHexStringLower(publisher.PublicKey.Span)}");
+        var magnetResolved = await engine.ResolveSelfUpdatingMagnetAsync(magnet);
+
+        Assert.True(published.AcceptedByNodes > 0);
+        Assert.Equal(0, published.Version);
+        Assert.Equal(new SelfUpdatingTorrentInfo(infoHash, 0), resolved);
+        Assert.Equal(resolved, magnetResolved);
+        Assert.True(engine.StopMaintainingSelfUpdatingTorrent(publisher));
+        Assert.False(engine.StopMaintainingSelfUpdatingTorrent(publisher));
+    }
+
     /// <summary>
     /// One key, several torrents. Without salt separation a publisher would need a fresh identity
     /// per feed.
@@ -171,6 +227,13 @@ public class Bep46Tests
         Assert.Equal(
             DhtItemCodec.ComputeMutableTarget(publicKey, "salt"u8),
             Bep46Resolver.ComputeTarget(publicKey, "salt"u8));
+    }
+
+    private static byte[] NodeId(int suffix)
+    {
+        var id = new byte[DhtTarget.Length];
+        id[^1] = (byte)suffix;
+        return id;
     }
 
     [Fact]

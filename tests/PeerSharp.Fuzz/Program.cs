@@ -155,9 +155,9 @@ static void ReplaySeedCorpus(string target, Action<Stream> fuzzTarget)
     string corpusDirectory = Path.Combine(AppContext.BaseDirectory, "corpus", target);
     foreach (string path in Directory.EnumerateFiles(corpusDirectory).Order())
     {
-        byte[] input = target == PeerMessageTarget
-            ? Convert.FromHexString(RemoveWhitespace(File.ReadAllText(path)))
-            : Encoding.ASCII.GetBytes(File.ReadAllText(path).TrimEnd('\r', '\n'));
+        byte[] input = target == BencodeTarget
+            ? Encoding.ASCII.GetBytes(File.ReadAllText(path).TrimEnd('\r', '\n'))
+            : Convert.FromHexString(RemoveWhitespace(File.ReadAllText(path)));
 
         using var stream = new MemoryStream(input, writable: false);
         fuzzTarget(stream);
