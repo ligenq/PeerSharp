@@ -365,13 +365,29 @@ internal static class HttpRangeParser
         }
 
         long rangeEnd = totalLength - 1;
-        if (!endSpan.IsEmpty && !long.TryParse(endSpan, out rangeEnd))
+        bool endPresent = !endSpan.IsEmpty;
+        if (endPresent && !long.TryParse(endSpan, out rangeEnd))
         {
             return new HttpByteRange(IsValid: false, IsPartial: true, Start: rangeStart, End: totalLength - 1);
         }
 
-        // Open-ended high (bytes=N-) is allowed and resolves to N..totalLength-1.
-        bool valid = totalLength > 0 && rangeStart >= 0 && rangeStart < totalLength && rangeEnd >= rangeStart && rangeEnd < totalLength;
+        // Open-ended high (bytes=N-) is allowed and resolves to N..totalLength-1. What decides
+        // satisfiability is the first byte position alone: RFC 7233 §2.1 makes a range unsatisfiable
+        // when it starts at or past the end, and a last-byte-pos that precedes it is malformed.
+        bool valid = totalLength > 0
+            && rangeStart >= 0
+            && rangeStart < totalLength
+            && (!endPresent || rangeEnd >= rangeStart);
+
+        // An end at or past the end of the file is not a rejection - "the byte range is interpreted
+        // as the remainder of the representation". Players request fixed-size chunks, so the last
+        // chunk of every file asks for more than is left, as does every chunk of a file smaller than
+        // one chunk. Answering those with 416 fails playback at the end of each file.
+        if (valid && rangeEnd >= totalLength)
+        {
+            rangeEnd = totalLength - 1;
+        }
+
         return new HttpByteRange(valid, IsPartial: true, rangeStart, rangeEnd);
     }
 }
