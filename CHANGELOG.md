@@ -89,9 +89,12 @@ stranger can make the DHT server spend, and what a consumer can see from outside
   agreement the BEP exists to provide - both ends of a connection independently reaching the same
   decision about which one gives way - was absent; and because a /16 mask makes every address in our
   own network XOR to zero, every such peer received an identical priority. Now the specified
-  calculation, checked against both worked examples in the BEP. The engine also has no way to learn
-  its own public address at this layer, so the connection paths still use a local-only ordering that
-  is deterministic but not canonical; it is no longer described as BEP 40.
+  calculation, checked against both worked examples in the BEP, and the connection paths now use it:
+  they pass the public address the DHT has learned, or the unspecified address until enough sources
+  agree on one, which is how libtorrent handles the same gap. Nothing caches the result, so a
+  priority becomes canonical as soon as the address is known and follows it if it later changes.
+  Peers on one distant network now rank alike rather than being spread out, which is the intent of
+  the specified masking - it is what stops a single network taking the swarm one slot at a time.
 - **The count of pieces in flight drifted upwards, and only upwards.** Replacing an active piece used
   `ConcurrentDictionary.AddOrUpdate` and incremented a separate counter from inside the add factory,
   which neither runs exactly once nor necessarily belongs to the branch that won - so concurrent

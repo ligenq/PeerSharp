@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Network;
 using PeerSharp.BEncoding;
@@ -1250,6 +1250,9 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// reports, so a tracker cannot single-handedly move our node ID - the vote threshold still has
     /// to be met, and the caller is responsible for not submitting the same tracker's opinion twice.
     /// </summary>
+    /// <inheritdoc />
+    public IPAddress? ExternalIp => _externalIpVoteTracker.ConfirmedAddress;
+
     public void ReportExternalIp(IPAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);

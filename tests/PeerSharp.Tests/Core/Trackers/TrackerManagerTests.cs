@@ -16,6 +16,7 @@ public class TrackerManagerTests
         public List<IPAddress> Reports { get; } = [];
         public bool ThrowOnReport { get; set; }
         public InfoHash NodeId { get; } = new InfoHash(new byte[20]);
+        public System.Net.IPAddress? ExternalIp => null;
 
         public void ReportExternalIp(IPAddress address)
         {

@@ -141,23 +141,68 @@ public class PeerPriorityTests
     }
 
     [Fact]
-    public void TheFallbackIsStablePerPeerAndTorrent()
+    public void AnUnknownLocalAddressStillSeparatesNetworks()
     {
-        // Used when this client does not know its own public address, where the canonical value
-        // cannot be computed. It only has to be deterministic and to separate peers.
-        Gen.Select(Address, Gen.Byte.Array[20, 20], Address).Sample((peer, infoHash, other) =>
-        {
-            Assert.Equal(
-                PeerPriority.CalculateWithoutLocalAddress(peer, infoHash),
-                PeerPriority.CalculateWithoutLocalAddress(peer, infoHash));
+        // Before enough sources agree on our public address, the unspecified address stands in - the
+        // same placeholder libtorrent starts from. The result is not canonical yet, since the peer at
+        // the other end is using our real address, but peers from different networks must still rank
+        // differently or the ordering decides nothing.
+        var unknown = new IPEndPoint(IPAddress.Any, 6881);
+        var priorities = new HashSet<uint>();
 
-            if (!peer.Equals(other))
-            {
-                Assert.NotEqual(
-                    PeerPriority.CalculateWithoutLocalAddress(peer, infoHash),
-                    PeerPriority.CalculateWithoutLocalAddress(other, infoHash));
-            }
-        }, iter: 5_000);
+        for (int i = 1; i < 60; i++)
+        {
+            priorities.Add(PeerPriority.Calculate(unknown, new IPEndPoint(IPAddress.Parse($"198.{i}.100.7"), 6881)));
+        }
+
+        Assert.True(priorities.Count > 50, $"59 networks produced only {priorities.Count} distinct priorities");
+    }
+
+    [Fact]
+    public void DistantPeersOnOneNetworkDeliberatelyRankAlike()
+    {
+        // Not a defect, and worth pinning so it is not "fixed" later. For a pair sharing no prefix
+        // the mask is FF.FF.55.55, so only alternating bits of the last two bytes survive and a whole
+        // /24 collapses into a handful of values. That is the point: BEP 40 ranks by network for
+        // peers far away and by host only for peers close by, which is what stops one distant network
+        // filling the swarm slot by slot. The full-address hash this replaced spread them out and
+        // gave that up.
+        var ours = new IPEndPoint(IPAddress.Parse("123.213.32.10"), 6881);
+        var priorities = new HashSet<uint>();
+
+        for (int i = 1; i < 60; i++)
+        {
+            priorities.Add(PeerPriority.Calculate(ours, new IPEndPoint(IPAddress.Parse($"198.51.100.{i}"), 6881)));
+        }
+
+        Assert.InRange(priorities.Count, 2, 16);
+    }
+
+    [Fact]
+    public void LearningOurAddressChangesTheAnswerToTheCanonicalOne()
+    {
+        // Nothing caches the priority, so the value corrects itself as soon as the address is known.
+        // This is the transition libtorrent leaves as a TODO, because it caches its peer ranks.
+        var peer = EndPoint("98.76.54.32");
+
+        uint beforeWeKnow = PeerPriority.Calculate(new IPEndPoint(IPAddress.Any, 6881), peer);
+        uint once = PeerPriority.Calculate(EndPoint("123.213.32.10"), peer);
+
+        Assert.NotEqual(beforeWeKnow, once);
+        Assert.Equal(0xec2d7224u, once);
+    }
+
+    [Fact]
+    public void AMismatchedAddressFamilyIsTreatedAsUnknown()
+    {
+        // Cannot happen on a connection that exists. If it does, our v4 address says nothing about a
+        // v6 peer, so it is worth no more than not knowing - which is what libtorrent's external
+        // address table returns in the same situation.
+        var v6Peer = new IPEndPoint(IPAddress.Parse("2001:db8::1"), 6881);
+
+        Assert.Equal(
+            PeerPriority.Calculate(new IPEndPoint(IPAddress.IPv6Any, 6881), v6Peer),
+            PeerPriority.Calculate(new IPEndPoint(IPAddress.Parse("198.51.100.1"), 6881), v6Peer));
     }
 
     private static readonly Gen<IPAddress> Address = Gen.Byte.Array[4, 4].Select(b => new IPAddress(b));
