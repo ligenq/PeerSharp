@@ -63,6 +63,31 @@ public class BlockCachePropertyTests
         }, iter: 2_000);
     }
 
+    [Fact]
+    public async Task ACacheMissFinishingAfterAnOverwriteCannotReinsertStaleBytes()
+    {
+        byte[] before = Enumerable.Repeat((byte)0x11, BlockSize).ToArray();
+        byte[] after = Enumerable.Repeat((byte)0x22, BlockSize).ToArray();
+        var storage = new PausedReadStorage(before);
+        using var cache = new BlockCache(BlockSize, readAheadBlocks: 0, readAheadEnabled: false, BlockSize);
+        cache.Initialize(storage);
+
+        byte[] overlappingRead = new byte[BlockSize];
+        Task<bool> read = cache.ReadAsync(0, overlappingRead, TestContext.Current.CancellationToken);
+        await storage.ReadCaptured;
+
+        await cache.WriteAsync(0, after, TestContext.Current.CancellationToken);
+        storage.ReleaseRead();
+        await read;
+
+        // The overlapping read is allowed to have observed the old value. A later read is not: the
+        // completed write must remain authoritative even though the older cache miss finished last.
+        byte[] subsequentRead = new byte[BlockSize];
+        await cache.ReadAsync(0, subsequentRead, TestContext.Current.CancellationToken);
+
+        Assert.Equal(after, subsequentRead);
+    }
+
     /// <summary>
     /// Scripts of reads and writes over a four-block torrent.
     /// </summary>
@@ -132,6 +157,49 @@ public class BlockCachePropertyTests
                 data[..length].CopyTo(_data.AsMemory((int)offset, length));
             }
 
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class PausedReadStorage(byte[] initial) : IStorage
+    {
+        private readonly TaskCompletionSource _readCaptured = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private byte[] _data = initial;
+
+        public Task ReadCaptured => _readCaptured.Task;
+
+        public void ReleaseRead() => _releaseRead.TrySetResult();
+
+        public Task DeleteAllAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
+        public Task InitAsync(IReadOnlyList<FileSelection>? selection = null, CancellationToken ct = default) => Task.CompletedTask;
+
+        public async ValueTask ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
+        {
+            byte[] snapshot = _data;
+            _readCaptured.TrySetResult();
+            await _releaseRead.Task.WaitAsync(ct);
+            snapshot.AsMemory((int)offset, buffer.Length).CopyTo(buffer);
+        }
+
+        public async Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct = default)
+        {
+            byte[] result = new byte[length];
+            await ReadAsync(offset, result, ct);
+            return result;
+        }
+
+        public Task UpdateFileSelectionAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default)
+            => Task.CompletedTask;
+
+        public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
+        {
+            byte[] updated = (byte[])_data.Clone();
+            data.CopyTo(updated.AsMemory((int)offset));
+            _data = updated;
             return ValueTask.CompletedTask;
         }
 

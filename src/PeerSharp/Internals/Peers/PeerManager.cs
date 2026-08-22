@@ -2849,9 +2849,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         foreach (var kvp in _connectedPeers)
         {
             var peer = kvp.Key;
-            if (peer.Priority < lowestPriority)
+            uint priority = peer.RemoteEndPoint is { } remote
+                ? CalculatePeerPriority(remote)
+                : peer.Priority;
+
+            // The public address may have become known (or changed) since the connection was
+            // registered. Keep the observable value current as well as using it for this decision.
+            peer.Priority = priority;
+
+            if (priority < lowestPriority)
             {
-                lowestPriority = peer.Priority;
+                lowestPriority = priority;
                 lowestPeer = peer;
             }
         }

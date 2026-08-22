@@ -535,6 +535,44 @@ public class PeerManagerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task TryGetLowestPriorityPeer_RecalculatesPrioritiesForTheCurrentAddress()
+    {
+        var ctx = CreateContext();
+        var endpoints = new[]
+        {
+            new IPEndPoint(IPAddress.Parse("198.51.100.4"), 6881),
+            new IPEndPoint(IPAddress.Parse("203.0.113.9"), 51413),
+            new IPEndPoint(IPAddress.Parse("192.0.2.44"), 42000)
+        };
+        var peers = endpoints.Select(endpoint => new PeerCommunication(
+            ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = endpoint,
+            // Deliberately stale and identical: the selection must not use the value cached when
+            // the peer connected, because our public address can be learned later.
+            Priority = uint.MaxValue
+        }).ToArray();
+
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+        foreach (var peer in peers)
+        {
+            connected.TryAdd(peer, 0);
+        }
+
+        var local = new IPEndPoint(IPAddress.Any, ctx.Torrent.Settings.Connection.TcpPort);
+        var expected = peers.MinBy(peer => PeerPriority.Calculate(local, peer.RemoteEndPoint!));
+
+        var lowest = (PeerCommunication?)InvokePrivate(ctx.Manager, "TryGetLowestPriorityPeer");
+
+        Assert.Same(expected, lowest);
+        Assert.All(peers, peer => Assert.Equal(
+            PeerPriority.Calculate(local, peer.RemoteEndPoint!),
+            peer.Priority));
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task CleanupPendingConnections_RemovesExpiredEntries()
     {
         var ctx = CreateContext();

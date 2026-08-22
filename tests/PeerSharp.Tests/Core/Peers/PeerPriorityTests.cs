@@ -129,6 +129,32 @@ public class PeerPriorityTests
         Assert.NotEqual(PeerPriority.Calculate(ours, near), PeerPriority.Calculate(ours, far));
     }
 
+    [Theory]
+    // Reference vectors from libtorrent 2.1's test_peer_priority.cpp. The final two distinguish the
+    // IPv6 rule from the IPv4 one: IPv6 retains one byte beyond the first differing byte.
+    [InlineData("ffff:0fff:ffff:ffff:ffff:ffff:ffff:ffff", 0x59d71f38u)]
+    [InlineData("ffff:ffff:0fff:ffff:ffff:ffff:ffff:ffff", 0x081d5282u)]
+    [InlineData("ffff:ffff:ff0f:ffff:ffff:ffff:ffff:ffff", 0xc5f972beu)]
+    [InlineData("ffff:ffff:ffff:0fff:ffff:ffff:ffff:ffff", 0x9ff50bd0u)]
+    public void IPv6MatchesLibtorrentReferenceVectors(string peerAddress, uint expected)
+    {
+        var ours = new IPEndPoint(IPAddress.Parse("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"), 0x4d2);
+        var peer = new IPEndPoint(IPAddress.Parse(peerAddress), 0x12c);
+
+        Assert.Equal(expected, PeerPriority.Calculate(ours, peer));
+        Assert.Equal(expected, PeerPriority.Calculate(peer, ours));
+    }
+
+    [Fact]
+    public void IPv6PriorityUsesAddressBytesBeyondTheFirst64Bits()
+    {
+        var ours = new IPEndPoint(IPAddress.Parse("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"), 0x4d2);
+        var first = new IPEndPoint(IPAddress.Parse("ffff:ffff:ffff:ffff:ffff:0fff:ffff:ffff"), 0x12c);
+        var second = new IPEndPoint(IPAddress.Parse("ffff:ffff:ffff:ffff:ffff:1fff:ffff:ffff"), 0x12c);
+
+        Assert.NotEqual(PeerPriority.Calculate(ours, first), PeerPriority.Calculate(ours, second));
+    }
+
     [Fact]
     public void MixedAddressFamiliesDoNotThrow()
     {

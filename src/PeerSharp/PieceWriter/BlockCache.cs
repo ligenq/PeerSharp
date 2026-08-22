@@ -28,6 +28,7 @@ internal class BlockCache : IBlockCache
     private IStorage? _storage;
     private readonly ConcurrentDictionary<long, byte> _readAheadInFlight = new();
     private readonly SemaphoreSlim _readAheadSemaphore = new(2, 2);
+    private long _writeGeneration;
     // 16KB
 
     public BlockCache(int capacityBytes, int readAheadBlocks, bool readAheadEnabled, long totalSize)
@@ -67,11 +68,15 @@ internal class BlockCache : IBlockCache
                 return true;
             }
 
+            long writeGeneration = Volatile.Read(ref _writeGeneration);
+
             // Cache miss - read from storage
             await _storage.ReadAsync(offset, buffer, ct).ConfigureAwait(false);
 
-            // Add to cache
-            AddToCache(offset, buffer.Span);
+            // A write may have completed while storage was serving this miss. The bytes returned to
+            // this overlapping read may legitimately be the old ones, but they must not replace the
+            // writer's newer cache entry and poison later reads.
+            AddToCacheIfUnchanged(offset, buffer.Span, writeGeneration);
 
             TriggerReadAhead(offset + BlockSize, ct);
             return true;
@@ -94,6 +99,11 @@ internal class BlockCache : IBlockCache
 
         // Write-Through: Write to storage first
         await _storage.WriteAsync(offset, data, ct).ConfigureAwait(false);
+
+        // Increment before touching the cache. Any miss or prefetch that started before this write
+        // must either observe the increment and decline admission, or admit first and then be
+        // refreshed/invalidated by the cache operations below.
+        Interlocked.Increment(ref _writeGeneration);
 
         // Populate the cache, walking the aligned blocks this write touches rather than the write's
         // own chunks. Every touched block ends up in one of two states and never in between: fully
@@ -189,8 +199,9 @@ internal class BlockCache : IBlockCache
                     byte[] buffer = CachePool.Rent(BlockSize);
                     try
                     {
+                        long writeGeneration = Volatile.Read(ref _writeGeneration);
                         await _storage.ReadAsync(offset, buffer.AsMemory(0, BlockSize), ct).ConfigureAwait(false);
-                        AddToCache(offset, buffer.AsSpan(0, BlockSize));
+                        AddToCacheIfUnchanged(offset, buffer.AsSpan(0, BlockSize), writeGeneration);
                     }
                     finally
                     {
@@ -215,40 +226,58 @@ internal class BlockCache : IBlockCache
 
     private void AddToCache(long offset, ReadOnlySpan<byte> data)
     {
+        lock (_lock)
+        {
+            AddToCacheLocked(offset, data);
+        }
+    }
+
+    private void AddToCacheIfUnchanged(long offset, ReadOnlySpan<byte> data, long writeGeneration)
+    {
+        lock (_lock)
+        {
+            // Make the generation check and admission indivisible with respect to the writer's
+            // cache refresh. Otherwise a writer can update the cache after this check but before
+            // AddToCache takes the lock, letting the older read overwrite it last.
+            if (writeGeneration == Volatile.Read(ref _writeGeneration))
+            {
+                AddToCacheLocked(offset, data);
+            }
+        }
+    }
+
+    private void AddToCacheLocked(long offset, ReadOnlySpan<byte> data)
+    {
+        if (_blocks.TryGetValue(offset, out var existing))
+        {
+            // Refresh the cached contents: the same offset can be written again with
+            // different data (e.g. a piece that failed verification and was re-downloaded).
+            // Keeping the old block here would serve stale/corrupt data on later reads.
+            data.CopyTo(existing.Data);
+            _lruList.Remove(existing.Node);
+            _lruList.AddLast(existing.Node);
+            return;
+        }
+
         byte[] buffer = CachePool.Rent(BlockSize);
         data.CopyTo(buffer);
 
-        lock (_lock)
+        // Evict if needed
+        while (_currentBytes + BlockSize > _capacityBytes && _lruList.Count > 0)
         {
-            if (_blocks.TryGetValue(offset, out var existing))
-            {
-                // Refresh the cached contents: the same offset can be written again with
-                // different data (e.g. a piece that failed verification and was re-downloaded).
-                // Keeping the old block here would serve stale/corrupt data on later reads.
-                data.CopyTo(existing.Data);
-                _lruList.Remove(existing.Node);
-                _lruList.AddLast(existing.Node);
-                CachePool.Return(buffer);
-                return;
-            }
-
-            // Evict if needed
-            while (_currentBytes + BlockSize > _capacityBytes && _lruList.Count > 0)
-            {
-                EvictLRU();
-            }
-
-            if (_currentBytes + BlockSize > _capacityBytes)
-            {
-                // Still no room (capacity too small?)
-                CachePool.Return(buffer);
-                return;
-            }
-
-            var node = _lruList.AddLast(offset);
-            _blocks.Add(offset, new CachedBlock(buffer, node));
-            _currentBytes += BlockSize;
+            EvictLRU();
         }
+
+        if (_currentBytes + BlockSize > _capacityBytes)
+        {
+            // Still no room (capacity too small?)
+            CachePool.Return(buffer);
+            return;
+        }
+
+        var node = _lruList.AddLast(offset);
+        _blocks.Add(offset, new CachedBlock(buffer, node));
+        _currentBytes += BlockSize;
     }
 
     /// <summary>
