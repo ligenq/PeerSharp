@@ -201,6 +201,7 @@ public class HandshakeMessageOrderTests : IDisposable
     private sealed class StubDhtManager : Internals.Dht.IDhtManager
     {
         public InfoHash NodeId { get; } = new(new byte[20]);
+        public System.Net.IPAddress? ExternalIp => null;
 
         public void Announce(InfoHash infoHash, int port) { }
         public int FindPeers(InfoHash infoHash) {

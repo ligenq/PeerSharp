@@ -227,11 +227,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        // Priority decides which connection gives way when we are at the limit. This is the
-        // local-only ordering, not the canonical BEP 40 value - see PeerPriority.
-        uint incomingPriority = remote != null
-            ? PeerPriority.CalculateWithoutLocalAddress(remote.Address, _torrent.Hash.ToArray())
-            : 0;
+        // Priority decides which connection gives way when we are at the limit, and the peer at the
+        // other end works it out for itself and has to reach the same answer - see PeerPriority.
+        uint incomingPriority = remote != null ? CalculatePeerPriority(remote) : 0;
 
         // Check connection limits for incoming connections
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
@@ -340,8 +338,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        // Priority decides which connection gives way when we are at the limit. This is the
-        // local-only ordering, not the canonical BEP 40 value - see PeerPriority.
         var remoteEp = NetworkUtils.NormalizeEndPoint(client.Client.RemoteEndPoint as IPEndPoint);
 
         // Check blocklist first
@@ -360,9 +356,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             client.Close();
             return;
         }
-        uint incomingPriority = remoteEp != null
-            ? PeerPriority.CalculateWithoutLocalAddress(remoteEp.Address, _torrent.Hash.ToArray())
-            : 0;
+        uint incomingPriority = remoteEp != null ? CalculatePeerPriority(remoteEp) : 0;
 
         // Check connection limits for incoming connections
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
@@ -1972,7 +1966,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             {
                 peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
                 // Deterministic per-peer ordering.
-                peer.Priority = PeerPriority.CalculateWithoutLocalAddress(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
+                peer.Priority = CalculatePeerPriority(peer.RemoteEndPoint);
             }
 
             // The connection may have died between ConnectAsync succeeding and the registration
@@ -2827,6 +2821,24 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     }
 
     /// <summary>
+    /// The BEP 40 priority for a connection to this peer.
+    /// </summary>
+    /// <remarks>
+    /// Our own public address is what the DHT has learned, and null until enough nodes agree on it.
+    /// PeerPriority stands the unspecified address in for it meanwhile, which is what libtorrent
+    /// does too; the value only becomes canonical - the same number the peer at the other end
+    /// computes - once the real address is known. It is recalculated on each decision rather than
+    /// cached, so that happens on its own, and a later change of address is picked up as well.
+    /// </remarks>
+    private uint CalculatePeerPriority(IPEndPoint remote)
+    {
+        var ourAddress = _torrent.DhtManager?.ExternalIp ?? IPAddress.Any;
+        int ourPort = _torrent.PortListener?.Port ?? _torrent.Settings.Connection.TcpPort;
+
+        return PeerPriority.Calculate(new IPEndPoint(ourAddress, ourPort), remote);
+    }
+
+    /// <summary>
     /// The lowest priority connected peer, or null if there are none.
     /// </summary>
     private PeerCommunication? TryGetLowestPriorityPeer()
@@ -3056,7 +3068,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (peer.RemoteEndPoint != null)
         {
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-            peer.Priority = PeerPriority.CalculateWithoutLocalAddress(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
+            peer.Priority = CalculatePeerPriority(peer.RemoteEndPoint);
 
             var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint, isListenAddress: initiator);
             history.UpdateSource(sourceKind);

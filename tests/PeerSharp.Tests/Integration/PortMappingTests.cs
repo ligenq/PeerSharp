@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utp;
@@ -263,6 +263,7 @@ public class PortMappingTests
     private class MockDhtManager : IDhtManager
     {
         public InfoHash NodeId { get; } = InfoHash.CreateRandom();
+        public System.Net.IPAddress? ExternalIp => null;
         public Task StartAsync(CancellationToken ct = default) { return Task.CompletedTask; }
         public Task StopAsync(CancellationToken ct = default) { return Task.CompletedTask; }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

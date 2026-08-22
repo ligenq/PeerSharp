@@ -31,6 +31,7 @@ public class NetworkManagerTests
     }
         public void ScrapeInfoHash(InfoHash hash) { }
         public InfoHash NodeId => InfoHash.Empty;
+        public System.Net.IPAddress? ExternalIp => null;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         public DhtState? ConsumeStateSnapshot() => null;
     }

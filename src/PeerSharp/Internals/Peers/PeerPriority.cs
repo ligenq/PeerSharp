@@ -39,15 +39,8 @@ internal static class PeerPriority
         ArgumentNullException.ThrowIfNull(ourEndPoint);
         ArgumentNullException.ThrowIfNull(peerEndPoint);
 
-        byte[] ours = ourEndPoint.Address.GetAddressBytes();
         byte[] peer = peerEndPoint.Address.GetAddressBytes();
-
-        // BEP 40 says nothing about one end being v4 and the other v6, which cannot happen on a
-        // connection that exists. Fall back rather than invent a rule other clients will not share.
-        if (ours.Length != peer.Length)
-        {
-            return CalculateWithoutLocalAddress(peerEndPoint.Address, []);
-        }
+        byte[] ours = NormaliseToPeerFamily(ourEndPoint.Address, peerEndPoint.Address).GetAddressBytes();
 
         if (ours.AsSpan().SequenceEqual(peer))
         {
@@ -62,29 +55,34 @@ internal static class PeerPriority
     }
 
     /// <summary>
-    /// A stable per-peer ordering for when this client does not know its own public address.
-    /// </summary>
-    /// <remarks>
-    /// Not BEP 40 and not interoperable: without our own address the canonical value cannot be
-    /// computed at all. It keeps the local decisions deterministic - the same peer on the same
-    /// torrent always sorts the same way - which is enough to stop this client thrashing on its own,
-    /// and no help whatsoever in agreeing with the peer on the other end.
-    /// </remarks>
-    public static uint CalculateWithoutLocalAddress(IPAddress peerIp, byte[] infoHash)
-    {
-        ArgumentNullException.ThrowIfNull(peerIp);
-        ArgumentNullException.ThrowIfNull(infoHash);
-
-        return ComputeCrc32C(Concatenate(peerIp.GetAddressBytes(), infoHash));
-    }
-
-    /// <summary>
     /// Compare two peers by priority. Returns positive if a has higher priority than b.
     /// </summary>
     public static int Compare(uint priorityA, uint priorityB)
     {
         // Higher priority value = more preferred
         return priorityA.CompareTo(priorityB);
+    }
+
+    /// <summary>
+    /// Our address as it must be to pair with this peer's: the same family, and the unspecified
+    /// address when we do not know our own.
+    /// </summary>
+    /// <remarks>
+    /// A client that has not yet learned its public address still has to rank peers, so the
+    /// unspecified address stands in and the calculation stays the specified one - the same thing
+    /// libtorrent does, whose external address table starts out holding exactly that. The value is
+    /// not canonical until the real address is known, because the peer at the other end is using our
+    /// actual address, but it is a well-formed priority in the meantime and becomes canonical by
+    /// itself once the address arrives. Nothing here is cached, so that transition needs no help.
+    /// </remarks>
+    private static IPAddress NormaliseToPeerFamily(IPAddress ours, IPAddress peer)
+    {
+        if (ours.AddressFamily == peer.AddressFamily)
+        {
+            return ours;
+        }
+
+        return peer.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any;
     }
 
     private static byte[] Apply(byte[] address, byte[] mask)
