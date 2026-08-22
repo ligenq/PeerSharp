@@ -83,6 +83,15 @@ stranger can make the DHT server spend, and what a consumer can see from outside
 - **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
   save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
   stayed in the bitfield and were persisted as present.
+- **Peer priority did not implement BEP 40, despite naming it.** It masked both addresses to /16,
+  XORed them and appended the info hash, which is not the specified calculation and does not produce
+  the values the BEP publishes. Two consequences: no other client computed the same priority, so the
+  agreement the BEP exists to provide - both ends of a connection independently reaching the same
+  decision about which one gives way - was absent; and because a /16 mask makes every address in our
+  own network XOR to zero, every such peer received an identical priority. Now the specified
+  calculation, checked against both worked examples in the BEP. The engine also has no way to learn
+  its own public address at this layer, so the connection paths still use a local-only ordering that
+  is deterministic but not canonical; it is no longer described as BEP 40.
 - **The count of pieces in flight drifted upwards, and only upwards.** Replacing an active piece used
   `ConcurrentDictionary.AddOrUpdate` and incremented a separate counter from inside the add factory,
   which neither runs exactly once nor necessarily belongs to the branch that won - so concurrent
