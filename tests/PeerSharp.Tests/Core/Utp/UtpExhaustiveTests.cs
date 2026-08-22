@@ -699,7 +699,7 @@ public class UtpExhaustiveTests
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.ConnectAsync(cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.ConnectAsync(cancellationToken: cts.Token));
         Assert.Empty(_listener.SentPackets);
         Assert.Equal(UtpState.None, stream.State);
     }
@@ -710,7 +710,7 @@ public class UtpExhaustiveTests
         var stream = _manager.CreateStream(_remoteParams);
         using var cts = new CancellationTokenSource();
 
-        var connectTask = stream.ConnectAsync(cts.Token);
+        var connectTask = stream.ConnectAsync(cancellationToken: cts.Token);
         // SYN is sent but no SYN-ACK comes; cancel instead
         cts.Cancel();
 

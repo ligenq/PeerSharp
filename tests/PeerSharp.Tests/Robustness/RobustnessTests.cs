@@ -275,7 +275,7 @@ public class RobustnessTests
         cts.CancelAfter(TimeSpan.FromMilliseconds(100));
 
         // Connect should fail due to timeout (no response from remote)
-        var connectTask = stream.ConnectAsync(cts.Token);
+        var connectTask = stream.ConnectAsync(cancellationToken: cts.Token);
 
         // Should throw OperationCanceledException
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => connectTask);
@@ -301,10 +301,10 @@ public class RobustnessTests
         cts.CancelAfter(TimeSpan.FromMilliseconds(500));
 
         // First connect starts
-        var task1 = stream.ConnectAsync(cts.Token);
+        var task1 = stream.ConnectAsync(cancellationToken: cts.Token);
 
         // Second connect should fail immediately (already connecting)
-        await Assert.ThrowsAsync<InvalidOperationException>(() => stream.ConnectAsync(cts.Token));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => stream.ConnectAsync(cancellationToken: cts.Token));
 
         // Clean up
         cts.Cancel();

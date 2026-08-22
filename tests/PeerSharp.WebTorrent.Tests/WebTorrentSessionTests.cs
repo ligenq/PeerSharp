@@ -1397,7 +1397,7 @@ public class WebTorrentSessionTests
         }
 
         public Task<bool> ConnectAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
-            => ConnectAsync(cancellationToken);
+            => ConnectAsync(cancellationToken: cancellationToken);
 
         public void EmitIceCandidate(string candidate)
         {
