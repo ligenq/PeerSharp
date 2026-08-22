@@ -120,16 +120,7 @@ public interface ITorrent
     /// </summary>
     /// <param name="other">The torrent to compare.</param>
     /// <returns><see langword="true"/> when a non-empty hash version matches.</returns>
-    bool HasSameIdentity(ITorrent? other)
-    {
-        if (other == null)
-        {
-            return false;
-        }
-
-        return (!Hash.IsEmpty && !other.Hash.IsEmpty && Hash == other.Hash)
-            || (!HashV2.IsEmpty && !other.HashV2.IsEmpty && HashV2 == other.HashV2);
-    }
+    bool HasSameIdentity(ITorrent? other);
 
     /// <summary>
     /// Gets whether this torrent contains streamable media files.

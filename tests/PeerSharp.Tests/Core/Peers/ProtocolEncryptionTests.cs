@@ -66,6 +66,13 @@ public class ProtocolEncryptionTests
         public float? RatioLimit { get => null; set { } }
         public TimeSpan? SeedTimeLimit { get => null; set { } }
         public void RegisterPeerTransport(IPeerTransport transport) => throw new NotImplementedException();
+
+    public bool HasSameIdentity(ITorrent? other)
+    {
+        return other != null
+            && ((!Hash.IsEmpty && !other.Hash.IsEmpty && Hash == other.Hash)
+                || (!HashV2.IsEmpty && !other.HashV2.IsEmpty && HashV2 == other.HashV2));
+    }
     }
 
     private class MockTorrentResolver : ITorrentResolver
