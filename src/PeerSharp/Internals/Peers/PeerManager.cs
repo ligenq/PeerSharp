@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Framework;
@@ -227,20 +227,21 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        // Calculate priority early for BEP 40 decisions
+        // Priority decides which connection gives way when we are at the limit. This is the
+        // local-only ordering, not the canonical BEP 40 value - see PeerPriority.
         uint incomingPriority = remote != null
-            ? PeerPriority.Calculate(remote.Address, _torrent.Hash.ToArray())
+            ? PeerPriority.CalculateWithoutLocalAddress(remote.Address, _torrent.Hash.ToArray())
             : 0;
 
         // Check connection limits for incoming connections
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
         if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
         {
-            // BEP 40: Try to replace lowest priority peer if incoming has higher priority
+            // Replace the lowest priority peer if the incoming one outranks it.
             var lowestPriorityPeer = TryGetLowestPriorityPeer();
             if (lowestPriorityPeer != null && incomingPriority > lowestPriorityPeer.Priority)
             {
-                _logger.LogDebug("BEP 40: Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
+                _logger.LogDebug("Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
                 await lowestPriorityPeer.CloseAsync().ConfigureAwait(false);
             }
             else
@@ -282,7 +283,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (peer.RemoteEndPoint != null)
         {
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-            // BEP 40: Use already calculated priority
+            // Reuse the priority already calculated above.
             peer.Priority = incomingPriority;
 
             // Refused in both directions, or a peer that has been dropped for serving bad data simply
@@ -339,7 +340,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        // Calculate priority early for BEP 40 decisions
+        // Priority decides which connection gives way when we are at the limit. This is the
+        // local-only ordering, not the canonical BEP 40 value - see PeerPriority.
         var remoteEp = NetworkUtils.NormalizeEndPoint(client.Client.RemoteEndPoint as IPEndPoint);
 
         // Check blocklist first
@@ -359,18 +361,18 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
         uint incomingPriority = remoteEp != null
-            ? PeerPriority.Calculate(remoteEp.Address, _torrent.Hash.ToArray())
+            ? PeerPriority.CalculateWithoutLocalAddress(remoteEp.Address, _torrent.Hash.ToArray())
             : 0;
 
         // Check connection limits for incoming connections
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
         if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
         {
-            // BEP 40: Try to replace lowest priority peer if incoming has higher priority
+            // Replace the lowest priority peer if the incoming one outranks it.
             var lowestPriorityPeer = TryGetLowestPriorityPeer();
             if (lowestPriorityPeer != null && incomingPriority > lowestPriorityPeer.Priority)
             {
-                _logger.LogDebug("BEP 40: Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
+                _logger.LogDebug("Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
                 await lowestPriorityPeer.CloseAsync().ConfigureAwait(false);
             }
             else
@@ -404,7 +406,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (peer.RemoteEndPoint != null)
         {
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-            // BEP 40: Calculate canonical peer priority
+            // Deterministic per-peer ordering.
             peer.Priority = incomingPriority;
 
             // See AddIncomingPeerAsync: an incoming connection's source port is not a dialable address.
@@ -1969,8 +1971,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (peer.RemoteEndPoint != null)
             {
                 peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-                // BEP 40: Calculate canonical peer priority
-                peer.Priority = PeerPriority.Calculate(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
+                // Deterministic per-peer ordering.
+                peer.Priority = PeerPriority.CalculateWithoutLocalAddress(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
             }
 
             // The connection may have died between ConnectAsync succeeding and the registration
@@ -2825,7 +2827,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     }
 
     /// <summary>
-    /// BEP 40: Get the lowest priority connected peer, or null if no peers.
+    /// The lowest priority connected peer, or null if there are none.
     /// </summary>
     private PeerCommunication? TryGetLowestPriorityPeer()
     {
@@ -3054,7 +3056,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (peer.RemoteEndPoint != null)
         {
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-            peer.Priority = PeerPriority.Calculate(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
+            peer.Priority = PeerPriority.CalculateWithoutLocalAddress(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
 
             var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint, isListenAddress: initiator);
             history.UpdateSource(sourceKind);
