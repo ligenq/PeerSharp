@@ -314,7 +314,6 @@ public class PortMappingTests
         }
 
         public Task StartAsync(CancellationToken token) { Port = 6881; return Task.CompletedTask; }
-        public void Stop() { }
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

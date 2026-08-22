@@ -178,33 +178,6 @@ internal class UdpListener : IUdpListener
         }
     }
 
-    public void Stop()
-    {
-        StopInternal();
-
-        // Wait for processing task to complete synchronously
-        try
-        {
-            _processTask?.Wait(TimeSpan.FromSeconds(2), CancellationToken.None);
-        }
-        catch (AggregateException ex)
-        {
-            _logger.LogTrace(ex, "UdpListener process task exception during stop (likely cancelled)");
-        }
-
-        // Wait for receive task to complete synchronously
-        try
-        {
-            _receiveTask?.Wait(TimeSpan.FromSeconds(2), CancellationToken.None);
-        }
-        catch (AggregateException ex)
-        {
-            _logger.LogTrace(ex, "UdpListener receive task exception during stop (likely cancelled)");
-        }
-
-        CleanupResources();
-    }
-
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         StopInternal();
