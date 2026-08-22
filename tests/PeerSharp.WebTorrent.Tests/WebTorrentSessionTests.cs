@@ -1178,6 +1178,13 @@ public class WebTorrentSessionTests
 
     private sealed class FakePeerTransportHost : ITorrent, IPeerTransportHost
     {
+        public bool HasSameIdentity(ITorrent? other)
+        {
+            return other != null
+                && ((!Hash.IsEmpty && !other.Hash.IsEmpty && Hash == other.Hash)
+                    || (!HashV2.IsEmpty && !other.HashV2.IsEmpty && HashV2 == other.HashV2));
+        }
+
         public FakePeerTransportHost(params string[] trackers)
         {
             Hash = new InfoHash(Enumerable.Range(0, 20).Select(i => (byte)i).ToArray());
