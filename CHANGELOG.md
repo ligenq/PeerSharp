@@ -85,6 +85,16 @@ stranger can make the DHT server spend, and what a consumer can see from outside
 - **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
   save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
   stayed in the bitfield and were persisted as present.
+- **Dialling a peer that is not there no longer throws.** Connecting is the engine's most repeated
+  failure - most addresses a swarm hands out are gone, closed or behind a NAT that never answers - and
+  both transports reported it by throwing: TCP because `Socket`'s task-based connect has no other way
+  to say so, uTP because an unanswered SYN faulted the connect task. Measured over 45 seconds of
+  connection churn that was 280 first-chance exceptions on TCP and 277 on uTP, the latter at nearly
+  four per dead peer once the throw had crossed each await and faulted the stream's pipe. Both now
+  report the outcome: TCP through `SocketAsyncEventArgs`, uTP by completing its connect with `false`.
+  The same failures are still logged, at Debug, exactly as before. Costs nothing in throughput - a
+  throw is under two microseconds - but every first-chance exception is a round trip to an attached
+  debugger, which is why stepping through an application using this engine felt sluggish.
 - **Roughly one inbound encrypted peer in 256 was refused.** Whether an incoming connection was
   plaintext or encrypted was decided on its first byte alone: 19 meant a plaintext handshake, anything
   else an MSE key exchange. An MSE key is indistinguishable from random bytes by design, so about one

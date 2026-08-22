@@ -229,8 +229,10 @@ public class UtpStreamStateTests
 
         Assert.Equal(UtpState.Closed, stream.State);
 
-        var ex = await Assert.ThrowsAsync<TimeoutException>(() => connectTask);
-        Assert.NotNull(ex);
+        // A peer that never answers the SYN is reported rather than thrown: it is the ordinary
+        // outcome of dialling a stranger, and throwing it cost four first-chance exceptions per
+        // dead peer on a path that runs for most addresses a swarm hands out.
+        Assert.False(await connectTask);
     }
 
     [Fact]
