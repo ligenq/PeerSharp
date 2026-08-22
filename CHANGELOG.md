@@ -83,6 +83,12 @@ stranger can make the DHT server spend, and what a consumer can see from outside
 - **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
   save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
   stayed in the bitfield and were persisted as present.
+- **Streaming refused the last chunk of every file.** A `Range` header whose end position was at or
+  past the end of the file was answered with 416, where RFC 7233 §2.1 requires it to be served as the
+  remainder of the file - satisfiability is decided by the *start* position alone. Media players
+  request fixed-size chunks, so the final chunk of any file asks for more than is left, as does every
+  chunk of a file smaller than one chunk; both were rejected. The end position is now clamped, and a
+  range is refused only when it begins at or past the end of the file.
 - **Peer priority did not implement BEP 40, despite naming it.** It masked both addresses to /16,
   XORed them and appended the info hash, which is not the specified calculation and does not produce
   the values the BEP publishes. Two consequences: no other client computed the same priority, so the
