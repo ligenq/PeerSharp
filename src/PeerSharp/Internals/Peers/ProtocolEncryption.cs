@@ -1,4 +1,4 @@
-using PeerSharp.Internals.Framework;
+﻿using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
