@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
+using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
@@ -926,7 +927,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     RemoteEndPoint = endpoint;
 
                     _logger.LogDebug("Initiating uTP connection to {Endpoint}", endpoint);
-                    await UtpStream.ConnectAsync(linkedCts.Token).ConfigureAwait(false);
+                    if (!await UtpStream.ConnectAsync(linkedCts.Token).ConfigureAwait(false))
+                    {
+                        // The peer never answered the SYN, which uTP now reports rather than throws.
+                        LogConnectTimeout(ip, port, GetConnectionElapsedMs(), "uTP SYN timeout");
+                        await CloseAsync().ConfigureAwait(false);
+                        return false;
+                    }
+
                     _logger.LogDebug("uTP connection to {Endpoint} successful", endpoint);
                 }
             }
@@ -954,8 +962,54 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     // We set it manually here.
                     RemoteEndPoint = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(ip), port);
                 }
+                else if (System.Net.IPAddress.TryParse(ip, out var peerAddress))
+                {
+                    // A peer address, which is all but universally what this is. Connecting through
+                    // the socket directly reports a refusal or a dead address as a result rather
+                    // than as an exception - see SocketConnect for why that is worth the detour.
+                    Client = new TcpClient(bindAddress?.AddressFamily ?? peerAddress.AddressFamily);
+                    if (bindAddress != null)
+                    {
+                        Client.Client.Bind(new IPEndPoint(bindAddress, 0));
+                    }
+
+                    ConfigureTcpClient(Client, _torrent.Settings, _logger);
+
+                    var socketError = await SocketConnect
+                        .ConnectAsync(Client.Client, new IPEndPoint(peerAddress, port), linkedCts.Token)
+                        .ConfigureAwait(false);
+
+                    if (socketError != SocketError.Success)
+                    {
+                        // The same outcomes the catch blocks below produce, reached without the
+                        // throw. Kept in the same order and worded the same way, so a log from
+                        // before and after this change reads identically.
+                        if (_cts.IsCancellationRequested)
+                        {
+                            LogConnectCancelled(ip, port);
+                        }
+                        else if (linkedCts.IsCancellationRequested || socketError == SocketError.TimedOut)
+                        {
+                            LogConnectTimeout(ip, port, GetConnectionElapsedMs(), nameof(SocketError.TimedOut));
+                        }
+                        else
+                        {
+                            // Constructed for its message only. Constructing an exception raises
+                            // nothing; only throwing one does.
+                            LogConnectFailed(ip, port, new SocketException((int)socketError).Message);
+                        }
+
+                        await CloseAsync().ConfigureAwait(false);
+                        return false;
+                    }
+
+                    Stream = Client.GetStream();
+                    RemoteEndPoint = Client.Client.RemoteEndPoint as System.Net.IPEndPoint;
+                }
                 else
                 {
+                    // A host name rather than an address. Rare enough for peers that it keeps the
+                    // resolving path, exceptions and all.
                     Client = bindAddress == null
                         ? new TcpClient()
                         : new TcpClient(bindAddress.AddressFamily);
@@ -1057,47 +1111,35 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         catch (OperationCanceledException ex) when (!_cts.IsCancellationRequested)
         {
             // Connection timeout (not explicit cancellation via CloseAsync()) - expected in BitTorrent
-            int elapsedMs = GetConnectionElapsedMs();
-#pragma warning disable S6667 // Deliberately no stack trace: see note above.
-            _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, ex.GetType().Name);
-#pragma warning restore S6667
+            LogConnectTimeout(ip, port, GetConnectionElapsedMs(), ex.GetType().Name);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut)
         {
             // OS-level connection timeout (timeoutMs > OS timeout)
-            int elapsedMs = GetConnectionElapsedMs();
-#pragma warning disable S6667 // Deliberately no stack trace: see note above.
-            _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, ex.GetType().Name);
-#pragma warning restore S6667
+            LogConnectTimeout(ip, port, GetConnectionElapsedMs(), ex.GetType().Name);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (OperationCanceledException)
         {
             // Explicit cancellation via CloseAsync()
-#pragma warning disable S6667 // Deliberately no stack trace: see note above.
-            _logger.LogDebug("Connect cancelled {Ip}:{Port}", ip, port);
-#pragma warning restore S6667
+            LogConnectCancelled(ip, port);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (SocketException ex)
         {
             // Expected network errors - log without stack trace at Debug level
-#pragma warning disable S6667 // Deliberately no stack trace: see note above.
-            _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, ex.Message);
-#pragma warning restore S6667
+            LogConnectFailed(ip, port, ex.Message);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
         catch (IOException ex) when (ex.InnerException is SocketException)
         {
             // Expected network errors wrapped in IOException - log without stack trace
-#pragma warning disable S6667 // Deliberately no stack trace: see note above.
-            _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, ex.InnerException.Message);
-#pragma warning restore S6667
+            LogConnectFailed(ip, port, ex.InnerException.Message);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
@@ -1122,6 +1164,34 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
+    }
+
+    /// <summary>
+    /// A peer that did not answer in time. Shared by the connect path and its catch blocks so the
+    /// two report the same thing.
+    /// </summary>
+    private void LogConnectTimeout(string ip, int port, int elapsedMs, string reason)
+    {
+#pragma warning disable S6667 // Deliberately no stack trace: see the note in ConnectAsync.
+        _logger.LogDebug(
+            "Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, reason);
+#pragma warning restore S6667
+    }
+
+    /// <summary>A connection this engine gave up on itself.</summary>
+    private void LogConnectCancelled(string ip, int port)
+    {
+#pragma warning disable S6667 // Deliberately no stack trace: see the note in ConnectAsync.
+        _logger.LogDebug("Connect cancelled {Ip}:{Port}", ip, port);
+#pragma warning restore S6667
+    }
+
+    /// <summary>A peer that refused, or an address nothing is listening on.</summary>
+    private void LogConnectFailed(string ip, int port, string message)
+    {
+#pragma warning disable S6667 // Deliberately no stack trace: see the note in ConnectAsync.
+        _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, message);
+#pragma warning restore S6667
     }
 
     [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]

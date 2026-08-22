@@ -250,9 +250,14 @@ internal class UtpStream : Stream
                     // Debug, not warning: see the SYN-RECV case above. The caller reports this too, so
                     // at warning level one unreachable peer produced two lines and a stack trace.
                     _logger.LogDebug("uTP {Remote}: SYN timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
-                    var ex = new TimeoutException($"Connection to {RemoteEndPoint} timed out after {MaxSynRetries} SYN retries");
-                    _connectTcs?.TrySetException(ex);
-                    CloseInternal(false, ex);
+
+                    // Reported as a result, not thrown. Most addresses a swarm hands out sit behind a
+                    // NAT that never answers a SYN, so this is the ordinary outcome of dialling a
+                    // stranger - and throwing it cost four first-chance exceptions per dead peer:
+                    // one here, one crossing each await on the way out, and one more when the faulted
+                    // close completed the pipe. Closing without an error keeps the pipe clean.
+                    _connectTcs?.TrySetResult(false);
+                    CloseInternal(false);
                     return;
                 }
 
@@ -397,11 +402,18 @@ internal class UtpStream : Stream
         CloseInternal(true);
     }
 
-    public async Task ConnectAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Opens the stream, or reports that the peer never answered.
+    /// </summary>
+    /// <returns>
+    /// <see langword="true"/> once connected, <see langword="false"/> when the peer did not answer
+    /// the SYN. Cancellation and genuine faults still throw - those are not ordinary outcomes.
+    /// </returns>
+    public async Task<bool> ConnectAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        Task connectTask;
+        Task<bool> connectTask;
         TaskCompletionSource<bool> connectTcs;
         lock (_lock)
         {
@@ -424,7 +436,7 @@ internal class UtpStream : Stream
             CloseInternal(false);
         });
 
-        await connectTask.ConfigureAwait(false);
+        return await connectTask.ConfigureAwait(false);
     }
 
     public override async ValueTask DisposeAsync()

@@ -770,7 +770,10 @@ public class UtpExhaustiveTests
         }
 
         Assert.Equal(UtpState.Closed, stream.State);
-        await Assert.ThrowsAnyAsync<Exception>(() => tcs.Task);
+
+        // Completed with a result rather than faulted - see the note on the SYN timeout in
+        // UtpStream: it is the ordinary outcome, not a failure worth an exception.
+        Assert.False(await tcs.Task);
     }
 
     [Fact(Timeout = 10000)]

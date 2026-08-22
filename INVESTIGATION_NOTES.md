@@ -112,6 +112,56 @@ path validator and the DHT codecs, did not.
 
 ---
 
+## Exceptions on the connect path, measured before changing anything
+
+Exceptions being expensive in .NET is folklore worth checking rather than repeating. Measured on
+.NET 10, no debugger attached:
+
+| | cost |
+| --- | --- |
+| Return a failure result | 0.02 us |
+| throw + catch, shallow | 0.81 us |
+| throw + catch, 16 frames | 3.71 us |
+| throw + catch `SocketException` | 1.47 us |
+| exception across 8 awaits | 30.8 us (3.1 us without) |
+
+So the folklore is stale for throughput, and the async case is the one that matters here.
+
+What the engine actually threw, counted with the soak test's own first-chance counter:
+
+| Scenario | notifications | distinct | amplification |
+| --- | --- | --- | --- |
+| Clean 8 MiB loopback transfer | 0 | 0 | - |
+| 30s, 50 unreachable peers, TCP | 280 | 140 | 2.0x |
+| 45s, 50 unreachable peers, uTP | 277 | 72 | 3.8x |
+
+The happy path throws nothing; every one of these is a connection that did not happen. At those
+rates the runtime cost is about a thousandth of a percent of a core - not worth changing on its own.
+What made it worth changing is that each first-chance exception is a round trip to an attached
+debugger, so a consumer stepping through their own application pays for how often this engine dials a
+dead peer, and pays it as visible sluggishness. That was reported from Peerfluence.
+
+The 2.0x on TCP is a floor, not a defect: one notification where the exception is raised and one as
+it crosses the await. A standalone benchmark with the catch immediately around the await reproduced
+exactly 2.0x, so no amount of restructuring gets below it while the API throws. Only not throwing
+does.
+
+libtorrent settles the design question. Its `peer_connection::on_connection_complete(error_code
+const& e)` takes asio's error_code overload, so a refused connection is an ordinary branch costing no
+exception at all. .NET has the same thing in `SocketAsyncEventArgs`, which reports through
+`SocketError` where the task-based overloads throw.
+
+After the change, with the same workloads: TCP 280 to 0, uTP 277 to 48. The 48 are
+`TaskCanceledException` from the connect deadline firing before uTP exhausts its SYN retries, and
+those were left alone - cancellation surfacing as an exception is the .NET contract, it is tested
+here deliberately, and changing it would be fighting the language rather than the design.
+
+The log counts confirm the drop is real rather than the engine having quietly stopped trying: over
+the same 30 seconds it still logged 120 connect failures and 30 connect timeouts, and still completed
+the transfer.
+
+---
+
 ## Testing encryption against ourselves proved less than it looked
 
 Every test of the MSE handshake ran our initiator against our own responder. That shows the two
