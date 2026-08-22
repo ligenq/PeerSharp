@@ -1,4 +1,4 @@
-﻿using PeerSharp.Internals.Framework;
+using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
@@ -58,7 +58,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
 
     private const int MaxPaddingLength = 512;
 
-    private readonly DiffieHellman _dh = new();
+    private readonly DiffieHellman _dh;
 
     private readonly byte[]? _infoHash;
 
@@ -77,9 +77,22 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
     private Step _step = Step.Pe1;
 
     public ProtocolEncryptionHandshake(byte[] infoHash, bool initiator)
+        : this(infoHash, initiator, new DiffieHellman())
+    {
+    }
+
+    /// <summary>
+    /// Creates a handshake using a caller-supplied key exchange, for replaying a recorded one.
+    /// </summary>
+    /// <remarks>
+    /// See <see cref="DiffieHellman(ReadOnlySpan{byte})"/>: only a fixed private key makes a
+    /// recording reproducible. Live connections use the constructor above, which generates one.
+    /// </remarks>
+    internal ProtocolEncryptionHandshake(byte[] infoHash, bool initiator, DiffieHellman exchange)
     {
         _infoHash = infoHash;
         _initiator = initiator;
+        _dh = exchange;
         if (initiator)
         {
             _step = Step.Pe2;
@@ -87,9 +100,16 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
     }
 
     public ProtocolEncryptionHandshake(ITorrentResolver resolver)
+        : this(resolver, new DiffieHellman())
+    {
+    }
+
+    /// <inheritdoc cref="ProtocolEncryptionHandshake(byte[], bool, DiffieHellman)" />
+    internal ProtocolEncryptionHandshake(ITorrentResolver resolver, DiffieHellman exchange)
     {
         _resolver = resolver;
         _initiator = false;
+        _dh = exchange;
         _step = Step.Pe1;
     }
 
