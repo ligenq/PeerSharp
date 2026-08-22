@@ -83,6 +83,13 @@ stranger can make the DHT server spend, and what a consumer can see from outside
 - **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
   save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
   stayed in the bitfield and were persisted as present.
+- **Roughly one inbound encrypted peer in 256 was refused.** Whether an incoming connection was
+  plaintext or encrypted was decided on its first byte alone: 19 meant a plaintext handshake, anything
+  else an MSE key exchange. An MSE key is indistinguishable from random bytes by design, so about one
+  in 256 begins with 19 - and those connections had 96 bytes of key read as a handshake, producing an
+  info hash matching no torrent and dropping a peer that was behaving correctly. Too rare to look like
+  anything but ordinary swarm churn. The protocol name is now checked before committing to plaintext,
+  and anything else is handed to the encryption handshake instead.
 - **Streaming refused the last chunk of every file.** A `Range` header whose end position was at or
   past the end of the file was answered with 416, where RFC 7233 §2.1 requires it to be served as the
   remainder of the file - satisfiability is decided by the *start* position alone. Media players
