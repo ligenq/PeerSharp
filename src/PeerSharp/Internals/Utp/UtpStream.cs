@@ -405,11 +405,25 @@ internal class UtpStream : Stream
     /// <summary>
     /// Opens the stream, or reports that the peer never answered.
     /// </summary>
+    /// <param name="timeout">
+    /// How long to wait before giving up. This is the operation's own deadline, so running out of it
+    /// is a result rather than a cancellation - see the remarks. Defaults to no deadline, which is
+    /// what the SYN retry budget already bounds.
+    /// </param>
+    /// <param name="cancellationToken">The caller asking to stop, which does throw.</param>
     /// <returns>
-    /// <see langword="true"/> once connected, <see langword="false"/> when the peer did not answer
-    /// the SYN. Cancellation and genuine faults still throw - those are not ordinary outcomes.
+    /// <see langword="true"/> once connected, <see langword="false"/> when the peer did not answer in
+    /// time. Cancellation and genuine faults still throw - those are not ordinary outcomes.
     /// </returns>
-    public async Task<bool> ConnectAsync(CancellationToken cancellationToken = default)
+    /// <remarks>
+    /// The two are deliberately separate. A cancellation token means the caller changed its mind, and
+    /// <see cref="OperationCanceledException"/> is the right way to report that; a deadline this
+    /// method owns is part of what it promises to do, and a peer that did not answer inside it is the
+    /// ordinary outcome rather than an abort. Folding the deadline into the token - which is what a
+    /// linked source does - turns every unanswered peer back into an exception, which is the mistake
+    /// HttpClient is still criticised for.
+    /// </remarks>
+    public async Task<bool> ConnectAsync(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -429,10 +443,18 @@ internal class UtpStream : Stream
             connectTask = connectTcs.Task;
         }
 
-        // Register cancellation to abort the connection attempt
+        // The caller giving up: an abort, and reported as one.
         await using var registration = cancellationToken.Register(() =>
         {
             connectTcs.TrySetCanceled(cancellationToken);
+            CloseInternal(false);
+        });
+
+        // Our own deadline: an outcome, and reported as one.
+        using var deadline = new CancellationTokenSource(timeout ?? Timeout.InfiniteTimeSpan, _timeProvider);
+        await using var deadlineRegistration = deadline.Token.Register(() =>
+        {
+            connectTcs.TrySetResult(false);
             CloseInternal(false);
         });
 

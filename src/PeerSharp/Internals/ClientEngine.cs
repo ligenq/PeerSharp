@@ -869,8 +869,12 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
             if (!negotiated.Success)
             {
+                // Returned rather than thrown. This is the ordinary outcome for an inbound peer that
+                // hangs up or never finishes the handshake, the catch that received it is twenty
+                // lines below in this same method, and it was costing an exception per attempt on a
+                // path that runs for every incoming connection.
                 _logger.LogDebug("uTP handshake from {Remote} did not complete", stream.RemoteEndPoint);
-                throw new InvalidDataException("Invalid handshake");
+                return;
             }
 
             var torrent = ResolveTorrentForBackgroundWork(negotiated.InfoHash);
@@ -881,7 +885,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 _logger.LogDebug(
                     "Refusing incoming uTP connection for {TorrentName}: the torrent is not running",
                     stopped.Name);
-                throw new InvalidOperationException("Torrent is not running");
+                return;
             }
 
             if (torrent is Torrent t)

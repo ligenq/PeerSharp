@@ -911,6 +911,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             using var connectTimeoutCts = new CancellationTokenSource(timeoutMs);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ConnectionToken, connectTimeoutCts.Token, ct);
 
+            // The same tokens without the deadline. Giving up on a peer is this engine's own decision
+            // and belongs in the result; only these two mean somebody asked us to stop.
+            using var abortCts = CancellationTokenSource.CreateLinkedTokenSource(ConnectionToken, ct);
+
             if (useUtp && _torrent.UtpManager != null)
             {
                 if (!CanUseUtpWithProxy(_torrent.Settings))
@@ -927,7 +931,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     RemoteEndPoint = endpoint;
 
                     _logger.LogDebug("Initiating uTP connection to {Endpoint}", endpoint);
-                    if (!await UtpStream.ConnectAsync(linkedCts.Token).ConfigureAwait(false))
+                    if (!await UtpStream.ConnectAsync(TimeSpan.FromMilliseconds(timeoutMs), abortCts.Token).ConfigureAwait(false))
                     {
                         // The peer never answered the SYN, which uTP now reports rather than throws.
                         LogConnectTimeout(ip, port, GetConnectionElapsedMs(), "uTP SYN timeout");

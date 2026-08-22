@@ -162,6 +162,55 @@ the transfer.
 
 ---
 
+## A timeout is not a cancellation
+
+Two more sources of exceptions on ordinary paths, found by profiling with the DHT switched on - the
+earlier profiles had disabled it, so anything it or the inbound uTP path threw was invisible.
+
+`ClientEngine.HandleIncomingUtpAsync` threw `InvalidDataException` for a handshake that did not
+complete, and caught it twenty lines below in its own `catch`. A throw used to jump within one
+method, on the path every inbound connection takes, for a condition already sitting in a bool. Now a
+`return`.
+
+The other is the interesting one. What remained of the uTP connect path was
+`TaskCanceledException`, and it came from folding two different things into one token: the caller's
+cancellation, and this engine's own "give up after N milliseconds". A linked source cannot tell them
+apart afterwards, so an ordinary unanswered peer arrived as an abort.
+
+They are not the same, and separating them is the fix:
+
+- A `CancellationToken` means the caller changed its mind. `OperationCanceledException` is the right
+  way to report that, it is what every caller expects, and it stays.
+- A deadline the operation owns is part of what the operation promises. Running out of it is an
+  outcome, and belongs in the return value.
+
+`UtpStream.ConnectAsync` now takes the deadline as a parameter and completes with `false` when it
+expires, while the token still throws. This is the same distinction `HttpClient` is criticised for
+missing - a request timeout there surfaces as `TaskCanceledException`, indistinguishable from the
+caller cancelling, which is why .NET 5 had to add a `TimeoutException` inner exception to tell them
+apart.
+
+### What is left, and why it stays
+
+| Source | share |
+| --- | --- |
+| Peer teardown cancelling read and send loops | ~90% |
+| DHT sends to unreachable hosts | ~1% |
+
+The teardown exceptions are one `OperationCanceledException` per closed connection, multiplied by the
+stream layers it crosses on the way out - rate limiter, encryption, uTP - at about five notifications
+per teardown. That is the idiomatic .NET shutdown pattern: a pending `ReadAsync` observes its token
+and throws. Avoiding it means read loops that poll instead of awaiting, which is worse code for a
+cost that is already negligible, so it stays.
+
+### The measurement is noisy
+
+Totals ranged from 774 to 2,082 across identical 60-second runs, because the harness re-offers fifty
+unreachable peers four times a second - far more connection churn than real use. The attribution is
+stable and the removed sources are gone from every run; the absolute totals are not worth quoting.
+
+---
+
 ## Testing encryption against ourselves proved less than it looked
 
 Every test of the MSE handshake ran our initiator against our own responder. That shows the two
