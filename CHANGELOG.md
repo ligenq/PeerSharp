@@ -35,6 +35,11 @@ surface against libtorrent's `torrent_handle` and `session_handle`.
 - **`IClientEngine.PauseAsync` / `ResumeAsync` / `IsPaused`** stop every running torrent and start
   back exactly those, leaving alone any the user had stopped by hand. A torrent added while paused
   waits for the resume.
+- **`TryParse` now states when its `error` is set.** The `out string? error` overloads of
+  `TorrentFile.TryParse` and `MagnetLink.TryParse` carry `[NotNullWhen(false)]`, so reading the
+  message in the failure branch no longer warns. The produced value already carried
+  `[NotNullWhen(true)]`. An architecture test now requires every public `Try` method to say when each
+  of its reference-typed out parameters is null.
 - **Three new alerts.** `PieceHashFailed` names the piece and, where one peer supplied all of it, the
   peer. `PeerBlocked` reports an address refused by the blocklist or for having served bad data.
   `ListenPortChanged` fires when a listener could not bind the configured port - the case where port
