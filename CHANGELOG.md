@@ -7,6 +7,24 @@ history has the reasoning and the measurements behind each one.
 
 ### Fixed
 
+- **A v2 download wrote every file after the first to the wrong place.** BEP 52 starts each file on a
+  piece boundary, so a v2 torrent's piece space is larger than the sum of its files by that padding.
+  Storage laid its files out along their sizes instead, putting each one earlier than it belonged by
+  the accumulated gap. Nothing noticed, because a piece is verified when it is assembled and before
+  it is written: the hashes passed, the download reported 100%, and the data on disk was corrupt from
+  the second file onward. Checked byte for byte against libtorrent's own copy, a three-file v2
+  download now matches on every file where two of the three previously did not.
+- **A v2-only torrent could never report itself finished.** `HasMetadata` asked for the v1 SHA-1
+  `pieces` string or a BEP 30 merkle root, and a v2 torrent has neither - it describes its pieces per
+  file, in the file tree. Nothing on the download path consulted it, so the transfer completed and
+  verified and then sat at 100% forever, never announcing completion and never releasing the peers
+  that had served it.
+- **`TotalSize` counted padding as content.** For a v2 torrent it reported the piece space, which
+  overstates the torrent by the alignment padding and leaves the remaining-bytes count unable to
+  reach zero; for a v1 torrent with BEP 47 padding entries it counted bytes the same API hides from
+  the file list. It is now the content: the sum of the real files. **This changes the value returned
+  by `ITorrent.TotalSize` and `TorrentFile.TotalSize`** for any torrent containing padding.
+
 - **A v2 torrent's last piece per file never verified**, so a v2 or hybrid download from any other
   client died on the first tail piece it completed - the peer that supplied it is dropped as the sole
   source of a bad piece. PeerSharp zero-padded the data of a short final block to 16 KiB before

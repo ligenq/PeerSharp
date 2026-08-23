@@ -186,6 +186,72 @@ internal class TorrentFileInfo
         return result;
     }
 
+    /// <summary>
+    /// The bytes of actual content: what a consumer is downloading, and what a progress bar should be
+    /// measured against.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="FullSize"/>, which is the size of the piece space. The two differ
+    /// wherever the layout contains padding - BEP 47 padding entries in a v1 torrent, or the implicit
+    /// gaps BEP 52 leaves after a file that does not end on a piece boundary. Reporting the piece
+    /// space as the torrent's size overstates a v2 torrent by the whole of that padding, and leaves
+    /// its remaining-bytes count unable to reach zero.
+    /// </remarks>
+    public long ContentSize
+    {
+        get
+        {
+            long total = 0;
+            foreach (var file in Files)
+            {
+                if (!file.IsPadding)
+                {
+                    total += file.Size;
+                }
+            }
+
+            return total > 0 ? total : FullSize;
+        }
+    }
+
+    /// <summary>
+    /// How much of the torrent's piece space each file occupies, in file order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is not the same as the file's size. BEP 52 starts every file on a piece boundary, so a v2
+    /// torrent's piece space has a gap after any file that does not end on one, and the offsets the
+    /// parser recorded already account for it. A v1 torrent packs files end to end and spells out any
+    /// alignment as explicit padding entries, so there the span is the size.
+    /// </para>
+    /// <para>
+    /// Storage has to lay files out along this, not along their sizes. Mapping a piece-space offset
+    /// through the sizes put every file after the first one earlier by the accumulated gap, which
+    /// wrote each file's data into the wrong place while every piece still verified - verification
+    /// happens on the assembled piece before it is written. A v2 download reported 100% and left the
+    /// first file correct and every other file corrupt.
+    /// </para>
+    /// <para>
+    /// Derived from the recorded offsets rather than from the version, so it stays right for a
+    /// torrent whose padding is explicit and one whose padding is implied.
+    /// </para>
+    /// </remarks>
+    public List<long> GetPieceSpaceSpans()
+    {
+        var spans = new List<long>(Files.Count);
+        for (int i = 0; i < Files.Count; i++)
+        {
+            long next = i + 1 < Files.Count ? Files[i + 1].Offset : FullSize;
+            long span = next - Files[i].Offset;
+
+            // A file can never occupy less of the piece space than it holds; if the recorded offsets
+            // say otherwise they are not usable and the size is the safer answer.
+            spans.Add(Math.Max(span, Files[i].Size));
+        }
+
+        return spans;
+    }
+
     public long GetPieceSize(int pieceIndex)
     {
         int pieceCount = GetPieceCount();

@@ -96,7 +96,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             }
 
             long finished = (long)Math.Min(FinishedBytes, (ulong)long.MaxValue);
-            return Math.Max(0, InfoFile.Info.FullSize - finished);
+            return Math.Max(0, InfoFile.Info.ContentSize - finished);
         }
     }
 
@@ -157,8 +157,23 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public InfoHash HashV2 => InfoFile.Info.HashV2;
 
-    public bool HasMetadata => (InfoFile.Info.Pieces?.Count > 0 && InfoFile.Info.FullSize > 0)
-                                 || (InfoFile.Info.IsMerkle && InfoFile.Info.FullSize > 0);
+    /// <summary>
+    /// Whether this torrent knows its own layout. False for a magnet whose BEP 9 exchange has not
+    /// finished.
+    /// </summary>
+    /// <remarks>
+    /// The three ways a torrent can describe its pieces, and it needs any one of them. A v1 torrent
+    /// has the SHA-1 <c>pieces</c> string; a BEP 30 torrent has a merkle root; a v2 torrent has
+    /// neither and describes its pieces per file, in the file tree. Asking only the first two meant a
+    /// v2-only torrent was permanently "without metadata" - which no part of the download path
+    /// consulted, so it downloaded and verified perfectly and then could not report itself finished,
+    /// because <see cref="Finished"/> requires this. It sat at a hundred per cent, never announced
+    /// completion, and never let go of the peers that had served it.
+    /// </remarks>
+    public bool HasMetadata => InfoFile.Info.FullSize > 0
+        && ((InfoFile.Info.Pieces?.Count > 0)
+            || InfoFile.Info.IsMerkle
+            || (InfoFile.Info.IsV2 && InfoFile.Info.Files.Count > 0));
 
     public bool HasSameIdentity(ITorrent? other)
     {
@@ -304,7 +319,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
     public DateTimeOffset TimeAdded { get; set; }
-    public long TotalSize => InfoFile.Info.FullSize;
+    public long TotalSize => InfoFile.Info.ContentSize;
     public TrackerManager TrackerManager { get; private set; } = null!;
     public ITrackers Trackers => TrackerManager;
     public IWebSeeds WebSeeds => _webSeeds;
