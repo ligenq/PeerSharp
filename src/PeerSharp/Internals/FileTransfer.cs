@@ -513,7 +513,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _pieceProcessingQueue = Channel.CreateBounded<PieceState>(new BoundedChannelOptions(maxConcurrentPieces)
         {
             FullMode = BoundedChannelFullMode.Wait, // Backpressure: stop accepting blocks if processing lags
-            SingleReader = true
+            SingleReader = false
         });
 
         Logger.LogDebug("Piece processing queue initialized with capacity {MaxConcurrentPieces} (configurable via MaxConcurrentPieceProcessing)", maxConcurrentPieces);
@@ -595,7 +595,17 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         // Track background tasks for proper disposal and error handling
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessIncomingBlocksAsync, "ProcessIncomingBlocks"));
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessPeerEvaluationsAsync, "ProcessPeerEvaluations"));
-        _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessPieceQueueAsync, "ProcessPieceQueue"));
+
+        // One reader per unit of allowed concurrency. A single reader awaited each piece's hash and
+        // write before taking the next, so the queue's only parallelism came from its overflow path -
+        // which made the queue's capacity a proxy for how much work ran at once, and in the wrong
+        // direction. Raising the capacity from 16 to 64 spilled less often, ran more of the work
+        // through that one sequential reader, and cost a measured 227 MB/s of download throughput,
+        // down to 45. Concurrency is stated here instead, and the capacity is only a buffer again.
+        for (int i = 0; i < maxConcurrentPieces; i++)
+        {
+            _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessPieceQueueAsync, $"ProcessPieceQueue-{i}"));
+        }
     }
 
     long IFileTransfer.Downloaded => Downloader.Downloaded;

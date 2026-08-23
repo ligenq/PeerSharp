@@ -198,7 +198,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private readonly HashSet<int> _allowedFastPieces = [];
     private readonly Lock _availabilityLock = new();
     private readonly Lock _fastPiecesLock = new();
-    private readonly int _lastLoggedPipelineDepth = 0;
     private readonly ILogger<PeerCommunication> _logger;
     private IPeerListener _listener;
     private readonly MessageQueue _sendQueue;
@@ -1280,13 +1279,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         var transferSettings = _torrent.Settings.Transfer;
         int speedBytesPerSec = (int)Math.Min(int.MaxValue, Math.Max(DownloadSpeed, SmoothedDownloadSpeed));
-        int rttMs = SmoothedRttMs;
 
         return PipelineDepthCalculator.CalculateOptimal(
             speedBytesPerSec,
-            rttMs,
+            transferSettings.RequestQueueTimeSeconds,
             transferSettings.EstimatedBandwidthBytesPerSec,
-            transferSettings.EstimatedRttMs,
             transferSettings.InitialPipelineDepth);
     }
 
@@ -1336,13 +1333,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         int newRtt = ((oldRtt * 7) + rttMs) / 8;
         Interlocked.Exchange(ref _smoothedRttMs, Math.Max(10, Math.Min(newRtt, 5000))); // Clamp 10ms-5s
 
-        // Log significant RTT changes (>50% change)
+        // Log significant RTT changes (>50% change). Pipeline depth is deliberately not reported
+        // here any more: it is sized from the peer's rate rather than its round trip.
         if (Math.Abs(newRtt - oldRtt) > oldRtt / 2)
         {
-            int oldPipeline = _lastLoggedPipelineDepth > 0 ? _lastLoggedPipelineDepth : GetOptimalPipelineDepthForRtt(oldRtt);
-            int newPipeline = GetOptimalPipelineDepthForRtt(newRtt);
-            _logger.LogTrace("RTT significant change for {PeerName}: {OldRtt}ms -> {NewRtt}ms (sample={Sample}ms), pipeline depth {OldPipeline} -> {NewPipeline}",
-                Name, oldRtt, newRtt, rttMs, oldPipeline, newPipeline);
+            _logger.LogTrace("RTT significant change for {PeerName}: {OldRtt}ms -> {NewRtt}ms (sample={Sample}ms)",
+                Name, oldRtt, newRtt, rttMs);
         }
     }
 
@@ -1789,12 +1785,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         long extra = speed / 200_000 * 50;
         int limit = (int)Math.Min(SendQueueCapacityMax, SendQueueBaseSoftLimit + extra);
         return Math.Clamp(limit, SendQueueCapacityMin, SendQueueCapacityMax);
-    }
-
-    private int GetOptimalPipelineDepthForRtt(int rttMs)
-    {
-        int speedBytesPerSec = (int)Math.Min(int.MaxValue, Math.Max(DownloadSpeed, SmoothedDownloadSpeed));
-        return PipelineDepthCalculator.CalculateOptimalForRtt(speedBytesPerSec, rttMs);
     }
 
     private async Task HandleExtendedMessageAsync(ReadOnlyMemory<byte> data)
