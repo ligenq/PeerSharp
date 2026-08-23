@@ -343,6 +343,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _sendQueue = new MessageQueue(SendQueueCapacityMax);
     }
 
+    /// <summary>
+    /// Whether the last outgoing attempt died with the peer hanging up mid-MSE.
+    /// </summary>
+    /// <remarks>
+    /// The one failure that is worth another dial straight away, because the peer never said anything
+    /// about encryption and the next attempt will offer the other thing. Every other failure is left
+    /// to the ordinary backoff.
+    /// </remarks>
+    public bool HungUpDuringEncryptionHandshake { get; private set; }
+
     private enum EncryptionHandshakeResult
     { Success, Failed, PlaintextDetected, ConnectionClosed }
 
@@ -1085,6 +1095,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     // marks a peer that sent nothing back as unconnectable. We follow libtorrent: report
                     // the failure and let the peer's history choose plaintext next time.
                     _logger.LogDebug("Peer {Ip}:{Port} hung up during the encryption handshake", ip, port);
+                    HungUpDuringEncryptionHandshake = true;
                     await CloseAsync().ConfigureAwait(false);
                     return false;
                 }
