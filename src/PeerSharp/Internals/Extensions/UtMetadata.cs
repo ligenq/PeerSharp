@@ -62,10 +62,40 @@ internal class UtMetadata : IUtMetadata
         SendMessage(dict, null, RemoteMessageId.Value);
     }
 
+    /// <summary>
+    /// Asks a peer for one piece of the metadata.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Sent under the id the peer advertised for ut_metadata, and only that one. BEP 10 numbers
+    /// extensions per receiver: the id in an outgoing extended message is the one the peer chose for
+    /// itself, and this client's own numbering means nothing on the wire.
+    /// </para>
+    /// <para>
+    /// This used to send the request a second time under the local id as well, as a fallback "for
+    /// peers that ignore our extension mapping". There is no such peer, and the copy was addressed to
+    /// whichever different extension the receiver had put at that number: PeerSharp offers
+    /// ut_metadata as 1 and libtorrent offers it as 2, so every request also arrived at libtorrent's
+    /// extension 1 as nonsense. libtorrent offers an extended message to each of its extensions in
+    /// turn and disconnects with invalid_message when none of them claims it
+    /// (bt_peer_connection.cpp, on_extended), so the copy was at best ignored and at worst fatal.
+    /// </para>
+    /// <para>
+    /// It went unnoticed because two PeerSharp instances agree: both put ut_metadata at 1, the
+    /// duplicate is suppressed when the ids match, and nothing was ever sent twice.
+    /// </para>
+    /// <para>
+    /// Removing it is correct on its own terms and is not yet known to be sufficient: a metadata
+    /// fetch from libtorrent still ends with the peer closing the connection, for a reason that build
+    /// cannot be asked for because it is compiled without logging.
+    /// </para>
+    /// </remarks>
     public void SendRequest(int piece)
     {
-        if (!RemoteMessageId.HasValue && !LocalMessageId.HasValue)
+        if (!RemoteMessageId.HasValue)
         {
+            // A peer that did not advertise ut_metadata has no id to address, and there is no id we
+            // may invent for it.
             return;
         }
 
@@ -73,15 +103,7 @@ internal class UtMetadata : IUtMetadata
         dict.Dict["msg_type"] = new BNumber((int)MessageType.Request);
         dict.Dict["piece"] = new BNumber(piece);
 
-        if (RemoteMessageId.HasValue)
-        {
-            SendMessage(dict, null, RemoteMessageId.Value);
-        }
-        if (LocalMessageId.HasValue && RemoteMessageId != LocalMessageId)
-        {
-            // Compatibility fallback for peers that ignore our extension mapping.
-            SendMessage(dict, null, LocalMessageId.Value);
-        }
+        SendMessage(dict, null, RemoteMessageId.Value);
     }
 
     public void SetLocalMessageId(int id)
