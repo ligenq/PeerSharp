@@ -2,6 +2,8 @@
 using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Utilities;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Internals.Transfers;
 
 internal sealed class PieceVerificationOutcome : IDisposable
@@ -175,7 +177,7 @@ internal sealed class PieceVerificationWriter
         // Non-recoverable storage failures (disk full, permanently failed file) deliberately
         // propagate: retrying is hopeless, and FileTransfer stops the torrent with an error
         // instead of re-downloading this piece forever.
-        catch (Exception ex) when (ex is not PieceWriter.StorageException { IsRecoverable: false })
+        catch (Exception ex) when (ex is not StorageException { IsRecoverable: false })
         {
             _logger.LogError(ex, "Write failed for piece {PieceIndex}", pieceToProcess.Index);
             return false;

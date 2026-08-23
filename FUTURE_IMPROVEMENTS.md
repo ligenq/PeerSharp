@@ -91,39 +91,7 @@ counters to per-block or per-message paths.
 
 ---
 
-## 5. A domain error model
-
-**Impact: low individually, cumulative for a consumer.** The library throws mostly framework
-exceptions — `InvalidOperationException`, `ArgumentException`, `FormatException`,
-`InvalidDataException`, `IOException` — against three domain types (`TorrentException` and its two
-subclasses) plus `StorageException` and the tracker exceptions. A consumer cannot reliably tell
-"tracker rejected the announce" from "disk full" from "malformed torrent file" without matching on
-message strings.
-
-Not done because it is a breaking change done properly and a cosmetic one done cheaply. Wrapping
-everything in new types changes what existing `catch` blocks catch; adding types only at the public
-entry points leaves the interior inconsistent. It wants doing once, with the entry points enumerated,
-in a major version.
-
-**Partly addressed from the other end.** The half of this that does not need a breaking change is
-telling the library's own mistakes apart from the network's, and that is now done: see `Defect`.
-Measured first — 183 of 358 catch sites catch `Exception` and 176 of those log and continue, so a
-`NullReferenceException` thrown from the peer manager's maintenance loop let all 59 integration tests
-pass while it fired on every tick. Only the unit test calling the broken method directly noticed.
-Defects are now logged as errors with their stack and handed to an `IDefectObserver`, which the test
-assembly registers so that any test provoking one fails.
-
-**What remains here.** Five catch sites report; the other ~171 broad catches do not, so the sweep is
-unfinished — and it is a judgement call per site rather than a mechanical edit, because catches
-around *consumer callbacks* should keep swallowing everything. A consumer's bug must not take the
-engine down. The typed-exception work above is untouched and still wants a major version.
-
-**Resume when:** the next major version, or a consumer reports a case where the distinction actually
-changed what their code should do.
-
----
-
-## 6. Conditional protocol extensions: BEP 38 and BEP 45
+## 5. Conditional protocol extensions: BEP 38 and BEP 45
 
 **Impact: low without a consumer.** These were identified during the BEP audit and remain intentionally
 unimplemented:

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Text;
 using PeerSharp.BEncoding;
+using PeerSharp.Exceptions;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
@@ -95,7 +96,7 @@ static void FuzzTorrentMetadata(Stream stream)
     {
         TorrentFileParser.ParseInfoBytes(input);
     }
-    catch (FormatException)
+    catch (TorrentMetadataException)
     {
         // The contract this target exists to check. MetadataDownload parses a peer's ut_metadata
         // response before it can verify the hash - it has to, because computing the hash is what

@@ -4,6 +4,8 @@ using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
 using System.Collections;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Internals.Extensions;
 
 internal class MetadataDownload : IMetadataDownload, IDisposable
@@ -238,7 +240,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 {
                     newMetadata = TorrentFileParser.ParseInfoBytes(_metadataBuffer, _loggerFactory);
                 }
-                catch (FormatException ex)
+                catch (TorrentMetadataException ex)
                 {
                     _logger.LogWarning(ex, "Downloaded metadata is not a valid info dictionary. Discarding metadata.");
                     RejectCompletedMetadata();

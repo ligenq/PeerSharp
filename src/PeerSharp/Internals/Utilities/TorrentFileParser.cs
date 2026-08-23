@@ -1,13 +1,47 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.BEncoding;
+using PeerSharp.Exceptions;
 using System.Security.Cryptography;
 
 namespace PeerSharp.Internals.Utilities;
 
 internal static class TorrentFileParser
 {
+    /// <summary>
+    /// Reads a whole .torrent file.
+    /// </summary>
+    /// <remarks>
+    /// This is the boundary where bytes stop being bencode and start being a torrent, so it is where
+    /// a parse failure stops being a codec detail and becomes something a caller can act on. Callers
+    /// above this see <see cref="TorrentMetadataException"/> and nothing else.
+    /// </remarks>
     public static TorrentFileMetadata Parse(byte[] data, ILoggerFactory? loggerFactory = null)
+    {
+        try
+        {
+            return ParseCore(data, loggerFactory);
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidDataException or EndOfStreamException)
+        {
+            throw new TorrentMetadataException($"The torrent file could not be read: {ex.Message}", ex);
+        }
+    }
+
+    /// <inheritdoc cref="Parse(byte[], ILoggerFactory)" />
+    public static TorrentFileMetadata ParseInfoBytes(byte[] infoBytes, ILoggerFactory? loggerFactory = null)
+    {
+        try
+        {
+            return ParseInfoBytesCore(infoBytes, loggerFactory);
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidDataException or EndOfStreamException)
+        {
+            throw new TorrentMetadataException($"The info dictionary could not be read: {ex.Message}", ex);
+        }
+    }
+
+    private static TorrentFileMetadata ParseCore(byte[] data, ILoggerFactory? loggerFactory)
     {
         var logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger(nameof(TorrentFileParser));
         if (BencodeParser.Parse(data) is not BDict root)
@@ -106,7 +140,7 @@ internal static class TorrentFileParser
         return metadata;
     }
 
-    public static TorrentFileMetadata ParseInfoBytes(byte[] infoBytes, ILoggerFactory? loggerFactory = null)
+    private static TorrentFileMetadata ParseInfoBytesCore(byte[] infoBytes, ILoggerFactory? loggerFactory)
     {
         var logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger(nameof(TorrentFileParser));
         if (BencodeParser.Parse(infoBytes) is not BDict info)
