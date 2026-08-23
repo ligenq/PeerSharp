@@ -1176,26 +1176,20 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     private void LogConnectTimeout(string ip, int port, int elapsedMs, string reason)
     {
-#pragma warning disable S6667 // Deliberately no stack trace: see the note in ConnectAsync.
         _logger.LogDebug(
             "Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Error})", ip, port, elapsedMs, reason);
-#pragma warning restore S6667
     }
 
     /// <summary>A connection this engine gave up on itself.</summary>
     private void LogConnectCancelled(string ip, int port)
     {
-#pragma warning disable S6667 // Deliberately no stack trace: see the note in ConnectAsync.
         _logger.LogDebug("Connect cancelled {Ip}:{Port}", ip, port);
-#pragma warning restore S6667
     }
 
     /// <summary>A peer that refused, or an address nothing is listening on.</summary>
     private void LogConnectFailed(string ip, int port, string message)
     {
-#pragma warning disable S6667 // Deliberately no stack trace: see the note in ConnectAsync.
         _logger.LogDebug("Connect failed {Ip}:{Port} - {Message}", ip, port, message);
-#pragma warning restore S6667
     }
 
     [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]

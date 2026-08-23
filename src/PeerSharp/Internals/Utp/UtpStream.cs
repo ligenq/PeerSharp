@@ -446,16 +446,23 @@ internal class UtpStream : Stream
         // The caller giving up: an abort, and reported as one.
         await using var registration = cancellationToken.Register(() =>
         {
-            connectTcs.TrySetCanceled(cancellationToken);
-            CloseInternal(false);
+            // A reply may have won immediately before this callback. Do not turn a successful
+            // connection into a closed stream while the async continuation is still disposing the
+            // registration.
+            if (connectTcs.TrySetCanceled(cancellationToken))
+            {
+                CloseInternal(false);
+            }
         });
 
         // Our own deadline: an outcome, and reported as one.
         using var deadline = new CancellationTokenSource(timeout ?? Timeout.InfiniteTimeSpan, _timeProvider);
         await using var deadlineRegistration = deadline.Token.Register(() =>
         {
-            connectTcs.TrySetResult(false);
-            CloseInternal(false);
+            if (connectTcs.TrySetResult(false))
+            {
+                CloseInternal(false);
+            }
         });
 
         return await connectTask.ConfigureAwait(false);
@@ -470,7 +477,6 @@ internal class UtpStream : Stream
             // Wait for pipe write task to complete (with timeout to avoid hanging)
             if (_pipeWriteTask?.IsCompleted == false)
             {
-#pragma warning disable RCS1075 // Avoid empty catch clause that catches System.Exception
                 try
                 {
                     await _pipeWriteTask.WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
@@ -479,7 +485,6 @@ internal class UtpStream : Stream
                 {
                     // Task may have faulted, ignore during dispose
                 }
-#pragma warning restore RCS1075 // Avoid empty catch clause that catches System.Exception
             }
 
             _writeSemaphore.Dispose();
