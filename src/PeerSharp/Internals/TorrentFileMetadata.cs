@@ -210,8 +210,77 @@ internal class TorrentFileInfo
                 }
             }
 
-            return total > 0 ? total : FullSize;
+            // A magnet has no file list until its metadata arrives, so FullSize is the only size it
+            // can carry. Once files are present, however, zero is a real content size: an empty
+            // torrent or a torrent containing only padding must not report its piece space as data.
+            return Files.Count == 0 ? FullSize : total;
         }
+    }
+
+    /// <summary>
+    /// Returns the amount of real file content represented by one piece, excluding explicit and
+    /// implicit padding.
+    /// </summary>
+    public long GetPieceContentSize(int pieceIndex)
+    {
+        int pieceCount = GetPieceCount();
+        if ((uint)pieceIndex >= (uint)pieceCount || PieceSize == 0)
+        {
+            return 0;
+        }
+
+        long pieceStart = (long)pieceIndex * PieceSize;
+        long pieceEnd = pieceStart > long.MaxValue - PieceSize
+            ? long.MaxValue
+            : pieceStart + PieceSize;
+        pieceEnd = Math.Min(pieceEnd, FullSize);
+
+        // Files are stored in piece-space order. Start at the last file whose offset is not after
+        // this piece, then walk only the files the piece actually touches.
+        int low = 0;
+        int high = Files.Count - 1;
+        int firstCandidate = 0;
+        while (low <= high)
+        {
+            int middle = low + ((high - low) / 2);
+            if (Files[middle].Offset <= pieceStart)
+            {
+                firstCandidate = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        long contentBytes = 0;
+        for (int i = firstCandidate; i < Files.Count; i++)
+        {
+            var file = Files[i];
+            if (file.Offset >= pieceEnd)
+            {
+                break;
+            }
+
+            if (file.IsPadding || file.Size <= 0 || file.Offset < 0)
+            {
+                continue;
+            }
+
+            long fileEnd = file.Offset > long.MaxValue - file.Size
+                ? long.MaxValue
+                : file.Offset + file.Size;
+            fileEnd = Math.Min(fileEnd, FullSize);
+            long overlapStart = Math.Max(pieceStart, file.Offset);
+            long overlapEnd = Math.Min(pieceEnd, fileEnd);
+            if (overlapEnd > overlapStart)
+            {
+                contentBytes += overlapEnd - overlapStart;
+            }
+        }
+
+        return contentBytes;
     }
 
     /// <summary>
