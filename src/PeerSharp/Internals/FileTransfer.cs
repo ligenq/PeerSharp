@@ -10,6 +10,8 @@ using System.Threading.Channels;
 using PeerSharp.Messages;
 using PeerSharp.Internals.Transfers;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Internals;
 
 /*

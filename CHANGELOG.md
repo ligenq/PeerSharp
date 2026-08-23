@@ -5,6 +5,31 @@ history has the reasoning and the measurements behind each one.
 
 ## Unreleased
 
+### Breaking changes
+
+This is a major version. The library's own failures now share one root, `PeerSharp.Exceptions.PeerSharpException`,
+so a consumer can tell a malformed torrent from a tracker refusal from a disk that could not be
+written without matching on message strings.
+
+- **`FormatException` from parsing is now `TorrentMetadataException`.** Affects `TorrentFile.Parse`,
+  `TorrentFile.Load`, `TorrentFile.LoadAsync`, `MagnetLink.Parse`, and metadata received from peers.
+  A `catch (FormatException)` around any of those needs changing. The original parse failure is kept
+  as `InnerException`. `BencodeParser` is unchanged and still throws `FormatException`: it is a
+  bencode codec, not a torrent reader, and callers of it are working at that level.
+- **`StorageException` moved** from `PeerSharp.PieceWriter` to `PeerSharp.Exceptions`.
+- **`UdpTrackerException` moved** from `PeerSharp.Internals.Trackers` to `PeerSharp.Exceptions`, and
+  now derives from the new `TrackerException`. It should never have been public from a namespace
+  called `Internals`.
+- **`TorrentException` now derives from `PeerSharpException`** rather than `Exception`. Existing
+  `catch (TorrentException)` blocks are unaffected.
+
+Deliberately unchanged: `ArgumentException` and its relatives, `InvalidOperationException` for an
+operation attempted in the wrong state, and `OperationCanceledException`. Those say the calling code
+has a bug or changed its mind, not that the library failed, and wrapping them would hide the first
+from whoever has to fix it. The `TryParse` pattern is also unchanged, and still reports bad input
+without throwing at all.
+
+
 A review of the engine outside its protocol code: what happens when the host dies mid-write, what a
 stranger can make the DHT server spend, and what a consumer can see from outside the process.
 

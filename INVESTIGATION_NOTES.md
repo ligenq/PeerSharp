@@ -162,6 +162,46 @@ the transfer.
 
 ---
 
+## The domain error model, and what stayed a framework exception
+
+Closed the improvement entry that had been deferred to a major version, and it went to 4.0.0 for it.
+The complaint was concrete: telling "the tracker refused this announce" from "the disk is full" from
+"this .torrent is malformed" meant matching on `ex.Message`, because all three arrived as framework
+exceptions from three different namespaces - two of which were implementation namespaces that had no
+business being public at all.
+
+Everything the library reports as its own failure now descends from `PeerSharpException`. What did
+*not* move is the more interesting half, and follows directly from the defect work that preceded it:
+
+| Stays as it was | Why |
+| --- | --- |
+| `ArgumentException` and relatives | The caller has a bug. Wrapping it hides that from whoever must fix it. |
+| `InvalidOperationException` for wrong-state calls | Same: a misuse, not a failure. |
+| `OperationCanceledException` | The caller changed its mind. Every .NET caller already knows this contract. |
+| `FormatException` from `BencodeParser` | It is a bencode codec, not a torrent reader. Callers of it work at that level. |
+| `TryParse` | Unchanged, and still the cheap path: expected bad input costs no exception at all. |
+
+The boundary for the new `TorrentMetadataException` is `TorrentFileParser`, not the public API
+surface. Putting it only at the public entry points was the option the improvement entry called the
+cheap cosmetic one, because it leaves the interior throwing something different from what it reports.
+Putting it where bytes stop being bencode and start being a torrent means one answer at every level
+above it.
+
+The cost of the wrap is one extra first-chance exception per malformed torrent, since the underlying
+parse failure is caught and re-thrown as the domain type with the original as `InnerException`. That
+is once per torrent added, not per message, and it buys a caller the distinction the entry existed
+for.
+
+### The edit that reported success and did nothing
+
+Reparenting `TorrentException` onto the new root silently failed - a string replace that matched
+nothing, with a print statement afterwards that announced success regardless. The test asserting the
+common root caught it. That is the fifth time this session the same shape has appeared: an operation
+that reports success without checking it did anything. Assert on the anchor, not on reaching the next
+line.
+
+---
+
 ## A timeout is not a cancellation
 
 Two more sources of exceptions on ordinary paths, found by profiling with the DHT switched on - the

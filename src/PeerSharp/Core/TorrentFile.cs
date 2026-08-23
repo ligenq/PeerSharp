@@ -1,6 +1,8 @@
 using PeerSharp.Internals;
 using PeerSharp.Internals.Utilities;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Core;
 
 /// <summary>
@@ -115,7 +117,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <returns>A parsed TorrentFile instance.</returns>
     /// <exception cref="ArgumentNullException">Thrown when path is null.</exception>
     /// <exception cref="FileNotFoundException">Thrown when the file does not exist.</exception>
-    /// <exception cref="FormatException">Thrown when the torrent file is invalid.</exception>
+    /// <exception cref="TorrentMetadataException">Thrown when the torrent file cannot be read.</exception>
     public static TorrentFile Load(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
@@ -141,7 +143,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <returns>A parsed TorrentFile instance.</returns>
     /// <exception cref="ArgumentNullException">Thrown when path is null.</exception>
     /// <exception cref="FileNotFoundException">Thrown when the file does not exist.</exception>
-    /// <exception cref="FormatException">Thrown when the torrent file is invalid.</exception>
+    /// <exception cref="TorrentMetadataException">Thrown when the torrent file cannot be read.</exception>
     public static async Task<TorrentFile> LoadAsync(string path, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
@@ -168,14 +170,14 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <param name="data">The raw .torrent file bytes.</param>
     /// <returns>A parsed TorrentFile instance.</returns>
     /// <exception cref="ArgumentNullException">Thrown when data is null.</exception>
-    /// <exception cref="FormatException">Thrown when the torrent file is invalid.</exception>
+    /// <exception cref="TorrentMetadataException">Thrown when the torrent file cannot be read.</exception>
     public static TorrentFile Parse(byte[] data)
     {
         ArgumentNullException.ThrowIfNull(data);
 
         if (data.Length == 0)
         {
-            throw new FormatException("Torrent file data cannot be empty.");
+            throw new TorrentMetadataException("Torrent file data cannot be empty.");
         }
 
         var metadata = TorrentFileParser.Parse(data);
@@ -188,12 +190,12 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <param name="data">The raw .torrent file bytes.</param>
     /// <returns>A parsed TorrentFile instance.</returns>
     /// <exception cref="ArgumentException">Thrown when data is empty.</exception>
-    /// <exception cref="FormatException">Thrown when the torrent file is invalid.</exception>
+    /// <exception cref="TorrentMetadataException">Thrown when the torrent file cannot be read.</exception>
     public static TorrentFile Parse(ReadOnlySpan<byte> data)
     {
         if (data.IsEmpty)
         {
-            throw new FormatException("Torrent file data cannot be empty.");
+            throw new TorrentMetadataException("Torrent file data cannot be empty.");
         }
 
         return Parse(data.ToArray());
@@ -233,7 +235,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
             result = Parse(data);
             return true;
         }
-        catch (FormatException ex)
+        catch (TorrentMetadataException ex)
         {
             error = ex.Message;
             return false;

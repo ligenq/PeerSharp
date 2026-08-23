@@ -8,44 +8,9 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Internals.Trackers;
-
-/// <summary>
-/// Exception thrown for UDP tracker protocol errors.
-/// </summary>
-public class UdpTrackerException : Exception
-{
-    /// <summary>Initializes a new instance with the specified message.</summary>
-    /// <param name="message">A description of the failure.</param>
-    /// <param name="isTransient">
-    /// <see langword="true"/> for failures worth retrying, such as a timeout or an expired
-    /// connection id; <see langword="false"/> for protocol errors that will recur.
-    /// </param>
-    public UdpTrackerException(string message, bool isTransient = false)
-        : base(message)
-    {
-        IsTransient = isTransient;
-    }
-
-    /// <summary>Initializes a new instance with the specified message and cause.</summary>
-    /// <param name="message">A description of the failure.</param>
-    /// <param name="inner">The underlying error.</param>
-    /// <param name="isTransient">
-    /// <see langword="true"/> for failures worth retrying, such as a timeout or an expired
-    /// connection id; <see langword="false"/> for protocol errors that will recur.
-    /// </param>
-    public UdpTrackerException(string message, Exception inner, bool isTransient = false)
-        : base(message, inner)
-    {
-        IsTransient = isTransient;
-    }
-
-    /// <summary>
-    /// Gets a value indicating whether re-announcing is likely to succeed. Transient failures do
-    /// not count toward the tracker's circuit breaker.
-    /// </summary>
-    public bool IsTransient { get; }
-}
 
 internal class UdpTracker : TrackerBase, IDisposable
 {

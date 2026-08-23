@@ -2,6 +2,8 @@
 using System.Text;
 using System.Web;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Core;
 
 /// <summary>
@@ -133,14 +135,14 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
     /// <param name="magnetUri">The magnet link URI string.</param>
     /// <returns>A parsed MagnetLink instance.</returns>
     /// <exception cref="ArgumentNullException">Thrown when magnetUri is null.</exception>
-    /// <exception cref="FormatException">Thrown when the magnet link is invalid.</exception>
+    /// <exception cref="TorrentMetadataException">Thrown when the magnet link cannot be read.</exception>
     public static MagnetLink Parse(string magnetUri)
     {
         ArgumentNullException.ThrowIfNull(magnetUri);
 
         if (!TryParse(magnetUri, out var result, out var error))
         {
-            throw new FormatException(error);
+            throw new TorrentMetadataException(error ?? "The magnet link could not be read.", magnetUri);
         }
 
         return result;

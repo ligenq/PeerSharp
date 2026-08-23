@@ -24,7 +24,7 @@ public class TorrentAlreadyExistsException : TorrentException
 /// <summary>
 /// Exception thrown when a torrent operation fails.
 /// </summary>
-public class TorrentException : Exception
+public class TorrentException : PeerSharpException
 {
     /// <summary>
     /// Creates a new TorrentException with a message.

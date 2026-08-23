@@ -1,3 +1,5 @@
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Tests.Api;
 
 public class MagnetLinkTests
@@ -199,7 +201,7 @@ public class MagnetLinkTests
     [Fact]
     public void Parse_ThrowsOnInvalidFormat()
     {
-        Assert.Throws<FormatException>(() => MagnetLink.Parse("not-a-magnet"));
+        Assert.Throws<TorrentMetadataException>(() => MagnetLink.Parse("not-a-magnet"));
     }
 
     [Fact]

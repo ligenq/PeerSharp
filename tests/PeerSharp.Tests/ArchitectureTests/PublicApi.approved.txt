@@ -653,6 +653,13 @@ static class PeerSharp.Diagnostics.PeerSharpMetrics
     String TorrentsInstrument
     String UploadSpeedInstrument
     String UploadedInstrument
+abstract class PeerSharp.Exceptions.PeerSharpException
+class PeerSharp.Exceptions.StorageException
+    .ctor()
+    .ctor(String message)
+    .ctor(String message, Exception inner, Boolean isRecoverable)
+    .ctor(String message, Exception innerException)
+    Boolean IsRecoverable { get; }
 class PeerSharp.Exceptions.TorrentAlreadyExistsException
     .ctor(PeerSharp.Interfaces.ITorrent existingTorrent)
     PeerSharp.Interfaces.ITorrent ExistingTorrent { get; }
@@ -662,8 +669,24 @@ class PeerSharp.Exceptions.TorrentException
     .ctor(String message, PeerSharp.Core.InfoHash infoHash)
     .ctor(String message, PeerSharp.Core.InfoHash infoHash, Exception innerException)
     Nullable<PeerSharp.Core.InfoHash> InfoHash { get; }
+class PeerSharp.Exceptions.TorrentMetadataException
+    .ctor()
+    .ctor(String message)
+    .ctor(String message, Exception innerException)
+    .ctor(String message, String metadataSource)
+    String MetadataSource { get; }
 class PeerSharp.Exceptions.TorrentNotFoundException
     .ctor(PeerSharp.Core.InfoHash infoHash)
+class PeerSharp.Exceptions.TrackerException
+    .ctor()
+    .ctor(String message)
+    .ctor(String message, Boolean isTransient, String trackerUrl = default)
+    .ctor(String message, Exception innerException)
+    Boolean IsTransient { get; }
+    String TrackerUrl { get; }
+class PeerSharp.Exceptions.UdpTrackerException
+    .ctor(String message, Boolean isTransient = default)
+    .ctor(String message, Exception inner, Boolean isTransient = default)
 struct PeerSharp.Interfaces.DownloadProgress
     Int32 CompletedPieces { get; init; }
     Int32 TotalPieces { get; init; }
@@ -899,19 +922,9 @@ struct PeerSharp.Interfaces.TransferStats
     Int64 UploadSpeed { get; init; }
     Int64 Uploaded { get; init; }
     Single Ratio { get; }
-class PeerSharp.Internals.Trackers.UdpTrackerException
-    .ctor(String message, Boolean isTransient = default)
-    .ctor(String message, Exception inner, Boolean isTransient = default)
-    Boolean IsTransient { get; }
 interface PeerSharp.PieceWriter.IFileHandleLease
     Microsoft.Win32.SafeHandles.SafeFileHandle Handle { get; }
     String Path { get; }
-class PeerSharp.PieceWriter.StorageException
-    .ctor()
-    .ctor(String message)
-    .ctor(String message, Exception inner, Boolean isRecoverable)
-    .ctor(String message, Exception innerException)
-    Boolean IsRecoverable { get; }
 sealed class PeerSharp.Streaming.HttpStreamServer
     .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex)
     .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex, Microsoft.Extensions.Logging.ILoggerFactory loggerFactory)
