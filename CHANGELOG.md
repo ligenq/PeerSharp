@@ -45,6 +45,18 @@ history has the reasoning and the measurements behind each one.
 
 ### Performance
 
+- **Upload CPU is roughly half what it was and throughput a quarter higher** - 5.2 s and 1200 MB/s
+  before, 2.8 s and 1525 MB/s after, against libtorrent's 699 MB/s on the same run. Read-ahead was
+  issuing one sixteen-kilobyte read per block, awaited one after another and each taking the
+  read-ahead semaphore, which is the same work moved earlier rather than amortised. A profile of
+  seeding put the majority of PeerSharp's CPU in thread-pool parking and about seven per cent in the
+  syscalls, which is what a queue of tiny asynchronous operations looks like from outside. The window
+  is now a single contiguous read, and `FilesSettings.ReadAheadBlocks` rises from 4 to 16 to make it
+  worth more.
+- **A read that lies inside one file no longer takes the engine's file-selection lock**, which every
+  concurrent read of every file previously queued on, nor allocates the two lists the general path
+  needs. That is nearly every read a seeding torrent does.
+
 - **Download throughput is around 36 times what it was**, measured against libtorrent's
   `connection_tester` over loopback: 24 MB/s before, 857 MB/s after, where libtorrent itself manages
   300 MB/s on the same workload. Two independent causes, both about keeping work in flight rather
