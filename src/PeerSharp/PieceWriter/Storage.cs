@@ -1150,7 +1150,11 @@ internal sealed class Storage : IStorage
 
     private async Task ReadWithThrottleAsync(SafeFileHandle handle, Memory<byte> buffer, long fileOffset, CancellationToken ct)
     {
-        if (_diskLimiter == null)
+        // The metering below is per chunk, and a block is one chunk, so on a torrent with no disk
+        // limit it buys nothing and costs a task allocation and two locked channel lookups per block.
+        // At the rates this reaches while seeding that is tens of thousands of them a second, and it
+        // showed up in a profile as thread-pool churn rather than as disk work.
+        if (_diskLimiter == null || !_diskLimiter.IsReadLimitedNow())
         {
             await RandomAccess.ReadAsync(handle, buffer, fileOffset, ct).ConfigureAwait(false);
             return;
@@ -1201,7 +1205,7 @@ internal sealed class Storage : IStorage
 
     private async Task WriteWithThrottleAsync(SafeFileHandle handle, ReadOnlyMemory<byte> data, long fileOffset, CancellationToken ct)
     {
-        if (_diskLimiter == null)
+        if (_diskLimiter == null || !_diskLimiter.IsWriteLimitedNow())
         {
             await RandomAccess.WriteAsync(handle, data, fileOffset, ct).ConfigureAwait(false);
             return;
