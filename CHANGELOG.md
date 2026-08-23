@@ -5,6 +5,16 @@ history has the reasoning and the measurements behind each one.
 
 ## Unreleased
 
+### Fixed
+
+- **v2 and hybrid torrents were unreachable by the hash everything actually uses.** BEP 52 gives a v2
+  torrent two identities - the full SHA-256 of its info dictionary and that hash truncated to twenty
+  bytes - and every protocol with a twenty-byte field uses the second: the peer handshake, tracker
+  announces, DHT lookups. The engine resolved an incoming hash against the stored v1 and full v2
+  hashes only, so a v2 torrent matched none of them. Inbound connections were dropped mid-handshake
+  and DHT and tracker callbacks were discarded on arrival. Hybrid torrents were half-affected:
+  reachable by their v1 hash, invisible to a peer that used the v2 one.
+
 ### Performance
 
 - **Download throughput is around 36 times what it was**, measured against libtorrent's
