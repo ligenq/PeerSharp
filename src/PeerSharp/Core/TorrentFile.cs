@@ -1,5 +1,6 @@
 using PeerSharp.Internals;
 using PeerSharp.Internals.Utilities;
+using System.Diagnostics.CodeAnalysis;
 
 using PeerSharp.Exceptions;
 
@@ -207,7 +208,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <param name="data">The raw .torrent file bytes.</param>
     /// <param name="result">The parsed TorrentFile if successful.</param>
     /// <returns>True if parsing succeeded, false otherwise.</returns>
-    public static bool TryParse(byte[]? data, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TorrentFile? result)
+    public static bool TryParse(byte[]? data, [NotNullWhen(true)] out TorrentFile? result)
     {
         return TryParse(data, out result, out _);
     }
@@ -219,7 +220,10 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <param name="result">The parsed TorrentFile if successful.</param>
     /// <param name="error">Error message if parsing failed.</param>
     /// <returns>True if parsing succeeded, false otherwise.</returns>
-    public static bool TryParse(byte[]? data, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TorrentFile? result, out string? error)
+    public static bool TryParse(
+        byte[]? data,
+        [NotNullWhen(true)] out TorrentFile? result,
+        [NotNullWhen(false)] out string? error)
     {
         result = null;
         error = null;
