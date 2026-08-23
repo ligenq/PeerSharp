@@ -722,6 +722,18 @@ public sealed class TransferSettings
     /// <summary>Estimated round-trip time for startup pipeline calculation (ms).</summary>
     public int EstimatedRttMs { get; set; } = 50;
 
+    /// <summary>
+    /// Seconds of work to keep queued on each peer, which is what sets the request pipeline depth.
+    /// </summary>
+    /// <remarks>
+    /// Depth is this many seconds multiplied by the peer's measured download rate, so a fast peer
+    /// earns a deep queue and a slow one does not. Raising it costs a request record per outstanding
+    /// block and risks asking for more than a peer will serve before it is choked; lowering it below
+    /// the round trip leaves the peer idle between requests. Matches libtorrent's
+    /// <c>request_queue_time</c>.
+    /// </remarks>
+    public int RequestQueueTimeSeconds { get; set; } = 3;
+
     /// <summary>Initial request pipeline depth for new peer connections.</summary>
     public int InitialPipelineDepth { get; set; } = 16;
 
@@ -735,9 +747,10 @@ public sealed class TransferSettings
     public int MaxConcurrentPieceWrites { get; set; } = 8;
 
     /// <summary>
-    /// Maximum outstanding requests per peer to cap pipeline growth.
+    /// Maximum outstanding requests per peer to cap pipeline growth. Matches libtorrent's
+    /// <c>max_out_request_queue</c>.
     /// </summary>
-    public int MaxRequestsPerPeer { get; set; } = 128;
+    public int MaxRequestsPerPeer { get; set; } = 500;
 
     /// <summary>
     /// Maximum number of distinct metadata pieces requested in parallel (ut_metadata).

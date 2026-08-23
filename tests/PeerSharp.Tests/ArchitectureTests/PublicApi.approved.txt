@@ -175,6 +175,7 @@ sealed class PeerSharp.Config.TransferSettings
     Int32 MetadataRequestPipeline { get; set; }
     Int32 MetadataRequestRedundancy { get; set; }
     Int32 MetadataRequestTimeoutSeconds { get; set; }
+    Int32 RequestQueueTimeSeconds { get; set; }
     Int64 MaxDownloadSpeed { get; set; }
     Int64 MaxUploadSpeed { get; set; }
 abstract class PeerSharp.Core.Alert

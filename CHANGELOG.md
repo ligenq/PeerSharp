@@ -5,6 +5,23 @@ history has the reasoning and the measurements behind each one.
 
 ## Unreleased
 
+### Performance
+
+- **Download throughput is around 36 times what it was**, measured against libtorrent's
+  `connection_tester` over loopback: 24 MB/s before, 857 MB/s after, where libtorrent itself manages
+  300 MB/s on the same workload. Two independent causes, both about keeping work in flight rather
+  than about doing it faster - PeerSharp was using a fifth of one core while it was 12 times slower.
+  - Request queue depth was sized as bandwidth multiplied by round-trip time, which feeds back on
+    itself: the depth it produces limits the rate, and the lowered rate then justifies the depth. On
+    a link whose latency rounds to nothing the product collapses to the floor. Depth is now seconds
+    of queued work, as libtorrent sizes it, and `TransferSettings.RequestQueueTimeSeconds` (default
+    3, matching libtorrent's `request_queue_time`) is the knob. `MaxRequestsPerPeer` rises from 128
+    to 500 to match `max_out_request_queue`.
+  - Completed pieces were hashed and written by a single sequential reader, so the piece queue's only
+    parallelism came from the overflow path it takes when full. Queue capacity was therefore acting
+    as a proxy for concurrency, and inversely: raising it made throughput five times worse. The
+    readers are now as many as the configured concurrency allows.
+
 ### Added
 
 Controls a consumer needed and could not reach. Most of these close gaps found by comparing the public
