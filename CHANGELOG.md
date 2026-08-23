@@ -7,6 +7,16 @@ history has the reasoning and the measurements behind each one.
 
 ### Fixed
 
+- **A v2 torrent's last piece per file never verified**, so a v2 or hybrid download from any other
+  client died on the first tail piece it completed - the peer that supplied it is dropped as the sole
+  source of a bad piece. PeerSharp zero-padded the data of a short final block to 16 KiB before
+  hashing it; BEP 52 pads the tree with zero *hashes* past the end of the data and never pads the
+  data, which is what libtorrent does. The same mistake was made when building torrents as when
+  verifying them, so PeerSharp agreed with itself and with nothing else, and every existing merkle
+  test passed either way. Against a torrent from libtorrent's `connection_tester`, piece verification
+  goes from six of nine to nine of nine, and a hybrid transfer that previously failed outright now
+  runs to completion at 699 MB/s.
+
 - **v2 and hybrid torrents were unreachable by the hash everything actually uses.** BEP 52 gives a v2
   torrent two identities - the full SHA-256 of its info dictionary and that hash truncated to twenty
   bytes - and every protocol with a twenty-byte field uses the second: the peer handshake, tracker

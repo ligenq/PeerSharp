@@ -37,17 +37,16 @@ internal static class MerkleTree
             int blockLen = Math.Min(BlockSize, data.Length - offset);
             var block = data.Slice(offset, blockLen);
 
-            if (blockLen < BlockSize)
-            {
-                // BEP 52: "If the file size is not a multiple of 16KiB, the last leaf is the SHA-256 hash of the remaining data, zero-padded to 16KiB."
-                byte[] padded = new byte[BlockSize];
-                block.CopyTo(padded);
-                leaves.Add(SHA256.HashData(padded));
-            }
-            else
-            {
-                leaves.Add(SHA256.HashData(block));
-            }
+            // BEP 52 pads the merkle tree with zero *hashes* for leaves past the end of the data.
+            // It does not pad the data of the last block: a short final block is hashed at the
+            // length it actually has. libtorrent hashes exactly
+            // min(block_size, piece_size - offset) bytes and never widens the buffer.
+            //
+            // Padding the data instead produced a tree that agreed with itself and with nothing
+            // else, because the same mistake was made when building torrents as when verifying
+            // them. Every full-size piece matched and the last piece of every file did not, so a
+            // v2 download from any other client died on its first completed tail piece.
+            leaves.Add(SHA256.HashData(block));
 
             offset += BlockSize;
         }
