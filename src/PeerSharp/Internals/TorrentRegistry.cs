@@ -115,7 +115,7 @@ internal sealed class TorrentRegistry
     {
         lock (_lock)
         {
-            torrent = _torrents.FirstOrDefault(t => t.Hash == hash || t.HashV2 == hash);
+            torrent = _torrents.FirstOrDefault(t => Matches(t, hash));
             return torrent != null;
         }
     }
@@ -133,10 +133,36 @@ internal sealed class TorrentRegistry
     {
         lock (_lock)
         {
-            torrent = _torrents.FirstOrDefault(t => t.Hash == hash || t.HashV2 == hash)
-                ?? _transient.FirstOrDefault(t => t.Hash == hash || t.HashV2 == hash);
+            torrent = _torrents.FirstOrDefault(t => Matches(t, hash))
+                ?? _transient.FirstOrDefault(t => Matches(t, hash));
             return torrent != null;
         }
+    }
+
+    /// <summary>
+    /// Whether a hash names this torrent, in any of the forms the world refers to it by.
+    /// </summary>
+    /// <remarks>
+    /// BEP 52 gives a v2 torrent two identities: the full SHA-256 of its info dictionary, and that
+    /// hash truncated to twenty bytes. Everything with a twenty-byte field uses the second - the peer
+    /// handshake, tracker announces, DHT lookups - so a v2-only torrent is reached almost entirely by
+    /// a hash that is not the one it stores. Matching only the stored forms meant every inbound
+    /// handshake for a v2 torrent resolved to nothing and the connection was dropped before the
+    /// handshake completed, and every DHT and tracker callback for one was discarded on arrival.
+    /// Hybrid torrents were half-affected: reachable by their v1 hash, invisible to a peer that used
+    /// the v2 one.
+    /// </remarks>
+    private static bool Matches(Torrent torrent, InfoHash hash)
+    {
+        if (torrent.Hash == hash || torrent.HashV2 == hash)
+        {
+            return true;
+        }
+
+        return hash.IsV1
+            && torrent.HashV2.IsV2
+            && !torrent.HashV2.IsEmpty
+            && torrent.HashV2.TruncateToV1() == hash;
     }
 
     private static string GetTorrentKey(Torrent torrent)
