@@ -121,6 +121,43 @@ public class ClientEngineTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task RemoveTorrentAsync_ByTruncatedV2Hash_RemovesOnlyThatTorrent()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        static TorrentFile CreateV2File(string name)
+        {
+            var metadata = new TorrentFileMetadata();
+            metadata.Info.Name = name;
+            metadata.Info.Version = TorrentVersion.V2;
+            metadata.Info.HashV2 = InfoHash.CreateRandomV2();
+            metadata.Info.PieceSize = 16_384;
+            metadata.Info.FullSize = 16_384;
+            metadata.Info.Files.Add(new Internals.TorrentFileEntry
+            {
+                Path = $"{name}.bin",
+                Size = 16_384,
+                Offset = 0,
+                FirstPieceIndex = 0,
+                PieceCount = 1,
+                PiecesRoot = new byte[32]
+            });
+            return new TorrentFile(metadata);
+        }
+
+        var options = new AddTorrentOptions { StartImmediately = false };
+        var first = await engine.AddTorrentAsync(CreateV2File("first"), options);
+        var second = await engine.AddTorrentAsync(CreateV2File("second"), options);
+
+        await engine.RemoveTorrentAsync(second.HashV2.TruncateToV1());
+
+        Assert.Same(first, engine.GetTorrent(first.HashV2));
+        Assert.Null(engine.GetTorrent(second.HashV2));
+        Assert.Single(engine.GetTorrents());
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task InitializeAsync_PreservesConfiguredPort_WhenNetworkManagerDoesNotBind()
     {
         // Network manager reports BoundTcpPort=0 (e.g. TCP disabled in WebTorrent-only setups).

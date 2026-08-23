@@ -106,6 +106,23 @@ internal sealed class TorrentRegistry
         }
     }
 
+    /// <summary>Removes one exact torrent instance.</summary>
+    public bool Remove(Torrent torrent)
+    {
+        lock (_lock)
+        {
+            int index = _torrents.IndexOf(torrent);
+            if (index < 0)
+            {
+                return false;
+            }
+
+            _torrents.RemoveAt(index);
+            _torrentsByHash.Remove(GetTorrentKey(torrent));
+            return true;
+        }
+    }
+
     /// <summary>
     /// Resolves a hash to a torrent the caller owns. Transient torrents are deliberately invisible
     /// here: this backs the public lookup, and handing back a torrent the caller never added would

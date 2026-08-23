@@ -111,6 +111,51 @@ public class V2LayoutTests
         }
     }
 
+    [Fact]
+    public async Task PaddingDoesNotCountAsFinishedContent()
+    {
+        // Each one-byte file occupies a whole piece in v2. Completing the first piece must report
+        // one byte finished and one byte left, not one whole piece finished and nothing left.
+        var metadata = new TorrentFileMetadata { Info = CreateV2(fileSize: 1, fileCount: 2) };
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+
+        try
+        {
+            torrent.Pieces.AddPiece(0);
+
+            Assert.Equal(1UL, torrent.FinishedBytes);
+            Assert.Equal(1, torrent.DataLeft);
+
+            torrent.Pieces.AddPiece(1);
+
+            Assert.Equal(2UL, torrent.FinishedBytes);
+            Assert.Equal(0, torrent.DataLeft);
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task AnEmptyV2TorrentStillHasMetadataAndIsFinished()
+    {
+        var metadata = new TorrentFileMetadata { Info = CreateV2(fileSize: 0, fileCount: 1) };
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+
+        try
+        {
+            Assert.True(torrent.HasMetadata);
+            Assert.True(torrent.Finished);
+            Assert.Equal(0, torrent.TotalSize);
+            Assert.Equal(0, torrent.DataLeft);
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+        }
+    }
+
     private static Internals.TorrentFileInfo CreateV2(long fileSize, int fileCount)
     {
         var info = new Internals.TorrentFileInfo

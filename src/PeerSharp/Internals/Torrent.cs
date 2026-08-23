@@ -170,10 +170,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// because <see cref="Finished"/> requires this. It sat at a hundred per cent, never announced
     /// completion, and never let go of the peers that had served it.
     /// </remarks>
-    public bool HasMetadata => InfoFile.Info.FullSize > 0
-        && ((InfoFile.Info.Pieces?.Count > 0)
-            || InfoFile.Info.IsMerkle
-            || (InfoFile.Info.IsV2 && InfoFile.Info.Files.Count > 0));
+    public bool HasMetadata => InfoFile.Info.Files.Count > 0
+        || (InfoFile.Info.FullSize > 0
+            && ((InfoFile.Info.Pieces?.Count > 0) || InfoFile.Info.IsMerkle));
 
     public bool HasSameIdentity(ITorrent? other)
     {
@@ -1746,20 +1745,31 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     {
         if (Pieces == null || InfoFile.Info.PieceSize == 0)
         {
-            return (ulong)(FileTransferInternal?.GetUnfinishedBytes() ?? 0);
+            return 0;
         }
 
-        ulong completedBytes = (ulong)Pieces.ReceivedCount * InfoFile.Info.PieceSize;
-        if (Pieces.Count > 0 && Pieces.HasPiece(Pieces.Count - 1))
+        long contentSize = InfoFile.Info.ContentSize;
+        ulong completedBytes;
+        if (contentSize != InfoFile.Info.FullSize)
         {
-            long lastPieceSize = InfoFile.Info.FullSize % InfoFile.Info.PieceSize;
-            if (lastPieceSize > 0)
+            completedBytes = (ulong)Math.Max(0, Pieces.ReceivedWeight);
+        }
+        else
+        {
+            completedBytes = (ulong)Pieces.ReceivedCount * InfoFile.Info.PieceSize;
+            if (Pieces.Count > 0 && Pieces.HasPiece(Pieces.Count - 1))
             {
-                completedBytes -= (ulong)(InfoFile.Info.PieceSize - lastPieceSize);
+                long lastPieceSize = InfoFile.Info.FullSize % InfoFile.Info.PieceSize;
+                if (lastPieceSize > 0)
+                {
+                    completedBytes -= (ulong)(InfoFile.Info.PieceSize - lastPieceSize);
+                }
             }
         }
 
-        return completedBytes + (ulong)(FileTransferInternal?.GetUnfinishedBytes() ?? 0);
+        // FinishedBytes is documented as downloaded and verified. Active, unverified blocks belong
+        // in Progress, not in the tracker-facing completed-byte count.
+        return Math.Min(completedBytes, (ulong)Math.Max(0, contentSize));
     }
 
     private void Initialize()
@@ -1779,7 +1789,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             piecesCount = (int)((InfoFile.Info.FullSize + InfoFile.Info.PieceSize - 1) / InfoFile.Info.PieceSize);
         }
 
-        Pieces = new PiecesProgress(piecesCount);
+        long contentSize = InfoFile.Info.ContentSize;
+        Pieces = contentSize == InfoFile.Info.FullSize
+            ? new PiecesProgress(piecesCount)
+            : new PiecesProgress(piecesCount, InfoFile.Info.GetPieceContentSize, contentSize);
         FileTransferInternal = new FileTransfer(this, Services.TimeProvider, Services.LoggerFactory);
         _fileSelectionManager.SetBytesProvider(FileTransferInternal);
         SuperSeedManager = new SuperSeedManager(this, Services.LoggerFactory.CreateLogger<SuperSeedManager>())

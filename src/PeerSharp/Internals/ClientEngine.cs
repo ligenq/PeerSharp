@@ -126,7 +126,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     private bool RemoveAndRetire(Torrent torrent, bool transient = false)
     {
         return LifetimeTotals.RemoveAndRetire(
-            () => transient ? _registry.RemoveTransient(torrent) : _registry.Remove(torrent.Hash, out _),
+            () => transient ? _registry.RemoveTransient(torrent) : _registry.Remove(torrent),
             torrent.TotalDownloaded,
             torrent.TotalUploaded);
     }
