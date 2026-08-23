@@ -1775,6 +1775,31 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Grants a peer that hung up mid-MSE one prompt retry, and returns the address to dial.
+    /// </summary>
+    /// <remarks>
+    /// The decision itself is <see cref="FastReconnectPolicy"/>, which carries the reasoning. This
+    /// records it: the earlier finding that an immediate plaintext retry failed 72 times in 77 was
+    /// about retrying inside one attempt, on the socket the peer had just closed. What is granted
+    /// here is a fresh connection offering the other choice.
+    /// </remarks>
+    private IPEndPoint? ClaimFastReconnectAfterEncryptionHangUp(PeerCommunication peer, PeerHistory history)
+    {
+        if (!FastReconnectPolicy.ShouldRetryImmediately(peer.HungUpDuringEncryptionHandshake, history.FastReconnects))
+        {
+            return null;
+        }
+
+        history.FastReconnects++;
+
+        // The rewind itself: libtorrent moves the peer's last_connected back so the reconnect gate
+        // lets it through at once, and this is the same thing said forwards.
+        history.NextConnectAttempt = _timeProvider.GetUtcNow();
+
+        return history.EndPoint;
+    }
+
     private void ApplyConnectionBackoff(PeerHistory history)
     {
         var settings = _settings.Connection;
@@ -1800,6 +1825,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private async Task ConnectAndHandleAsync(PeerCommunication peer, string ip, int port, IReadOnlyList<TransportPreference> transportPlan, bool useGovernor, bool isHolepunch)
     {
         IPEndPoint? endpoint = null;
+
+        // Set when this attempt earns a prompt retry with the other encryption choice; acted on in
+        // the finally, once every guard this attempt holds has been released.
+        IPEndPoint? fastReconnectTarget = null;
+        bool fastReconnectEncrypted = false;
+
         try
         {
             endpoint = NetworkUtils.NormalizeEndPoint(new IPEndPoint(IPAddress.Parse(ip), port));
@@ -1903,6 +1934,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 // costs nothing extra because the attempt was going to happen anyway; a peer that only
                 // speaks one of them is reached on the following try.
                 history.RegisterHandshakeFailure();
+                fastReconnectTarget = ClaimFastReconnectAfterEncryptionHangUp(peer, history);
+                fastReconnectEncrypted = history.OfferEncryptionNext;
             }
 
             // Remove from connecting list regardless of outcome
@@ -1916,6 +1949,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             {
                 _governor.ReleasePendingSlot();
             }
+
 
             if (!success)
             {
@@ -2037,6 +2071,20 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (endpoint != null)
             {
                 _pendingConnections.TryRemove(endpoint, out _);
+            }
+
+            // Only now, with the pending guard, the connecting-list entry and the governor slot all
+            // given back. The retry is an ordinary dial and goes through the ordinary gates, and this
+            // attempt still holding any of them is exactly what those gates exist to turn away.
+            if (fastReconnectTarget is not null)
+            {
+                _logger.LogDebug(
+                    "Retrying {EndPoint} promptly with encryption={OfferEncryption} after it hung up mid-handshake",
+                    fastReconnectTarget,
+                    fastReconnectEncrypted);
+
+                try { ConnectTo(fastReconnectTarget.Address.ToString(), fastReconnectTarget.Port); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to queue the prompt retry"); }
             }
         }
     }
