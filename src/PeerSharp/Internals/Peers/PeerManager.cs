@@ -223,6 +223,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (_torrent.Blocklist?.IsBlocked(remote) == true)
         {
             _logger.LogDebug("Blocked incoming connection from {Remote} (blocklist)", remote);
+            ReportBlocked(remote, PeerBlockReason.Blocklist);
             stream.Close();
             return;
         }
@@ -233,7 +234,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
         // Check connection limits for incoming connections
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
             // Replace the lowest priority peer if the incoming one outranks it.
             var lowestPriorityPeer = TryGetLowestPriorityPeer();
@@ -244,7 +245,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             }
             else
             {
-                _logger.LogDebug("Rejecting incoming stream connection - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
+                _logger.LogDebug("Rejecting incoming stream connection - at limit ({MaxPeers})", MaxPeersForThisTorrent);
                 stream.Close();
                 return;
             }
@@ -344,6 +345,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (_torrent.Blocklist?.IsBlocked(remoteEp) == true)
         {
             _logger.LogDebug("Blocked incoming connection from {RemoteEp} (blocklist)", remoteEp);
+            ReportBlocked(remoteEp, PeerBlockReason.Blocklist);
             client.Close();
             return;
         }
@@ -353,6 +355,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _logger.LogDebug(
                 "Rejecting incoming TCP connection from {RemoteEp} - it has served bad data before",
                 remoteEp);
+            ReportBlocked(remoteEp, PeerBlockReason.BadData);
             client.Close();
             return;
         }
@@ -360,7 +363,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
         // Check connection limits for incoming connections
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
             // Replace the lowest priority peer if the incoming one outranks it.
             var lowestPriorityPeer = TryGetLowestPriorityPeer();
@@ -371,7 +374,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             }
             else
             {
-                _logger.LogDebug("Rejecting incoming connection - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
+                _logger.LogDebug("Rejecting incoming connection - at limit ({MaxPeers})", MaxPeersForThisTorrent);
                 client.Close();
                 return;
             }
@@ -589,6 +592,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     }
 
     /// <summary>Whether this address has served enough bad data to be left alone.</summary>
+    /// <summary>
+    /// Announces a refusal that happens before any connection exists, so nothing else would report it.
+    /// </summary>
+    private void ReportBlocked(IPEndPoint? endpoint, PeerBlockReason reason)
+    {
+        if (endpoint is not null)
+        {
+            _torrent.Alerts.PeerBlockedAlert(_torrent, endpoint, reason);
+        }
+    }
+
     private bool IsRefusedForBadData(IPAddress address)
         => _hashFailuresByAddress.TryGetValue(NormaliseForBadDataKey(address), out int failures)
             && failures >= MaxHashFailuresPerAddress;
@@ -628,7 +642,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return configured;
         }
 
-        int wanted = _settings.Connection.MaxPeersPerTorrent - currentConnections;
+        int wanted = MaxPeersForThisTorrent - currentConnections;
         return Math.Clamp(wanted, 0, configured);
     }
 
@@ -656,6 +670,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (_torrent.Blocklist?.IsBlocked(ip) == true)
         {
             _logger.LogDebug("Blocked outgoing connection to {Ip}:{Port} (blocklist)", ip, port);
+            if (IPAddress.TryParse(ip, out var blockedAddress))
+            {
+                ReportBlocked(new IPEndPoint(blockedAddress, port), PeerBlockReason.Blocklist);
+            }
+
             return;
         }
 
@@ -675,7 +694,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         int currentConnecting = Interlocked.CompareExchange(ref _connectingPeersCount, 0, 0);
 
         // Limit active connections
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent && !forceUtp)
+        if (currentConnections >= MaxPeersForThisTorrent && !forceUtp)
         {
             return;
         }
@@ -2470,7 +2489,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
 
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
             return false;
         }
@@ -2718,6 +2737,19 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     internal int ConnectedPeerIdCountForTesting => _connectedPeerIds.Count;
 
     internal int GetOptimisticUnchokeIntervalSecondsForTesting() => _choker.GetOptimisticUnchokeIntervalSeconds();
+
+    /// <summary>
+    /// The peer ceiling for this torrent: its own <see cref="Interfaces.ITorrent.MaxConnections"/>
+    /// when the caller set one, otherwise the engine-wide default.
+    /// </summary>
+    private int MaxPeersForThisTorrent
+    {
+        get
+        {
+            int perTorrent = _torrent.MaxConnections;
+            return perTorrent > 0 ? perTorrent : _settings.Connection.MaxPeersPerTorrent;
+        }
+    }
 
     internal int GetUploadSlotsForTesting() => _choker.GetUploadSlotsForTesting(ConnectedCount);
 
@@ -3051,6 +3083,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (_torrent.Blocklist?.IsBlocked(remote) == true)
         {
             _logger.LogDebug("Blocked connected stream peer from {Remote} (blocklist)", remote);
+            ReportBlocked(remote, PeerBlockReason.Blocklist);
             stream.Close();
             return Task.CompletedTask;
         }
@@ -3065,9 +3098,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
 
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
-            _logger.LogDebug("Rejecting connected stream peer - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
+            _logger.LogDebug("Rejecting connected stream peer - at limit ({MaxPeers})", MaxPeersForThisTorrent);
             stream.Close();
             return Task.CompletedTask;
         }

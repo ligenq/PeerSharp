@@ -114,6 +114,9 @@ public class BlockCachePropertyTests
     /// </summary>
     private sealed class ArrayStorage(int size) : IStorage
     {
+        public Task MoveAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         private readonly byte[] _data = new byte[size];
 
         public Task DeleteAllAsync(CancellationToken ct = default) => Task.CompletedTask;
@@ -165,6 +168,9 @@ public class BlockCachePropertyTests
 
     private sealed class PausedReadStorage(byte[] initial) : IStorage
     {
+        public Task MoveAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         private readonly TaskCompletionSource _readCaptured = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _releaseRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private byte[] _data = initial;

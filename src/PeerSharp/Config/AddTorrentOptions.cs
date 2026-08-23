@@ -104,6 +104,20 @@ public sealed class AddTorrentOptions
     public bool StartImmediately { get; set; } = true;
 
     /// <summary>
+    /// Gets or sets extra BEP 19 web seed URLs to use alongside any the torrent's metadata declares.
+    /// </summary>
+    public IReadOnlyList<string>? AdditionalWebSeeds { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether the torrent seeds in BEP 16 super-seed mode. Default is false.
+    /// </summary>
+    /// <remarks>
+    /// For introducing content to an empty swarm from a single seed. See
+    /// <see cref="Interfaces.ITorrent.SuperSeeding"/> for when it helps and when it hurts.
+    /// </remarks>
+    public bool SuperSeeding { get; set; }
+
+    /// <summary>
     /// Magnet links only: when true, the torrent runs just long enough to download its
     /// metadata and is then left stopped instead of resuming into the download. This gives
     /// the application a race-free window to preview the file list and adjust selections

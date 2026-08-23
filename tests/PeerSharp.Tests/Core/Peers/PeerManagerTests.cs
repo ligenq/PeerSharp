@@ -1602,6 +1602,11 @@ public class PeerManagerTests
 
     private sealed class RecordingAlertsManager : IAlertsManager
     {
+        public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
+
+        public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason) { }
+
+        public void ListenPortChangedAlert(int requestedPort, int actualPort, ListenTransport transport) { }
         public List<Alert> Alerts { get; } = [];
         public void PostAlert(Alert alert) => Alerts.Add(alert);
         public void MetadataAlert(AlertId id, ITorrent torrent) { }

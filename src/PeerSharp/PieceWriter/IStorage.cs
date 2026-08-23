@@ -13,6 +13,19 @@ internal interface IStorage : IAsyncDisposable
 
     Task InitAsync(IReadOnlyList<FileSelection>? selection = null, CancellationToken ct = default);
 
+    /// <summary>
+    /// Moves one file to <paramref name="newRelativePath"/> under the existing root, so the data
+    /// already downloaded is still there under its new name.
+    /// </summary>
+    Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default);
+
+    /// <summary>
+    /// Moves every file this torrent owns to the same layout under <paramref name="newRootPath"/>.
+    /// Throws <see cref="Exceptions.StorageException"/> if any file cannot be moved, having first put
+    /// back the ones that already had been.
+    /// </summary>
+    Task MoveAsync(string newRootPath, CancellationToken ct = default);
+
     ValueTask ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default);
 
     Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct = default);

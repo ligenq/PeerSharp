@@ -253,6 +253,40 @@ public interface IClientEngine : IAsyncDisposable
     IReadOnlyList<ITorrent> GetTorrents();
 
     /// <summary>
+    /// Whether the session is paused. See <see cref="PauseAsync(CancellationToken)"/>.
+    /// </summary>
+    bool IsPaused { get; }
+
+    /// <summary>
+    /// Stops every running torrent at once, remembering which were running.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels partway through; torrents already stopped stay stopped.</param>
+    /// <remarks>
+    /// <para>
+    /// For "stop everything now" - the machine is going to sleep, the user pulled the network, a
+    /// metered connection came up. <see cref="ResumeAsync(CancellationToken)"/> starts again exactly
+    /// the torrents this stopped, leaving alone any the user had already stopped by hand.
+    /// </para>
+    /// <para>
+    /// A torrent added while paused waits for the resume rather than starting on its own, whatever
+    /// its <see cref="Config.AddTorrentOptions.StartImmediately"/> says. Removing a torrent while
+    /// paused is fine: the resume skips what is no longer there.
+    /// </para>
+    /// <para>
+    /// The engine keeps running - the DHT node, the listeners and the port mappings all stay up, so
+    /// this is not a substitute for disposing the engine.
+    /// </para>
+    /// </remarks>
+    Task PauseAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Starts the torrents that <see cref="PauseAsync(CancellationToken)"/> stopped.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels partway through; torrents already started stay started.</param>
+    /// <remarks>Does nothing if the session is not paused.</remarks>
+    Task ResumeAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Initializes the BitTorrent client asynchronously.
     /// Sets up listeners, DHT, UPnP, and loads previously added torrents.
     /// </summary>

@@ -5,6 +5,41 @@ history has the reasoning and the measurements behind each one.
 
 ## Unreleased
 
+### Added
+
+Controls a consumer needed and could not reach. Most of these close gaps found by comparing the public
+surface against libtorrent's `torrent_handle` and `session_handle`.
+
+- **Super-seeding (BEP 16) can now be turned on.** `ITorrent.SuperSeeding`, or
+  `AddTorrentOptions.SuperSeeding` when adding. The BEP 16 implementation was complete and unit
+  tested, but the flag that enables it lived on an internal type and nothing in the library ever set
+  it - the feature was listed as supported and was unreachable. The setting survives a magnet's
+  metadata fetch and is kept in the session state.
+- **`ITorrent.MoveStorageAsync`** relocates a torrent's downloaded data and continues from the new
+  path. `SetDownloadPathAsync` only ever repointed, leaving the data behind for the next start to not
+  find; it still does, and now says so. A move that fails partway puts back what it had already
+  moved rather than leaving the torrent split across two directories.
+- **`ITorrent.RenameFileAsync`** stores one of a torrent's files under a different name, moving what
+  has been downloaded. The name is kept in the resume data, since rebuilding paths from the torrent's
+  own metadata would otherwise undo it on the next start. `GetRenamedFiles` reports them.
+- **`ITorrent.SetPiecePriority` / `GetPiecePriority` / `ClearPiecePriorities`** for priorities below
+  the level of a file - a media header, a range about to be read, an archive's trailing index. An
+  override outranks the file selection in both directions.
+- **`ITorrent.ReadPieceAsync`** reads a downloaded piece back from disk.
+- **`ITorrent.MaxConnections` and `ITorrent.MaxUploadSlots`** apply per torrent, overriding the
+  engine-wide `MaxPeersPerTorrent` and the calculated upload slot count.
+- **`ITorrent.WebSeeds`** adds and removes BEP 19 web seeds at runtime, including removing one the
+  torrent's own metadata declared. `AddTorrentOptions.AdditionalWebSeeds` covers the same at add time.
+- **`ITrackers.ScrapeAsync`** asks trackers for seeder and leecher counts on demand. Scrape already
+  worked on a timer and the counts were already on `TrackerStatus`; there was no way to ask.
+- **`IClientEngine.PauseAsync` / `ResumeAsync` / `IsPaused`** stop every running torrent and start
+  back exactly those, leaving alone any the user had stopped by hand. A torrent added while paused
+  waits for the resume.
+- **Three new alerts.** `PieceHashFailed` names the piece and, where one peer supplied all of it, the
+  peer. `PeerBlocked` reports an address refused by the blocklist or for having served bad data.
+  `ListenPortChanged` fires when a listener could not bind the configured port - the case where port
+  forwarding silently stops reaching the session.
+
 ### Breaking changes
 
 This is a major version. The library's own failures now share one root, `PeerSharp.Exceptions.PeerSharpException`,

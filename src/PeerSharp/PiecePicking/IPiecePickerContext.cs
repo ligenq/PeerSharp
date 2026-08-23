@@ -206,6 +206,11 @@ internal class TorrentPiecePickerContext : IPiecePickerContext
 
     public Priority GetPiecePriority(int pieceIndex, IReadOnlyList<FileSelection>? selection)
     {
+        if (_torrent.TryGetPiecePriority(pieceIndex, out var overridden))
+        {
+            return overridden;
+        }
+
         return _torrent.InfoFile.Info.GetPiecePriority(pieceIndex, selection);
     }
 
@@ -221,6 +226,14 @@ internal class TorrentPiecePickerContext : IPiecePickerContext
 
     public bool IsPieceNeeded(int pieceIndex, IReadOnlyList<FileSelection>? selection)
     {
+        // An explicit priority decides both questions. Answering "needed" from the file selection
+        // while answering "priority" from the override would let the picker want a piece it then
+        // ranks as DoNotDownload, and vice versa.
+        if (_torrent.TryGetPiecePriority(pieceIndex, out var overridden))
+        {
+            return overridden != Priority.DoNotDownload;
+        }
+
         return _torrent.InfoFile.Info.IsPieceNeeded(pieceIndex, selection);
     }
 }

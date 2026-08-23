@@ -33,6 +33,9 @@ public class RobustnessTests
 
     private class MockStorage : IStorage
     {
+        public Task MoveAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         private readonly ConcurrentDictionary<long, byte[]> _data = new();
         private readonly int _totalSize;
         public int ReadCount;

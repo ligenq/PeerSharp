@@ -8,6 +8,9 @@ public class PieceCheckerTests
 {
     private class MockFiles : IInternalFiles
     {
+        public Task MoveFilesAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         public bool Checking { get; set; }
         public string DownloadPath => "";
         public List<(long Offset, byte[] Data)> Writes { get; } = [];
