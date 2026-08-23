@@ -76,7 +76,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
         lock (_lock)
         {
-            if (_sources.Any(s => s.Url.Equals(url, StringComparison.OrdinalIgnoreCase)))
+            if (_sources.Any(source => Matches(source, url)))
             {
                 return false;
             }
@@ -95,7 +95,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         lock (_lock)
         {
-            int index = _sources.FindIndex(s => s.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
+            int index = _sources.FindIndex(source => Matches(source, url));
             if (index < 0)
             {
                 return false;
@@ -108,12 +108,16 @@ internal sealed class WebSeedManager : IAsyncDisposable
         return true;
     }
 
+    private static bool Matches(WebSeedSource source, string url)
+        => source.IsDirectory == url.EndsWith("/", StringComparison.Ordinal)
+            && source.Url.Equals(url.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The URLs currently in use.</summary>
     public IReadOnlyList<string> GetSourceUrls()
     {
         lock (_lock)
         {
-            return [.. _sources.Select(s => s.Url)];
+            return [.. _sources.Select(source => source.IsDirectory ? source.Url + "/" : source.Url)];
         }
     }
 

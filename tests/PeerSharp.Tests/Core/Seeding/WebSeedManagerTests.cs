@@ -248,6 +248,17 @@ public class WebSeedManagerTests
     }
 
     [Fact]
+    public void RuntimeSources_DistinguishAFileUrlFromADirectoryUrl()
+    {
+        var manager = new WebSeedManager(_torrent, ["http://seed.com/content"], _timeProvider);
+
+        Assert.True(manager.AddSource("http://seed.com/content/"));
+        Assert.Equal(2, manager.GetSourceUrls().Count);
+        Assert.True(manager.RemoveSource("http://seed.com/content/"));
+        Assert.Equal(["http://seed.com/content"], manager.GetSourceUrls());
+    }
+
+    [Fact]
     public async Task DownloadSingleFilePieceAsync_416_ReturnsNull()
     {
         var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);

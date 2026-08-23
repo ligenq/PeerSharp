@@ -41,6 +41,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
     // Session-wide pause. The set records what was running so Resume puts back exactly that, rather
     // than starting everything the engine happens to hold.
+    private readonly SemaphoreSlim _pauseGate = new(1, 1);
     private readonly Lock _pauseLock = new();
     private readonly HashSet<InfoHash> _pausedTorrents = [];
     private int _paused;
@@ -427,38 +428,48 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         _disposal.ThrowIfDisposed(this);
 
-        if (Interlocked.CompareExchange(ref _paused, 1, 0) == 1)
+        await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            return;
-        }
-
-        foreach (var torrent in _registry.GetAll())
-        {
-            if (!torrent.Started)
-            {
-                continue;
-            }
-
             lock (_pauseLock)
             {
-                _pausedTorrents.Add(torrent.Hash);
+                Volatile.Write(ref _paused, 1);
             }
 
-            // Cleared before stopping, so the queue cannot pick this torrent up again between the
-            // stop and the next one - the queue only starts torrents that want auto-start.
-            torrent.QueueAutoStart = false;
+            // Always rescan. A cancelled earlier pause may have stopped only part of the session,
+            // and a retry must finish the operation instead of treating the flag as proof.
+            foreach (var torrent in _registry.GetAll())
+            {
+                if (!torrent.Started)
+                {
+                    continue;
+                }
 
-            try
-            {
-                await torrent.StopAsync(cancellationToken).ConfigureAwait(false);
+                lock (_pauseLock)
+                {
+                    _pausedTorrents.Add(torrent.Hash);
+                }
+
+                // Cleared before stopping, so the queue cannot pick this torrent up again between the
+                // stop and the next one - the queue only starts torrents that want auto-start.
+                torrent.QueueAutoStart = false;
+
+                try
+                {
+                    await torrent.StopAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // One torrent failing to stop must not leave the rest running, which is what the
+                    // caller asked to prevent.
+                    Defect.ReportIfDefect(ex, $"pausing torrent {torrent.Hash}", _logger);
+                    _logger.LogWarning(ex, "Torrent {Hash} could not be stopped while pausing the session", torrent.Hash);
+                }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // One torrent failing to stop must not leave the rest running, which is what the
-                // caller asked to prevent.
-                Defect.ReportIfDefect(ex, $"pausing torrent {torrent.Hash}", _logger);
-                _logger.LogWarning(ex, "Torrent {Hash} could not be stopped while pausing the session", torrent.Hash);
-            }
+        }
+        finally
+        {
+            _pauseGate.Release();
         }
     }
 
@@ -466,36 +477,99 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         _disposal.ThrowIfDisposed(this);
 
-        if (Interlocked.CompareExchange(ref _paused, 0, 1) == 0)
+        await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            return;
+            if (!IsPaused)
+            {
+                return;
+            }
+
+            while (true)
+            {
+                InfoHash[] toStart;
+                lock (_pauseLock)
+                {
+                    if (_pausedTorrents.Count == 0)
+                    {
+                        Volatile.Write(ref _paused, 0);
+                        return;
+                    }
+
+                    toStart = [.. _pausedTorrents];
+                }
+
+                foreach (var hash in toStart)
+                {
+                    if (!_registry.TryGet(hash, out var torrent) || torrent is null)
+                    {
+                        lock (_pauseLock)
+                        {
+                            _pausedTorrents.Remove(hash);
+                        }
+                        continue;
+                    }
+
+                    bool removeFromPaused = false;
+                    try
+                    {
+                        // StartAsync restores QueueAutoStart, so nothing has to put it back here.
+                        await torrent.StartCoreAsync(cancellationToken).ConfigureAwait(false);
+                        removeFromPaused = true;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // StartAsync sets auto-start before doing cancellable work. Keep a cancelled
+                        // resume from leaking this torrent back into the queue while the session is
+                        // still paused.
+                        torrent.QueueAutoStart = false;
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        removeFromPaused = true;
+                        Defect.ReportIfDefect(ex, $"resuming torrent {hash}", _logger);
+                        _logger.LogWarning(ex, "Torrent {Hash} could not be restarted while resuming the session", hash);
+                    }
+                    finally
+                    {
+                        if (removeFromPaused)
+                        {
+                            lock (_pauseLock)
+                            {
+                                _pausedTorrents.Remove(hash);
+                            }
+                        }
+                    }
+                }
+            }
         }
-
-        InfoHash[] toStart;
-        lock (_pauseLock)
+        finally
         {
-            toStart = [.. _pausedTorrents];
-            _pausedTorrents.Clear();
+            _pauseGate.Release();
         }
+    }
 
-        foreach (var hash in toStart)
+    private async Task StartUnlessSessionPausedAsync(Torrent torrent, CancellationToken cancellationToken)
+    {
+        await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            if (!_registry.TryGet(hash, out var torrent) || torrent is null)
+            lock (_pauseLock)
             {
-                // Removed while the session was paused. Nothing to restore.
-                continue;
+                if (IsPaused)
+                {
+                    torrent.QueueAutoStart = false;
+                    _pausedTorrents.Add(torrent.Hash);
+                    return;
+                }
             }
 
-            try
-            {
-                // StartAsync restores QueueAutoStart, so nothing has to put it back here.
-                await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                Defect.ReportIfDefect(ex, $"resuming torrent {hash}", _logger);
-                _logger.LogWarning(ex, "Torrent {Hash} could not be restarted while resuming the session", hash);
-            }
+            await torrent.StartCoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _pauseGate.Release();
         }
     }
 
@@ -789,6 +863,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
         var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
 
+        if (!transient)
+        {
+            torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
+        }
+
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
@@ -828,6 +907,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         var fsm = new FileSelectionManager(metadata);
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
         var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
+        if (!transient)
+        {
+            torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
+        }
 
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
@@ -1557,19 +1640,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // Start if requested
             if (options?.StartImmediately ?? true)
             {
-                if (IsPaused)
+                if (transient)
                 {
-                    // A torrent added while the session is paused waits with the rest, rather than
-                    // being the one thing transferring in a paused engine.
-                    torrent.QueueAutoStart = false;
-                    lock (_pauseLock)
-                    {
-                        _pausedTorrents.Add(torrent.Hash);
-                    }
+                    await torrent.StartCoreAsync(cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
-                    await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
+                    await StartUnlessSessionPausedAsync(torrent, cancellationToken).ConfigureAwait(false);
                 }
             }
         }
@@ -1835,20 +1912,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // Start if requested
             if (options?.StartImmediately ?? true)
             {
-                if (IsPaused)
-                {
-                    // A torrent added while the session is paused waits with the rest, rather than
-                    // being the one thing transferring in a paused engine.
-                    torrent.QueueAutoStart = false;
-                    lock (_pauseLock)
-                    {
-                        _pausedTorrents.Add(torrent.Hash);
-                    }
-                }
-                else
-                {
-                    await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
-                }
+                await StartUnlessSessionPausedAsync(torrent, cancellationToken).ConfigureAwait(false);
             }
         }
         catch

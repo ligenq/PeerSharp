@@ -26,7 +26,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 - **NAT Traversal:** UPnP, NAT-PMP, and Holepunch (BEP 55) for connectivity behind NATs.
 - **Bandwidth Control:** Per-torrent and global upload/download/disk I/O rate limiting.
 - **Proxy Support:** SOCKS5 and HTTP proxy support with authentication.
-- **IP Blocklist & GeoIP:** Block peers by IP range or country.
+- **IP Blocklist & GeoIP:** Block peers by IP range and label connected peers by country.
 - **One Error Model:** Everything the library reports as its own failure derives from `PeerSharpException`, so a malformed torrent, a refused tracker and an unwritable disk are told apart by type rather than by message.
 - **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.
 - **Thoroughly Tested:** Property-based tests over the parsers, caches and schedulers, repeated concurrency stress over the shared-state paths, architecture tests for design integrity, fuzzing for robustness, byte-for-byte resume and interop checks against real clients, and [BenchmarkDotNet suites](https://github.com/ligenq/PeerSharp/blob/main/benchmarks/PeerSharp.Benchmarks/README.md) covering the engine's hot paths.
@@ -305,6 +305,7 @@ await torrent.RenameFileAsync(0, "movies/feature.mkv");
 
 // Priorities below the level of a file: a media header, a range about to be read, an archive's index.
 torrent.SetPiecePriority(0, Priority.High);
+// ReadPieceAsync reads verified data; call it after piece 0 completes.
 byte[] header = await torrent.ReadPieceAsync(0);
 
 // Limits for this torrent alone, overriding the engine-wide settings.
