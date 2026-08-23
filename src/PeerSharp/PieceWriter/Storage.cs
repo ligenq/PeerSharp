@@ -502,7 +502,7 @@ internal sealed class Storage : IStorage
                 _fileFailed = new bool[count];
                 _fileDirty = new bool[count];
                 _fileLocks = new SemaphoreSlim[count];
-                _fileMapper = new FileMapper(files.ConvertAll(f => f.Size));
+                _fileMapper = new FileMapper(_info.Info.GetPieceSpaceSpans());
 
                 for (int i = 0; i < count; i++)
                 {

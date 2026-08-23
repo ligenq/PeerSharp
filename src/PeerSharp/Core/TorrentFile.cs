@@ -94,7 +94,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <summary>
     /// Gets the total size of all files in bytes.
     /// </summary>
-    public long TotalSize => Metadata.Info.FullSize;
+    public long TotalSize => Metadata.Info.ContentSize;
 
     /// <summary>
     /// Gets the list of tracker URLs.
