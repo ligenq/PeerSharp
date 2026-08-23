@@ -27,15 +27,16 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 - **Bandwidth Control:** Per-torrent and global upload/download/disk I/O rate limiting.
 - **Proxy Support:** SOCKS5 and HTTP proxy support with authentication.
 - **IP Blocklist & GeoIP:** Block peers by IP range or country.
+- **One Error Model:** Everything the library reports as its own failure derives from `PeerSharpException`, so a malformed torrent, a refused tracker and an unwritable disk are told apart by type rather than by message.
 - **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.
-- **Thoroughly Tested:** Repeated concurrency stress over the shared-state paths, architecture tests for design integrity, fuzzing for robustness, byte-for-byte resume and interop checks against real clients, and [BenchmarkDotNet suites](https://github.com/ligenq/PeerSharp/blob/main/benchmarks/PeerSharp.Benchmarks/README.md) covering the engine's hot paths.
+- **Thoroughly Tested:** Property-based tests over the parsers, caches and schedulers, repeated concurrency stress over the shared-state paths, architecture tests for design integrity, fuzzing for robustness, byte-for-byte resume and interop checks against real clients, and [BenchmarkDotNet suites](https://github.com/ligenq/PeerSharp/blob/main/benchmarks/PeerSharp.Benchmarks/README.md) covering the engine's hot paths.
 
 ## Getting Started
 
 ### Installation
 
 ```bash
-dotnet add package PeerSharp --version 3.2.0
+dotnet add package PeerSharp --version 4.0.0
 ```
 
 Requires .NET 10.0 or later.
@@ -45,7 +46,7 @@ Requires .NET 10.0 or later.
 Each GitHub release includes SPDX SBOMs for `PeerSharp` and `PeerSharp.WebTorrent` alongside the NuGet and symbol packages. Release packages have signed GitHub build-provenance and SBOM attestations. After downloading a package, verify its origin with the GitHub CLI:
 
 ```bash
-gh attestation verify PeerSharp.3.2.0.nupkg --repo ligenq/PeerSharp
+gh attestation verify PeerSharp.4.0.0.nupkg --repo ligenq/PeerSharp
 ```
 
 ### Basic Usage
@@ -288,6 +289,54 @@ Notes:
   hashes to give, and observed intervals spanned the full permitted 0–21600s range. See
   `tests/PeerSharp.Tests/Interop`, excluded from CI and gated on `PEERSHARP_INTEROP=1`.
 
+### Managing a Running Torrent
+
+Beyond start, stop and file selection:
+
+```csharp
+// Move the data somewhere else and carry on from there. SetDownloadPathAsync only repoints at a new
+// directory - it leaves the data behind, which on the next start reads as a torrent that has nothing.
+await torrent.StopAsync();
+await torrent.MoveStorageAsync("/mnt/archive/downloads");
+
+// Store one file under a different name, taking what has been downloaded with it. The torrent's own
+// metadata is untouched, so the info hash does not change.
+await torrent.RenameFileAsync(0, "movies/feature.mkv");
+
+// Priorities below the level of a file: a media header, a range about to be read, an archive's index.
+torrent.SetPiecePriority(0, Priority.High);
+byte[] header = await torrent.ReadPieceAsync(0);
+
+// Limits for this torrent alone, overriding the engine-wide settings.
+torrent.MaxConnections = 30;
+torrent.MaxUploadSlots = 4;
+
+// Web seeds the torrent's metadata did not name - a mirror set up later, or a local HTTP copy.
+torrent.WebSeeds.Add("https://mirror.example/releases/");
+
+// Ask the trackers for swarm counts now, rather than waiting for the next scheduled scrape.
+await torrent.Trackers.ScrapeAsync();
+foreach (var tracker in torrent.Trackers.GetTrackers())
+{
+    Console.WriteLine($"{tracker.Url}: {tracker.SeedCount} seeds, {tracker.LeechCount} leechers");
+}
+
+// Seeding into an empty swarm: BEP 16 hands each peer one piece at a time so no two peers get the
+// same one, which costs the seed far less upload to get a full copy out. Turn it off afterwards -
+// against an established swarm it only throttles peers that could have downloaded freely.
+torrent.SuperSeeding = true;
+```
+
+The engine can also be stopped as a whole - for a machine going to sleep, or a metered connection
+coming up. `ResumeAsync` starts back exactly the torrents `PauseAsync` stopped, so a torrent the user
+had already stopped by hand stays stopped:
+
+```csharp
+await engine.PauseAsync();
+// ... engine, DHT node and listeners stay up; nothing transfers
+await engine.ResumeAsync();
+```
+
 ### Streaming
 
 ```csharp
@@ -329,7 +378,7 @@ magnet's metadata fetch and stop, `--run-for <s>` for an unattended run that exi
 PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
 
 ```bash
-dotnet add package PeerSharp.WebTorrent --version 3.2.0
+dotnet add package PeerSharp.WebTorrent --version 4.0.0
 ```
 
 ```csharp
@@ -363,156 +412,13 @@ Notes for production use:
 - There is a demo harness at [samples/PeerSharp.WebTorrent.Demo/Program.cs](https://github.com/ligenq/PeerSharp/blob/main/samples/PeerSharp.WebTorrent.Demo/Program.cs) for controlled interop and soak testing.
 - The `PeerSharp.WebTorrent` logger category emits reconnect, pending-peer expiry, and signaling lifecycle information. For rollout, capture this category at `Information` or `Debug`.
 
-Recommended validation before broad rollout:
+## Testing
 
-1. Verify announce and peer negotiation against at least one browser WebTorrent client and a couple of real WebSocket trackers.
-2. Run long-lived churn tests with forced tracker disconnects and failed negotiations to confirm pending peers remain bounded.
-3. Test at least one TURN-backed path in addition to STUN-only connectivity.
-
-## Real-Swarm Interop and Soak Testing
-
-The core engine gets the same treatment. Local swarms prove the protocol encodes correctly; they
-cannot detect the failure that actually decides production viability — being quietly throttled,
-choked or dropped by real libtorrent, qBittorrent and Transmission peers. Those clients enforce their
-own expectations, and a client they dislike still *appears* to work. It just downloads at a fraction
-of the speed it should, for reasons nothing local will surface.
-
-`tests/PeerSharp.Tests/Interop/RealSwarmSoakTests.cs` measures that against a live swarm:
-
-| Test | What it answers |
-|------|-----------------|
-| `Interop_HowRealClientsTreatUs` | Which implementations we meet, and how many of each ever unchoke us, send us data, or want ours |
-| `Soak_ConnectionsStayBoundedUnderChurn` | Whether the connection pool stays inside its ceiling as peers come and go over a long run |
-| `Interop_DownloadRunsToCompletion` | Whether a download from strangers actually finishes, and at what rate |
-| `Interop_MultipleTorrentsAtOnce` | Whether several live swarms in one engine starve each other, sharing bandwidth channels, the connection governor and one DHT node |
-| `Seeding_HowRealClientsRequestFromUs` | The other direction — whether real clients request from us when we hold the data, and whether we actually deliver |
-
-These are diagnostics, not pass/fail gates — swarm composition is not ours to control, so the numbers
-are the deliverable and the assertions cover only what would make the numbers meaningless. They stay
-opt-in: each requires `PEERSHARP_SOAK=1`, separately from the DHT probes' `PEERSHARP_INTEROP=1`,
-because they transfer real data for a long time against a swarm of strangers.
-
-The rest of `PeerSharp.Tests.Interop` — the local counterpart-client tests and the loopback ones —
-runs nightly in CI (`.github/workflows/interop.yml`), not on pull requests. It needs real client
-binaries and real transfers, which is too slow and too dependent on an apt mirror to sit in front of
-every change, but leaving it entirely to a human meant an interop regression could sit unnoticed for
-as long as nobody happened to run it. A test whose counterpart client is not installed skips rather
-than fails, so read the skip count: a run where everything skipped proves nothing.
-
-**You choose the content.** Nothing is hardcoded; the tests skip until you point them somewhere.
-Use something you have the right to distribute. Projects that publish their own releases over
-BitTorrent are the conventional choice, and are also the most useful to measure against — they are
-well seeded by a broad mix of client implementations:
-
-| Source | Where |
-|--------|-------|
-| Debian installer images | `https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/` |
-| Ubuntu releases | `https://releases.ubuntu.com/` (each `.iso` has an `.iso.torrent`) |
-| Tails | `https://tails.net/install/` |
-| Internet Archive | most public-domain items offer a `.torrent` from their details page |
-
-Both variables accept several entries separated by `;`, which is what `Interop_MultipleTorrentsAtOnce`
-uses. Prefer a mix of sizes: swarm composition differs sharply between projects, so a conclusion drawn
-from one torrent is really a conclusion about that torrent's seeders.
-
-```bash
-PEERSHARP_SOAK=1 \
-PEERSHARP_SOAK_TORRENT=https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/debian-13.6.0-amd64-netinst.iso.torrent \
-PEERSHARP_SOAK_SECONDS=600 \
-PEERSHARP_SOAK_MAX_BYTES=1073741824 \
-dotnet test tests/PeerSharp.Tests --filter FullyQualifiedName~RealSwarmSoakTests --logger "console;verbosity=detailed"
-```
-
-| Variable | Purpose |
-|----------|---------|
-| `PEERSHARP_SOAK` | Must be `1`; nothing runs otherwise |
-| `PEERSHARP_SOAK_TORRENT` | `.torrent` path or http(s) URL |
-| `PEERSHARP_SOAK_MAGNET` | Magnet link, as an alternative to the above |
-| `PEERSHARP_SOAK_SECONDS` | Duration of the interop measurement (default 600) |
-| `PEERSHARP_SOAK_CHURN_SECONDS` | Duration of the churn soak (default 1800) |
-| `PEERSHARP_SOAK_COMPLETION_SECONDS` | Budget for the completion run (default 1800) |
-| `PEERSHARP_SOAK_MAX_BYTES` | Hard ceiling on data pulled per run (default 1 GiB) |
-| `PEERSHARP_SOAK_SEED_SECONDS` | Duration of the seeding run (default 900) |
-| `PEERSHARP_SOAK_SEED_PATH` | Directory holding a complete copy of the torrent's content, for the seeding run |
-| `PEERSHARP_SOAK_RATE_BYTES` | Rate cap applied globally and per torrent (default 2 MiB/s) |
-
-### Reading the report
-
-Read the **unchoke** column first. A client that meets fifty libtorrent peers and is unchoked by none
-of them has an interop bug, however healthy the aggregate throughput looks. Two things confound that
-reading and are called out in the output itself:
-
-- **Tit-for-tat.** If the `we served` column is near zero everywhere, low unchoke rates say more
-  about our upload than about anyone's opinion of us. A leech-only run cannot conclude much; re-run
-  while seeding.
-- **`seen once`** counts connections that did not outlive one sampling interval. A cluster of those
-  against one implementation is what a post-handshake rejection looks like from the outside.
-- **Seeds cannot want your data.** The upload columns are reported against the incomplete peers only,
-  because on a distribution swarm most peers already have everything and counting them would
-  manufacture a problem that is not there. Meeting incomplete peers and serving *none* of them is the
-  finding worth chasing.
-
-Compare runs against each other rather than against an absolute target.
-
-### Bugs these tests have found
-
-- **Download rate limiting was not enforced on plaintext connections.** Limiting lived inside the
-  encrypted stream wrapper, so it only applied when a peer negotiated encryption; a configured
-  ceiling silently did nothing on every other connection, and a run capped at 256 bytes/s still
-  pulled 140 MB in 30 seconds. Limiting is now its own layer wrapping every peer connection.
-  Regression cover: `RateLimitTests` exercises global and per-torrent limits, in both directions,
-  in both encryption modes, over loopback.
-
-- **The bitfield was not sent first, so seeds were ignored.** BEP 3 requires the bitfield to be the
-  first message after the handshake; we sent the BEP 5 Port message ahead of it whenever DHT was
-  enabled — the default in production, and disabled in every local test. Strict clients discard a
-  late bitfield, so peers believed we held nothing. Seeding a complete torrent to a live swarm, 48
-  incomplete peers connected and *not one* became interested. Our own parser tolerates the wrong
-  order, which is exactly why two PeerSharp instances interoperated happily while real clients
-  ignored us. After the fix the same run served its first bytes. Regression cover:
-  `HandshakeMessageOrderTests` asserts on what we send, since testing against ourselves cannot catch
-  it.
-
-- **The plaintext fallback reused a dead socket.** When the encryption handshake hit a network error
-  we reported "failed" rather than "connection gone", so the `Encryption.Allow` fallback retried
-  plaintext on the same socket — already dead, and already carrying the MSE bytes we had written.
-  The retry could only throw, and the peer was lost even though it might have been reachable in
-  plaintext. Roughly 3% of connection attempts. Regression cover: `EncryptionFallbackTests`.
-
-- **Inbound uTP rejected every encrypted peer.** The TCP listener peeked a byte and ran an MSE
-  handshake when it was not `19`; the uTP path had no such branch, so it read 68 bytes, saw the first
-  byte of somebody's Diffie-Hellman key, and dropped the connection. Encryption and transport are
-  independent choices — libtorrent decides encryption from policy alone and Transmission hands every
-  inbound socket to the same handshake regardless of transport — and encrypted uTP is the common
-  case, not a corner: 63 of 68 qBittorrent connections in one measurement were uTP and all 68 were
-  encrypted. Both transports now share one negotiator so they cannot diverge again. Regression cover:
-  `EncryptedUtpTests`, which fails on `Encryption.Require` without the fix.
-
-- **We never sent keepalives, and the transport gave up before the protocol.** BEP 3's zero-length
-  keepalive was defined in the serializer and never sent, so an idle connection went silent and the
-  remote dropped it — libtorrent after 120s, Transmission expecting traffic every 100s. Meanwhile the
-  uTP layer closed after 60s of quiet, half our own peer-level idle policy, so the transport was
-  ending connections the protocol still considered healthy. Fixing the timeout then exposed dead
-  code: the uTP handshake retry limits sat behind a branch that always won, so connection attempts
-  had been relying on the inactivity timeout instead. Regression cover: `KeepAliveTests`, which pins
-  the ordering between the three timeouts rather than their literal values.
-
-Two of these were found by tests that assert on real bytes rather than on mocked calls, which is a
-distinction worth keeping: `WireSequenceTests` captures the opening sequence from a real socket, and
-`MseConformanceTests` decodes our encrypted handshake with an implementation that shares no code with
-the engine — written from the spec and cross-checked against Transmission's `peer-mse.cc`. Encryption
-is the production path (forcing plaintext against a live swarm dropped a run from 127 peers to 12)
-while the rest of the suite barely touches it, and self-consistent encryption tests would agree just
-as happily on a wrong keystream.
-
-The same instinct drives two local suites that run in CI, since a bug worth finding on a real swarm is
-usually cheaper to catch deterministically:
-
-- `RateLimitTests` — limits actually constrain throughput, with a control proving an unlimited
-  transfer is genuinely faster, so a broken transfer cannot masquerade as a working limiter.
-- `ResumeIntegrityTests` — completed downloads match the source byte for byte (including multi-file
-  layouts, where pieces straddle file boundaries), a mid-transfer restart keeps its verified pieces,
-  and a recheck actually detects corruption rather than always reporting success.
+Unit, integration, architecture and property-based tests run on every build and need no setup.
+The suites that need more - coverage-guided fuzzing, interop against real client binaries, live
+DHT probes, and soak runs against a real swarm - are described in
+[tests/README.md](https://github.com/ligenq/PeerSharp/blob/main/tests/README.md), along with how
+to read what they report.
 
 ## Supported BEPs
 
@@ -530,7 +436,7 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 12  | Multitracker Metadata Extension | Supported |
 | 14  | Local Service Discovery | Supported |
 | 15  | UDP Tracker Protocol | Supported |
-| 16  | Superseeding | Supported |
+| 16  | Superseeding | Supported, via `ITorrent.SuperSeeding` or `AddTorrentOptions.SuperSeeding` |
 | 19  | WebSeed - HTTP/FTP Seeding (GetRight style) | Supported |
 | 20  | Peer ID Conventions | Supported |
 | 21  | Extension for Partial Seeds | Supported, `upload_only` plus `event=paused` while a partial seed |
