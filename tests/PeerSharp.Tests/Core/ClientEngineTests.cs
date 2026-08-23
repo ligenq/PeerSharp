@@ -151,6 +151,40 @@ public class ClientEngineTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task InitializeAsync_AlertsWhenAConfiguredPortCouldNotBeUsed()
+    {
+        ushort requestedTcp = _settings.Connection.TcpPort;
+        ushort requestedUdp = _settings.Connection.UdpPort;
+        _networkManager.BoundTcpPort = 12345;
+        _networkManager.BoundUdpPort = 23456;
+        var alerts = new AlertsManager(_timeProvider);
+        alerts.RegisterAlerts((uint)AlertCategory.Session);
+        var engine = ClientEngine.Create(
+            _settings,
+            alerts: alerts,
+            networkManager: _networkManager,
+            timeProvider: _timeProvider);
+
+        await engine.InitializeAsync();
+
+        var changed = alerts.PopAlerts().OfType<ListenPortChangedAlert>().ToArray();
+        Assert.Collection(
+            changed.OrderBy(alert => alert.Transport),
+            tcp =>
+            {
+                Assert.Equal(ListenTransport.Tcp, tcp.Transport);
+                Assert.Equal(requestedTcp, tcp.RequestedPort);
+                Assert.Equal(12345, tcp.ActualPort);
+            },
+            udp =>
+            {
+                Assert.Equal(ListenTransport.Udp, udp.Transport);
+                Assert.Equal(requestedUdp, udp.RequestedPort);
+                Assert.Equal(23456, udp.ActualPort);
+            });
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task GetStats_AggregatesFromTorrents()
     {
         var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);

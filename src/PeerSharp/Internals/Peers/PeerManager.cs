@@ -292,6 +292,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 _logger.LogDebug(
                     "Rejecting incoming connection from {RemoteEndPoint} - it has served bad data before",
                     peer.RemoteEndPoint);
+                ReportBlocked(peer.RemoteEndPoint, PeerBlockReason.BadData);
                 // The peer has not joined _connectedPeers yet, so CloseAsync cannot release the
                 // governor slot (ConnectionClosedAsync only releases slots owned by registered
                 // peers). Undo the provisional endpoint claim and slot explicitly.
@@ -591,7 +592,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return failures >= MaxHashFailuresPerAddress;
     }
 
-    /// <summary>Whether this address has served enough bad data to be left alone.</summary>
     /// <summary>
     /// Announces a refusal that happens before any connection exists, so nothing else would report it.
     /// </summary>
@@ -686,6 +686,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (IPAddress.TryParse(ip, out var parsedForBadData) && IsRefusedForBadData(parsedForBadData))
         {
             _logger.LogDebug("Not dialling {Ip}:{Port} - it has served bad data before", ip, port);
+            ReportBlocked(new IPEndPoint(parsedForBadData, port), PeerBlockReason.BadData);
             return;
         }
 
@@ -1459,10 +1460,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
         catch (TimeoutException) { /* Ignore timeout */ }
         catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error awaiting connection tasks during stop");
-                        Defect.ReportIfDefect(ex, "Error awaiting connection tasks during stop", _logger);
-                    }
+        {
+            _logger.LogError(ex, "Error awaiting connection tasks during stop");
+            Defect.ReportIfDefect(ex, "Error awaiting connection tasks during stop", _logger);
+        }
 
         _activeConnectionTasks.Clear();
         _pendingConnections.Clear();
@@ -2343,10 +2344,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 // UpdateSpeeds - every 1 second
                 try { await UpdateSpeedsAsync().ConfigureAwait(false); }
                 catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "UpdateSpeeds error");
-                        Defect.ReportIfDefect(ex, "UpdateSpeeds error", _logger);
-                    }
+                {
+                    _logger.LogError(ex, "UpdateSpeeds error");
+                    Defect.ReportIfDefect(ex, "UpdateSpeeds error", _logger);
+                }
 
                 // CheckPeerHealth (Watchdog) - every 5 seconds
                 if (tickCount % WatchdogIntervalSeconds == 0)
@@ -3093,6 +3094,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _logger.LogDebug(
                 "Rejecting connected stream peer from {Remote} - it has served bad data before",
                 remote);
+            ReportBlocked(remote, PeerBlockReason.BadData);
             stream.Close();
             return Task.CompletedTask;
         }

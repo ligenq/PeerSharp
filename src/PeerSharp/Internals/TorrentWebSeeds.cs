@@ -16,28 +16,30 @@ internal sealed class TorrentWebSeeds(Torrent torrent) : IWebSeeds
     private readonly Lock _lock = new();
     private readonly Torrent _torrent = torrent;
 
-    // Null until a caller adds or removes one, at which point it becomes the authority.
-    private List<string>? _urls;
+    private readonly HashSet<string> _added = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _removed = new(StringComparer.OrdinalIgnoreCase);
 
     public bool Add(string url)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(url);
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return false;
+        }
 
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeFtp))
+        if (!IsSupportedUrl(url))
         {
             return false;
         }
 
         lock (_lock)
         {
-            var effective = EffectiveListLocked();
-            if (effective.Any(u => u.Equals(url, StringComparison.OrdinalIgnoreCase)))
+            if (EffectiveListLocked().Any(u => u.Equals(url, StringComparison.OrdinalIgnoreCase)))
             {
                 return false;
             }
 
-            effective.Add(url);
+            _removed.Remove(url);
+            _added.Add(url);
         }
 
         // Running torrents get it now; stopped ones pick it up from the configuration at start.
@@ -47,24 +49,24 @@ internal sealed class TorrentWebSeeds(Torrent torrent) : IWebSeeds
 
     public bool Remove(string url)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(url);
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return false;
+        }
 
-        bool removed;
         lock (_lock)
         {
-            var effective = EffectiveListLocked();
-            int index = effective.FindIndex(u => u.Equals(url, StringComparison.OrdinalIgnoreCase));
-            if (index < 0)
+            if (!EffectiveListLocked().Any(u => u.Equals(url, StringComparison.OrdinalIgnoreCase)))
             {
                 return false;
             }
 
-            effective.RemoveAt(index);
-            removed = true;
+            _added.Remove(url);
+            _removed.Add(url);
         }
 
         _torrent.WebSeedManager?.RemoveSource(url);
-        return removed;
+        return true;
     }
 
     public IReadOnlyList<string> GetAll()
@@ -75,13 +77,25 @@ internal sealed class TorrentWebSeeds(Torrent torrent) : IWebSeeds
         }
     }
 
-    /// <summary>
-    /// The caller's list, created from the metadata's on first change. Kept null until then so a
-    /// torrent nobody has touched reports exactly what its metadata says, even if that metadata
-    /// arrives later.
-    /// </summary>
     private List<string> EffectiveListLocked()
     {
-        return _urls ??= [.. _torrent.InfoFile.WebSeedUrls];
+        var result = new List<string>();
+        foreach (string url in _torrent.InfoFile.WebSeedUrls.Concat(_added))
+        {
+            if (IsSupportedUrl(url) &&
+                !_removed.Contains(url) &&
+                !result.Any(existing => existing.Equals(url, StringComparison.OrdinalIgnoreCase)))
+            {
+                result.Add(url);
+            }
+        }
+
+        return result;
     }
+
+    private static bool IsSupportedUrl(string url)
+        => Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            && (uri.Scheme == Uri.UriSchemeHttp
+                || uri.Scheme == Uri.UriSchemeHttps
+                || uri.Scheme == Uri.UriSchemeFtp);
 }

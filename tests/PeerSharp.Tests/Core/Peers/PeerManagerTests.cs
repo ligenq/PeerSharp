@@ -1600,11 +1600,62 @@ public class PeerManagerTests
         await CleanupAsync(ctx);
     }
 
+    [Fact]
+    public async Task ConnectTo_ReportsAPeerRefusedForRepeatedBadData()
+    {
+        var alerts = new RecordingAlertsManager();
+        var ctx = CreateContext(alerts: alerts);
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.91"), 51413);
+        var failures = GetPrivateField<ConcurrentDictionary<IPAddress, int>>(
+            ctx.Manager,
+            "_hashFailuresByAddress");
+        failures[endpoint.Address] = 3;
+
+        ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+
+        var alert = Assert.Single(alerts.Alerts.OfType<PeerBlockedAlert>());
+        Assert.Equal(endpoint, alert.Endpoint);
+        Assert.Equal(PeerBlockReason.BadData, alert.Reason);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact]
+    public async Task AddConnectedPeer_ReportsAPeerRefusedForRepeatedBadData()
+    {
+        var alerts = new RecordingAlertsManager();
+        var ctx = CreateContext(alerts: alerts);
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.92"), 51413);
+        var failures = GetPrivateField<ConcurrentDictionary<IPAddress, int>>(
+            ctx.Manager,
+            "_hashFailuresByAddress");
+        failures[endpoint.Address] = 3;
+        var stream = new MemoryStream();
+
+        await ctx.Manager.AddConnectedPeerAsync(stream, initiator: true, endpoint);
+
+        var alert = Assert.Single(alerts.Alerts.OfType<PeerBlockedAlert>());
+        Assert.Equal(endpoint, alert.Endpoint);
+        Assert.Equal(PeerBlockReason.BadData, alert.Reason);
+        Assert.False(stream.CanRead);
+
+        await CleanupAsync(ctx);
+    }
+
     private sealed class RecordingAlertsManager : IAlertsManager
     {
         public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
 
-        public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason) { }
+        public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason)
+        {
+            Alerts.Add(new PeerBlockedAlert
+            {
+                Id = AlertId.PeerBlocked,
+                Torrent = torrent,
+                Endpoint = endpoint,
+                Reason = reason
+            });
+        }
 
         public void ListenPortChangedAlert(int requestedPort, int actualPort, ListenTransport transport) { }
         public List<Alert> Alerts { get; } = [];

@@ -130,6 +130,8 @@ public class TorrentControlTests : IDisposable
 
         Assert.Throws<ArgumentOutOfRangeException>(() => torrent.SetPiecePriority(-1, Priority.High));
         Assert.Throws<ArgumentOutOfRangeException>(() => torrent.SetPiecePriority(torrent.PieceCount, Priority.High));
+        Assert.Throws<ArgumentOutOfRangeException>(() => torrent.GetPiecePriority(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => torrent.GetPiecePriority(torrent.PieceCount));
     }
 
     [Fact]
@@ -181,6 +183,15 @@ public class TorrentControlTests : IDisposable
     }
 
     [Fact]
+    public async Task WebSeeds_IgnoreUnusableUrlsInTorrentMetadata()
+    {
+        var (engine, torrent) = await CreateTorrentAsync("web-seed-invalid-metadata", webSeed: "file:///tmp/data");
+        await using var _ = engine;
+
+        Assert.Empty(torrent.WebSeeds.GetAll());
+    }
+
+    [Fact]
     public async Task WebSeeds_CanBeAddedAndRemovedAtRuntime()
     {
         var (engine, torrent) = await CreateTorrentAsync("web-seed-runtime", webSeed: "https://example.invalid/data/");
@@ -202,6 +213,23 @@ public class TorrentControlTests : IDisposable
         Assert.False(torrent.WebSeeds.Remove("https://never-added.invalid/"));
     }
 
+    [Fact]
+    public async Task WebSeeds_KeepMetadataUrlsThatAppearAfterAnAddition()
+    {
+        var (engine, torrent) = await CreateTorrentAsync("web-seed-late-metadata");
+        await using var _ = engine;
+
+        Assert.True(torrent.WebSeeds.Add("https://mirror.invalid/data/"));
+
+        // Metadata is replaced when a magnet finishes its BEP 9 exchange. The caller's overlay must
+        // not freeze the empty pre-metadata list and thereby hide what the torrent later declares.
+        ((Torrent)torrent).InfoFile.WebSeedUrls.Add("https://publisher.invalid/data/");
+
+        Assert.Equal(
+            ["https://publisher.invalid/data/", "https://mirror.invalid/data/"],
+            torrent.WebSeeds.GetAll());
+    }
+
     [Theory]
     [InlineData("not-a-url")]
     [InlineData("magnet:?xt=urn:btih:0000000000000000000000000000000000000000")]
@@ -213,6 +241,50 @@ public class TorrentControlTests : IDisposable
 
         Assert.False(torrent.WebSeeds.Add(url));
         Assert.Empty(torrent.WebSeeds.GetAll());
+    }
+
+    [Fact]
+    public async Task WebSeeds_RefuseBlankUrlsWithoutThrowing()
+    {
+        var (engine, torrent) = await CreateTorrentAsync("web-seed-blank");
+        await using var _ = engine;
+
+        Assert.False(torrent.WebSeeds.Add("   "));
+        Assert.False(torrent.WebSeeds.Remove("   "));
+    }
+
+    [Fact]
+    public async Task WebSeeds_AreRebuiltWhenATorrentRestarts()
+    {
+        var (engine, torrent) = await CreateTorrentAsync(
+            "web-seed-restart",
+            webSeed: "https://example.invalid/data/");
+        await using var _ = engine;
+        var internals = (Torrent)torrent;
+
+        await torrent.StartAsync(TestContext.Current.CancellationToken);
+        var first = Assert.IsType<Internals.Seeding.WebSeedManager>(internals.WebSeedManager);
+
+        await torrent.StopAsync(TestContext.Current.CancellationToken);
+        Assert.Null(internals.WebSeedManager);
+
+        await torrent.StartAsync(TestContext.Current.CancellationToken);
+        var second = Assert.IsType<Internals.Seeding.WebSeedManager>(internals.WebSeedManager);
+        Assert.NotSame(first, second);
+        Assert.Equal(["https://example.invalid/data/"], second.GetSourceUrls());
+    }
+
+    [Fact]
+    public async Task WebSeeds_RemoveStopsARunningDirectorySeed()
+    {
+        const string url = "https://example.invalid/content/";
+        var (engine, torrent) = await CreateTorrentAsync("web-seed-live-remove", webSeed: url);
+        await using var _ = engine;
+        await torrent.StartAsync(TestContext.Current.CancellationToken);
+        var manager = Assert.IsType<Internals.Seeding.WebSeedManager>(((Torrent)torrent).WebSeedManager);
+
+        Assert.True(torrent.WebSeeds.Remove(url));
+        Assert.Empty(manager.GetSourceUrls());
     }
 
     [Fact]
@@ -297,6 +369,22 @@ public class TorrentControlTests : IDisposable
     }
 
     [Fact]
+    public async Task SessionPause_HoldsBackAManualStartUntilResume()
+    {
+        await using var engine = await CreateEngineAsync();
+        var torrent = await AddTorrentAsync(engine, "manually-started-while-paused", start: false);
+
+        await engine.PauseAsync(TestContext.Current.CancellationToken);
+        await torrent.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(engine.IsPaused);
+        Assert.False(torrent.Started);
+
+        await engine.ResumeAsync(TestContext.Current.CancellationToken);
+        Assert.True(torrent.Started);
+    }
+
+    [Fact]
     public async Task SessionPause_IgnoresASecondCall()
     {
         await using var engine = await CreateEngineAsync();
@@ -323,6 +411,39 @@ public class TorrentControlTests : IDisposable
 
         Assert.False(engine.IsPaused);
         Assert.Empty(engine.GetTorrents());
+    }
+
+    [Fact]
+    public async Task SessionPause_PreCancelledCallDoesNotChangeSessionState()
+    {
+        await using var engine = await CreateEngineAsync();
+        var torrent = await AddTorrentAsync(engine, "cancelled-pause", start: true);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => engine.PauseAsync(cancellation.Token));
+
+        Assert.False(engine.IsPaused);
+        Assert.True(torrent.Started);
+    }
+
+    [Fact]
+    public async Task SessionResume_PreCancelledCallCanBeRetried()
+    {
+        await using var engine = await CreateEngineAsync();
+        var torrent = await AddTorrentAsync(engine, "cancelled-resume", start: true);
+        await engine.PauseAsync(TestContext.Current.CancellationToken);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => engine.ResumeAsync(cancellation.Token));
+
+        Assert.True(engine.IsPaused);
+        Assert.False(torrent.Started);
+
+        await engine.ResumeAsync(TestContext.Current.CancellationToken);
+        Assert.False(engine.IsPaused);
+        Assert.True(torrent.Started);
     }
 
     public void Dispose()

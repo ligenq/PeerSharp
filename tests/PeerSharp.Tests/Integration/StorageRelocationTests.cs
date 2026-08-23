@@ -137,6 +137,19 @@ public class StorageRelocationTests : IDisposable
     }
 
     [Fact]
+    public async Task MoveStorage_AllowsAFileWhoseNameStartsWithTwoDots()
+    {
+        var fixture = await CreateCompleteTorrentAsync("dotdot-name");
+        await using var engine = fixture.Engine;
+        await fixture.Torrent.RenameFileAsync(0, "..data.bin", TestContext.Current.CancellationToken);
+
+        string destination = Path.Combine(_testRoot, "dotdot-destination");
+        await fixture.Torrent.MoveStorageAsync(destination, TestContext.Current.CancellationToken);
+
+        Assert.True(File.Exists(Path.Combine(destination, "..data.bin")));
+    }
+
+    [Fact]
     public async Task SetDownloadPath_LeavesTheDataBehind()
     {
         // Pinning the difference between the two, because it is the whole reason MoveStorageAsync
@@ -190,6 +203,24 @@ public class StorageRelocationTests : IDisposable
         Assert.NotNull(state);
         Assert.Equal("kept.bin", Assert.Single(state.RenamedFiles).Path);
         Assert.True(File.Exists(Path.Combine(fixture.DownloadPath, "kept.bin")));
+    }
+
+    [Fact]
+    public async Task RenameFile_FailureDoesNotPersistTheName()
+    {
+        var fixture = await CreateCompleteTorrentAsync("rename-failure");
+        await using var engine = fixture.Engine;
+        string oldPath = Path.Combine(fixture.DownloadPath, fixture.Payloads[0].Path);
+
+        // A directory cannot be replaced by the file move, providing a deterministic failure after
+        // validation but before the rename is committed.
+        Directory.CreateDirectory(Path.Combine(fixture.DownloadPath, "occupied.bin"));
+
+        await Assert.ThrowsAsync<StorageException>(
+            () => fixture.Torrent.RenameFileAsync(0, "occupied.bin", TestContext.Current.CancellationToken));
+
+        Assert.Empty(fixture.Torrent.GetRenamedFiles());
+        Assert.True(File.Exists(oldPath));
     }
 
     [Theory]

@@ -74,7 +74,7 @@ public enum AlertId : uint
     /// <summary>A completed piece did not match its hash and has to be downloaded again.</summary>
     PieceHashFailed = 1 << 14,
 
-    /// <summary>A peer was refused because of the IP blocklist or the country filter.</summary>
+    /// <summary>A peer was refused because of the IP blocklist or repeated bad data.</summary>
     PeerBlocked = 1 << 15,
 
     /// <summary>Metadata was fetched from the swarm, so the file list is now known.</summary>

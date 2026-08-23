@@ -452,6 +452,8 @@ public interface ITorrent
     /// among the files it touches.
     /// </summary>
     /// <param name="pieceIndex">The piece to ask about.</param>
+    /// <exception cref="InvalidOperationException">The metadata is not known yet.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The index is outside the torrent.</exception>
     Priority GetPiecePriority(int pieceIndex);
 
     /// <summary>

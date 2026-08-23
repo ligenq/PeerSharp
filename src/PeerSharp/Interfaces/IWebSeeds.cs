@@ -15,12 +15,19 @@ public interface IWebSeeds
     /// </summary>
     /// <param name="url">An absolute <c>http</c>, <c>https</c> or <c>ftp</c> URL.</param>
     /// <returns>
-    /// <see langword="true"/> if it was added; <see langword="false"/> if the URL is not one of those
-    /// schemes, or the torrent already had it.
+    /// <see langword="true"/> if it was added; <see langword="false"/> if the torrent already had it,
+    /// or the URL is blank, malformed, or not one of those schemes.
     /// </returns>
     /// <remarks>
+    /// <para>
     /// Takes effect immediately on a running torrent, and is remembered for the next start either
     /// way. Web seeds still need <see cref="Config.ConnectionSettings.EnableWebSeeds"/>.
+    /// </para>
+    /// <para>
+    /// Unusable input is reported rather than thrown, because a web seed list is usually assembled
+    /// from somewhere the caller does not control - a config file, a paste box, a mirror list - and
+    /// one bad entry among many is a thing to skip, not a bug in the calling code.
+    /// </para>
     /// </remarks>
     bool Add(string url);
 
@@ -28,7 +35,10 @@ public interface IWebSeeds
     /// Removes a web seed URL, including one the torrent's own metadata declared.
     /// </summary>
     /// <param name="url">The URL to stop using.</param>
-    /// <returns><see langword="true"/> if it was in use.</returns>
+    /// <returns>
+    /// <see langword="true"/> if it was in use; <see langword="false"/> if it was not, including when
+    /// the URL is blank or malformed.
+    /// </returns>
     /// <remarks>Downloads already in flight against it are left to finish.</remarks>
     bool Remove(string url);
 

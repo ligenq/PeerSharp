@@ -70,6 +70,8 @@ internal sealed class Storage : IStorage
     /// </summary>
     public IReadOnlyDictionary<int, string>? RenamedFiles { get; init; }
 
+    internal bool IsInitialized => Volatile.Read(ref _initialized) == 1;
+
     public void DeleteAll()
     {
         _handleCache.CloseTorrentHandles(_rootPath);
@@ -189,7 +191,7 @@ internal sealed class Storage : IStorage
                 }
 
                 string relative = Path.GetRelativePath(oldRoot, file.FullPath);
-                if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative))
+                if (EscapesRoot(relative) || Path.IsPathRooted(relative))
                 {
                     // Outside the root we were told we own. Refuse rather than write somewhere unrelated.
                     throw new StorageException(
@@ -211,7 +213,7 @@ internal sealed class Storage : IStorage
         }
         catch (Exception ex)
         {
-            RollBack(moved);
+            await RollBackAsync(moved).ConfigureAwait(false);
 
             if (ex is StorageException or OperationCanceledException)
             {
@@ -239,12 +241,6 @@ internal sealed class Storage : IStorage
             return;
         }
 
-        string? current = _files[fileIndex].FullPath;
-        if (current == null || !File.Exists(current))
-        {
-            return;
-        }
-
         string? sanitized = SanitizeFilePath(newRelativePath);
         if (sanitized == null)
         {
@@ -254,8 +250,22 @@ internal sealed class Storage : IStorage
                 isRecoverable: false);
         }
 
+        string? current = _files[fileIndex].FullPath;
+        if (current == null)
+        {
+            return;
+        }
+
         if (string.Equals(Path.GetFullPath(current), Path.GetFullPath(sanitized), StringComparison.OrdinalIgnoreCase))
         {
+            return;
+        }
+
+        if (!File.Exists(current))
+        {
+            // Match libtorrent's rename semantics: an absent file still adopts the new path so the
+            // first write creates it under the requested name.
+            _files[fileIndex] = _files[fileIndex] with { FullPath = sanitized };
             return;
         }
 
@@ -291,18 +301,43 @@ internal sealed class Storage : IStorage
         }
         catch (IOException)
         {
-            // Across volumes a rename is not available, so pay for the copy.
-            await using (var from = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 0, useAsync: true))
-            await using (var to = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, 0, useAsync: true))
+            // Across volumes a rename is not available, so pay for the copy. Copy to a sibling
+            // temporary file first: cancellation or an I/O failure must not leave a truncated file
+            // at the destination that looks like a completed move.
+            string directory = Path.GetDirectoryName(destination) ?? Directory.GetCurrentDirectory();
+            string temporary = Path.Combine(directory, $".peersharp-{Guid.NewGuid():N}.tmp");
+            try
             {
-                await from.CopyToAsync(to, ct).ConfigureAwait(false);
-            }
+                await using (var from = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 0, useAsync: true))
+                await using (var to = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 0, useAsync: true))
+                {
+                    await from.CopyToAsync(to, ct).ConfigureAwait(false);
+                    await to.FlushAsync(ct).ConfigureAwait(false);
+                }
 
-            File.Delete(source);
+                File.Move(temporary, destination, overwrite: true);
+                File.Delete(source);
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(temporary);
+                }
+                catch (IOException)
+                {
+                    // Do not replace the move's cancellation or original I/O failure with a
+                    // best-effort temporary-file cleanup failure.
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // As above; the source remains authoritative unless the final rename succeeded.
+                }
+            }
         }
     }
 
-    private void RollBack(List<(string From, string To)> moved)
+    private async Task RollBackAsync(List<(string From, string To)> moved)
     {
         for (int i = moved.Count - 1; i >= 0; i--)
         {
@@ -315,7 +350,7 @@ internal sealed class Storage : IStorage
                     Directory.CreateDirectory(directory);
                 }
 
-                File.Move(to, from, overwrite: true);
+                await MoveOneAsync(to, from, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -325,6 +360,11 @@ internal sealed class Storage : IStorage
             }
         }
     }
+
+    private static bool EscapesRoot(string relativePath)
+        => relativePath.Equals("..", StringComparison.Ordinal)
+            || relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            || relativePath.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
 
     private void RemoveEmptyDirectories(IEnumerable<string> vacatedFiles, string root)
     {

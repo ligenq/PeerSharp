@@ -44,6 +44,8 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
 
     public bool IsDisposed => _disposal.IsDisposed;
 
+    internal bool IsInitialized => _storage is Storage storage && storage.IsInitialized;
+
     /// <summary>
     /// Creates a Files instance with optional custom download path.
     /// Path resolution: customPath → settings default → app base directory.

@@ -393,6 +393,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     internal StreamingController Streaming { get; private set; } = null!;
     internal List<int>? StreamingPriorityPieces => Streaming?.PriorityPieces;
 
+    /// <summary>
+    /// Lets the owning engine serialize starts with its session pause transition. Torrents created
+    /// directly in unit tests, and transient metadata-fetch torrents, have no session coordinator.
+    /// </summary>
+    internal Func<Torrent, CancellationToken, Task>? SessionStartCoordinator { get; set; }
+
     internal long TotalDownloaded => FileTransferInternal?.Downloader.Downloaded ?? 0;
     internal long TotalUploaded => FileTransferInternal?.Uploader.Uploaded ?? 0;
 
@@ -846,6 +852,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 throw new InvalidOperationException("Torrent must be stopped before renaming a file");
             }
 
+            // An initialized Storage updates its live path while it carries the data across. An
+            // unopened one has only its construction-time rename snapshot and is rebuilt below.
+            bool rebuildStorage = FilesInternal is PieceWriter.Files files && !files.IsInitialized;
+            if (FilesInternal != null)
+            {
+                await FilesInternal.RenameFileAsync(internalIndex, normalized, cancellationToken).ConfigureAwait(false);
+            }
+
             var renamed = LocalState.RenamedFiles;
             int existing = renamed.FindIndex(r => r.Index == internalIndex);
             if (existing >= 0)
@@ -861,13 +875,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 });
             }
 
-            // Storage assigns paths at construction, so the rename only takes effect on a rebuild. It
-            // carries the data across on the way, otherwise the torrent would start again looking for
-            // a file that is still sitting under its old name.
-            if (FilesInternal != null)
+            if (rebuildStorage && FilesInternal != null)
             {
+                // An unopened Storage has no path table to update. Recreate just that case so its
+                // initial rename snapshot includes the state committed above. An initialized Storage
+                // updated its live path in RenameFileAsync and must not be replaced with an unopened
+                // instance, or a following MoveStorageAsync would have no files to move.
                 string downloadPath = FilesInternal.DownloadPath;
-                await FilesInternal.RenameFileAsync(internalIndex, normalized, cancellationToken).ConfigureAwait(false);
                 await FilesInternal.DisposeAsync().ConfigureAwait(false);
                 FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, downloadPath);
             }
@@ -910,7 +924,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public Priority GetPiecePriority(int pieceIndex)
     {
         _disposal.ThrowIfDisposed(this);
+
+        if (!HasMetadata)
+        {
+            throw new InvalidOperationException("Piece priorities cannot be read before the torrent's metadata is known");
+        }
+
         ArgumentOutOfRangeException.ThrowIfNegative(pieceIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(pieceIndex, PieceCount);
 
         if (TryGetPiecePriority(pieceIndex, out var overridden))
         {
@@ -1001,7 +1022,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return _fileSelectionManager.SetFileSelectionAsync(internalIndex, selection, cancellationToken);
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken = default)
+    public Task StartAsync(CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+        return SessionStartCoordinator?.Invoke(this, cancellationToken)
+            ?? StartCoreAsync(cancellationToken);
+    }
+
+    internal async Task StartCoreAsync(CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
 
@@ -1865,9 +1893,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                     disposing,
                     throwOnFailure: recoveringFailedStart && !disposing,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                if (WebSeedManager != null)
+                if (WebSeedManager is { } webSeeds)
                 {
-                    await WebSeedManager.DisposeAsync().ConfigureAwait(false);
+                    // A disposed manager cannot own the next start: restarting it would create a
+                    // worker whose later DisposeAsync is a no-op because its disposal flag is already
+                    // set. Clear it so StartAsync rebuilds from the durable effective URL list.
+                    WebSeedManager = null;
+                    await webSeeds.DisposeAsync().ConfigureAwait(false);
                 }
                 if (FileTransferInternal != null)
                 {

@@ -14,6 +14,8 @@ internal sealed class TorrentConfiguration
     private long _downloadLimitBytesPerSecond;
     private long _diskReadLimitBytesPerSecond;
     private long _diskWriteLimitBytesPerSecond;
+    private int _maxConnections;
+    private int _maxUploadSlots;
     private long _uploadLimitBytesPerSecond;
 
     public TorrentConfiguration(ITorrent torrent, IBandwidthManager bandwidth)
@@ -64,8 +66,17 @@ internal sealed class TorrentConfiguration
     public ConcurrentDictionary<int, Priority> PiecePriorities { get; } = new();
 
     // 0 means "use the engine-wide setting", matching how the rate limits treat 0.
-    public int MaxConnections { get; set; }
-    public int MaxUploadSlots { get; set; }
+    public int MaxConnections
+    {
+        get => Volatile.Read(ref _maxConnections);
+        set => Volatile.Write(ref _maxConnections, value);
+    }
+
+    public int MaxUploadSlots
+    {
+        get => Volatile.Read(ref _maxUploadSlots);
+        set => Volatile.Write(ref _maxUploadSlots, value);
+    }
 
     public bool QueueAutoStart { get; set; } = true;
     public int QueuePriority { get; set; }

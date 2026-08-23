@@ -1,4 +1,5 @@
 using PeerSharp.Internals.Framework;
+using System.Collections.Concurrent;
 using System.Reflection;
 using Xunit.v3;
 
@@ -26,7 +27,7 @@ namespace PeerSharp.Tests;
 [AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = false)]
 public sealed class DefectFreeAttribute : BeforeAfterTestAttribute, IDefectObserver
 {
-    private static readonly AsyncLocal<List<string>?> Current = new();
+    private static readonly AsyncLocal<ConcurrentQueue<string>?> Current = new();
     private static readonly Subscription Registration = new();
 
     public override void Before(MethodInfo methodUnderTest, IXunitTest test)
@@ -39,7 +40,7 @@ public sealed class DefectFreeAttribute : BeforeAfterTestAttribute, IDefectObser
         }
 
         Registration.EnsureRegistered(this);
-        Current.Value = [];
+        Current.Value = new ConcurrentQueue<string>();
     }
 
     /// <summary>
@@ -77,7 +78,7 @@ public sealed class DefectFreeAttribute : BeforeAfterTestAttribute, IDefectObser
         // Flows to whichever test's async context provoked it. A defect raised on a pool thread with
         // no test context - a background loop outliving the test that started it - is not attributed
         // to whatever happens to be running instead.
-        Current.Value?.Add($"{context}: {exception.GetType().Name}: {exception.Message}");
+        Current.Value?.Enqueue($"{context}: {exception.GetType().Name}: {exception.Message}");
     }
 
     /// <summary>Registers the observer once for the lifetime of the test run.</summary>
