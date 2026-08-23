@@ -175,6 +175,32 @@ public interface ITorrent
     bool QueueAutoStart { get; set; }
 
     /// <summary>
+    /// Gets or sets the most peers this torrent may connect to, overriding
+    /// <see cref="Config.ConnectionSettings.MaxPeersPerTorrent"/>. Zero, the default, uses that
+    /// engine-wide setting.
+    /// </summary>
+    /// <remarks>
+    /// Lowering this does not disconnect peers already connected; it stops new ones being accepted
+    /// until the count falls below the new ceiling. The engine-wide
+    /// <see cref="Config.ConnectionSettings.MaxConnections"/> still applies on top of whatever is set
+    /// here.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    int MaxConnections { get; set; }
+
+    /// <summary>
+    /// Gets or sets how many peers this torrent uploads to at once. Zero, the default, lets the
+    /// engine choose from the upload rate limit and
+    /// <see cref="Config.ConnectionSettings.UploadSlotsMin"/>/<see cref="Config.ConnectionSettings.UploadSlotsMax"/>.
+    /// </summary>
+    /// <remarks>
+    /// A number set here is used as given, never widened by the automatic calculation - though it is
+    /// still bounded by how many peers are actually connected.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    int MaxUploadSlots { get; set; }
+
+    /// <summary>
     /// Gets or sets the queue priority for auto-start ordering.
     /// Higher values are started first.
     /// </summary>
@@ -194,6 +220,29 @@ public interface ITorrent
     /// Gets whether all selected files have been downloaded.
     /// </summary>
     bool SelectionFinished { get; }
+
+    /// <summary>
+    /// Gets or sets whether this torrent seeds in BEP 16 super-seed mode. Default is
+    /// <see langword="false"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Super-seeding claims to hold nothing and then hands each peer a single piece at a time, moving
+    /// on only once that piece has been seen coming back from somebody else. It exists for the case
+    /// where one seed is introducing content to an empty swarm: it costs the seed far less upload to
+    /// get a full copy distributed, because no two peers are handed the same piece to begin with.
+    /// </para>
+    /// <para>
+    /// It is the wrong setting everywhere else. Against an established swarm it throttles peers that
+    /// could have downloaded freely, and a peer that cannot tell super-seeding from a client with
+    /// nothing to offer may simply disconnect. Turn it on for an initial seed and off afterwards.
+    /// </para>
+    /// <para>
+    /// The setting can be changed at any time and survives the metadata fetch of a magnet link. It
+    /// takes effect for peers connecting afterwards; peers already sent a bitfield keep it.
+    /// </para>
+    /// </remarks>
+    bool SuperSeeding { get; set; }
 
     /// <summary>
     /// Gets the download progress of selected files only (0.0 to 1.0).
@@ -234,6 +283,11 @@ public interface ITorrent
     /// Gets the tracker management interface for this torrent.
     /// </summary>
     ITrackers Trackers { get; }
+
+    /// <summary>
+    /// The BEP 19 web seeds this torrent pulls from, and the ones a caller adds.
+    /// </summary>
+    IWebSeeds WebSeeds { get; }
 
     /// <summary>
     /// Gets or sets the per-torrent upload limit in bytes per second. 0 means unlimited.
@@ -315,15 +369,124 @@ public interface ITorrent
     Task SetAllFilesPriorityAsync(Priority priority, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sets the download path for this torrent.
+    /// Points this torrent at a different download path without touching any data already on disk.
     /// Must be stopped before calling this method.
     /// </summary>
+    /// <remarks>
+    /// For a torrent that has not downloaded anything yet. If it has, the data stays where it was and
+    /// the torrent starts again believing it holds nothing - use
+    /// <see cref="MoveStorageAsync(string, CancellationToken)"/> to take the data along.
+    /// </remarks>
     /// <param name="path">The new download path.</param>
     /// <param name="cancellationToken">
     /// Cancellation token. Bounds the wait for other state transitions (start, stop, recheck)
     /// to finish; once the path change itself begins it runs to completion.
     /// </param>
     Task SetDownloadPathAsync(string path, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Moves the torrent's downloaded data to <paramref name="path"/> and continues from there.
+    /// </summary>
+    /// <param name="path">The directory the content should live under from now on.</param>
+    /// <param name="cancellationToken">Cancels the wait for the torrent lock and the move itself.</param>
+    /// <remarks>
+    /// <para>
+    /// This is the one to use once a torrent has data on disk.
+    /// <see cref="SetDownloadPathAsync(string, CancellationToken)"/> only repoints at a new directory
+    /// and leaves whatever was downloaded where it was, which on the next start reads as a torrent
+    /// that has nothing.
+    /// </para>
+    /// <para>
+    /// The torrent must be stopped. Files are moved with their layout intact; a move within a volume
+    /// is a rename, one that crosses volumes is a copy and takes as long as the data is large. If any
+    /// file cannot be moved, the ones already moved are put back before the exception is thrown, so
+    /// the torrent is never left half in each place.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">The torrent is running.</exception>
+    /// <exception cref="Exceptions.StorageException">The data could not be moved.</exception>
+    Task MoveStorageAsync(string path, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads one downloaded piece back from disk.
+    /// </summary>
+    /// <param name="pieceIndex">The piece to read.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The piece's bytes. The last piece of a torrent is shorter than the rest.</returns>
+    /// <remarks>
+    /// For inspecting content the torrent already holds - a thumbnail from the first piece of a
+    /// video, a signature block, a header. To read a file rather than a piece, and to have the
+    /// missing parts fetched on demand, use
+    /// <see cref="OpenStreamAsync(int, CancellationToken)"/> instead.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// The metadata is not known, the storage is not open, or the piece has not been downloaded and
+    /// verified.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">The index is outside the torrent.</exception>
+    Task<byte[]> ReadPieceAsync(int pieceIndex, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gives one piece a priority of its own, overriding whatever this torrent's file selection
+    /// implies for it.
+    /// </summary>
+    /// <param name="pieceIndex">The piece to prioritise.</param>
+    /// <param name="priority">
+    /// Its new priority. <see cref="Priority.DoNotDownload"/> excludes the piece even where the file
+    /// it belongs to is selected.
+    /// </param>
+    /// <remarks>
+    /// File priorities are the right tool for "fetch this file first". This is for the cases below
+    /// that: the piece holding a media header, a range a reader is about to seek to, the last piece
+    /// of an archive that carries its index. An override stays in force until it is replaced or
+    /// <see cref="ClearPiecePriorities"/> is called, and outranks the file selection in both
+    /// directions.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">The metadata is not known yet.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The index is outside the torrent.</exception>
+    void SetPiecePriority(int pieceIndex, Priority priority);
+
+    /// <summary>
+    /// The priority in force for a piece - the one set with
+    /// <see cref="SetPiecePriority(int, Priority)"/> if there is one, otherwise the highest priority
+    /// among the files it touches.
+    /// </summary>
+    /// <param name="pieceIndex">The piece to ask about.</param>
+    Priority GetPiecePriority(int pieceIndex);
+
+    /// <summary>
+    /// Drops every per-piece priority, returning the whole torrent to what its file selection says.
+    /// </summary>
+    void ClearPiecePriorities();
+
+    /// <summary>
+    /// Stores one of the torrent's files under a different name, keeping whatever has been downloaded.
+    /// </summary>
+    /// <param name="fileIndex">The file's index within this torrent.</param>
+    /// <param name="newPath">
+    /// The new location relative to the download path. May contain directories, which are created as
+    /// needed; may not be absolute or contain <c>..</c>.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the wait for the torrent lock and the rename itself.</param>
+    /// <remarks>
+    /// <para>
+    /// This changes only where the data is written; the torrent's own metadata is untouched, so the
+    /// info hash and everything announced about it stay as they were. The new name is kept in the
+    /// resume data, because rebuilding paths from the metadata on the next start would otherwise put
+    /// every renamed file back.
+    /// </para>
+    /// <para>The torrent must be stopped.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentException"><paramref name="newPath"/> is absolute or escapes the download path.</exception>
+    /// <exception cref="InvalidOperationException">The torrent is running, or has no metadata yet.</exception>
+    /// <exception cref="Exceptions.StorageException">The file could not be renamed on disk.</exception>
+    Task RenameFileAsync(int fileIndex, string newPath, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The files renamed with <see cref="RenameFileAsync(int, string, CancellationToken)"/>, keyed by
+    /// file index. Empty when none have been.
+    /// </summary>
+    IReadOnlyDictionary<int, string> GetRenamedFiles();
 
     /// <summary>
     /// Sets the download priority for a specific file.

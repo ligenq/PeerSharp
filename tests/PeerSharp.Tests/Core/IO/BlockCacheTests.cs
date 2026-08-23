@@ -6,6 +6,9 @@ public class BlockCacheTests
 {
     private class MockStorage : IStorage
     {
+        public Task MoveAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         public int ReadCount { get; private set; }
         public int WriteCount { get; private set; }
         private readonly byte[] _data;

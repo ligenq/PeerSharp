@@ -27,6 +27,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     // State
     private readonly SemaphoreSlim _stateLock = new(1, 1);
+    private readonly TorrentWebSeeds _webSeeds;
 
     private readonly ITimer _timer;
 
@@ -69,6 +70,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         Services = services;
         _logger = services.LoggerFactory.CreateLogger<Torrent>();
         Configuration = new TorrentConfiguration(this, services.Bandwidth);
+        _webSeeds = new TorrentWebSeeds(this);
         _fileSelectionManager = fileSelectionManager;
         _fileSelectionManager.SetObserver(this);
         TimeAdded = Services.TimeProvider.GetUtcNow();
@@ -219,6 +221,26 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
+    public int MaxConnections
+    {
+        get => Configuration.MaxConnections;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            Configuration.MaxConnections = value;
+        }
+    }
+
+    public int MaxUploadSlots
+    {
+        get => Configuration.MaxUploadSlots;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            Configuration.MaxUploadSlots = value;
+        }
+    }
+
     public bool QueueAutoStart { get => Configuration.QueueAutoStart; set => Configuration.QueueAutoStart = value; }
     public int QueuePriority { get => Configuration.QueuePriority; set => Configuration.QueuePriority = value; }
     public float? RatioLimit { get => Configuration.RatioLimit; set => Configuration.RatioLimit = value; }
@@ -265,10 +287,27 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public DateTimeOffset StateTimestamp => new(Interlocked.Read(ref _activityTimeTicks), TimeSpan.Zero);
     public IReadOnlyList<int> StreamableFileIndices => Streaming.StreamableFileIndices;
     public SuperSeedManager SuperSeedManager { get; private set; } = null!;
+
+    public bool SuperSeeding
+    {
+        get => Configuration.SuperSeeding;
+        set
+        {
+            Configuration.SuperSeeding = value;
+
+            // The manager is null until Initialize runs and is replaced when a magnet's metadata
+            // arrives, so the configuration is the authority and this only mirrors it.
+            if (SuperSeedManager is not null)
+            {
+                SuperSeedManager.Enabled = value;
+            }
+        }
+    }
     public DateTimeOffset TimeAdded { get; set; }
     public long TotalSize => InfoFile.Info.FullSize;
     public TrackerManager TrackerManager { get; private set; } = null!;
     public ITrackers Trackers => TrackerManager;
+    public IWebSeeds WebSeeds => _webSeeds;
     public long UploadLimitBytesPerSecond { get => Configuration.UploadLimitBytesPerSecond; set => Configuration.UploadLimitBytesPerSecond = value; }
     public IUtpManager? UtpManager { get => Network.Utp; set => Network.Utp = value; }
 
@@ -517,6 +556,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             AddedTime = TimeAdded.ToUnixTimeSeconds(),
             DownloadPath = FilesInternal?.DownloadPath ?? Settings.Files.DefaultDownloadPath,
             Selection = [.. _fileSelectionManager.GetAllFileSelections()],
+            RenamedFiles = [.. LocalState.RenamedFiles],
             Info =
             {
                 Name = Name,
@@ -736,6 +776,217 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
+    /// <summary>
+    /// The renames, keyed by the internal file index Storage works in. Null when there are none, so
+    /// the common case costs no dictionary.
+    /// </summary>
+    internal IReadOnlyDictionary<int, string>? GetRenamedFileMap()
+    {
+        var renamed = LocalState.RenamedFiles;
+        if (renamed.Count == 0)
+        {
+            return null;
+        }
+
+        var map = new Dictionary<int, string>(renamed.Count);
+        foreach (var entry in renamed)
+        {
+            map[entry.Index] = entry.Path;
+        }
+
+        return map;
+    }
+
+    public IReadOnlyDictionary<int, string> GetRenamedFiles()
+    {
+        var result = new Dictionary<int, string>();
+        foreach (var entry in LocalState.RenamedFiles)
+        {
+            if (InfoFile.Info.TryMapInternalIndexToVisible(entry.Index, out int visibleIndex))
+            {
+                result[visibleIndex] = entry.Path;
+            }
+        }
+
+        return result;
+    }
+
+    public async Task RenameFileAsync(int fileIndex, string newPath, CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(newPath);
+
+        if (!HasMetadata)
+        {
+            throw new InvalidOperationException("Files cannot be renamed before the torrent's metadata is known");
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(fileIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(fileIndex, FileCount);
+
+        string normalized = newPath.Replace('\\', '/').Trim('/');
+        if (normalized.Length == 0 ||
+            Path.IsPathRooted(newPath) ||
+            normalized.Split('/').Any(segment => segment is "." or ".."))
+        {
+            throw new ArgumentException(
+                "A file name must be relative to the torrent's download path and may not walk outside it.",
+                nameof(newPath));
+        }
+
+        int internalIndex = InfoFile.Info.MapVisibleIndexToInternal(fileIndex);
+
+        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _disposal.ThrowIfDisposed(this);
+
+            if (Started)
+            {
+                throw new InvalidOperationException("Torrent must be stopped before renaming a file");
+            }
+
+            var renamed = LocalState.RenamedFiles;
+            int existing = renamed.FindIndex(r => r.Index == internalIndex);
+            if (existing >= 0)
+            {
+                renamed[existing].Path = normalized;
+            }
+            else
+            {
+                renamed.Add(new PieceWriter.TorrentStateData.RenamedFileData
+                {
+                    Index = internalIndex,
+                    Path = normalized
+                });
+            }
+
+            // Storage assigns paths at construction, so the rename only takes effect on a rebuild. It
+            // carries the data across on the way, otherwise the torrent would start again looking for
+            // a file that is still sitting under its old name.
+            if (FilesInternal != null)
+            {
+                string downloadPath = FilesInternal.DownloadPath;
+                await FilesInternal.RenameFileAsync(internalIndex, normalized, cancellationToken).ConfigureAwait(false);
+                await FilesInternal.DisposeAsync().ConfigureAwait(false);
+                FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, downloadPath);
+            }
+
+            _logger.LogInformation("File {FileIndex} renamed to {NewPath}", fileIndex, normalized);
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+    internal bool TryGetPiecePriority(int pieceIndex, out Priority priority)
+    {
+        var overrides = Configuration.PiecePriorities;
+        if (overrides.IsEmpty)
+        {
+            priority = default;
+            return false;
+        }
+
+        return overrides.TryGetValue(pieceIndex, out priority);
+    }
+
+    public void SetPiecePriority(int pieceIndex, Priority priority)
+    {
+        _disposal.ThrowIfDisposed(this);
+
+        if (!HasMetadata)
+        {
+            throw new InvalidOperationException("Piece priorities cannot be set before the torrent's metadata is known");
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(pieceIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(pieceIndex, PieceCount);
+
+        Configuration.PiecePriorities[pieceIndex] = priority;
+    }
+
+    public Priority GetPiecePriority(int pieceIndex)
+    {
+        _disposal.ThrowIfDisposed(this);
+        ArgumentOutOfRangeException.ThrowIfNegative(pieceIndex);
+
+        if (TryGetPiecePriority(pieceIndex, out var overridden))
+        {
+            return overridden;
+        }
+
+        return InfoFile.Info.GetPiecePriority(pieceIndex, GetFileSelectionSnapshot());
+    }
+
+    public void ClearPiecePriorities()
+    {
+        _disposal.ThrowIfDisposed(this);
+        Configuration.PiecePriorities.Clear();
+    }
+
+    public async Task<byte[]> ReadPieceAsync(int pieceIndex, CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+
+        if (!HasMetadata)
+        {
+            throw new InvalidOperationException("Pieces cannot be read before the torrent's metadata is known");
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(pieceIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(pieceIndex, PieceCount);
+
+        if (!Pieces.HasPiece(pieceIndex))
+        {
+            throw new InvalidOperationException(
+                $"Piece {pieceIndex} has not been downloaded and verified yet.");
+        }
+
+        var files = FilesInternal ?? throw new InvalidOperationException(
+            "The torrent's storage is not open. Start the torrent before reading pieces from it.");
+
+        long offset = (long)pieceIndex * InfoFile.Info.PieceSize;
+        int length = (int)InfoFile.Info.GetPieceSize(pieceIndex);
+
+        return await files.ReadAsync(offset, length, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task MoveStorageAsync(string path, CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _disposal.ThrowIfDisposed(this);
+
+            if (Started)
+            {
+                throw new InvalidOperationException("Torrent must be stopped before moving its storage");
+            }
+
+            if (FilesInternal != null)
+            {
+                // Move first, then repoint. The other order would leave the data unreachable if the
+                // move failed, which is the situation this method exists to avoid.
+                await FilesInternal.MoveFilesAsync(path, cancellationToken).ConfigureAwait(false);
+                await FilesInternal.DisposeAsync().ConfigureAwait(false);
+            }
+
+            LocalState.DownloadPath = path;
+            FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, path);
+
+            _logger.LogInformation("Storage moved to: {Path}", path);
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
     public Task SetFilePriorityAsync(int fileIndex, Priority priority, CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
@@ -821,15 +1072,16 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                     _logger.LogDebug("DHT disabled for private torrent {TorrentName}", Name);
                 }
 
-                if (Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
+                var webSeedUrls = _webSeeds.GetAll();
+                if (Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
                 {
-                    WebSeedManager ??= new WebSeedManager(this, InfoFile.WebSeedUrls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
+                    WebSeedManager ??= new WebSeedManager(this, webSeedUrls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
                     WebSeedManager.Start();
-                    _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", InfoFile.WebSeedUrls.Count);
+                    _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", webSeedUrls.Count);
                 }
-                else if (!Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
+                else if (!Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
                 {
-                    _logger.LogInformation("Web seeds disabled; ignoring {UrlCount} URLs from torrent metadata", InfoFile.WebSeedUrls.Count);
+                    _logger.LogInformation("Web seeds disabled; ignoring {UrlCount} URLs", webSeedUrls.Count);
                 }
             }
             catch
@@ -1487,7 +1739,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         Pieces = new PiecesProgress(piecesCount);
         FileTransferInternal = new FileTransfer(this, Services.TimeProvider, Services.LoggerFactory);
         _fileSelectionManager.SetBytesProvider(FileTransferInternal);
-        SuperSeedManager = new SuperSeedManager(this, Services.LoggerFactory.CreateLogger<SuperSeedManager>());
+        SuperSeedManager = new SuperSeedManager(this, Services.LoggerFactory.CreateLogger<SuperSeedManager>())
+        {
+            Enabled = Configuration.SuperSeeding
+        };
 
         // BEP 30: Initialize Merkle tree for Merkle hash torrents
         if (InfoFile.Info.IsMerkle && InfoFile.Info.MerkleRootHash != null)

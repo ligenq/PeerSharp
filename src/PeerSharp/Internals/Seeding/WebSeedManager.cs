@@ -61,6 +61,62 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Adds a source, or returns false if the URL is unusable or already present.
+    /// </summary>
+    public bool AddSource(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != "http" && uri.Scheme != "https" && uri.Scheme != "ftp"))
+        {
+            return false;
+        }
+
+        bool isMultiFile = _torrent.InfoFile.Info.Files.Count > 1;
+
+        lock (_lock)
+        {
+            if (_sources.Any(s => s.Url.Equals(url, StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            _sources.Add(new WebSeedSource(url, isMultiFile));
+        }
+
+        _logger.LogInformation("Added web seed: {Url}", url);
+        return true;
+    }
+
+    /// <summary>
+    /// Removes a source. Downloads already in flight against it are left to finish.
+    /// </summary>
+    public bool RemoveSource(string url)
+    {
+        lock (_lock)
+        {
+            int index = _sources.FindIndex(s => s.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                return false;
+            }
+
+            _sources.RemoveAt(index);
+        }
+
+        _logger.LogInformation("Removed web seed: {Url}", url);
+        return true;
+    }
+
+    /// <summary>The URLs currently in use.</summary>
+    public IReadOnlyList<string> GetSourceUrls()
+    {
+        lock (_lock)
+        {
+            return [.. _sources.Select(s => s.Url)];
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposal.MarkDisposed())

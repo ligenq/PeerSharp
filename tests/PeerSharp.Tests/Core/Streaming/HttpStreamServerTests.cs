@@ -274,6 +274,27 @@ public class HttpStreamServerTests
 
     private sealed class FakeTorrent : ITorrent
     {
+        public bool SuperSeeding { get; set; }
+
+        public int MaxConnections { get; set; }
+
+        public int MaxUploadSlots { get; set; }
+
+        public IWebSeeds WebSeeds => throw new NotSupportedException();
+
+        public Task MoveStorageAsync(string path, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newPath, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public IReadOnlyDictionary<int, string> GetRenamedFiles() => new Dictionary<int, string>();
+
+        public Task<byte[]> ReadPieceAsync(int pieceIndex, CancellationToken cancellationToken = default) => Task.FromResult(Array.Empty<byte>());
+
+        public void SetPiecePriority(int pieceIndex, Priority priority) { }
+
+        public Priority GetPiecePriority(int pieceIndex) => Priority.Normal;
+
+        public void ClearPiecePriorities() { }
         public bool HasSameIdentity(ITorrent? other)
         {
             return other != null

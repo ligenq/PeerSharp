@@ -1579,6 +1579,14 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                             pieceToProcess.Index,
                             pieceToProcess.HashFailures);
 
+                        // Named only when one peer supplied the whole piece: with several
+                        // contributors the alert would be pointing at somebody innocent.
+                        _torrent.Alerts.PieceHashFailedAlert(
+                            _torrent,
+                            pieceToProcess.Index,
+                            pieceToProcess.HashFailures,
+                            soleSupplier ? contributors[0].RemoteEndPoint : null);
+
                         // The quarantine is keyed by IP address, so one failed piece must count once
                         // per address as well. Multiple connections behind the same NAT can all have
                         // contributed; incrementing once per connection would turn one ambiguous

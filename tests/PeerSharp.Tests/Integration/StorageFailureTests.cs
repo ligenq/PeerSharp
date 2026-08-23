@@ -22,6 +22,9 @@ public class StorageFailureTests
 
     private class MockFailingFiles : IInternalFiles
     {
+        public Task MoveFilesAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         public bool Checking { get; set; }
         public string DownloadPath => "C:\\Mock";
         public bool IsDisposed => false;

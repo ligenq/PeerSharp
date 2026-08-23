@@ -59,6 +59,18 @@ internal sealed class NullAlertsManager : IAlertsManager
     {
     }
 
+    public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer)
+    {
+    }
+
+    public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason)
+    {
+    }
+
+    public void ListenPortChangedAlert(int requestedPort, int actualPort, ListenTransport transport)
+    {
+    }
+
     public void PostAlert(Alert alert)
     {
     }

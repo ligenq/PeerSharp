@@ -64,6 +64,12 @@ internal sealed class Storage : IStorage
         _logger = loggerFactory.CreateLogger<Storage>();
     }
 
+    /// <summary>
+    /// Names the caller chose for individual files, keyed by file index, replacing the ones the
+    /// torrent declares. Read once, when paths are assigned in <see cref="InitAsync"/>.
+    /// </summary>
+    public IReadOnlyDictionary<int, string>? RenamedFiles { get; init; }
+
     public void DeleteAll()
     {
         _handleCache.CloseTorrentHandles(_rootPath);
@@ -128,6 +134,226 @@ internal sealed class Storage : IStorage
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error during storage deletion");
+        }
+    }
+
+    /// <summary>
+    /// Moves this torrent's files under a new root, preserving their relative layout.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A partial move is the failure worth designing for: a torrent whose data is half here and half
+    /// there matches nothing on a recheck and looks to the user like the download was lost. So the
+    /// files that moved are tracked and put back if a later one fails, and the exception describes the
+    /// original failure rather than the rollback.
+    /// </para>
+    /// <para>
+    /// Files are moved rather than copied where the filesystem allows it. A move that crosses a volume
+    /// cannot be a rename, so those fall back to copy-then-delete, which is why this can take as long
+    /// as the data is large.
+    /// </para>
+    /// </remarks>
+    public async Task MoveAsync(string newRootPath, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(newRootPath);
+
+        // Handles held against the old paths would keep the files locked on Windows and would go on
+        // pointing at the old location everywhere else.
+        _handleCache.CloseTorrentHandles(_rootPath);
+
+        if (_files == null || _files.Length == 0)
+        {
+            return;
+        }
+
+        string oldRoot = Path.GetFullPath(_rootPath);
+        string newRoot = Path.GetFullPath(newRootPath);
+
+        if (string.Equals(oldRoot, newRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var moved = new List<(string From, string To)>();
+
+        try
+        {
+            foreach (var file in _files)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (file.FullPath == null || !File.Exists(file.FullPath))
+                {
+                    // Nothing on disk yet - a skipped file, or one this torrent has not reached.
+                    continue;
+                }
+
+                string relative = Path.GetRelativePath(oldRoot, file.FullPath);
+                if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative))
+                {
+                    // Outside the root we were told we own. Refuse rather than write somewhere unrelated.
+                    throw new StorageException(
+                        $"'{file.FullPath}' is not inside the torrent's download path, so it cannot be moved with it.",
+                        null,
+                        isRecoverable: false);
+                }
+
+                string destination = Path.Combine(newRoot, relative);
+                string? destinationDirectory = Path.GetDirectoryName(destination);
+                if (!string.IsNullOrEmpty(destinationDirectory))
+                {
+                    Directory.CreateDirectory(destinationDirectory);
+                }
+
+                await MoveOneAsync(file.FullPath, destination, ct).ConfigureAwait(false);
+                moved.Add((file.FullPath, destination));
+            }
+        }
+        catch (Exception ex)
+        {
+            RollBack(moved);
+
+            if (ex is StorageException or OperationCanceledException)
+            {
+                throw;
+            }
+
+            throw new StorageException(
+                $"The torrent's files could not be moved to '{newRootPath}': {ex.Message}",
+                ex,
+                isRecoverable: false);
+        }
+
+        RemoveEmptyDirectories(moved.Select(m => m.From), oldRoot);
+        _logger.LogInformation("Moved {Count} file(s) from {OldPath} to {NewPath}", moved.Count, oldRoot, newRoot);
+    }
+
+    public async Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(newRelativePath);
+
+        if (_files == null || fileIndex < 0 || fileIndex >= _files.Length)
+        {
+            // Nothing allocated yet: the new name is recorded by the caller and applied when this
+            // storage is next built, which is the whole effect a rename has on an untouched torrent.
+            return;
+        }
+
+        string? current = _files[fileIndex].FullPath;
+        if (current == null || !File.Exists(current))
+        {
+            return;
+        }
+
+        string? sanitized = SanitizeFilePath(newRelativePath);
+        if (sanitized == null)
+        {
+            throw new StorageException(
+                $"'{newRelativePath}' is not a usable file name under the torrent's download path.",
+                null,
+                isRecoverable: false);
+        }
+
+        if (string.Equals(Path.GetFullPath(current), Path.GetFullPath(sanitized), StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _handleCache.CloseTorrentHandles(_rootPath);
+
+        try
+        {
+            string? directory = Path.GetDirectoryName(sanitized);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            await MoveOneAsync(current, sanitized, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new StorageException(
+                $"'{current}' could not be renamed to '{newRelativePath}': {ex.Message}",
+                ex,
+                isRecoverable: false);
+        }
+
+        _files[fileIndex] = _files[fileIndex] with { FullPath = sanitized };
+        RemoveEmptyDirectories([current], Path.GetFullPath(_rootPath));
+    }
+
+    private static async Task MoveOneAsync(string source, string destination, CancellationToken ct)
+    {
+        try
+        {
+            File.Move(source, destination, overwrite: true);
+        }
+        catch (IOException)
+        {
+            // Across volumes a rename is not available, so pay for the copy.
+            await using (var from = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 0, useAsync: true))
+            await using (var to = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None, 0, useAsync: true))
+            {
+                await from.CopyToAsync(to, ct).ConfigureAwait(false);
+            }
+
+            File.Delete(source);
+        }
+    }
+
+    private void RollBack(List<(string From, string To)> moved)
+    {
+        for (int i = moved.Count - 1; i >= 0; i--)
+        {
+            var (from, to) = moved[i];
+            try
+            {
+                string? directory = Path.GetDirectoryName(from);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                File.Move(to, from, overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                // Reported, not thrown: the caller needs the failure that started this, and a torrent
+                // whose data is now split is exactly what the log has to record.
+                _logger.LogError(ex, "Could not move {Path} back to {Original} after a failed storage move", to, from);
+            }
+        }
+    }
+
+    private void RemoveEmptyDirectories(IEnumerable<string> vacatedFiles, string root)
+    {
+        var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string file in vacatedFiles)
+        {
+            string? directory = Path.GetDirectoryName(file);
+            while (!string.IsNullOrEmpty(directory) &&
+                   directory.StartsWith(root, StringComparison.OrdinalIgnoreCase) &&
+                   directory.Length > root.Length)
+            {
+                directories.Add(directory);
+                directory = Path.GetDirectoryName(directory);
+            }
+        }
+
+        foreach (string directory in directories.OrderByDescending(d => d.Length))
+        {
+            try
+            {
+                if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any())
+                {
+                    Directory.Delete(directory);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete empty directory {Path} after moving storage", directory);
+            }
         }
     }
 
@@ -281,7 +507,13 @@ internal sealed class Storage : IStorage
                         isSelected = sel.Selected && sel.Priority != Priority.DoNotDownload;
                     }
 
-                    string? fullPath = SanitizeFilePath(file.Path);
+                    // A caller-supplied name wins over the torrent's own, and goes through the same
+                    // sanitizing: a rename is still untrusted input as far as the filesystem cares.
+                    string declaredPath = RenamedFiles != null && RenamedFiles.TryGetValue(i, out string? renamed)
+                        ? renamed
+                        : file.Path;
+
+                    string? fullPath = SanitizeFilePath(declaredPath);
                     if (fullPath == null)
                     {
                         _logger.LogWarning("Skipping malicious/invalid file path in torrent: {FilePath}", file.Path);
