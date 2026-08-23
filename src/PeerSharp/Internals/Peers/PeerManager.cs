@@ -1439,7 +1439,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             }
         }
         catch (TimeoutException) { /* Ignore timeout */ }
-        catch (Exception ex) { _logger.LogError(ex, "Error awaiting connection tasks during stop"); }
+        catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error awaiting connection tasks during stop");
+                        Defect.ReportIfDefect(ex, "Error awaiting connection tasks during stop", _logger);
+                    }
 
         _activeConnectionTasks.Clear();
         _pendingConnections.Clear();
@@ -2319,13 +2323,21 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
                 // UpdateSpeeds - every 1 second
                 try { await UpdateSpeedsAsync().ConfigureAwait(false); }
-                catch (Exception ex) { _logger.LogError(ex, "UpdateSpeeds error"); }
+                catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "UpdateSpeeds error");
+                        Defect.ReportIfDefect(ex, "UpdateSpeeds error", _logger);
+                    }
 
                 // CheckPeerHealth (Watchdog) - every 5 seconds
                 if (tickCount % WatchdogIntervalSeconds == 0)
                 {
                     try { await CheckPeerHealthAsync().ConfigureAwait(false); }
-                    catch (Exception ex) { _logger.LogError(ex, "CheckPeerHealth error"); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "CheckPeerHealth error");
+                        Defect.ReportIfDefect(ex, "CheckPeerHealth error", _logger);
+                    }
                 }
 
                 // DHT peer lookup. This has to repeat, and the reason is a race that used to make it
@@ -2357,7 +2369,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     }
 
                     try { CleanupPendingConnections(); }
-                    catch (Exception ex) { _logger.LogError(ex, "CleanupPendingConnections error"); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "CleanupPendingConnections error");
+                        Defect.ReportIfDefect(ex, "CleanupPendingConnections error", _logger);
+                    }
                 }
 
                 // BroadcastPex - every 60 seconds
@@ -2367,7 +2383,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 if (tickCount % pexIntervalSeconds == 0)
                 {
                     try { BroadcastPex(); }
-                    catch (Exception ex) { _logger.LogError(ex, "BroadcastPex error"); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "BroadcastPex error");
+                        Defect.ReportIfDefect(ex, "BroadcastPex error", _logger);
+                    }
                 }
             }
         }
