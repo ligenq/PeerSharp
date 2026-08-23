@@ -54,15 +54,29 @@ public class LifecycleTests : IDisposable
         await seedTorrent.StartAsync();
 
         await using var leecherEngine = await CreateEngineAsync(_pathB, config);
-        var leecherTorrent = await leecherEngine.AddTorrentAsync(torrentFile);
+
+        // Rate-limited so the interruption below lands mid-download. Two megabytes over loopback is
+        // otherwise gone within a single poll interval, and a torrent that has already finished is a
+        // different test: it declines to dial a peer it knows is a seed, quite correctly, so the
+        // restart then waits ten seconds for a connection the engine is right not to make. The limit
+        // is what keeps this a test about resuming rather than a race against the transfer.
+        var leecherTorrent = await leecherEngine.AddTorrentAsync(
+            torrentFile,
+            new AddTorrentOptions { DownloadLimitBytesPerSecond = 128 * 1024 });
 
         await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
-        await WaitForProgressOrCompletionAsync(leecherTorrent, TimeSpan.FromSeconds(15), cancellationToken: TestContext.Current.CancellationToken);
+        await WaitForPartialProgressAsync(leecherTorrent, TimeSpan.FromSeconds(20), cancellationToken: TestContext.Current.CancellationToken);
 
         await leecherTorrent.StopAsync();
         Assert.Equal(TorrentState.Stopped, leecherTorrent.State);
 
+        // The premise, stated rather than assumed: what restarts below has to be an unfinished
+        // download, or the rest of this proves nothing.
+        Assert.False(leecherTorrent.Finished, "the torrent should still be incomplete when it is stopped");
+
+        // Lifted for the second half, which is about finishing rather than about being interrupted.
+        leecherTorrent.DownloadLimitBytesPerSecond = 0;
         await leecherTorrent.StartAsync();
         await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
         await WaitForConditionAsync(leecherTorrent, t => t.Finished, TimeSpan.FromSeconds(30), "restart download completion", cancellationToken: TestContext.Current.CancellationToken);
@@ -235,6 +249,41 @@ public class LifecycleTests : IDisposable
 
         Assert.True(leecherTorrent.Peers.ConnectedCount > 0,
             $"Timed out waiting for peer connection. {IntegrationTestDiagnostics.DescribeTorrent(leecherTorrent)}");
+    }
+
+    /// <summary>
+    /// Waits for the torrent to hold some pieces but not all of them.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="WaitForProgressOrCompletionAsync"/>, which is satisfied by a finished
+    /// torrent. A test that interrupts a download needs one that is actually running, and needs to
+    /// say so where it fails rather than ten seconds later somewhere else.
+    /// </remarks>
+    private static async Task WaitForPartialProgressAsync(ITorrent torrent, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
+
+        while (!cts.IsCancellationRequested)
+        {
+            if (torrent.PiecesReceived > 0 && torrent.PiecesReceived < torrent.PieceCount)
+            {
+                return;
+            }
+
+            if (torrent.LastException != null)
+            {
+                throw new InvalidOperationException(
+                    $"Torrent error while waiting for partial progress: {IntegrationTestDiagnostics.DescribeTorrent(torrent)}",
+                    torrent.LastException);
+            }
+
+            try { await Task.Delay(50, cts.Token); } catch { break; }
+        }
+
+        Assert.True(
+            torrent.PiecesReceived > 0 && torrent.PiecesReceived < torrent.PieceCount,
+            $"Timed out waiting for a partially downloaded torrent. {IntegrationTestDiagnostics.DescribeTorrent(torrent)}");
     }
 
     private static async Task WaitForProgressOrCompletionAsync(ITorrent torrent, TimeSpan timeout, CancellationToken cancellationToken = default)
