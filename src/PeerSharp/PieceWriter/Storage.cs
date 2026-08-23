@@ -630,6 +630,36 @@ internal sealed class Storage : IStorage
 
     public async ValueTask ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
     {
+        // A block that lies inside one file, which is almost every read a seeding torrent does. The
+        // general path below takes the selection lock, materialises the operations into a list and
+        // collects a second list of the locks it took, all for one read of sixteen kilobytes. Under
+        // load that lock is the contended one - every concurrent read of every file queues on it -
+        // and a profile of seeding put the majority of PeerSharp's CPU in thread-pool parking rather
+        // than in the reads themselves.
+        //
+        // The mapper is immutable and assigned once, so it does not need the lock to be read. What
+        // the lock otherwise orders here is UpdateFileSelectionAsync flipping a file's skipped flag,
+        // and that flag is a single bool read by index: a read that crosses the change either serves
+        // the file or serves zeros, both of which it could already have done depending on when it
+        // arrived.
+        var mapper = Volatile.Read(ref _fileMapper);
+        if (mapper != null && IsInitialized)
+        {
+            var enumerator = mapper.MapRange(offset, buffer.Length).GetEnumerator();
+            if (!enumerator.MoveNext())
+            {
+                return;
+            }
+
+            var only = enumerator.Current;
+            if (!enumerator.MoveNext())
+            {
+                await ReadFromOneFileAsync(only.FileIndex, only.FileOffset, buffer.Slice(only.BufferOffset, only.Length), ct)
+                    .ConfigureAwait(false);
+                return;
+            }
+        }
+
         var fileOperations = new List<(int FileIdx, long FileOffset, int ReadSize, int BufferOffset)>();
 
         await _fileSelectionLock.WaitAsync(ct).ConfigureAwait(false);
@@ -702,6 +732,57 @@ internal sealed class Storage : IStorage
         finally
         {
             ReleaseFileLocks(acquiredLocks);
+        }
+    }
+
+    /// <summary>
+    /// Reads a range that lies wholly inside one file, holding only that file's lock.
+    /// </summary>
+    private async ValueTask ReadFromOneFileAsync(int fileIdx, long fileOffset, Memory<byte> destination, CancellationToken ct)
+    {
+        if (_fileSkipped[fileIdx])
+        {
+            // Deselected file - the data legitimately does not exist locally.
+            destination.Span.Clear();
+            return;
+        }
+
+        if (_fileFailed[fileIdx])
+        {
+            // Serving zeroed data for a failed file would poison uploads. See the general path.
+            throw new StorageException(
+                $"File '{_info.Info.Files[fileIdx].Path}' is marked failed after repeated I/O errors",
+                null,
+                isRecoverable: false);
+        }
+
+        var entry = _files[fileIdx];
+        if (entry.FullPath == null)
+        {
+            destination.Span.Clear();
+            return;
+        }
+
+        var fileLock = _fileLocks[fileIdx];
+        await fileLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            using var lease = await _handleCache.GetHandleAsync(entry.FullPath, false, ct).ConfigureAwait(false);
+            await ReadWithThrottleAsync(lease.Handle, destination, fileOffset, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var fileName = _info.Info.Files[fileIdx].Path;
+            _logger.LogError(ex, "Read error for file {FileName}", fileName);
+            throw new StorageException($"Read failed for file '{fileName}'", ex, isRecoverable: true);
+        }
+        finally
+        {
+            fileLock.Release();
         }
     }
 

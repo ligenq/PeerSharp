@@ -530,7 +530,7 @@ public sealed class FilesSettings
     /// <summary>
     /// Number of 16KiB blocks to prefetch when sequential reads are detected.
     /// </summary>
-    public int ReadAheadBlocks { get; set; } = 4;
+    public int ReadAheadBlocks { get; set; } = 16;
 
     /// <summary>
     /// Global disk read speed limit in bytes per second. 0 for unlimited. Negative values are rejected.

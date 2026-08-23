@@ -166,8 +166,28 @@ internal class BlockCache : IBlockCache
             TaskScheduler.Default);
     }
 
+    /// <summary>
+    /// Fills the cache ahead of the reader with a single contiguous read.
+    /// </summary>
+    /// <remarks>
+    /// This used to issue one read per block: four separate sixteen-kilobyte reads, awaited one after
+    /// another, each taking the read-ahead semaphore. That is not read-ahead so much as the same work
+    /// moved earlier, and it added the semaphore traffic on top - reading four blocks individually
+    /// costs four disk operations whether they are wanted now or later. Seeding at a gigabyte a second
+    /// means tens of thousands of block reads a second, and a profile put most of PeerSharp's CPU in
+    /// thread-pool parking rather than in the reads, which is what a queue of tiny asynchronous
+    /// operations looks like from the outside.
+    ///
+    /// <para>
+    /// One read covering the whole window costs one operation and one completion however many blocks
+    /// it spans. The window stops at the first block already cached or already being fetched, because
+    /// a single read has to be contiguous, and stopping is right anyway: someone else is bringing the
+    /// rest in.
+    /// </para>
+    /// </remarks>
     private async Task PrefetchAsync(long startOffset, CancellationToken ct)
     {
+        int blocks = 0;
         for (int i = 0; i < _readAheadBlocks; i++)
         {
             long offset = startOffset + (i * BlockSize);
@@ -176,50 +196,63 @@ internal class BlockCache : IBlockCache
                 break;
             }
 
-            if (IsCached(offset))
+            if (IsCached(offset) || !_readAheadInFlight.TryAdd(offset, 0))
             {
-                continue;
+                break;
             }
 
-            if (!_readAheadInFlight.TryAdd(offset, 0))
-            {
-                continue;
-            }
+            blocks++;
+        }
 
+        if (blocks == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await _readAheadSemaphore.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                await _readAheadSemaphore.WaitAsync(ct).ConfigureAwait(false);
+                if (_storage == null)
+                {
+                    return;
+                }
+
+                int length = blocks * BlockSize;
+                byte[] buffer = CachePool.Rent(length);
                 try
                 {
-                    if (_storage == null)
-                    {
-                        return;
-                    }
+                    long writeGeneration = Volatile.Read(ref _writeGeneration);
+                    await _storage.ReadAsync(startOffset, buffer.AsMemory(0, length), ct).ConfigureAwait(false);
 
-                    byte[] buffer = CachePool.Rent(BlockSize);
-                    try
+                    for (int i = 0; i < blocks; i++)
                     {
-                        long writeGeneration = Volatile.Read(ref _writeGeneration);
-                        await _storage.ReadAsync(offset, buffer.AsMemory(0, BlockSize), ct).ConfigureAwait(false);
-                        AddToCacheIfUnchanged(offset, buffer.AsSpan(0, BlockSize), writeGeneration);
-                    }
-                    finally
-                    {
-                        CachePool.Return(buffer);
+                        AddToCacheIfUnchanged(
+                            startOffset + (i * BlockSize),
+                            buffer.AsSpan(i * BlockSize, BlockSize),
+                            writeGeneration);
                     }
                 }
                 finally
                 {
-                    _readAheadSemaphore.Release();
+                    CachePool.Return(buffer);
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
             }
             finally
             {
-                _readAheadInFlight.TryRemove(offset, out _);
+                _readAheadSemaphore.Release();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        finally
+        {
+            for (int i = 0; i < blocks; i++)
+            {
+                _readAheadInFlight.TryRemove(startOffset + (i * BlockSize), out _);
             }
         }
     }
