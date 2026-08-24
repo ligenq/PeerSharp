@@ -156,6 +156,29 @@ public class V2LayoutTests
         }
     }
 
+    [Fact]
+    public async Task ATorrentWithoutMetadataHasNotFinishedItsSelection()
+    {
+        // A magnet has no pieces and no file selection until BEP 9 finishes, so "is everything
+        // selected already here" answered itself with zero of zero and came out true the moment the
+        // torrent was added. That fired the selection-finished callback before there was a file list,
+        // and put upload_only in the BEP 21 handshake - which libtorrent reads as a peer that wants
+        // nothing and disconnects, so no magnet could fetch its metadata from libtorrent at all.
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = PieceSize;
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+
+        try
+        {
+            Assert.False(torrent.HasMetadata);
+            Assert.False(torrent.SelectionFinished);
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+        }
+    }
+
     private static Internals.TorrentFileInfo CreateV2(long fileSize, int fileCount)
     {
         var info = new Internals.TorrentFileInfo
