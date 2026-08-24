@@ -628,6 +628,13 @@ internal sealed class Storage : IStorage
         }
     }
 
+    public async Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct = default)
+    {
+        byte[] buffer = GC.AllocateUninitializedArray<byte>(length);
+        await ReadAsync(offset, buffer, ct).ConfigureAwait(false);
+        return buffer;
+    }
+
     public async ValueTask ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
     {
         // A block that lies inside one file, which is almost every read a seeding torrent does. The
@@ -784,13 +791,6 @@ internal sealed class Storage : IStorage
         {
             fileLock.Release();
         }
-    }
-
-    public async Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct = default)
-    {
-        byte[] buffer = GC.AllocateUninitializedArray<byte>(length);
-        await ReadAsync(offset, buffer, ct).ConfigureAwait(false);
-        return buffer;
     }
 
     public async Task UpdateFileSelectionAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default)

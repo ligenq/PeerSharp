@@ -200,6 +200,11 @@ foreach (var torrent in torrents)
     }
 }
 
+// Listening starts before torrents are registered. Automation must not treat the socket line as
+// workload readiness or a fast peer can complete the entire transfer while AddTorrentAsync is
+// still returning and before measurement starts.
+Console.WriteLine($"Ready           : {torrents.Count} torrent(s) registered");
+
 if (options.Peers.Count > 0)
 {
     var endpoints = new List<System.Net.IPEndPoint>();
@@ -231,6 +236,27 @@ Console.CancelKeyPress += (_, e) =>
     Console.WriteLine("Stopping...");
     stopping.Cancel();
 };
+
+if (options.ControlStdin)
+{
+    // Redirected Console.In can block synchronously before ReadLineAsync returns its first
+    // incomplete awaitable on Windows. Keep that console wait off the engine/control loop.
+    _ = Task.Run(StopFromStandardInputAsync, CancellationToken.None);
+}
+
+async Task StopFromStandardInputAsync()
+{
+    try
+    {
+        // The benchmark harness writes "q". EOF has the same meaning so a crashed orchestrator
+        // does not leave a seed running indefinitely with its redirected input pipe closed.
+        await Console.In.ReadLineAsync(stopping.Token).ConfigureAwait(false);
+        stopping.Cancel();
+    }
+    catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+    {
+    }
+}
 
 if (options.RunForSeconds is { } runFor)
 {
@@ -315,12 +341,18 @@ if (options.MetadataOnly)
 bool announcedCompletion = false;
 bool stopped = false;
 var startedAt = DateTimeOffset.UtcNow;
+var nextReportAt = DateTimeOffset.MinValue;
 
 try
 {
     while (!stopping.IsCancellationRequested)
     {
-        reporter.ReportOnce();
+        var now = DateTimeOffset.UtcNow;
+        if (now >= nextReportAt)
+        {
+            reporter.ReportOnce();
+            nextReportAt = now + options.ReportInterval;
+        }
 
         if (options.StopAfterSeconds is { } stopAfter
             && !stopped
@@ -349,7 +381,13 @@ try
             }
         }
 
-        await Task.Delay(options.ReportInterval, stopping.Token);
+        // Completion and --stop-after are control signals, not reporting concerns. Poll them
+        // promptly even when a diagnostic run intentionally prints only once an hour.
+        TimeSpan untilNextReport = nextReportAt - DateTimeOffset.UtcNow;
+        TimeSpan delay = untilNextReport <= TimeSpan.Zero
+            ? TimeSpan.Zero
+            : TimeSpan.FromMilliseconds(Math.Min(100, untilNextReport.TotalMilliseconds));
+        await Task.Delay(delay, stopping.Token);
     }
 }
 catch (OperationCanceledException)
