@@ -102,6 +102,13 @@ internal sealed record Options
     /// </summary>
     public int? StopAfterSeconds { get; init; }
 
+    /// <summary>
+    /// Treat a line or EOF on standard input as a clean shutdown request. This is primarily for
+    /// automation which needs the same final reporting and disposal path as Ctrl+C without sending
+    /// platform-specific console signals.
+    /// </summary>
+    public bool ControlStdin { get; init; }
+
     public static Options? Parse(string[] args, TextWriter error)
     {
         var sources = new List<string>();
@@ -122,6 +129,7 @@ internal sealed record Options
         int maxActiveDownloads = 3;
         var peers = new List<string>();
         int? stopAfter = null;
+        bool controlStdin = false;
         var interval = TimeSpan.FromSeconds(5);
         int? down = null;
         int? up = null;
@@ -227,6 +235,10 @@ internal sealed record Options
                     stopAfter = stopSeconds;
                     break;
 
+                case "--control-stdin":
+                    controlStdin = true;
+                    break;
+
                 case "--peer":
                     if (!TryTake(args, ref i, out var peer))
                     {
@@ -313,6 +325,7 @@ internal sealed record Options
             MaxActiveDownloads = maxActiveDownloads,
             Peers = peers,
             StopAfterSeconds = stopAfter,
+            ControlStdin = controlStdin,
             ReportInterval = interval,
             DownloadLimitBytesPerSecond = down,
             UploadLimitBytesPerSecond = up
@@ -343,6 +356,7 @@ internal sealed record Options
                   --max-active <n> torrents downloading at once; implies --queue (default 3)
                   --peer <ip:port> try this peer as well as any found by discovery (repeatable)
                   --stop-after <s> stop the torrent after this long and keep reporting
+                  --control-stdin  stop cleanly when stdin receives a line or reaches EOF
                   --interval <s>   seconds between reports (default: 5)
                   --down <KiB/s>   download rate limit
                   --up <KiB/s>     upload rate limit

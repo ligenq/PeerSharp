@@ -246,7 +246,8 @@ internal class BlockCache : IBlockCache
         }
         catch (OperationCanceledException)
         {
-            return;
+            // Shutdown during a read-ahead. There is nothing to cache and nothing to report; the
+            // finally below still releases the in-flight markers.
         }
         finally
         {
