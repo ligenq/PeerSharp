@@ -33,6 +33,7 @@ internal sealed class SyntheticPeer : IAsyncDisposable
     private readonly List<SyntheticConnection> _connections = [];
     private readonly List<TcpClient> _clients = [];
     private readonly Task _acceptLoop;
+    private readonly byte[] _peerId = BuildPeerId();
 
     private SyntheticPeer(TcpListener listener, SyntheticPeerOptions options)
     {
@@ -145,6 +146,7 @@ internal sealed class SyntheticPeer : IAsyncDisposable
         try
         {
             using var stream = client.GetStream();
+            connection.AttachStream(stream);
 
             // The first byte decides what this is. A plaintext handshake opens with the protocol
             // string's length; anything else is the MSE key exchange, which begins with a Diffie-
@@ -188,6 +190,9 @@ internal sealed class SyntheticPeer : IAsyncDisposable
                 await SendExtensionHandshakeAsync(stream).ConfigureAwait(false);
             }
 
+            // Everything we owe the peer has gone out, so a test may now send whatever it likes.
+            connection.MarkReady();
+
             await ReadFramesAsync(stream, connection).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException or SocketException)
@@ -215,13 +220,23 @@ internal sealed class SyntheticPeer : IAsyncDisposable
         handshake[27] |= 0x04; // BEP 6 fast extension.
 
         infoHash.CopyTo(handshake.AsSpan(28));
-        Encoding.ASCII.GetBytes("-SY0001-").CopyTo(handshake.AsSpan(48));
-        for (int i = 8; i < 20; i++)
-        {
-            handshake[48 + i] = (byte)('0' + (i % 10));
-        }
+        _peerId.CopyTo(handshake.AsSpan(48));
 
         return handshake;
+    }
+
+    /// <summary>
+    /// A peer id unique to this instance. It has to be: a peer id identifies a peer rather than a
+    /// connection, so two synthetic peers sharing one are a single peer dialled twice, and PeerSharp
+    /// correctly closes the second as a duplicate. A test that stands two of them up and wonders why
+    /// only one gets talked to has found its own bug.
+    /// </summary>
+    private static byte[] BuildPeerId()
+    {
+        byte[] peerId = new byte[20];
+        Encoding.ASCII.GetBytes("-SY0001-").CopyTo(peerId.AsSpan());
+        System.Security.Cryptography.RandomNumberGenerator.Fill(peerId.AsSpan(8));
+        return peerId;
     }
 
     /// <summary>
