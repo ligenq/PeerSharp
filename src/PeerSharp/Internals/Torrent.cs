@@ -259,7 +259,19 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public int QueuePriority { get => Configuration.QueuePriority; set => Configuration.QueuePriority = value; }
     public float? RatioLimit { get => Configuration.RatioLimit; set => Configuration.RatioLimit = value; }
     public TimeSpan? SeedTimeLimit { get => Configuration.SeedTimeLimit; set => Configuration.SeedTimeLimit = value; }
-    public bool SelectionFinished => _fileSelectionManager.IsSelectionFinished;
+    /// <summary>
+    /// Whether everything selected has been downloaded.
+    /// </summary>
+    /// <remarks>
+    /// False until the metadata says what "everything" is. Without it there are no pieces and no file
+    /// selection, so the underlying question answers itself with zero of zero and comes out true - so
+    /// a magnet reported its selection complete the moment it was added. That fired the
+    /// selection-finished callback before the file list existed, stopped the web seeds, and told
+    /// every peer in the BEP 21 handshake that this client wanted nothing, which libtorrent answers
+    /// by hanging up as soon as it has read it. HttpTracker already wrote the pairing out by hand;
+    /// this puts it where the other callers get it too.
+    /// </remarks>
+    public bool SelectionFinished => HasMetadata && _fileSelectionManager.IsSelectionFinished;
     public float SelectionProgress => _fileSelectionManager.CalculateSelectionProgress();
     public Settings Settings { get; }
     public bool Started => Interlocked.CompareExchange(ref _started, 0, 0) == 1;
