@@ -57,6 +57,9 @@ internal sealed class SyntheticConnection(int ordinal)
 {
     private readonly List<WireFrame> _frames = [];
     private readonly TaskCompletionSource _finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private System.Net.Sockets.NetworkStream? _stream;
 
     /// <summary>Zero-based order of arrival.</summary>
     public int Ordinal { get; } = ordinal;
@@ -88,7 +91,58 @@ internal sealed class SyntheticConnection(int ordinal)
     /// <summary>Every extended message, including the handshake at extension id zero.</summary>
     public IReadOnlyList<WireFrame> ExtendedFrames => [.. Frames.Where(static frame => frame.IsExtended)];
 
+    /// <summary>Whether PeerSharp has closed this connection.</summary>
+    public bool IsClosed => _finished.Task.IsCompleted;
+
+    /// <summary>Completes once our handshake has gone out and this connection can be written to.</summary>
+    public Task Ready => _ready.Task;
+
     internal void RecordOpening(bool plaintext) => StartedWithPlaintextHandshake = plaintext;
+
+    internal void AttachStream(System.Net.Sockets.NetworkStream stream) => _stream = stream;
+
+    internal void MarkReady() => _ready.TrySetResult();
+
+    /// <summary>
+    /// Sends a length-prefixed message. The id and payload are written exactly as given - there is no
+    /// validation here on purpose, because sending something no correct client would is the point.
+    /// </summary>
+    public async Task SendFrameAsync(byte id, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
+    {
+        byte[] framed = new byte[5 + payload.Length];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(framed, 1 + payload.Length);
+        framed[4] = id;
+        payload.Span.CopyTo(framed.AsSpan(5));
+        await SendRawAsync(framed, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Writes bytes straight onto the socket, including deliberately malformed framing.</summary>
+    public async Task SendRawAsync(ReadOnlyMemory<byte> raw, CancellationToken cancellationToken)
+    {
+        var stream = _stream ?? throw new InvalidOperationException(
+            "This connection has no stream yet. Await Ready before sending.");
+
+        await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await stream.WriteAsync(raw, cancellationToken).ConfigureAwait(false);
+            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or System.Net.Sockets.SocketException)
+        {
+            // PeerSharp dropping us mid-write is a legitimate response to what these tests send.
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    /// <summary>Waits for PeerSharp to close the connection, which for hostile input is a correct answer.</summary>
+    public Task<bool> WaitForCloseAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        return SyntheticPeer.WaitForAsync(() => IsClosed, timeout, cancellationToken);
+    }
 
     internal void RecordHandshake(byte[] remainderOfHandshake)
     {
