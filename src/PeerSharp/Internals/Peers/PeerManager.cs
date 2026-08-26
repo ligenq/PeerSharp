@@ -1763,6 +1763,39 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     }
 
     private Task CheckPeerHealthAsync() => _peerHealth.CheckAsync(_connectedPeers.Keys, ConnectedCount);
+
+    /// <summary>
+    /// Re-sends the extended handshake to every connected peer so they learn we now want nothing.
+    /// </summary>
+    /// <remarks>
+    /// BEP 21's <c>upload_only</c> was only ever sent in the opening handshake, which happens while we
+    /// are still downloading and therefore always said we wanted data. A peer we finish against is
+    /// never told otherwise, so it keeps a slot open for a download that will never be requested. BEP
+    /// 10 allows the handshake to be re-sent, and the builder already sets the key from the torrent's
+    /// own state, so announcing completion is the same message sent again.
+    /// </remarks>
+    internal async Task AnnounceUploadOnlyAsync()
+    {
+        foreach (var peer in _connectedPeers.Keys)
+        {
+            try
+            {
+                await peer.RefreshExtendedHandshakeAfterMetadataAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // A peer that has gone away needs no announcement, and the rest still do.
+                _logger.LogDebug(ex, "Could not announce upload_only to {RemoteEndPoint}", peer.RemoteEndPoint);
+            }
+        }
+
+        // The redundant connections this creates are closed by the next periodic health check rather
+        // than here. Sweeping them immediately was tried and reverted: it is what libtorrent does, but
+        // it disconnects our seeds at the instant we finish, and PeerSharp finishes downloading well
+        // before it has served the peers downloading from us - so the swarm lost its seeds while
+        // uploads were still in flight. The periodic sweep costs at most five seconds of one
+        // connection slot, against the two minutes this replaced, and leaves the uploads alone.
+    }
     private void CleanupPendingConnections()
     {
         long now = Environment.TickCount64;

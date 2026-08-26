@@ -641,6 +641,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public bool RemoteIsUploadOnly { get; private set; }
 
     /// <summary>
+    /// Whether this peer has everything, either by holding every piece or by saying so under BEP 21.
+    /// A peer that has not reported its pieces yet is unknown rather than empty.
+    /// </summary>
+    public bool RemoteHasEverything =>
+        RemoteIsUploadOnly || (HasReportedPieces && PeerPieces.Count > 0 && PeerPieces.ReceivedCount == PeerPieces.Count);
+
+    /// <summary>
     /// BEP-52 BitTorrent v2 support. Indicates peer can handle v2 info hashes and Merkle trees.
     /// </summary>
     public bool RemoteSupportsV2 { get; internal set; }
@@ -2831,7 +2838,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             // BEP 21: tells the peer we will not be downloading, so it need not spend an upload slot
             // on us. Set whenever everything we intend to fetch is already here - which includes a
             // partial seed, not just a complete torrent.
-            if (_torrent.SelectionFinished)
+            if (_torrent.Finished || _torrent.SelectionFinished)
             {
                 handshake.IsUploadOnly = true;
             }
