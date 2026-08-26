@@ -116,6 +116,19 @@ internal sealed class CapturedProcess : IAsyncDisposable
     public bool HasExited => _process.HasExited;
     public int? ExitCode => _process.HasExited ? _process.ExitCode : null;
 
+    /// <summary>
+    /// Whether this process had to be killed instead of ending by itself.
+    ///
+    /// <para>
+    /// It decides whether the exit code means anything. libtorrent's <c>client_test</c> reads the
+    /// console directly rather than standard input - <c>_kbhit</c> and <c>_getch</c> on Windows - so
+    /// the "q" written to its redirected stdin never reaches it, and any mode that does not pass a
+    /// self-exit flag ends with the harness terminating it. The resulting non-zero code is the
+    /// harness's own doing and says nothing about the run.
+    /// </para>
+    /// </summary>
+    public bool WasKilled { get; private set; }
+
     public static CapturedProcess Start(ProcessStartInfo startInfo, string logPath, string? readyMarker = null)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
@@ -160,6 +173,7 @@ internal sealed class CapturedProcess : IAsyncDisposable
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or OperationCanceledException)
         {
+            WasKilled = true;
             ProcessUtility.TryKill(_process);
             await _process.WaitForExitAsync().ConfigureAwait(false);
         }

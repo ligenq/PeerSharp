@@ -9,6 +9,8 @@ internal sealed record ToolPaths(
     string BoostRoot,
     string LibtorrentBuildRoot);
 
+internal sealed record BenchmarkRunSummary(string OutputDirectory, int FailedTrials);
+
 internal sealed record BenchmarkCase(
     string Engine,
     string Mode,

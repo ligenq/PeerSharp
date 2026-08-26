@@ -23,7 +23,8 @@ precede measured iterations within their group.
 `connection_tester` has no BEP 9 at all: it speaks the base wire protocol and the v2 hash requests
 and nothing else. So `--modes metadata` swaps the shared counterpart for a real libtorrent session -
 `client_test` holding the .torrent - and each engine in turn joins it by magnet. The peer address
-travels in the magnet as `x.pe`, so neither side is configured differently from the other.
+travels in the magnet as `x.pe`, so neither side is configured differently from the other. Pure v2
+torrents use their SHA-256 `btmh` exact topic; v1 and hybrid torrents use their SHA-1 `btih` identity.
 
 The harness times both engines the same way and from outside: from starting the child process to the
 child announcing in its own log that the metadata arrived. That interval includes the runtime's
@@ -111,7 +112,7 @@ or pass `--libtorrent-root` explicitly.
 ## Results
 
 Every run writes an independently usable directory under
-`artifacts/peersharp-e2e/runs/<UTC timestamp>/`:
+`artifacts/peersharp-e2e/runs/<UTC timestamp>-<process id>/`:
 
 - `manifest.json` records revisions, machine/runtime information, workload and cache policy.
 - `results.json` is the complete structured result, including warmups and failed trials.
@@ -120,9 +121,10 @@ Every run writes an independently usable directory under
 - `trials/<case>/target.log` and `tester.log` preserve both sides' output.
 - libtorrent trials additionally retain session counters and alert output.
 
-Failed trials are results. A timeout, rejected handshake, unsupported variant or missing rate remains
-visible in JSON/CSV and in the Markdown failure section; it is never folded into a zero-valued median.
-Reports are rewritten after every trial, so a cancelled long matrix keeps all completed results.
+Failed trials are results. A timeout, rejected handshake, incomplete transfer, missing target
+completion or unsupported variant remains visible in JSON/CSV and in the Markdown failure section;
+it is never folded into a zero-valued median. The command exits nonzero if any trial fails. Reports
+are rewritten after every trial, so a cancelled long matrix keeps all completed results.
 
 ## Reading the metrics
 

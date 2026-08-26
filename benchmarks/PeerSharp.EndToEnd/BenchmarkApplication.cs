@@ -51,10 +51,10 @@ internal static class BenchmarkApplication
             }
 
             var runner = new BenchmarkOrchestrator(options, tools);
-            string output = await runner.RunAsync(stopping.Token).ConfigureAwait(false);
+            BenchmarkRunSummary summary = await runner.RunAsync(stopping.Token).ConfigureAwait(false);
             Console.WriteLine();
-            Console.WriteLine($"Reports: {output}");
-            return 0;
+            Console.WriteLine($"Reports: {summary.OutputDirectory}");
+            return summary.FailedTrials == 0 ? 0 : 1;
         }
         catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {

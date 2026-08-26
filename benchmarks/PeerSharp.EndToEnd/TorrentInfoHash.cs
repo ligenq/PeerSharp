@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 namespace PeerSharp.EndToEnd;
 
 /// <summary>
-/// Reads a torrent's v1 info hash straight out of the file.
+/// Reads a torrent's exact-topic identity straight out of the file.
 /// </summary>
 /// <remarks>
 /// Deliberately written here rather than taken from PeerSharp. The harness measures PeerSharp, so
@@ -12,8 +12,11 @@ namespace PeerSharp.EndToEnd;
 /// </remarks>
 internal static class TorrentInfoHash
 {
-    /// <summary>Returns the hex info hash, as a magnet's <c>xt=urn:btih:</c> wants it.</summary>
-    public static string ReadHex(string torrentPath)
+    /// <summary>
+    /// Returns the complete magnet exact topic. Pure v2 torrents use the SHA-256 multihash form;
+    /// v1 and hybrid torrents use their SHA-1 identity.
+    /// </summary>
+    public static string ReadExactTopic(string torrentPath, bool v2Only)
     {
         byte[] data = File.ReadAllBytes(torrentPath);
         if (data.Length == 0 || data[0] != (byte)'d')
@@ -33,7 +36,15 @@ internal static class TorrentInfoHash
 
             if (key == "info")
             {
-                return Convert.ToHexString(SHA1.HashData(data.AsSpan(keyEnd, valueEnd - keyEnd))).ToLowerInvariant();
+                ReadOnlySpan<byte> info = data.AsSpan(keyEnd, valueEnd - keyEnd);
+                if (v2Only)
+                {
+                    // BEP 52 magnet links carry the full SHA-256 info hash as a multihash:
+                    // 0x12 = sha2-256, 0x20 = 32-byte digest.
+                    return "urn:btmh:1220" + Convert.ToHexStringLower(SHA256.HashData(info));
+                }
+
+                return "urn:btih:" + Convert.ToHexStringLower(SHA1.HashData(info));
             }
 
             i = valueEnd;
