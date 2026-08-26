@@ -1835,10 +1835,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 RemoteIsUploadOnly = RemoteExtensions.IsUploadOnly;
 
                 // BEP 30: Initialize ut_hash_piece from remote handshake
-                if (UtHashPiece != null && RemoteExtensions.MessageIds.TryGetValue(UtHashPiece.Name, out int hashPieceId))
+                if (UtHashPiece != null && RemoteExtensions.MessageIds.ContainsKey(UtHashPiece.Name))
                 {
-                    UtHashPiece.RemoteMessageId = (byte)hashPieceId;
-                    _logger.LogDebug("BEP 30: Peer {PeerName} supports ut_hash_piece (ID={Id})", Name, hashPieceId);
+                    UtHashPiece.RemoteMessageId = RemoteExtensions.GetEnabledMessageId(UtHashPiece.Name);
+                    if (UtHashPiece.RemoteMessageId is { } hashPieceId)
+                    {
+                        _logger.LogDebug("BEP 30: Peer {PeerName} supports ut_hash_piece (ID={Id})", Name, hashPieceId);
+                    }
                 }
 
                 // BEP 10 'p': where this peer actually listens, which is not where it connected from.

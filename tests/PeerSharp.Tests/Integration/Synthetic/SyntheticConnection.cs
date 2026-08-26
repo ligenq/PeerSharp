@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 
 namespace PeerSharp.Tests.Integration.Synthetic;
@@ -24,6 +25,19 @@ internal sealed class SyntheticPeerOptions
 
     /// <summary>The <c>metadata_size</c> to advertise, when this peer claims to hold metadata.</summary>
     public long? MetadataSize { get; set; }
+
+    /// <summary>
+    /// A complete bencoded info dictionary to serve through BEP 9. When set, its length is advertised
+    /// as <c>metadata_size</c> and valid requests are answered in 16 KiB pieces.
+    /// </summary>
+    public byte[]? Metadata { get; set; }
+
+    /// <summary>
+    /// IPv4 peers to introduce in one unsolicited BEP 11 message after the engine publishes its own
+    /// <c>ut_pex</c> id. This lets the same independently encoded PEX message drive both PeerSharp and
+    /// a reference implementation.
+    /// </summary>
+    public List<IPEndPoint> PexAdded { get; } = [];
 }
 
 /// <summary>One frame as it arrived, kept as bytes rather than as an interpretation of them.</summary>
@@ -60,6 +74,8 @@ internal sealed class SyntheticConnection(int ordinal)
     private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private System.Net.Sockets.NetworkStream? _stream;
+    private readonly List<int> _servedMetadataPieces = [];
+    private int _metadataResponseFrameBoundary;
 
     /// <summary>Zero-based order of arrival.</summary>
     public int Ordinal { get; } = ordinal;
@@ -90,6 +106,33 @@ internal sealed class SyntheticConnection(int ordinal)
 
     /// <summary>Every extended message, including the handshake at extension id zero.</summary>
     public IReadOnlyList<WireFrame> ExtendedFrames => [.. Frames.Where(static frame => frame.IsExtended)];
+
+    /// <summary>The metadata piece indices this synthetic connection answered.</summary>
+    public IReadOnlyList<int> ServedMetadataPieces
+    {
+        get
+        {
+            lock (_servedMetadataPieces)
+            {
+                return [.. _servedMetadataPieces];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Number of inbound frames already recorded when the most recent metadata response finished
+    /// writing. Any later frame is therefore a reaction that cannot predate that response.
+    /// </summary>
+    public int MetadataResponseFrameBoundary
+    {
+        get
+        {
+            lock (_servedMetadataPieces)
+            {
+                return _metadataResponseFrameBoundary;
+            }
+        }
+    }
 
     /// <summary>Whether PeerSharp has closed this connection.</summary>
     public bool IsClosed => _finished.Task.IsCompleted;
@@ -155,6 +198,15 @@ internal sealed class SyntheticConnection(int ordinal)
         lock (_frames)
         {
             _frames.Add(frame);
+        }
+    }
+
+    internal void RecordServedMetadataPiece(int piece, int receivedFrameCount)
+    {
+        lock (_servedMetadataPieces)
+        {
+            _servedMetadataPieces.Add(piece);
+            _metadataResponseFrameBoundary = receivedFrameCount;
         }
     }
 

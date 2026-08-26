@@ -205,6 +205,30 @@ public class UtMetadataTests
     }
 
     [Fact]
+    public void Init_OmissionPreservesButZeroDisablesTheAdvertisedId()
+    {
+        var mockPeer = new MockPeerCommunication();
+        var utMetadata = new UtMetadata(mockPeer);
+        var enabled = new ExtensionHandshake();
+        enabled.MessageIds[UtMetadata.Name] = 7;
+        utMetadata.Init(enabled);
+
+        // BEP 10 makes subsequent m dictionaries additive: omission means no change.
+        utMetadata.Init(new ExtensionHandshake());
+        utMetadata.SendRequest(0);
+        Assert.Equal(7, Assert.Single(mockPeer.SentMessages).Data[0]);
+
+        // An explicit zero is the change that disables the extension.
+        var disabled = new ExtensionHandshake();
+        disabled.MessageIds[UtMetadata.Name] = 0;
+        utMetadata.Init(disabled);
+        utMetadata.SendRequest(1);
+
+        Assert.Single(mockPeer.SentMessages);
+        Assert.Null(utMetadata.RemoteMessageId);
+    }
+
+    [Fact]
     public void SendRequest_PieceZero_SendsCorrectPieceNumber()
     {
         // Arrange

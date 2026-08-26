@@ -383,21 +383,24 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 return;
             }
 
-            if (peer.RemoteSupportsExtensions && peer.RemoteExtensions?.MessageIds.ContainsKey(UtMetadata.Name) == true)
+            if (peer.RemoteSupportsExtensions &&
+                peer.RemoteExtensions is { } remoteExtensions &&
+                remoteExtensions.GetEnabledMessageId(UtMetadata.Name).HasValue &&
+                peer.UtMetadata.RemoteMessageId.HasValue)
             {
                 if (!_activePeers.Contains(peer))
                 {
                     _activePeers.Add(peer);
                 }
-                _logger.LogInformation("Metadata peer connected {PeerId} (id={MessageId}, size={MetadataSize})", peer.PeerId, peer.UtMetadata.RemoteMessageId, peer.RemoteExtensions.MetadataSize);
+                _logger.LogInformation("Metadata peer connected {PeerId} (id={MessageId}, size={MetadataSize})", peer.PeerId, peer.UtMetadata.RemoteMessageId, remoteExtensions.MetadataSize);
                 _logger.LogDebug("Peer {PeerId} supports ut_metadata. Adding to active list.", peer.PeerId);
 
                 // Request metadata_size if peer sent it
-                if (peer.RemoteExtensions.MetadataSize.HasValue)
+                if (remoteExtensions.MetadataSize.HasValue)
                 {
                     if (_metadataSize == 0)
                     {
-                        InitializeMetadataBuffer(peer.RemoteExtensions.MetadataSize.Value);
+                        InitializeMetadataBuffer(remoteExtensions.MetadataSize.Value);
                     }
 
                     if (Active && !Finished)
