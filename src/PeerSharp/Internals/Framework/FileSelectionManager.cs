@@ -8,6 +8,16 @@ internal class FileSelectionManager : IFileSelectionManager
     private List<FileSelection> _fileSelection = [];
     private IReadOnlyList<FileSelection>? _fileSelectionSnapshot;
     private IFileSelectionObserver? _observer;
+
+    /// <summary>
+    /// <see cref="PiecesProgress.ReceivedCount"/> as it stood when the selected-piece counters were
+    /// last known to agree with it, or -1 before the first count. The counters are maintained
+    /// incrementally, so they are only correct while every change to the piece map passes through
+    /// <see cref="OnPieceVerified"/> - and not every change does. A recheck fills the map directly,
+    /// which left a torrent holding every piece reporting its selection unfinished, and BEP 21
+    /// upload_only is derived from that: a complete seed never advertised itself as one.
+    /// </summary>
+    private int _piecesReceivedAtLastSync = -1;
     private PiecesProgress? _pieces; // Set during Initialize
 
     public FileSelectionManager(TorrentFileMetadata metadata)
@@ -30,6 +40,8 @@ internal class FileSelectionManager : IFileSelectionManager
                 {
                     return _pieces.ReceivedCount == _pieces.Count;
                 }
+
+                EnsureStatsFresh();
                 return ReceivedSelectedPieces >= TotalSelectedPieces;
             }
         }
@@ -48,6 +60,7 @@ internal class FileSelectionManager : IFileSelectionManager
 
         lock (_selectionLock)
         {
+            EnsureStatsFresh();
             ulong bytes = (ulong)ReceivedSelectedPieces * _metadata.Info.PieceSize;
 
             // Adjust for last piece if it's smaller and selected/received
@@ -80,6 +93,7 @@ internal class FileSelectionManager : IFileSelectionManager
 
         lock (_selectionLock)
         {
+            EnsureStatsFresh();
             if (_fileSelection.Count == 0 || TotalSelectedPieces == 0)
             {
                 return 1.0f;
@@ -151,9 +165,22 @@ internal class FileSelectionManager : IFileSelectionManager
 
         lock (_selectionLock)
         {
-            if (_metadata.Info.IsPieceNeeded(pieceIndex, _fileSelection))
+            // The piece map is the authority. One new piece is what this call is reporting, so the
+            // increment is safe; any other change means the map moved without us and the counters
+            // have to be rebuilt from it. This also absorbs a repeated notification for a piece
+            // already counted, which would otherwise silently overshoot the total.
+            if (_pieces.ReceivedCount == _piecesReceivedAtLastSync + 1)
             {
-                ReceivedSelectedPieces++;
+                if (_metadata.Info.IsPieceNeeded(pieceIndex, _fileSelection))
+                {
+                    ReceivedSelectedPieces++;
+                }
+
+                _piecesReceivedAtLastSync = _pieces.ReceivedCount;
+            }
+            else
+            {
+                RecalculateSelectionStats();
             }
         }
     }
@@ -319,6 +346,24 @@ internal class FileSelectionManager : IFileSelectionManager
         }
         TotalSelectedPieces = total;
         ReceivedSelectedPieces = received;
+        _piecesReceivedAtLastSync = _pieces.ReceivedCount;
+    }
+
+    /// <summary>
+    /// Rebuilds the counters when the piece map has moved behind their back.
+    /// </summary>
+    /// <remarks>
+    /// Must be called inside <c>_selectionLock</c>. This is the backstop for any path that adds
+    /// pieces without announcing them - a recheck today, and whatever is written next. Comparing one
+    /// integer keeps the ordinary case free; the full count runs only when they have actually
+    /// diverged.
+    /// </remarks>
+    private void EnsureStatsFresh()
+    {
+        if (_pieces != null && _pieces.ReceivedCount != _piecesReceivedAtLastSync)
+        {
+            RecalculateSelectionStats();
+        }
     }
 }
 

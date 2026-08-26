@@ -63,7 +63,12 @@ public class FileSelectionManagerTests
         var pieces = new PiecesProgress(3);
         _manager.Initialize(null, pieces);
 
+        // The piece map is the authority and the engine adds to it before announcing, so the
+        // announcement alone no longer moves the counter. It used to, which is how the counter came
+        // to disagree with the map after a recheck filled it directly.
+        pieces.AddPiece(0);
         _manager.OnPieceVerified(0);
+
         Assert.Equal(1, _manager.ReceivedSelectedPieces);
     }
 
@@ -73,7 +78,9 @@ public class FileSelectionManagerTests
         var pieces = new PiecesProgress(3);
         _manager.Initialize(null, pieces);
 
+        pieces.AddPiece(0);
         _manager.OnPieceVerified(0);
+
         Assert.Equal(1.0f / 3.0f, _manager.CalculateSelectionProgress());
     }
 
