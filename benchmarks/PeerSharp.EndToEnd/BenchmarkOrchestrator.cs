@@ -11,10 +11,16 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
 {
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
-    public async Task<string> RunAsync(CancellationToken cancellationToken)
+    public async Task<BenchmarkRunSummary> RunAsync(CancellationToken cancellationToken)
     {
         string timestamp = _startedAt.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-        string runRoot = Path.Combine(options.ArtifactRoot, "runs", timestamp);
+        // Include the process id so two benchmark invocations started in the same second cannot
+        // share fixtures, trial directories and reports. Concurrent validation runs exposed that
+        // timestamp-only names let one process overwrite the other's result set.
+        string runRoot = Path.Combine(
+            options.ArtifactRoot,
+            "runs",
+            $"{timestamp}-{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)}");
         Directory.CreateDirectory(runRoot);
 
         string peerSharpRevision = await GitRevisionAsync(options.RepositoryRoot, cancellationToken).ConfigureAwait(false);
@@ -79,7 +85,7 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
 
         int failures = results.Count(static result => !result.Success);
         Console.WriteLine($"Completed {results.Count - failures}/{results.Count} trials successfully.");
-        return runRoot;
+        return new BenchmarkRunSummary(runRoot, failures);
     }
 
     private async Task<BenchmarkResult> RunCaseAsync(
@@ -156,12 +162,53 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             elapsed.Stop();
             testerExitCode = tester.ExitCode ?? -1;
             metrics = sampler.Finish(elapsed.Elapsed.TotalSeconds);
+
+            TesterSummary testerSummary = ParseTesterSummary(testerLog);
+            downloadRate = testerSummary.DownloadRate;
+            uploadRate = testerSummary.UploadRate;
+            if (error is null && testerExitCode != 0) error = $"connection_tester exited with code {testerExitCode}.";
+            if (error is null && !testerSummary.HasRates) error = "connection_tester did not report a transfer rate.";
+            if (error is null && !TesterCompletedTransfer(benchmarkCase.Mode, testerSummary))
+            {
+                error = benchmarkCase.Mode switch
+                {
+                    "download" => $"connection_tester sent only {testerSummary.SentPercent:0.0}% of the payload.",
+                    "upload" => $"connection_tester received only {testerSummary.ReceivedPercent:0.0}% of the payload.",
+                    _ => $"connection_tester transferred only sent={testerSummary.SentPercent:0.0}%, " +
+                        $"received={testerSummary.ReceivedPercent:0.0}%."
+                };
+            }
+
+            if (error is null && benchmarkCase.Mode is "download" or "dual")
+            {
+                Func<bool> targetCompleted = benchmarkCase.Engine == "peersharp"
+                    ? () => LogContains(targetLog, "All complete")
+                    : () => HasResumeFile(targetDataRoot);
+                bool completed = await WaitForSignalAsync(
+                    targetCompleted,
+                    TimeSpan.FromSeconds(Math.Min(options.TimeoutSeconds, 30)),
+                    sampler,
+                    target,
+                    cancellationToken).ConfigureAwait(false);
+                if (!completed)
+                {
+                    error = $"{benchmarkCase.Engine} never reported the downloaded torrent complete.";
+                }
+            }
+
             await target.StopAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
             targetExitCode = target.ExitCode;
 
-            (downloadRate, uploadRate) = ParseRates(testerLog);
-            if (error is null && testerExitCode != 0) error = $"connection_tester exited with code {testerExitCode}.";
-            if (error is null && downloadRate == 0 && uploadRate == 0) error = "connection_tester did not report a transfer rate.";
+            // Only an engine that ended by itself has an exit code worth reading. client_test takes
+            // its keystrokes from the console rather than standard input, so in every mode that does
+            // not hand it a self-exit flag the harness has to terminate it - and failing the trial on
+            // the code that produces would discard libtorrent's upload and dual runs while keeping
+            // PeerSharp's, which honours --control-stdin. A benchmark that disqualifies only the
+            // other engine is worse than one that checks nothing.
+            if (error is null && !target.WasKilled && targetExitCode is not 0)
+            {
+                error = $"Target exited with code {targetExitCode?.ToString(CultureInfo.InvariantCulture) ?? "unknown"}.";
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -312,7 +359,9 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             "--alert_mask=error,status,connect,performance_warning,storage,peer",
             "-i", benchmarkCase.Backend
         };
-        if (benchmarkCase.Mode is "download" or "dual") clientArguments.Add("-1");
+        // In dual mode the target must stay alive after its download completes so it can finish
+        // uploading those pieces to the tester's leecher connections.
+        if (benchmarkCase.Mode == "download") clientArguments.Add("-1");
         if (benchmarkCase.Mode == "upload") clientArguments.AddRange(["-e", "240"]);
         return ProcessUtility.CreateStartInfo(tools.ClientTest, clientArguments, caseRoot, redirectInput: true);
     }
@@ -357,10 +406,11 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
 
         try
         {
-            string infoHash = TorrentInfoHash.ReadHex(torrentPath);
+            string exactTopic = TorrentInfoHash.ReadExactTopic(
+                torrentPath, v2Only: benchmarkCase.Variant == "v2");
             // The peer travels in the magnet (BEP 9's x.pe) rather than as an engine-specific flag,
             // so both engines are handed the identical link and neither gets a different route in.
-            string magnet = $"magnet:?xt=urn:btih:{infoHash}&x.pe=127.0.0.1:{port}";
+            string magnet = $"magnet:?xt={exactTopic}&x.pe=127.0.0.1:{port}";
 
             await using CapturedProcess seed = CapturedProcess.Start(
                 CreateMetadataSeedStartInfo(torrentPath, caseRoot, port), seedLog);
@@ -382,10 +432,9 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             // and exits. client_test's alert log is block-buffered and reaches disk when the process
             // ends, which is no use while it is running - but it saves resume data the moment the
             // metadata lands, and that file appearing is the same event.
-            string resumeFile = Path.Combine(dataRoot, ".resume", infoHash + ".resume");
             Func<bool> arrivedSignal = benchmarkCase.Engine == "peersharp"
                 ? () => LogContains(targetLog, "Metadata in")
-                : () => File.Exists(resumeFile);
+                : () => HasResumeFile(dataRoot);
 
             bool arrived = await WaitForSignalAsync(
                 arrivedSignal, TimeSpan.FromSeconds(options.TimeoutSeconds), sampler, target, cancellationToken)
@@ -584,16 +633,50 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
         return cases;
     }
 
-    private static (double DownloadRate, double UploadRate) ParseRates(string testerLog)
+    private static TesterSummary ParseTesterSummary(string testerLog)
     {
-        if (!File.Exists(testerLog)) return (0, 0);
+        if (!File.Exists(testerLog)) return default;
         using var stream = new FileStream(testerLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(stream);
-        Match match = RateRegex().Match(reader.ReadToEnd());
-        if (!match.Success) return (0, 0);
-        return (
-            double.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture),
-            double.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture));
+        string text = reader.ReadToEnd();
+        Match rates = RateRegex().Match(text);
+        Match completion = CompletionRegex().Match(text);
+        return new TesterSummary(
+            rates.Success ? double.Parse(rates.Groups[1].Value, CultureInfo.InvariantCulture) : 0,
+            rates.Success ? double.Parse(rates.Groups[2].Value, CultureInfo.InvariantCulture) : 0,
+            completion.Success ? double.Parse(completion.Groups[1].Value, CultureInfo.InvariantCulture) : 0,
+            completion.Success ? double.Parse(completion.Groups[2].Value, CultureInfo.InvariantCulture) : 0,
+            rates.Success,
+            completion.Success);
+    }
+
+    private static bool TesterCompletedTransfer(string mode, TesterSummary summary)
+    {
+        if (!summary.HasCompletion)
+        {
+            return false;
+        }
+
+        // The tester's own percentages are not exact: across recorded runs they overshoot routinely
+        // (102.5% sent, and 199%, 200% and 300% received, which count redundant transfer) and a
+        // finished transfer has been seen reported as 99.6%. A 99.9% floor therefore fails complete
+        // runs at the boundary, which is how a dual trial failed here with sent=100.2%, received=99.6%.
+        // A genuinely truncated transfer looks nothing like this - the observed ones report 47.3% and
+        // 0.0% - so the margin costs no real detection.
+        const double CompletePercent = 99.0;
+        return mode switch
+        {
+            "download" => summary.SentPercent >= CompletePercent,
+            "upload" => summary.ReceivedPercent >= CompletePercent,
+            "dual" => summary.SentPercent >= CompletePercent && summary.ReceivedPercent >= CompletePercent,
+            _ => false
+        };
+    }
+
+    private static bool HasResumeFile(string dataRoot)
+    {
+        string resumeRoot = Path.Combine(dataRoot, ".resume");
+        return Directory.Exists(resumeRoot) && Directory.EnumerateFiles(resumeRoot, "*.resume").Any();
     }
 
     private static async Task<string> GitRevisionAsync(string repository, CancellationToken cancellationToken)
@@ -661,4 +744,15 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
 
     [GeneratedRegex(@"rate sent:\s*([\d.]+)\s*MB/s\s+received:\s*([\d.]+)\s*MB/s", RegexOptions.CultureInvariant)]
     private static partial Regex RateRegex();
+
+    [GeneratedRegex(@"total sent:\s*([\d.]+)\s*%\s*received:\s*([\d.]+)\s*%", RegexOptions.CultureInvariant)]
+    private static partial Regex CompletionRegex();
+
+    private readonly record struct TesterSummary(
+        double DownloadRate,
+        double UploadRate,
+        double SentPercent,
+        double ReceivedPercent,
+        bool HasRates,
+        bool HasCompletion);
 }
