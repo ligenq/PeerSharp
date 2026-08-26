@@ -1569,6 +1569,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         {
             _finishedEventFired = true;
             StartSeedingTimerIfNeeded();
+
+            // BEP 21: tell the peers we already have that we want nothing more. Only the opening
+            // handshake used to carry this, and that is sent while still downloading, so a peer we
+            // finished against was never told and kept a slot open for us indefinitely.
+            FireAndForgetUploadOnlyAnnounce();
+
             FireFinishedEvent(false);
             Alerts.TorrentAlert(AlertId.TorrentFinished, this);
         }
@@ -1577,6 +1583,21 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             _selectionFinishedEventFired = true;
             FireFinishedEvent(true);
         }
+    }
+
+    private void FireAndForgetUploadOnlyAnnounce()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await PeersInternal.AnnounceUploadOnlyAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not announce upload_only after completion");
+            }
+        });
     }
 
     internal void UpdateSeedingTime(DateTimeOffset now)
