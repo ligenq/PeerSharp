@@ -168,6 +168,34 @@ public class ExtensionHandshakeTests
             ProtocolConstants.MaxOutstandingRequestsPerPeer,
             UploadQueueManager.MaxQueueDepthPerPeer);
     }
-}
 
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(256)]
+    [InlineData(4294967297)]
+    public void Parse_IgnoresExtensionIdsThatDoNotFitOnTheWire(long id)
+    {
+        var extensions = new BDict();
+        extensions.Dict[UtMetadata.Name] = new BNumber(id);
+        var dict = new BDict();
+        dict.Dict["m"] = extensions;
+
+        var handshake = ExtensionHandshake.Parse(dict);
+
+        Assert.False(handshake.MessageIds.ContainsKey(UtMetadata.Name));
+        Assert.Null(handshake.GetEnabledMessageId(UtMetadata.Name));
+    }
+
+    [Theory]
+    [InlineData(0, null)]
+    [InlineData(1, 1)]
+    [InlineData(255, 255)]
+    public void EnabledExtensionId_ReservesZeroAndAcceptsTheByteRange(int advertised, int? expected)
+    {
+        var handshake = new ExtensionHandshake();
+        handshake.MessageIds[UtMetadata.Name] = advertised;
+
+        Assert.Equal(expected, handshake.GetEnabledMessageId(UtMetadata.Name));
+    }
+}
 

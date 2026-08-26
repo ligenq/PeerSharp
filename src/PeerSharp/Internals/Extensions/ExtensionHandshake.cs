@@ -29,6 +29,17 @@ internal class ExtensionHandshake
     /// </summary>
     public bool IsUploadOnly { get; set; }
 
+    /// <summary>
+    /// Returns the one-byte message id when this handshake enables an extension. BEP 10 reserves
+    /// zero for the extension handshake itself and defines an extension value of zero as disabled.
+    /// </summary>
+    public int? GetEnabledMessageId(string name)
+    {
+        return MessageIds.TryGetValue(name, out int id) && id is > 0 and <= byte.MaxValue
+            ? id
+            : null;
+    }
+
     public static ExtensionHandshake Parse(BDict dict)
     {
         var handshake = new ExtensionHandshake();
@@ -36,7 +47,7 @@ internal class ExtensionHandshake
         {
             foreach (var kvp in m.Dict)
             {
-                if (kvp.Value is BNumber n)
+                if (kvp.Value is BNumber { Value: >= 0 and <= byte.MaxValue } n)
                 {
                     handshake.MessageIds[kvp.Key] = (int)n.Value;
                 }

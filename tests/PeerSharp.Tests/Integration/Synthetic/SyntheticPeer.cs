@@ -259,7 +259,8 @@ internal sealed class SyntheticPeer : IAsyncDisposable
             ["p"] = (long)Port
         };
 
-        if (_options.MetadataSize is { } size)
+        long? metadataSize = _options.Metadata?.LongLength ?? _options.MetadataSize;
+        if (metadataSize is { } size)
         {
             handshake["metadata_size"] = size;
         }
@@ -284,6 +285,8 @@ internal sealed class SyntheticPeer : IAsyncDisposable
 
     private async Task ReadFramesAsync(NetworkStream stream, SyntheticConnection connection)
     {
+        byte? remoteUtMetadataId = null;
+        bool pexSent = false;
         byte[] header = new byte[4];
         while (!_stopping.IsCancellationRequested)
         {
@@ -303,8 +306,127 @@ internal sealed class SyntheticPeer : IAsyncDisposable
 
             byte[] payload = new byte[length];
             await ReadExactlyAsync(stream, payload, _stopping.Token).ConfigureAwait(false);
-            connection.Record(new WireFrame(payload[0], payload[1..]));
+            var frame = new WireFrame(payload[0], payload[1..]);
+            connection.Record(frame);
+
+            if (!frame.IsExtended)
+            {
+                continue;
+            }
+
+            if (frame.ExtendedId == 0)
+            {
+                remoteUtMetadataId = ReadEnabledExtensionId(frame.ExtendedPayload, "ut_metadata");
+
+                byte? remoteUtPexId = ReadEnabledExtensionId(frame.ExtendedPayload, "ut_pex");
+                if (!pexSent && remoteUtPexId is { } pexId && _options.PexAdded.Count > 0)
+                {
+                    await SendPexAsync(stream, pexId, _options.PexAdded).ConfigureAwait(false);
+                    pexSent = true;
+                }
+
+                continue;
+            }
+
+            if (_options.Metadata is { } metadata &&
+                _options.Extensions.TryGetValue("ut_metadata", out long localId) &&
+                localId is > 0 and <= byte.MaxValue &&
+                frame.ExtendedId == (byte)localId &&
+                remoteUtMetadataId is { } responseId)
+            {
+                await TryServeMetadataAsync(stream, connection, frame, responseId, metadata).ConfigureAwait(false);
+            }
         }
+    }
+
+    /// <summary>Sends one independently encoded BEP 11 compact IPv4 peer list.</summary>
+    private async Task SendPexAsync(
+        NetworkStream stream, byte responseId, IReadOnlyList<IPEndPoint> peers)
+    {
+        byte[] compact = new byte[peers.Count * 6];
+        for (int index = 0; index < peers.Count; index++)
+        {
+            IPEndPoint peer = peers[index];
+            byte[] address = peer.Address.MapToIPv4().GetAddressBytes();
+            address.CopyTo(compact.AsSpan(index * 6, 4));
+            BinaryPrimitives.WriteUInt16BigEndian(
+                compact.AsSpan(index * 6 + 4, 2), checked((ushort)peer.Port));
+        }
+
+        byte[] body = SyntheticBencode.Encode(new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["added"] = compact,
+            ["added.f"] = new byte[peers.Count]
+        });
+
+        byte[] payload = new byte[2 + body.Length];
+        payload[0] = WireFrame.Extended;
+        payload[1] = responseId;
+        body.CopyTo(payload.AsSpan(2));
+        await SendFrameAsync(stream, payload).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads one enabled extension id from the engine's own BEP 10 handshake.</summary>
+    private static byte? ReadEnabledExtensionId(ReadOnlySpan<byte> payload, string name)
+    {
+        try
+        {
+            Dictionary<string, object> handshake = SyntheticBencode.DecodeDictionary(payload, "The engine's BEP 10 handshake");
+            Dictionary<string, object>? messages = SyntheticBencode.TryGetDictionary(handshake, "m");
+            long? id = messages is null ? null : SyntheticBencode.TryGetInteger(messages, name);
+            return id is > 0 and <= byte.MaxValue ? (byte)id.Value : null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Answers a valid BEP 9 request using the extension id the engine assigned itself.</summary>
+    private async Task TryServeMetadataAsync(
+        NetworkStream stream,
+        SyntheticConnection connection,
+        WireFrame frame,
+        byte responseId,
+        byte[] metadata)
+    {
+        Dictionary<string, object> request;
+        try
+        {
+            request = SyntheticBencode.DecodeDictionary(frame.ExtendedPayload, "The BEP 9 metadata request");
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+
+        long? piece = SyntheticBencode.TryGetInteger(request, "piece");
+        int pieceCount = (metadata.Length + 16 * 1024 - 1) / (16 * 1024);
+        if (SyntheticBencode.TryGetInteger(request, "msg_type") != 0 ||
+            piece is not >= 0 || piece >= pieceCount)
+        {
+            return;
+        }
+
+        int pieceIndex = (int)piece.Value;
+        int offset = pieceIndex * 16 * 1024;
+
+        int blockLength = Math.Min(16 * 1024, metadata.Length - offset);
+        byte[] body = SyntheticBencode.Encode(new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["msg_type"] = 1L,
+            ["piece"] = (long)pieceIndex,
+            ["total_size"] = (long)metadata.Length
+        });
+
+        byte[] payload = new byte[2 + body.Length + blockLength];
+        payload[0] = WireFrame.Extended;
+        payload[1] = responseId;
+        body.CopyTo(payload.AsSpan(2));
+        metadata.AsSpan(offset, blockLength).CopyTo(payload.AsSpan(2 + body.Length));
+
+        await SendFrameAsync(stream, payload).ConfigureAwait(false);
+        connection.RecordServedMetadataPiece(pieceIndex, connection.Frames.Count);
     }
 
     private static async Task ReadExactlyAsync(NetworkStream stream, byte[] buffer, CancellationToken cancellationToken)

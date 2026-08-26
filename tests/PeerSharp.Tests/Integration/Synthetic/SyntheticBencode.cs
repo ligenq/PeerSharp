@@ -99,6 +99,12 @@ internal static class SyntheticBencode
     {
         int position = 0;
         object value = Read(data, ref position);
+
+        if (position != data.Length)
+        {
+            throw new FormatException($"The value ended after {position} byte(s), with {data.Length - position} trailing byte(s).");
+        }
+
         return value;
     }
 

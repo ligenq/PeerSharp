@@ -892,13 +892,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (!_torrent.HasMetadata &&
                 _torrent.MetadataDownloadInternal?.Active == true &&
                 p.RemoteSupportsExtensions &&
-                p.RemoteExtensions?.MessageIds.ContainsKey(UtMetadata.Name) == true)
+                handshake.GetEnabledMessageId(UtMetadata.Name).HasValue &&
+                p.UtMetadata.RemoteMessageId.HasValue)
             {
                 _logger.LogDebug(
                     "Peer {RemoteEndPoint} supports ut_metadata (id={MessageId}, size={MetadataSize})",
                     p.RemoteEndPoint,
                     p.UtMetadata.RemoteMessageId,
-                    p.RemoteExtensions.MetadataSize);
+                    handshake.MetadataSize);
                 FireAndForget(p.SetInterestedAsync(true), "SetInterested (Metadata)");
             }
         }

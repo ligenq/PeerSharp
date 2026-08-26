@@ -62,13 +62,8 @@ public class SyntheticPeerInteropTests : IDisposable
         var connection = await DialAsync(engine, torrent, peer, cancellationToken);
         var handshake = await connection.WaitForExtensionHandshakeAsync(TimeSpan.FromSeconds(20), cancellationToken);
 
-        long uploadOnly = SyntheticBencode.TryGetInteger(handshake, "upload_only") ?? 0;
-
-        Assert.True(
-            uploadOnly == 0,
-            "The extension handshake advertised upload_only while the torrent still had no metadata, so a " +
-            "peer that honours BEP 21 has been told we want nothing and will drop the connection - taking " +
-            "the metadata we were about to ask it for with it.");
+        // Asserted by the shared conformance checks, which libtorrent is put through unchanged.
+        ExtensionProtocolConformance.AssertNoUploadOnlyBeforeMetadata(handshake, "PeerSharp", isReference: false);
     }
 
     /// <summary>
@@ -110,23 +105,188 @@ public class SyntheticPeerInteropTests : IDisposable
         await connection.WaitForExtensionHandshakeAsync(TimeSpan.FromSeconds(20), cancellationToken);
 
         // Give the metadata request time to be sent and, if the defect is present, to be sent twice.
-        await connection.WaitForFrameAsync(
+        bool metadataRequestArrived = await connection.WaitForFrameAsync(
             static frame => frame.IsExtended && frame.ExtendedId == UtMetadataId,
             TimeSpan.FromSeconds(20),
             cancellationToken);
-        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
-
-        byte[] published = [0, UtMetadataId, UtPexId];
-        var misaddressed = connection.ExtendedFrames
-            .Where(frame => !published.Contains(frame.ExtendedId))
-            .ToArray();
 
         Assert.True(
-            misaddressed.Length == 0,
-            $"An extension message was addressed to id(s) " +
-            $"{string.Join(", ", misaddressed.Select(static frame => frame.ExtendedId).Distinct())}, which this " +
-            $"peer never published. BEP 10 ids are chosen per receiver, so that id means something else here - " +
-            $"or nothing at all. Traffic: {connection.Describe()}");
+            metadataRequestArrived,
+            $"PeerSharp never sent the metadata request whose extension id this test measures. " +
+            $"Traffic: {connection.Describe()}");
+
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+
+        ExtensionProtocolConformance.AssertOnlyPublishedExtensionIdsAreAddressed(
+            connection, [0, UtMetadataId, UtPexId], "PeerSharp", isReference: false);
+        ExtensionProtocolConformance.AssertValidMetadataRequests(
+            connection, UtMetadataId, 32 * 1024, "PeerSharp", isReference: false);
+    }
+
+    /// <summary>BEP 10: assigning id zero means ut_metadata is disabled, not addressed as id zero.</summary>
+    [Fact(Timeout = 60000)]
+    public async Task ADisabledMetadataExtensionIsNotAddressedAsTheHandshake()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        await using var peer = SyntheticPeer.Start(new SyntheticPeerOptions
+        {
+            Extensions = { ["ut_metadata"] = 0 },
+            MetadataSize = 32 * 1024
+        });
+
+        await using var engine = CreateEngine(Encryption.Refuse);
+        var torrent = await AddMagnetAsync(engine, cancellationToken);
+
+        var connection = await DialAsync(engine, torrent, peer, cancellationToken);
+        await connection.WaitForExtensionHandshakeAsync(TimeSpan.FromSeconds(20), cancellationToken);
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+
+        ExtensionProtocolConformance.AssertNoMetadataRequests(connection, "PeerSharp", isReference: false);
+    }
+
+    /// <summary>BEP 10: each connection owns its extension numbering independently.</summary>
+    [Fact(Timeout = 90000)]
+    public async Task MetadataExtensionIdsAreKeptPerConnection()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        const byte FirstId = 7;
+        const byte SecondId = 11;
+        const int MetadataSize = 32 * 1024;
+
+        await using var firstPeer = SyntheticPeer.Start(new SyntheticPeerOptions
+        {
+            Extensions = { ["ut_metadata"] = FirstId },
+            MetadataSize = MetadataSize
+        });
+        await using var secondPeer = SyntheticPeer.Start(new SyntheticPeerOptions
+        {
+            Extensions = { ["ut_metadata"] = SecondId },
+            MetadataSize = MetadataSize
+        });
+
+        await using var engine = CreateEngine(Encryption.Refuse);
+        var torrent = await AddMagnetAsync(engine, cancellationToken);
+
+        SyntheticConnection[] connections = await Task.WhenAll(
+            DialAsync(engine, torrent, firstPeer, cancellationToken),
+            DialAsync(engine, torrent, secondPeer, cancellationToken));
+
+        await Task.WhenAll(connections.Select(connection =>
+            connection.WaitForExtensionHandshakeAsync(TimeSpan.FromSeconds(20), cancellationToken)));
+
+        bool[] requestsArrived = await Task.WhenAll(
+            connections[0].WaitForFrameAsync(
+                frame => frame.IsExtended && frame.ExtendedId == FirstId,
+                TimeSpan.FromSeconds(20), cancellationToken),
+            connections[1].WaitForFrameAsync(
+                frame => frame.IsExtended && frame.ExtendedId == SecondId,
+                TimeSpan.FromSeconds(20), cancellationToken));
+
+        Assert.All(requestsArrived, Assert.True);
+
+        ExtensionProtocolConformance.AssertOnlyPublishedExtensionIdsAreAddressed(
+            connections[0], [0, FirstId], "PeerSharp", isReference: false);
+        ExtensionProtocolConformance.AssertOnlyPublishedExtensionIdsAreAddressed(
+            connections[1], [0, SecondId], "PeerSharp", isReference: false);
+        ExtensionProtocolConformance.AssertValidMetadataRequests(
+            connections[0], FirstId, MetadataSize, "PeerSharp", isReference: false);
+        ExtensionProtocolConformance.AssertValidMetadataRequests(
+            connections[1], SecondId, MetadataSize, "PeerSharp", isReference: false);
+    }
+
+    /// <summary>The complete BEP 9 path: request, serve, assemble, hash-check and apply metadata.</summary>
+    [Fact(Timeout = 90000)]
+    public async Task ACompleteInfoDictionaryIsFetchedFromTheSyntheticPeer()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        SyntheticMetadataFixture metadata = SyntheticMetadataFixture.Create();
+
+        const byte UtMetadataId = 7;
+        await using var peer = SyntheticPeer.Start(new SyntheticPeerOptions
+        {
+            Extensions = { ["ut_metadata"] = UtMetadataId },
+            Metadata = metadata.InfoBytes
+        });
+
+        await using var engine = CreateEngine(Encryption.Refuse);
+        var torrent = await AddMagnetAsync(engine, cancellationToken, metadata.InfoHash);
+        var connection = await DialAsync(engine, torrent, peer, cancellationToken);
+
+        await torrent.WaitForMetadataAsync(cancellationToken).WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+
+        Assert.True(torrent.HasMetadata);
+        Assert.Equal(1, torrent.FileCount);
+        Assert.Equal("synthetic-metadata.bin", torrent.GetFileInfo(0).Path);
+        Assert.Equal(
+            Enumerable.Range(0, metadata.MetadataPieceCount),
+            connection.ServedMetadataPieces.Distinct().Order());
+        ExtensionProtocolConformance.AssertValidMetadataRequests(
+            connection, UtMetadataId, metadata.InfoBytes.Length, "PeerSharp", isReference: false);
+    }
+
+    /// <summary>The BEP 11 decoder accepts independently encoded PEX and dials the introduced peer.</summary>
+    [Fact(Timeout = 90000)]
+    public async Task APeerIntroducedOnlyBySyntheticPexIsDialled()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        await using var target = SyntheticPeer.Start(new SyntheticPeerOptions());
+        await using var source = SyntheticPeer.Start(new SyntheticPeerOptions
+        {
+            Extensions = { ["ut_pex"] = 9 },
+            PexAdded = { target.EndPoint }
+        });
+
+        await using var engine = CreateEngine(Encryption.Refuse);
+        var torrent = await AddMagnetAsync(engine, cancellationToken);
+
+        // The target is never supplied to PeerSharp through discovery. Its endpoint exists only in
+        // the raw compact PEX message emitted by source.
+        await DialAsync(engine, torrent, source, cancellationToken);
+        SyntheticConnection introduced = await target.WaitForConnectionAsync(
+            0, TimeSpan.FromSeconds(30), cancellationToken);
+
+        Assert.True(introduced.StartedWithPlaintextHandshake);
+    }
+
+    /// <summary>The BEP 11 encoder publishes the other connected peer in receiver-owned numbering.</summary>
+    [Fact(Timeout = 90000)]
+    public async Task PexIntroducesConnectedPeersUsingEachReceiversExtensionId()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        const byte FirstPexId = 9;
+        const byte SecondPexId = 11;
+
+        await using var first = SyntheticPeer.Start(new SyntheticPeerOptions
+        {
+            Extensions = { ["ut_pex"] = FirstPexId }
+        });
+        await using var second = SyntheticPeer.Start(new SyntheticPeerOptions
+        {
+            Extensions = { ["ut_pex"] = SecondPexId }
+        });
+
+        await using var engine = CreateEngine(Encryption.Refuse, TimeSpan.FromSeconds(1));
+        var torrent = await AddMagnetAsync(engine, cancellationToken);
+        SyntheticConnection[] connections = await Task.WhenAll(
+            DialAsync(engine, torrent, first, cancellationToken),
+            DialAsync(engine, torrent, second, cancellationToken));
+
+        bool[] pexArrived = await Task.WhenAll(
+            connections[0].WaitForFrameAsync(
+                frame => frame.IsExtended && frame.ExtendedId == FirstPexId,
+                TimeSpan.FromSeconds(20), cancellationToken),
+            connections[1].WaitForFrameAsync(
+                frame => frame.IsExtended && frame.ExtendedId == SecondPexId,
+                TimeSpan.FromSeconds(20), cancellationToken));
+
+        Assert.All(pexArrived, Assert.True);
+        ExtensionProtocolConformance.AssertPexIntroduces(
+            connections[0], FirstPexId, second.EndPoint, "PeerSharp", isReference: false);
+        ExtensionProtocolConformance.AssertPexIntroduces(
+            connections[1], SecondPexId, first.EndPoint, "PeerSharp", isReference: false);
     }
 
     /// <summary>
@@ -174,7 +334,7 @@ public class SyntheticPeerInteropTests : IDisposable
             "the first.");
     }
 
-    private ClientEngine CreateEngine(Encryption encryption)
+    private ClientEngine CreateEngine(Encryption encryption, TimeSpan? pexInterval = null)
     {
         var settings = new Settings
         {
@@ -189,7 +349,8 @@ public class SyntheticPeerInteropTests : IDisposable
                 PreferUtp = false,
                 UpnpPortMapping = false,
                 NatPmpPortMapping = false,
-                Encryption = encryption
+                Encryption = encryption,
+                PexInterval = pexInterval ?? TimeSpan.FromSeconds(60)
             },
             Dht = { Enabled = false }
         };
@@ -202,12 +363,15 @@ public class SyntheticPeerInteropTests : IDisposable
     }
 
     /// <summary>A magnet with no metadata and no way to get any except the peer the test provides.</summary>
-    private async Task<ITorrent> AddMagnetAsync(ClientEngine engine, CancellationToken cancellationToken)
+    private async Task<ITorrent> AddMagnetAsync(
+        ClientEngine engine,
+        CancellationToken cancellationToken,
+        byte[]? infoHash = null)
     {
         await engine.InitializeAsync(cancellationToken);
 
         var magnet = MagnetLink.Parse(
-            $"magnet:?xt=urn:btih:{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(20))}&dn=Synthetic");
+            $"magnet:?xt=urn:btih:{Convert.ToHexString(infoHash ?? System.Security.Cryptography.RandomNumberGenerator.GetBytes(20))}&dn=Synthetic");
 
         var torrent = await engine.AddMagnetAsync(
             magnet,
