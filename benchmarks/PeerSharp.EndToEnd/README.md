@@ -135,6 +135,19 @@ are rewritten after every trial, so a cancelled long matrix keeps all completed 
 - Disk read/write byte counters use Windows process I/O counters. They are zero on platforms where
   the harness does not yet have a native counter provider.
 - Warmups are retained for diagnosis but excluded from summary medians.
+- `--peers N` is an upper bound rather than a count. `connection_tester` fills each connection's peer
+  id with unseeded `rand()`, which is deterministic and per-thread, so some connections present an
+  identical id - the same one, `2923be84...`, on every run. A peer id names a peer rather than a
+  connection, so both engines correctly drop the duplicates: one is lost at `-c 4` and two at `-c 8`.
+  This is the tester's own defect and is left alone, because patching the pinned checkout would cost
+  more credibility than the connection is worth. In dual mode it lands on a seeder or a leecher at
+  random, which is why the reported `received` percentage alternates between roughly 100% and 200%.
+
+- Dual mode's rate includes the time PeerSharp takes to notice that its remaining peers are seeds. The
+  transfer itself finishes in well under a second; the periodic health check that closes redundant
+  connections runs every five seconds, and `connection_tester` measures until its last connection
+  ends. So a dual figure here understates throughput by roughly that interval, and the mode is better
+  read as a completeness check than as a rate.
 
 Very small payloads mostly measure startup, scheduler ticks and process shutdown. Use at least a few
 hundred MiB before comparing throughput, and use multiple measured iterations before comparing CPU or
