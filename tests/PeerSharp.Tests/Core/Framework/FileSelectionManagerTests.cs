@@ -85,6 +85,28 @@ public class FileSelectionManagerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task EqualCountBitfieldReplacement_RecalculatesSelectedPieces()
+    {
+        var pieces = new PiecesProgress(3);
+        _manager.Initialize(null, pieces);
+
+        // With f2 deselected, pieces 0 and 1 are selected while piece 2 is not.
+        await _manager.SetFilePriorityAsync(1, Priority.DoNotDownload);
+
+        pieces.FromBitfield([0b1100_0000]);
+        Assert.True(_manager.IsSelectionFinished);
+        Assert.Equal(2, _manager.ReceivedSelectedPieces);
+
+        // A recheck replaces selected piece 1 with unselected piece 2. The global count is still two,
+        // so a count-only freshness token incorrectly leaves the selection looking complete.
+        pieces.FromBitfield([0b1010_0000]);
+
+        Assert.False(_manager.IsSelectionFinished);
+        Assert.Equal(1, _manager.ReceivedSelectedPieces);
+        Assert.Equal(0.5f, _manager.CalculateSelectionProgress());
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task SetAllFilesPriorityAsync_SetsAllFiles_AndNotifiesObserver()
     {
         var pieces = new PiecesProgress(3);
@@ -184,7 +206,6 @@ public class FileSelectionManagerTests
         }
     }
 }
-
 
 
 
