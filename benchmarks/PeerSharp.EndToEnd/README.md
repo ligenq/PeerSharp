@@ -129,6 +129,20 @@ dotnet run -c Release --project benchmarks/PeerSharp.EndToEnd -- run `
   --warmups 0 --iterations 5 --timeout 240
 ```
 
+Churn is reliable at the gentle end and not in the middle. Measured over a 256 MiB download with
+eight peers, reconnecting every 64, 16 and 4 MiB completes every trial; every 1 MiB failed seven of
+twelve and every 0.25 MiB failed ten of twelve, on both engines alike. The cause is the tester rather
+than either engine - its restart logic collapses, ending the run in a tenth of a second with all
+eight connections dead and a fraction of the payload sent - and the completion gate catches those, so
+they are discarded rather than reported as slow.
+
+What the gate cannot repair is the trials that do survive at those levels: the rate is computed over
+the tester's own lifetime, and a run that restarts connections has a shorter and less meaningful one.
+libtorrent reads as 565 MB/s reconnecting every megabyte against 224 MB/s with no churn at all, which
+is not a real speed-up. Treat churn throughput as sound at 256 blocks and above, and read anything
+below that as a stress test whose rate means little - the CPU figures, which are sampled from the
+engine process rather than derived from the tester's clock, stay usable further down.
+
 `--corrupt` makes the peer send bad pieces sometimes. It only applies where the peer is the one
 uploading - `download` and `dual` - because that is the direction the engine has to verify, and the
 flag is left off elsewhere rather than recorded as a workload the run did not have.
