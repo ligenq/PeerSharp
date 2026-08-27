@@ -1581,6 +1581,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         else if (!_selectionFinishedEventFired && SelectionFinished)
         {
             _selectionFinishedEventFired = true;
+
+            // A partial seed wants nothing too. New connections would learn this from their opening
+            // handshake, but peers already connected while the selection was downloading need the
+            // same refresh as peers present when the whole torrent finishes.
+            FireAndForgetUploadOnlyAnnounce();
+
             FireFinishedEvent(true);
         }
     }

@@ -86,6 +86,47 @@ public class SyntheticPeerRedundancyTests : IDisposable
             $"Serving exactly this peer is what seeding is. Traffic: {connection.Describe()}");
     }
 
+    /// <summary>
+    /// A partial seed re-announces BEP 21 upload_only to peers that connected while it was still
+    /// downloading its selected files.
+    /// </summary>
+    [Fact(Timeout = 120000)]
+    public async Task FinishingTheSelectionRefreshesUploadOnlyOnExistingConnections()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        await using var peer = SyntheticPeer.Start(new SyntheticPeerOptions());
+        await using var engine = CreateEngine();
+        Torrent torrent = await AddPartiallySelectedTorrentAsync(engine, cancellationToken);
+
+        var connection = await DialAsync(engine, torrent, peer, cancellationToken);
+        var opening = await connection.WaitForExtensionHandshakeAsync(
+            TimeSpan.FromSeconds(20), cancellationToken);
+        Assert.Null(SyntheticBencode.TryGetInteger(opening, "upload_only"));
+
+        torrent.Pieces.AddPiece(0);
+        torrent.OnPieceVerified(0);
+
+        Assert.True(torrent.SelectionFinished);
+        Assert.False(torrent.Finished);
+
+        bool refreshed = await SyntheticPeer.WaitForAsync(
+            () => connection.ExtendedFrames.Count(
+                static frame => frame.ExtendedId == 0) >= 2,
+            TimeSpan.FromSeconds(20),
+            cancellationToken);
+
+        Assert.True(
+            refreshed,
+            "The selected files finished, but the peer received no refreshed BEP 10 handshake and " +
+            $"still believes PeerSharp wants data. Traffic: {connection.Describe()}");
+
+        WireFrame refreshFrame = connection.ExtendedFrames.Last(static frame => frame.ExtendedId == 0);
+        var refresh = SyntheticBencode.DecodeDictionary(
+            refreshFrame.ExtendedPayload, "The refreshed BEP 10 handshake");
+        Assert.Equal(1, SyntheticBencode.TryGetInteger(refresh, "upload_only"));
+    }
+
     private ClientEngine CreateEngine()
     {
         var settings = new Settings
@@ -127,6 +168,30 @@ public class SyntheticPeerRedundancyTests : IDisposable
         var torrent = await engine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
         Assert.Equal(torrentFile.PieceCount, await torrent.ForceRecheckAsync());
         await torrent.StartAsync();
+        return torrent;
+    }
+
+    private async Task<Torrent> AddPartiallySelectedTorrentAsync(
+        ClientEngine engine, CancellationToken cancellationToken)
+    {
+        await engine.InitializeAsync(cancellationToken);
+
+        byte[] wanted = new byte[PieceLength];
+        byte[] skipped = new byte[PieceLength];
+        Random.Shared.NextBytes(wanted);
+        Random.Shared.NextBytes(skipped);
+
+        var torrentFile = new ApiTorrentFileBuilder()
+            .WithName("partial-selection")
+            .WithPieceLength(PieceLength)
+            .AddFile("wanted.bin", wanted)
+            .AddFile("skipped.bin", skipped)
+            .Build();
+
+        var torrent = (Torrent)await engine.AddTorrentAsync(
+            torrentFile, new AddTorrentOptions { StartImmediately = false });
+        await torrent.SetFilePriorityAsync(1, Priority.DoNotDownload, cancellationToken);
+        await torrent.StartAsync(cancellationToken);
         return torrent;
     }
 

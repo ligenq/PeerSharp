@@ -10,14 +10,12 @@ internal class FileSelectionManager : IFileSelectionManager
     private IFileSelectionObserver? _observer;
 
     /// <summary>
-    /// <see cref="PiecesProgress.ReceivedCount"/> as it stood when the selected-piece counters were
-    /// last known to agree with it, or -1 before the first count. The counters are maintained
-    /// incrementally, so they are only correct while every change to the piece map passes through
-    /// <see cref="OnPieceVerified"/> - and not every change does. A recheck fills the map directly,
-    /// which left a torrent holding every piece reporting its selection unfinished, and BEP 21
-    /// upload_only is derived from that: a complete seed never advertised itself as one.
+    /// <see cref="PiecesProgress.Generation"/> as it stood when the selected-piece counters were last
+    /// known to agree with the map, or -1 before the first count. A generation is needed rather than
+    /// the received count: a recheck can replace one valid piece with another and leave that count
+    /// unchanged, even though the selected-piece answer changed.
     /// </summary>
-    private int _piecesReceivedAtLastSync = -1;
+    private long _piecesGenerationAtLastSync = -1;
     private PiecesProgress? _pieces; // Set during Initialize
 
     public FileSelectionManager(TorrentFileMetadata metadata)
@@ -169,14 +167,15 @@ internal class FileSelectionManager : IFileSelectionManager
             // increment is safe; any other change means the map moved without us and the counters
             // have to be rebuilt from it. This also absorbs a repeated notification for a piece
             // already counted, which would otherwise silently overshoot the total.
-            if (_pieces.ReceivedCount == _piecesReceivedAtLastSync + 1)
+            long generation = _pieces.Generation;
+            if (generation == _piecesGenerationAtLastSync + 1)
             {
                 if (_metadata.Info.IsPieceNeeded(pieceIndex, _fileSelection))
                 {
                     ReceivedSelectedPieces++;
                 }
 
-                _piecesReceivedAtLastSync = _pieces.ReceivedCount;
+                _piecesGenerationAtLastSync = generation;
             }
             else
             {
@@ -331,6 +330,7 @@ internal class FileSelectionManager : IFileSelectionManager
             return;
         }
 
+        long generationBefore = _pieces.Generation;
         int total = 0;
         int received = 0;
         for (int i = 0; i < _pieces.Count; i++)
@@ -344,9 +344,15 @@ internal class FileSelectionManager : IFileSelectionManager
                 }
             }
         }
+
+        long generationAfter = _pieces.Generation;
         TotalSelectedPieces = total;
         ReceivedSelectedPieces = received;
-        _piecesReceivedAtLastSync = _pieces.ReceivedCount;
+
+        // A concurrent update can make this scan a transient mixture. Do not spin until a large,
+        // active torrent happens to pause; leave it marked stale so the queued piece notification or
+        // the next read recalculates it.
+        _piecesGenerationAtLastSync = generationBefore == generationAfter ? generationAfter : -1;
     }
 
     /// <summary>
@@ -355,15 +361,13 @@ internal class FileSelectionManager : IFileSelectionManager
     /// <remarks>
     /// Must be called inside <c>_selectionLock</c>. This is the backstop for any path that adds
     /// pieces without announcing them - a recheck today, and whatever is written next. Comparing one
-    /// integer keeps the ordinary case free; the full count runs only when they have actually
-    /// diverged.
+    /// generation keeps the ordinary case free and still notices an equal-count bitfield replacement.
     /// </remarks>
     private void EnsureStatsFresh()
     {
-        if (_pieces != null && _pieces.ReceivedCount != _piecesReceivedAtLastSync)
+        if (_pieces != null && _pieces.Generation != _piecesGenerationAtLastSync)
         {
             RecalculateSelectionStats();
         }
     }
 }
-
