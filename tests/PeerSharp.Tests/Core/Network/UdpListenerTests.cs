@@ -115,6 +115,36 @@ public class UdpListenerTests
         await listener.DisposeAsync();
     }
 
+    /// <summary>
+    /// A proxy that cannot carry UDP must stop the socket opening, not be worked around.
+    /// </summary>
+    /// <remarks>
+    /// The listener carries the DHT and uTP, so a direct bind here announces the real address to
+    /// every DHT node while the traffic the proxy was configured for goes through it. libtorrent
+    /// refuses the send in the same situation rather than falling back.
+    /// </remarks>
+    [Fact(Timeout = 30000)]
+    public async Task StartAsync_WithAProxyThatCannotCarryUdp_RefusesToBind()
+    {
+        var settings = new Settings();
+        settings.Proxy.Type = ProxyType.Http;
+        settings.Proxy.Host = "127.0.0.1";
+        settings.Proxy.Port = 8080;
+
+        var factory = new MockUdpSocketFactory();
+        var listener = new UdpListener(0, factory, settings);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => listener.StartAsync(TestContext.Current.CancellationToken));
+
+        // Refusing to start is the whole behaviour: nothing can be sent from a listener that never
+        // opened, and the message has to say why or the failure looks like a bug in the proxy setup.
+        Assert.Contains("cannot carry UDP", error.Message, StringComparison.Ordinal);
+        Assert.Contains("SOCKS5", error.Message, StringComparison.Ordinal);
+
+        await listener.DisposeAsync();
+    }
+
     [Fact(Timeout = 30000)]
     public async Task StopAsync_DoesNotWaitForNonCooperativeReceiveTask()
     {
