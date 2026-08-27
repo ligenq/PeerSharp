@@ -64,6 +64,18 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
     private readonly Dictionary<IPeerCommunication, MetadataPeerRecord> _peerRecords = [];
 
+    /// <summary>Test hook: number of peers this download believes it can still ask.</summary>
+    internal int ActivePeerCountForTesting
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _activePeers.Count;
+            }
+        }
+    }
+
     /// <summary>Test hook: number of in-flight metadata piece requests.</summary>
     internal int PendingRequestCountForTesting
     {

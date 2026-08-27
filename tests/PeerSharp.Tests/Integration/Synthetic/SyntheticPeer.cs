@@ -444,8 +444,18 @@ internal sealed class SyntheticPeer : IAsyncDisposable
         }
     }
 
+    private int _disposed;
+
     public async ValueTask DisposeAsync()
     {
+        // Idempotent: a test that takes the peer away mid-run and then disposes it again in a finally
+        // is the ordinary shape of these tests, and the second call must be a no-op rather than an
+        // ObjectDisposedException from the cancellation source.
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+        {
+            return;
+        }
+
         await _stopping.CancelAsync().ConfigureAwait(false);
         _listener.Stop();
 

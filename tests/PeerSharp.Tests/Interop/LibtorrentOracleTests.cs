@@ -23,8 +23,8 @@ namespace PeerSharp.Tests.Interop;
 /// </para>
 ///
 /// <para>
-/// This needs a built <c>client_test</c>, which the end-to-end harness produces, so these skip rather
-/// than fail when it is absent. They are an oracle run occasionally to confirm the fast tests are
+/// Opt-in, excluded from CI, gated on <c>PEERSHARP_INTEROP=1</c> and on the <c>client_test</c> the
+/// end-to-end harness builds. They are an oracle consulted occasionally to confirm the fast tests are
 /// asking for the right thing, not part of the per-commit suite.
 /// </para>
 /// </summary>
@@ -264,9 +264,23 @@ public class LibtorrentOracleTests : IDisposable
             connections[1], SecondPexId, first.EndPoint, "libtorrent", isReference: true);
     }
 
-    /// <summary>Skips when the harness has not built libtorrent on this machine.</summary>
+    /// <summary>
+    /// Skips unless this is an opt-in interoperability run with libtorrent built.
+    /// </summary>
+    /// <remarks>
+    /// Gated the same way as the rest of this folder rather than on the binary alone. These spawn
+    /// external processes and wait up to a minute for a dial, and on a machine that has run the
+    /// benchmark harness the binary is simply present - so they were joining every full-suite run,
+    /// where they timed out three at a time under load and then passed on their own immediately
+    /// after. An oracle worth consulting occasionally is not worth a flaky suite.
+    /// </remarks>
     private static void SkipWithoutClientTest()
     {
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PEERSHARP_INTEROP")))
+        {
+            Assert.Skip("Set PEERSHARP_INTEROP=1 to run the libtorrent conformance oracle.");
+        }
+
         if (FindClientTest() is null)
         {
             Assert.Skip(
