@@ -19,16 +19,16 @@ jobs:
         include:
           - os: ubuntu-latest
             lane: fast
-            filter: --filter-not-namespace PeerSharp.Tests.Integration --filter-not-namespace PeerSharp.Tests.Concurrency --filter-not-namespace PeerSharp.Tests.Robustness --filter-not-namespace PeerSharp.Tests.Interop
+            filter: --filter-not-namespace PeerSharp.Tests.Integration --filter-not-namespace PeerSharp.Tests.Integration.Synthetic --filter-not-namespace PeerSharp.Tests.Concurrency --filter-not-namespace PeerSharp.Tests.Robustness --filter-not-namespace PeerSharp.Tests.Interop
           - os: windows-latest
             lane: fast
-            filter: --filter-not-namespace PeerSharp.Tests.Integration --filter-not-namespace PeerSharp.Tests.Concurrency --filter-not-namespace PeerSharp.Tests.Robustness --filter-not-namespace PeerSharp.Tests.Interop
+            filter: --filter-not-namespace PeerSharp.Tests.Integration --filter-not-namespace PeerSharp.Tests.Integration.Synthetic --filter-not-namespace PeerSharp.Tests.Concurrency --filter-not-namespace PeerSharp.Tests.Robustness --filter-not-namespace PeerSharp.Tests.Interop
           - os: ubuntu-latest
             lane: integration
-            filter: --filter-namespace PeerSharp.Tests.Integration
+            filter: --filter-namespace PeerSharp.Tests.Integration --filter-namespace PeerSharp.Tests.Integration.Synthetic
           - os: windows-latest
             lane: integration
-            filter: --filter-namespace PeerSharp.Tests.Integration
+            filter: --filter-namespace PeerSharp.Tests.Integration --filter-namespace PeerSharp.Tests.Integration.Synthetic
           - os: ubuntu-latest
             lane: concurrency-robustness
             filter: --filter-namespace PeerSharp.Tests.Concurrency --filter-namespace PeerSharp.Tests.Robustness
