@@ -109,6 +109,34 @@ dotnet run -c Release --project benchmarks/PeerSharp.EndToEnd -- run `
 Use `--help` for every option. `PEERSHARP_LIBTORRENT_ROOT` changes the default sibling checkout,
 or pass `--libtorrent-root` explicitly.
 
+## Adverse conditions
+
+Both of these are properties of the shared peer, so they apply to whichever engine is under test and
+neither gets to choose its own version of the hostility.
+
+`--churn <n>` makes the peer reconnect `n` times a second for the duration of the transfer. Every
+other measurement here runs on connections that are made once and kept, which is the one thing a real
+swarm never does, and connection setup and teardown is the part of the engine this repository has
+found the most defects in:
+
+```powershell
+dotnet run -c Release --project benchmarks/PeerSharp.EndToEnd -- run `
+  --skip-build --modes download --variants v1 `
+  --size-mib 256 --files 4 --peers 8 --churn 2 `
+  --warmups 0 --iterations 5 --timeout 240
+```
+
+`--corrupt` makes the peer send bad pieces sometimes. It only applies where the peer is the one
+uploading - `download` and `dual` - because that is the direction the engine has to verify, and the
+flag is left off elsewhere rather than recorded as a workload the run did not have.
+
+Under corruption the tester's completion percentage stops meaning anything: an engine that bans the
+peer sending bad data legitimately shows a low number, and one that re-requests shows more than a
+hundred. So that check is skipped for those runs and the trial is judged on the engine reporting the
+torrent complete, which is the only question corruption was asked to settle. Note that every peer is
+corrupt here, unlike a real swarm - an engine that bans them all has nowhere left to go, and that is a
+statement about this workload rather than about the engine.
+
 ## Results
 
 Every run writes an independently usable directory under
