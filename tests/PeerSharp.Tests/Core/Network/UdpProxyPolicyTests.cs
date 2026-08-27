@@ -26,7 +26,7 @@ public class UdpProxyPolicyTests
     [Fact]
     public void WithNoProxyUdpIsSentNormally()
     {
-        Assert.Equal(Decision.BindDirectly, UdpProxyPolicy.Decide(new ProxySettings()));
+        Assert.Equal(Decision.BindDirectly, UdpProxyPolicy.Decide(new ProxySettings(), proxyTraffic: true));
     }
 
     [Fact]
@@ -34,7 +34,7 @@ public class UdpProxyPolicyTests
     {
         var proxy = new ProxySettings { Type = ProxyType.Socks5, Host = "127.0.0.1", Port = 1080 };
 
-        Assert.Equal(Decision.TunnelThroughSocks5, UdpProxyPolicy.Decide(proxy));
+        Assert.Equal(Decision.TunnelThroughSocks5, UdpProxyPolicy.Decide(proxy, proxyTraffic: true));
     }
 
     [Fact]
@@ -44,7 +44,7 @@ public class UdpProxyPolicyTests
         // by binding a normal socket.
         var proxy = new ProxySettings { Type = ProxyType.Http, Host = "127.0.0.1", Port = 8080 };
 
-        Assert.Equal(Decision.Refuse, UdpProxyPolicy.Decide(proxy));
+        Assert.Equal(Decision.Refuse, UdpProxyPolicy.Decide(proxy, proxyTraffic: true));
     }
 
     [Fact]
@@ -54,6 +54,14 @@ public class UdpProxyPolicyTests
         // start for a setting that has never meant anything.
         var proxy = new ProxySettings { Type = ProxyType.Http, Host = "" };
 
-        Assert.Equal(Decision.BindDirectly, UdpProxyPolicy.Decide(proxy));
+        Assert.Equal(Decision.BindDirectly, UdpProxyPolicy.Decide(proxy, proxyTraffic: true));
+    }
+
+    [Fact]
+    public void TrafficExcludedFromProxyingMayUseUdpDirectly()
+    {
+        var proxy = new ProxySettings { Type = ProxyType.Http, Host = "127.0.0.1", Port = 8080 };
+
+        Assert.Equal(Decision.BindDirectly, UdpProxyPolicy.Decide(proxy, proxyTraffic: false));
     }
 }

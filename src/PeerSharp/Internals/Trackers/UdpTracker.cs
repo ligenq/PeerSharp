@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
+using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utilities;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -179,10 +180,7 @@ internal class UdpTracker : TrackerBase, IDisposable
         }
 
         var proxy = Torrent.Settings.Proxy;
-        bool proxyIsActive = proxy.Type == ProxyType.Socks5
-            && proxy.ProxyTrackers
-            && !string.IsNullOrEmpty(proxy.Host);
-        if (proxyIsActive)
+        if (UdpProxyPolicy.Decide(proxy, proxy.ProxyTrackers) != UdpProxyPolicy.Decision.BindDirectly)
         {
             return [null];
         }
@@ -534,10 +532,19 @@ internal class UdpTracker : TrackerBase, IDisposable
         {
             var uri = new Uri(Url);
             var proxy = Torrent.Settings.Proxy;
+            var proxyDecision = UdpProxyPolicy.Decide(proxy, proxy.ProxyTrackers);
+
+            if (proxyDecision == UdpProxyPolicy.Decision.Refuse)
+            {
+                throw new UdpTrackerException(
+                    $"A {proxy.Type} proxy is configured for trackers, but it cannot carry UDP tracker traffic. " +
+                    "Use a SOCKS5 proxy, disable tracker proxying, or remove this UDP tracker.",
+                    isTransient: false);
+            }
 
             try
             {
-                if (proxy.Type == ProxyType.Socks5 && proxy.ProxyTrackers && !string.IsNullOrEmpty(proxy.Host))
+                if (proxyDecision == UdpProxyPolicy.Decision.TunnelThroughSocks5)
                 {
                     _logger.LogDebug("Connecting to UDP tracker {Url} via SOCKS5 proxy {ProxyHost}:{ProxyPort}", Url, proxy.Host, proxy.Port);
                     var result = await ProxyHelper.ConnectSocks5UdpAsync(

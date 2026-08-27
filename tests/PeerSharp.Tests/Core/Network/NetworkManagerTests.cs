@@ -200,6 +200,34 @@ public class NetworkManagerTests
         Assert.False(udp.Started);
         Assert.False(lsd.Started);
     }
+
+    [Fact]
+    public async Task StartAsync_WithOnlyLsdEnabled_DoesNotStartSharedUdpListener()
+    {
+        var settings = new Settings();
+        settings.Dht.Enabled = false;
+        settings.Connection.EnableLsd = true;
+        settings.Connection.EnableTcpIn = false;
+        settings.Connection.EnableUtpIn = false;
+        settings.Connection.EnableUtpOut = false;
+
+        var dht = new MockDhtManager();
+        var utp = new MockUtpManager();
+        var port = new MockPortListener();
+        var udp = new MockUdpListener();
+        var lsd = new MockLsdManager();
+        var mapper = new MockPortMapperFactory();
+
+        var services = new NetworkServices(dht, utp, port, udp, lsd, mapper);
+        var manager = new NetworkManager(settings, _ => { }, services);
+
+        await manager.StartAsync();
+
+        Assert.True(lsd.Started);
+        Assert.False(udp.Started);
+        Assert.False(dht.Started);
+        Assert.False(utp.Started);
+    }
 }
 
 
