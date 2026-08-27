@@ -62,7 +62,7 @@ internal static class ReportWriter
             .AppendLine($"PeerSharp: `{manifest.PeerSharpRevision}`  ")
             .AppendLine($"libtorrent: `{manifest.LibtorrentRevision}`  ")
             .AppendLine($"Workload: {manifest.SizeMiB} MiB, {manifest.FileCount} files, {manifest.PeerCount} peers" +
-                (manifest.ChurnPerSecond > 0 ? $", {manifest.ChurnPerSecond} reconnect(s)/s" : "") +
+                (manifest.ChurnBlocks > 0 ? $", reconnecting every {manifest.ChurnBlocks} block(s)" : "") +
                 (manifest.Corrupt ? ", corrupt pieces" : "") + "  ")
             .AppendLine($"Cache policy: {manifest.CachePolicy}")
             .AppendLine()
