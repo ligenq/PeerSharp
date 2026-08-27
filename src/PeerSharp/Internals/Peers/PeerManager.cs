@@ -464,6 +464,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // BEP 16: Clean up superseed state
         _torrent.SuperSeedManager.HandlePeerDisconnected(p);
 
+        // BEP 9: drop the peer from the metadata fetch as well. This had been written and unit
+        // tested but never called from anywhere, so a peer that went away stayed in the active list
+        // forever - which suppressed the recovery that only runs when no peers are left, kept
+        // requests going to a closed connection, and is why the CLI could report no peers while the
+        // metadata download still claimed one.
+        _torrent.MetadataDownloadInternal?.PeerDisconnected(p);
+
         bool wasRegistered = _connectedPeers.TryRemove(p, out _);
         if (wasRegistered)
         {
@@ -2250,6 +2257,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             {
                 Exception exception = t.Exception.GetBaseException();
                 _logger.LogWarning(exception, "Async operation failed: {Context}", context);
+
+                // A dropped peer failing here is ordinary and stays a warning. A null reference is
+                // not, and without this it was indistinguishable from one: the escalation below only
+                // fires on a rate, so a single genuine defect on any of these paths was logged as a
+                // network hiccup and never reached the defect observers.
+                Defect.ReportIfDefect(exception, context, _logger);
+
                 RecordInternalFailure(context, exception);
             }
         }, TaskScheduler.Default);

@@ -945,6 +945,59 @@ public class PeerManagerTests
         await CleanupAsync(ctx);
     }
 
+    /// <summary>
+    /// A defect on a fire-and-forget path is reported as one rather than as a network failure.
+    /// </summary>
+    /// <remarks>
+    /// These paths log a warning and count towards an escalation that only fires on a rate, so a
+    /// single null reference in a block request or an interest update read exactly like a peer
+    /// dropping - which is most of what this log contains, and is why it would never be noticed.
+    /// </remarks>
+    [ReportsDefectsOnPurpose]
+    [Fact(Timeout = 30000)]
+    public async Task FireAndForget_ReportsADefectAsADefect()
+    {
+        var ctx = CreateContext();
+        var observer = new FireAndForgetDefectObserver();
+
+        using (PeerSharp.Internals.Framework.Defect.Observe(observer))
+        {
+            ctx.Manager.FireAndForgetForTesting(
+                Task.FromException(new NullReferenceException("boom")), "defect-path");
+
+            await TorrentTestUtility.WaitUntilAsync(
+                () => observer.Seen.Any(static seen => seen.Context == "defect-path"),
+                because: "a null reference on a fire-and-forget path to be reported as a defect");
+
+            // The ordinary case must stay ordinary: a peer going away is not a bug in this library.
+            ctx.Manager.FireAndForgetForTesting(
+                Task.FromException(new System.IO.IOException("peer went away")), "ordinary-path");
+
+            await TorrentTestUtility.WaitUntilAsync(
+                () => ctx.Manager.InternalFailureCountForTesting >= 2,
+                because: "both failures to have been recorded");
+
+            Assert.DoesNotContain(observer.Seen, static seen => seen.Context == "ordinary-path");
+        }
+
+        await CleanupAsync(ctx);
+    }
+
+    private sealed class FireAndForgetDefectObserver : PeerSharp.Internals.Framework.IDefectObserver
+    {
+        private readonly List<(Exception Exception, string Context)> _seen = [];
+
+        public IReadOnlyList<(Exception Exception, string Context)> Seen
+        {
+            get { lock (_seen) { return [.. _seen]; } }
+        }
+
+        public void DefectCaught(Exception exception, string context)
+        {
+            lock (_seen) { _seen.Add((exception, context)); }
+        }
+    }
+
     [Fact(Timeout = 30000)]
     public async Task FireAndForget_FaultedTasksAreTrackedAndEscalated()
     {
