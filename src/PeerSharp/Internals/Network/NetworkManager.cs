@@ -87,10 +87,9 @@ internal class NetworkManager : INetworkManager
         _stopped = false;
 
         var settings = _settings;
-        bool udpEnabled = settings.Connection.EnableUtpIn
+        bool sharedUdpEnabled = settings.Connection.EnableUtpIn
             || settings.Connection.EnableUtpOut
-            || settings.Dht.Enabled
-            || settings.Connection.EnableLsd;
+            || settings.Dht.Enabled;
 
         // Initialize packet handlers
         if (settings.Connection.EnableUtpIn || settings.Connection.EnableUtpOut)
@@ -110,7 +109,7 @@ internal class NetworkManager : INetworkManager
         }
 
         // Start receiving packets
-        if (udpEnabled)
+        if (sharedUdpEnabled)
         {
             await UdpListener.StartAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -139,7 +138,7 @@ internal class NetworkManager : INetworkManager
             _portMappingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _portMappingCts.CancelAfter(TimeSpan.FromSeconds(10));
 
-            _portMappingTask = StartPortMappingSafeAsync(BoundTcpPort, udpEnabled ? BoundUdpPort : 0, _portMappingCts.Token);
+            _portMappingTask = StartPortMappingSafeAsync(BoundTcpPort, sharedUdpEnabled ? BoundUdpPort : 0, _portMappingCts.Token);
             _ = _portMappingTask.ContinueWith(t =>
             {
                 if (t.IsFaulted)

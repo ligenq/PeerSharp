@@ -146,6 +146,25 @@ public class UdpListenerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task StartAsync_WithHttpProxyExcludedFromPeers_BindsForUtpWhenDhtIsDisabled()
+    {
+        var settings = new Settings();
+        settings.Dht.Enabled = false;
+        settings.Proxy.Type = ProxyType.Http;
+        settings.Proxy.Host = "127.0.0.1";
+        settings.Proxy.Port = 8080;
+        settings.Proxy.ProxyPeers = false;
+
+        var factory = new MockUdpSocketFactory();
+        var listener = new UdpListener(0, factory, settings);
+
+        await listener.StartAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(factory.LastSocket.Client.SafeHandle.IsClosed);
+        await listener.DisposeAsync();
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task StopAsync_DoesNotWaitForNonCooperativeReceiveTask()
     {
         var factory = new MockUdpSocketFactory(ignoreCancellation: true);
@@ -165,7 +184,6 @@ public class UdpListenerTests
         await listener.DisposeAsync();
     }
 }
-
 
 
 

@@ -107,22 +107,23 @@ internal class UdpListener : IUdpListener
             return;
         }
 
-        _running = true;
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
         var proxy = _settings.Proxy;
-        var decision = UdpProxyPolicy.Decide(proxy);
+        bool utpEnabled = _settings.Connection.EnableUtpIn || _settings.Connection.EnableUtpOut;
+        bool proxySharedUdp = _settings.Dht.Enabled || (utpEnabled && proxy.ProxyPeers);
+        var decision = UdpProxyPolicy.Decide(proxy, proxySharedUdp);
 
         if (decision == UdpProxyPolicy.Decision.Refuse)
         {
             // Only SOCKS5 can tunnel UDP. Binding a direct socket here would put the real address in
             // front of every DHT node while the traffic the proxy was configured for goes through it.
-            _running = false;
             throw new InvalidOperationException(
                 $"A {proxy.Type} proxy is configured, which cannot carry UDP. Refusing to send DHT and " +
                 "uTP traffic directly, because that would expose the address the proxy exists to hide. " +
                 "Use a SOCKS5 proxy, or turn off DHT and uTP.");
         }
+
+        _running = true;
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
         if (decision == UdpProxyPolicy.Decision.TunnelThroughSocks5)
         {

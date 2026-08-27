@@ -3,15 +3,13 @@ using PeerSharp.Config;
 namespace PeerSharp.Internals.Network;
 
 /// <summary>
-/// How UDP may leave this machine given the configured proxy.
+/// How UDP may leave this machine given the configured proxy and the traffic-specific proxy setting.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The UDP socket carries the DHT and uTP, so where it sends from is where the swarm and every DHT
-/// node see this client. Only SOCKS5 can tunnel UDP; an HTTP proxy cannot carry it at all. Binding a
-/// direct socket in that case leaves the real address exposed to the DHT while the tracker and peer
-/// traffic the user configured the proxy for goes through it, which is the shape of leak a proxy is
-/// bought to prevent.
+/// Only SOCKS5 can tunnel UDP; an HTTP proxy cannot carry it at all. Binding a direct socket when
+/// the relevant traffic is configured to use that proxy exposes the real address instead. Traffic
+/// for which proxying is explicitly disabled may still use a direct socket.
 /// </para>
 /// <para>
 /// libtorrent refuses the send rather than falling back:
@@ -23,7 +21,7 @@ namespace PeerSharp.Internals.Network;
 /// </remarks>
 internal static class UdpProxyPolicy
 {
-    /// <summary>What the UDP listener should do with the configured proxy.</summary>
+    /// <summary>What a UDP transport should do with the configured proxy.</summary>
     internal enum Decision
     {
         /// <summary>No usable proxy is configured, so bind a socket normally.</summary>
@@ -37,12 +35,18 @@ internal static class UdpProxyPolicy
     }
 
     /// <summary>
-    /// Decides how UDP may be sent.
+    /// Decides how UDP may be sent for one kind of traffic.
     /// </summary>
     /// <param name="proxy">The configured proxy, which may be none.</param>
-    public static Decision Decide(ProxySettings proxy)
+    /// <param name="proxyTraffic">Whether this kind of traffic is configured to use the proxy.</param>
+    public static Decision Decide(ProxySettings proxy, bool proxyTraffic)
     {
         ArgumentNullException.ThrowIfNull(proxy);
+
+        if (!proxyTraffic)
+        {
+            return Decision.BindDirectly;
+        }
 
         // A type without a host is not a usable proxy, and is treated as none everywhere else that
         // asks this question.
