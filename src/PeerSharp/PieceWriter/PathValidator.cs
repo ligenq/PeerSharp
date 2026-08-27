@@ -129,6 +129,17 @@ internal sealed class PathValidator : IPathValidator
             return string.Empty;
         }
 
+        // "." and ".." name a directory rather than a file, so a component that survives cleaning as
+        // either would change where a path points instead of what it is called. Windows already erases
+        // them by trimming trailing dots, and POSIX did not, so the same component came out of this
+        // function differently on the two platforms - the divergence the reserved-name handling above
+        // exists to avoid. ValidatePath rejects a traversal component before reaching here, so nothing
+        // that already downloads is affected; this is about what the next caller gets.
+        if (cleaned is "." or "..")
+        {
+            return string.Empty;
+        }
+
         if (!OperatingSystem.IsWindows())
         {
             return cleaned;
