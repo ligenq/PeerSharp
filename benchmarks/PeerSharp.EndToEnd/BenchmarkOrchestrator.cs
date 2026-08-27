@@ -39,7 +39,7 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             SizeMiB = options.SizeMiB,
             FileCount = options.FileCount,
             PeerCount = options.PeerCount,
-            ChurnPerSecond = options.ChurnPerSecond,
+            ChurnBlocks = options.ChurnBlocks,
             Corrupt = options.Corrupt,
             Iterations = options.Iterations,
             Warmups = options.Warmups,
@@ -245,7 +245,7 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             SizeMiB = options.SizeMiB,
             FileCount = options.FileCount,
             PeerCount = options.PeerCount,
-            ChurnPerSecond = options.ChurnPerSecond,
+            ChurnBlocks = options.ChurnBlocks,
             Corrupt = options.Corrupt,
             DurationSeconds = elapsed.Elapsed.TotalSeconds,
             DownloadMBps = downloadRate,
@@ -619,9 +619,9 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             "-t", torrentPath
         };
 
-        if (options.ChurnPerSecond > 0)
+        if (options.ChurnBlocks > 0)
         {
-            arguments.AddRange(["-r", options.ChurnPerSecond.ToString(CultureInfo.InvariantCulture)]);
+            arguments.AddRange(["-r", options.ChurnBlocks.ToString(CultureInfo.InvariantCulture)]);
         }
 
         // The tester only corrupts what it sends, so this reaches the engine in the modes where the

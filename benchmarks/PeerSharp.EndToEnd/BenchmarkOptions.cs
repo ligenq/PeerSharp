@@ -17,11 +17,17 @@ internal sealed record BenchmarkOptions
     public int PeerCount { get; init; } = 4;
 
     /// <summary>
-    /// Reconnects per second the shared peer performs during the transfer, or zero for stable
-    /// connections. Every trial so far has run on connections that are made once and kept, which is
-    /// the one thing a real swarm never does.
+    /// How many 16 KiB blocks the shared peer transfers before dropping the connection and coming
+    /// back, or zero to leave connections alone. Every other trial runs on connections that are made
+    /// once and kept, which is the one thing a real swarm never does.
     /// </summary>
-    public int ChurnPerSecond { get; init; }
+    /// <remarks>
+    /// Note the direction: this is a period, not a rate, so a larger number churns less. Two is
+    /// severe - a reconnect every thirty-two kilobytes, which measured out at about eleven hundred
+    /// connections a second. connection_tester's own help calls it "reconnects per second", which its
+    /// code does not agree with: it closes on <c>blocks_sent % churn == 0</c>.
+    /// </remarks>
+    public int ChurnBlocks { get; init; }
 
     /// <summary>
     /// Whether the shared peer corrupts some of the pieces it sends. Only the modes where it uploads
@@ -56,7 +62,7 @@ internal sealed record BenchmarkOptions
         int warmups = 1;
         int timeoutSeconds = 180;
         int randomSeed = 1741;
-        int churnPerSecond = 0;
+        int churnBlocks = 0;
         bool corrupt = false;
         bool skipBuild = false;
         bool keepRunData = false;
@@ -71,7 +77,7 @@ internal sealed record BenchmarkOptions
                     help = true;
                     break;
                 case "--churn":
-                    if (!TakeNonNegative(args, ref i, error, arg, out churnPerSecond)) return null;
+                    if (!TakeNonNegative(args, ref i, error, arg, out churnBlocks)) return null;
                     break;
                 case "--corrupt":
                     corrupt = true;
@@ -148,7 +154,7 @@ internal sealed record BenchmarkOptions
             SizeMiB = sizeMiB,
             FileCount = fileCount,
             PeerCount = peerCount,
-            ChurnPerSecond = churnPerSecond,
+            ChurnBlocks = churnBlocks,
             Corrupt = corrupt,
             Iterations = iterations,
             Warmups = warmups,
@@ -185,7 +191,7 @@ internal sealed record BenchmarkOptions
               --size-mib <n>                 payload size; piece size is 1 MiB (default 64)
               --files <n>                    files per torrent (default 4)
               --peers <n>                    simulated peer connections (default 4)
-              --churn <n>                    peer reconnects per second during the transfer (default 0)
+              --churn <n>                    peer reconnects every n blocks; smaller churns more (default 0, off)
               --corrupt                      the peer sends some corrupt pieces (download and dual)
               --warmups <n>                  unreported trials per case (default 1)
               --iterations <n>               measured trials per case (default 3)

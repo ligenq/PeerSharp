@@ -114,10 +114,13 @@ or pass `--libtorrent-root` explicitly.
 Both of these are properties of the shared peer, so they apply to whichever engine is under test and
 neither gets to choose its own version of the hostility.
 
-`--churn <n>` makes the peer reconnect `n` times a second for the duration of the transfer. Every
-other measurement here runs on connections that are made once and kept, which is the one thing a real
-swarm never does, and connection setup and teardown is the part of the engine this repository has
-found the most defects in:
+`--churn <n>` makes the peer drop the connection and come back every `n` blocks of 16 KiB. It is a
+period rather than a rate, so **a smaller number churns more**, and `connection_tester`'s own help
+calls it "reconnects per second" where its code says `blocks_sent % churn == 0`. Two is severe: a
+reconnect every thirty-two kilobytes, measured at roughly eleven hundred connections a second against
+eight configured peers. Every other measurement here runs on connections made once and kept, which is
+the one thing a real swarm never does, and connection setup and teardown is the part of the engine
+this repository has found the most defects in:
 
 ```powershell
 dotnet run -c Release --project benchmarks/PeerSharp.EndToEnd -- run `
