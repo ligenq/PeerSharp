@@ -39,6 +39,8 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             SizeMiB = options.SizeMiB,
             FileCount = options.FileCount,
             PeerCount = options.PeerCount,
+            ChurnPerSecond = options.ChurnPerSecond,
+            Corrupt = options.Corrupt,
             Iterations = options.Iterations,
             Warmups = options.Warmups,
             RandomSeed = options.RandomSeed,
@@ -132,8 +134,8 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             }
             else
             {
-                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
-                if (target.HasExited) throw new InvalidOperationException($"Target exited during startup with code {target.ExitCode}.");
+                await WaitUntilListeningAsync(port, target, TimeSpan.FromSeconds(30), cancellationToken)
+                    .ConfigureAwait(false);
             }
 
             ProcessStartInfo testerStart = CreateTesterStartInfo(benchmarkCase, torrentPath, port);
@@ -168,7 +170,15 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             uploadRate = testerSummary.UploadRate;
             if (error is null && testerExitCode != 0) error = $"connection_tester exited with code {testerExitCode}.";
             if (error is null && !testerSummary.HasRates) error = "connection_tester did not report a transfer rate.";
-            if (error is null && !TesterCompletedTransfer(benchmarkCase.Mode, testerSummary))
+            // Under corruption the tester's byte count stops being a completeness signal. An engine
+            // that bans the peer sending bad data legitimately shows a low percentage, and one that
+            // re-requests shows more than a hundred; neither says whether the torrent finished. The
+            // target-side completion evidence below answers that instead.
+            bool testerBytesAreMeaningful =
+                !(options.Corrupt && CorruptionReachesTheEngine(benchmarkCase.Mode));
+
+            if (error is null && testerBytesAreMeaningful
+                && !TesterCompletedTransfer(benchmarkCase.Mode, testerSummary))
             {
                 error = benchmarkCase.Mode switch
                 {
@@ -235,6 +245,8 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             SizeMiB = options.SizeMiB,
             FileCount = options.FileCount,
             PeerCount = options.PeerCount,
+            ChurnPerSecond = options.ChurnPerSecond,
+            Corrupt = options.Corrupt,
             DurationSeconds = elapsed.Elapsed.TotalSeconds,
             DownloadMBps = downloadRate,
             UploadMBps = uploadRate,
@@ -598,13 +610,76 @@ internal sealed partial class BenchmarkOrchestrator(BenchmarkOptions options, To
             "upload" => "download",
             _ => "dual"
         };
+        var arguments = new List<string>
+        {
+            action,
+            "-c", options.PeerCount.ToString(CultureInfo.InvariantCulture),
+            "-d", "127.0.0.1",
+            "-p", port.ToString(CultureInfo.InvariantCulture),
+            "-t", torrentPath
+        };
+
+        if (options.ChurnPerSecond > 0)
+        {
+            arguments.AddRange(["-r", options.ChurnPerSecond.ToString(CultureInfo.InvariantCulture)]);
+        }
+
+        // The tester only corrupts what it sends, so this reaches the engine in the modes where the
+        // tester is the one uploading. Asking for it in the other direction would be recorded as a
+        // workload the run did not actually have.
+        if (options.Corrupt && CorruptionReachesTheEngine(benchmarkCase.Mode))
+        {
+            arguments.Add("-C");
+        }
+
         return ProcessUtility.CreateStartInfo(
             tools.ConnectionTester,
-            [action, "-c", options.PeerCount.ToString(CultureInfo.InvariantCulture), "-d", "127.0.0.1", "-p",
-                port.ToString(CultureInfo.InvariantCulture), "-t", torrentPath],
+            arguments,
             Path.GetDirectoryName(torrentPath)!,
             redirectInput: false);
     }
+
+    /// <summary>
+    /// Waits until the target is actually accepting connections on its port.
+    /// </summary>
+    /// <remarks>
+    /// client_test prints no readiness line, so this used to be a flat two second sleep. That is a
+    /// guess, and under load it was wrong often enough to matter: the tester would arrive first and
+    /// every connection came back "actively refused", failing the trial with nothing transferred.
+    /// Because only libtorrent lacks the readiness marker, the losses fell entirely on the one engine
+    /// - the same shape of unfairness as judging it on an exit code it never chose. Connecting to the
+    /// port answers the question instead of estimating it.
+    /// </remarks>
+    private static async Task WaitUntilListeningAsync(
+        int port, CapturedProcess target, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = System.Diagnostics.Stopwatch.StartNew();
+        while (deadline.Elapsed < timeout)
+        {
+            if (target.HasExited)
+            {
+                throw new InvalidOperationException($"Target exited during startup with code {target.ExitCode}.");
+            }
+
+            try
+            {
+                using var probe = new System.Net.Sockets.TcpClient();
+                await probe.ConnectAsync(System.Net.IPAddress.Loopback, port, cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (System.Net.Sockets.SocketException)
+            {
+                await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Target was not accepting connections on port {port} within {timeout.TotalSeconds:0}s.");
+    }
+
+    /// <summary>Whether corrupt pieces would actually be sent to the engine in this mode.</summary>
+    internal static bool CorruptionReachesTheEngine(string mode) => mode is "download" or "dual";
 
     private List<BenchmarkCase> CreateCases()
     {

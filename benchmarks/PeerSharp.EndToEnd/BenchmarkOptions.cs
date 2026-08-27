@@ -15,6 +15,19 @@ internal sealed record BenchmarkOptions
     public int SizeMiB { get; init; } = 64;
     public int FileCount { get; init; } = 4;
     public int PeerCount { get; init; } = 4;
+
+    /// <summary>
+    /// Reconnects per second the shared peer performs during the transfer, or zero for stable
+    /// connections. Every trial so far has run on connections that are made once and kept, which is
+    /// the one thing a real swarm never does.
+    /// </summary>
+    public int ChurnPerSecond { get; init; }
+
+    /// <summary>
+    /// Whether the shared peer corrupts some of the pieces it sends. Only the modes where it uploads
+    /// - download and dual - are affected, since that is the direction the engine has to verify.
+    /// </summary>
+    public bool Corrupt { get; init; }
     public int Iterations { get; init; } = 3;
     public int Warmups { get; init; } = 1;
     public int TimeoutSeconds { get; init; } = 180;
@@ -43,6 +56,8 @@ internal sealed record BenchmarkOptions
         int warmups = 1;
         int timeoutSeconds = 180;
         int randomSeed = 1741;
+        int churnPerSecond = 0;
+        bool corrupt = false;
         bool skipBuild = false;
         bool keepRunData = false;
         bool help = false;
@@ -54,6 +69,12 @@ internal sealed record BenchmarkOptions
             {
                 case "-h" or "--help":
                     help = true;
+                    break;
+                case "--churn":
+                    if (!TakeNonNegative(args, ref i, error, arg, out churnPerSecond)) return null;
+                    break;
+                case "--corrupt":
+                    corrupt = true;
                     break;
                 case "--skip-build":
                     skipBuild = true;
@@ -127,6 +148,8 @@ internal sealed record BenchmarkOptions
             SizeMiB = sizeMiB,
             FileCount = fileCount,
             PeerCount = peerCount,
+            ChurnPerSecond = churnPerSecond,
+            Corrupt = corrupt,
             Iterations = iterations,
             Warmups = warmups,
             TimeoutSeconds = timeoutSeconds,
@@ -162,6 +185,8 @@ internal sealed record BenchmarkOptions
               --size-mib <n>                 payload size; piece size is 1 MiB (default 64)
               --files <n>                    files per torrent (default 4)
               --peers <n>                    simulated peer connections (default 4)
+              --churn <n>                    peer reconnects per second during the transfer (default 0)
+              --corrupt                      the peer sends some corrupt pieces (download and dual)
               --warmups <n>                  unreported trials per case (default 1)
               --iterations <n>               measured trials per case (default 3)
               --timeout <seconds>            per-transfer timeout (default 180)

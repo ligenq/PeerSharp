@@ -61,7 +61,9 @@ internal static class ReportWriter
             .AppendLine($"Started: `{manifest.StartedAt:O}`  ")
             .AppendLine($"PeerSharp: `{manifest.PeerSharpRevision}`  ")
             .AppendLine($"libtorrent: `{manifest.LibtorrentRevision}`  ")
-            .AppendLine($"Workload: {manifest.SizeMiB} MiB, {manifest.FileCount} files, {manifest.PeerCount} peers  ")
+            .AppendLine($"Workload: {manifest.SizeMiB} MiB, {manifest.FileCount} files, {manifest.PeerCount} peers" +
+                (manifest.ChurnPerSecond > 0 ? $", {manifest.ChurnPerSecond} reconnect(s)/s" : "") +
+                (manifest.Corrupt ? ", corrupt pieces" : "") + "  ")
             .AppendLine($"Cache policy: {manifest.CachePolicy}")
             .AppendLine()
             .AppendLine("Rates come from the common libtorrent `connection_tester`, not from either engine. CPU and memory cover only the engine-under-test process during the tester's transfer window.")

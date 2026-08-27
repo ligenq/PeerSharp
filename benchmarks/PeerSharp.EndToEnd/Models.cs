@@ -34,6 +34,8 @@ internal sealed record BenchmarkResult
     public required int SizeMiB { get; init; }
     public required int FileCount { get; init; }
     public required int PeerCount { get; init; }
+    public int ChurnPerSecond { get; init; }
+    public bool Corrupt { get; init; }
     public required double DurationSeconds { get; init; }
 
     /// <summary>
@@ -71,6 +73,8 @@ internal sealed record RunManifest
     public required int SizeMiB { get; init; }
     public required int FileCount { get; init; }
     public required int PeerCount { get; init; }
+    public int ChurnPerSecond { get; init; }
+    public bool Corrupt { get; init; }
     public required int Iterations { get; init; }
     public required int Warmups { get; init; }
     public required int RandomSeed { get; init; }
