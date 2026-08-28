@@ -132,6 +132,41 @@ public class UtpStreamStateTests
     }
 
     [Fact]
+    public async Task ConnectDeadlineCannotCloseAConnectionThatAlreadySucceeded()
+    {
+        // Repeated, because the interleaving this guards is not reachable on demand: the successful
+        // result queues its continuation, and whether the deadline callback runs before that
+        // continuation disposes the registration is down to the scheduler. Once was not enough - the
+        // single-shot version of this test passed against the unfixed stream every time, and three
+        // hundred attempts fails it reliably.
+        for (int attempt = 0; attempt < 300; attempt++)
+        {
+            var (stream, _, time) = CreateStream();
+            var connectTask = stream.ConnectAsync(TimeSpan.FromSeconds(1));
+
+            ushort ackNr = (ushort)(stream.SeqNr - 1);
+            var stateHeader = MakeHeader(MessageType.ST_STATE, seqNr: 10, ackNr: ackNr);
+            stream.ProcessPacketWithSack(stateHeader, [], 0, null, null, RemoteEndPoint);
+            time.Advance(TimeSpan.FromSeconds(1));
+
+            Assert.True(await connectTask);
+            Assert.Equal(UtpState.Connected, stream.State);
+        }
+    }
+
+    [Fact]
+    public async Task ConnectDeadlineReportsFalseAndClosesAnUnansweredStream()
+    {
+        var (stream, _, time) = CreateStream();
+        var connectTask = stream.ConnectAsync(TimeSpan.FromSeconds(1));
+
+        time.Advance(TimeSpan.FromSeconds(1));
+
+        Assert.False(await connectTask);
+        Assert.Equal(UtpState.Closed, stream.State);
+    }
+
+    [Fact]
     public async Task ProcessPacketWithSack_ResetInSynSend_ClosesConnection()
     {
         var (stream, _, _) = CreateStream();
@@ -229,8 +264,10 @@ public class UtpStreamStateTests
 
         Assert.Equal(UtpState.Closed, stream.State);
 
-        var ex = await Assert.ThrowsAsync<TimeoutException>(() => connectTask);
-        Assert.NotNull(ex);
+        // A peer that never answers the SYN is reported rather than thrown: it is the ordinary
+        // outcome of dialling a stranger, and throwing it cost four first-chance exceptions per
+        // dead peer on a path that runs for most addresses a swarm hands out.
+        Assert.False(await connectTask);
     }
 
     [Fact]

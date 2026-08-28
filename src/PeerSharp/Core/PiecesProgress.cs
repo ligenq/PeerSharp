@@ -7,17 +7,30 @@ namespace PeerSharp.Core;
 internal sealed class PiecesProgress
 {
     private readonly int[] _pieces;
+    private readonly Func<int, long>? _pieceWeight;
+    private readonly long _totalWeight;
     private int _hasAll;
     private int _receivedCount;
+    private long _receivedWeight;
+    private long _generation;
     // 0 = false, 1 = true (atomic)
 
-    public PiecesProgress(int piecesCount)
+    public PiecesProgress(int piecesCount, Func<int, long>? pieceWeight = null, long totalWeight = 0)
     {
         Count = piecesCount;
         _pieces = new int[(piecesCount + 31) / 32];
+        ArgumentOutOfRangeException.ThrowIfNegative(totalWeight);
+        _pieceWeight = pieceWeight;
+        _totalWeight = totalWeight;
     }
 
     public int Count { get; }
+
+    /// <summary>
+    /// Changes whenever the piece map is written. Unlike <see cref="ReceivedCount"/>, this also
+    /// distinguishes two bitfields containing the same number of different pieces.
+    /// </summary>
+    public long Generation => Interlocked.Read(ref _generation);
 
     public bool IsFull => Interlocked.CompareExchange(ref _hasAll, 0, 0) == 1 || ReceivedCount == Count;
 
@@ -34,6 +47,14 @@ internal sealed class PiecesProgress
             return Interlocked.CompareExchange(ref _receivedCount, 0, 0);
         }
     }
+
+    /// <summary>
+    /// Sum of the configured weights for received pieces. Torrents use content-byte weights so
+    /// padding never appears in their completed-byte total.
+    /// </summary>
+    public long ReceivedWeight => Interlocked.CompareExchange(ref _hasAll, 0, 0) == 1
+        ? _totalWeight
+        : Interlocked.Read(ref _receivedWeight);
 
     public void AddPiece(int index)
     {
@@ -62,11 +83,18 @@ internal sealed class PiecesProgress
         }
         while (Interlocked.CompareExchange(ref _pieces[arrayIdx], newVal, oldVal) != oldVal);
 
+        if (_pieceWeight != null)
+        {
+            Interlocked.Add(ref _receivedWeight, _pieceWeight(index));
+        }
+
         int newReceived = Interlocked.Increment(ref _receivedCount);
         if (newReceived == Count)
         {
             Interlocked.Exchange(ref _hasAll, 1);
         }
+
+        Interlocked.Increment(ref _generation);
     }
 
     /// <summary>
@@ -95,6 +123,7 @@ internal sealed class PiecesProgress
             }
 
             Interlocked.Exchange(ref _receivedCount, Count);
+            Interlocked.Exchange(ref _receivedWeight, _totalWeight);
         }
 
         int arrayIdx = index >> 5;
@@ -113,7 +142,13 @@ internal sealed class PiecesProgress
         }
         while (Interlocked.CompareExchange(ref _pieces[arrayIdx], newVal, oldVal) != oldVal);
 
+        if (_pieceWeight != null)
+        {
+            Interlocked.Add(ref _receivedWeight, -_pieceWeight(index));
+        }
+
         Interlocked.Decrement(ref _receivedCount);
+        Interlocked.Increment(ref _generation);
     }
 
     /// <summary>
@@ -154,6 +189,7 @@ internal sealed class PiecesProgress
         }
 
         int totalSet = 0;
+        long totalWeight = 0;
         Interlocked.Exchange(ref _hasAll, 0);
         Array.Clear(_pieces, 0, _pieces.Length);
 
@@ -176,6 +212,7 @@ internal sealed class PiecesProgress
                         {
                             val |= 1 << ((b * 8) + bit);
                             totalSet++;
+                            totalWeight += _pieceWeight?.Invoke(pieceIdx) ?? 0;
                         }
                     }
                 }
@@ -212,15 +249,19 @@ internal sealed class PiecesProgress
                     while (Interlocked.CompareExchange(ref _pieces[arrayIdx], newVal, oldVal) != oldVal);
 
                     totalSet++;
+                    totalWeight += _pieceWeight?.Invoke(pieceIdx) ?? 0;
                 }
             }
         }
 
         Interlocked.Exchange(ref _receivedCount, totalSet);
+        Interlocked.Exchange(ref _receivedWeight, totalWeight);
         if (totalSet == Count)
         {
             Interlocked.Exchange(ref _hasAll, 1);
         }
+
+        Interlocked.Increment(ref _generation);
     }
 
     public bool HasPiece(int index)
@@ -247,13 +288,17 @@ internal sealed class PiecesProgress
     {
         Interlocked.Exchange(ref _hasAll, 1);
         Interlocked.Exchange(ref _receivedCount, Count);
+        Interlocked.Exchange(ref _receivedWeight, _totalWeight);
+        Interlocked.Increment(ref _generation);
     }
 
     public void SetHaveNone()
     {
         Interlocked.Exchange(ref _hasAll, 0);
         Interlocked.Exchange(ref _receivedCount, 0);
+        Interlocked.Exchange(ref _receivedWeight, 0);
         Array.Clear(_pieces, 0, _pieces.Length);
+        Interlocked.Increment(ref _generation);
     }
 
     /// <summary>

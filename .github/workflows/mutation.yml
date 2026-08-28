@@ -1,0 +1,72 @@
+﻿# Mutation testing, weekly rather than per-PR.
+#
+# Coverage says a line ran. Mutation testing asks the question that actually matters: if that line
+# behaved differently, would a test notice? Both times it was applied by hand to this repository it
+# overturned a conclusion - once where 100% line coverage was hiding an untested branch, and once
+# where a concurrency test passed against an implementation with its synchronisation deleted.
+#
+# Scoped deliberately, in stryker-config.json, to small pure-logic units: the DHT rate limiter, the
+# lifetime counters and the connection calculators. Deterministic, quick to test, easy to get subtly
+# wrong. The transfer and networking paths are excluded on purpose - their tests are timing-dependent,
+# and a mutant that merely makes one flaky is reported as survived, which is noise rather than signal.
+#
+# The scope is also bounded by a tool limitation rather than by judgement alone. Stryker's per-test
+# coverage attribution does not work here - it reported 215 uncovered mutants in PiecePicker, which has
+# 31 passing tests - so stryker-config.json sets "coverage-analysis": "off" and every mutant runs the
+# whole 46-second lane. That is correct but slow, which is why files like PiecePicker, PathValidator
+# and DhtSecurity are left out for now. See INVESTIGATION_NOTES.md; a score produced with the default
+# coverage mode is fiction and should be discarded rather than investigated.
+#
+# Weekly and non-blocking: a mutation score is a number to read and act on, not a gate. Stryker also
+# re-runs the test suite once per surviving mutant, so this is minutes-to-hours of work that has no
+# business sitting in front of a pull request.
+name: Mutation
+
+on:
+  schedule:
+    # Sunday 03:00 UTC, clear of the nightly interop run.
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+
+jobs:
+  mutation:
+    name: Mutation score
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Stryker
+        run: dotnet tool install --global dotnet-stryker
+
+      # Nullable analysis is escalated to errors in this repository, which makes almost half of
+      # Stryker's mutants uncompilable and therefore untested. StrykerRun reaches MSBuild as a global
+      # property and relaxes exactly that, for this job only - see the comment in PeerSharp.csproj.
+      # --test-runner mtp is required, not a preference. xunit.v3 4.0 runs on Microsoft.Testing
+      # Platform and the .NET 10 SDK dropped the VSTest bridge, so Stryker's default VSTest runner
+      # discovers the 2505 tests and then hangs forever trying to execute them. The MTP runner is
+      # marked preview by Stryker; if a run reports "No test result reported", check first whether the
+      # initial test run exceeded roughly three minutes - that is the failure mode, and it is why the
+      # integration lane is compiled out of the assembly for mutation runs.
+      - name: Run mutation testing
+        env:
+          StrykerRun: 'true'
+        run: dotnet stryker --test-runner mtp
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: StrykerOutput/**/reports/*.html
+          if-no-files-found: warn

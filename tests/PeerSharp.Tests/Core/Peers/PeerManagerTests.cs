@@ -535,6 +535,44 @@ public class PeerManagerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task TryGetLowestPriorityPeer_RecalculatesPrioritiesForTheCurrentAddress()
+    {
+        var ctx = CreateContext();
+        var endpoints = new[]
+        {
+            new IPEndPoint(IPAddress.Parse("198.51.100.4"), 6881),
+            new IPEndPoint(IPAddress.Parse("203.0.113.9"), 51413),
+            new IPEndPoint(IPAddress.Parse("192.0.2.44"), 42000)
+        };
+        var peers = endpoints.Select(endpoint => new PeerCommunication(
+            ctx.Torrent, new TestPeerListener(), TimeProvider.System)
+        {
+            RemoteEndPoint = endpoint,
+            // Deliberately stale and identical: the selection must not use the value cached when
+            // the peer connected, because our public address can be learned later.
+            Priority = uint.MaxValue
+        }).ToArray();
+
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+        foreach (var peer in peers)
+        {
+            connected.TryAdd(peer, 0);
+        }
+
+        var local = new IPEndPoint(IPAddress.Any, ctx.Torrent.Settings.Connection.TcpPort);
+        var expected = peers.MinBy(peer => PeerPriority.Calculate(local, peer.RemoteEndPoint!));
+
+        var lowest = (PeerCommunication?)InvokePrivate(ctx.Manager, "TryGetLowestPriorityPeer");
+
+        Assert.Same(expected, lowest);
+        Assert.All(peers, peer => Assert.Equal(
+            PeerPriority.Calculate(local, peer.RemoteEndPoint!),
+            peer.Priority));
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task CleanupPendingConnections_RemovesExpiredEntries()
     {
         var ctx = CreateContext();
@@ -905,6 +943,59 @@ public class PeerManagerTests
         Assert.Contains("3 internal failures", error.Message);
 
         await CleanupAsync(ctx);
+    }
+
+    /// <summary>
+    /// A defect on a fire-and-forget path is reported as one rather than as a network failure.
+    /// </summary>
+    /// <remarks>
+    /// These paths log a warning and count towards an escalation that only fires on a rate, so a
+    /// single null reference in a block request or an interest update read exactly like a peer
+    /// dropping - which is most of what this log contains, and is why it would never be noticed.
+    /// </remarks>
+    [ReportsDefectsOnPurpose]
+    [Fact(Timeout = 30000)]
+    public async Task FireAndForget_ReportsADefectAsADefect()
+    {
+        var ctx = CreateContext();
+        var observer = new FireAndForgetDefectObserver();
+
+        using (PeerSharp.Internals.Framework.Defect.Observe(observer))
+        {
+            ctx.Manager.FireAndForgetForTesting(
+                Task.FromException(new NullReferenceException("boom")), "defect-path");
+
+            await TorrentTestUtility.WaitUntilAsync(
+                () => observer.Seen.Any(static seen => seen.Context == "defect-path"),
+                because: "a null reference on a fire-and-forget path to be reported as a defect");
+
+            // The ordinary case must stay ordinary: a peer going away is not a bug in this library.
+            ctx.Manager.FireAndForgetForTesting(
+                Task.FromException(new System.IO.IOException("peer went away")), "ordinary-path");
+
+            await TorrentTestUtility.WaitUntilAsync(
+                () => ctx.Manager.InternalFailureCountForTesting >= 2,
+                because: "both failures to have been recorded");
+
+            Assert.DoesNotContain(observer.Seen, static seen => seen.Context == "ordinary-path");
+        }
+
+        await CleanupAsync(ctx);
+    }
+
+    private sealed class FireAndForgetDefectObserver : PeerSharp.Internals.Framework.IDefectObserver
+    {
+        private readonly List<(Exception Exception, string Context)> _seen = [];
+
+        public IReadOnlyList<(Exception Exception, string Context)> Seen
+        {
+            get { lock (_seen) { return [.. _seen]; } }
+        }
+
+        public void DefectCaught(Exception exception, string context)
+        {
+            lock (_seen) { _seen.Add((exception, context)); }
+        }
     }
 
     [Fact(Timeout = 30000)]
@@ -1562,8 +1653,64 @@ public class PeerManagerTests
         await CleanupAsync(ctx);
     }
 
+    [Fact]
+    public async Task ConnectTo_ReportsAPeerRefusedForRepeatedBadData()
+    {
+        var alerts = new RecordingAlertsManager();
+        var ctx = CreateContext(alerts: alerts);
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.91"), 51413);
+        var failures = GetPrivateField<ConcurrentDictionary<IPAddress, int>>(
+            ctx.Manager,
+            "_hashFailuresByAddress");
+        failures[endpoint.Address] = 3;
+
+        ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+
+        var alert = Assert.Single(alerts.Alerts.OfType<PeerBlockedAlert>());
+        Assert.Equal(endpoint, alert.Endpoint);
+        Assert.Equal(PeerBlockReason.BadData, alert.Reason);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact]
+    public async Task AddConnectedPeer_ReportsAPeerRefusedForRepeatedBadData()
+    {
+        var alerts = new RecordingAlertsManager();
+        var ctx = CreateContext(alerts: alerts);
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.92"), 51413);
+        var failures = GetPrivateField<ConcurrentDictionary<IPAddress, int>>(
+            ctx.Manager,
+            "_hashFailuresByAddress");
+        failures[endpoint.Address] = 3;
+        var stream = new MemoryStream();
+
+        await ctx.Manager.AddConnectedPeerAsync(stream, initiator: true, endpoint);
+
+        var alert = Assert.Single(alerts.Alerts.OfType<PeerBlockedAlert>());
+        Assert.Equal(endpoint, alert.Endpoint);
+        Assert.Equal(PeerBlockReason.BadData, alert.Reason);
+        Assert.False(stream.CanRead);
+
+        await CleanupAsync(ctx);
+    }
+
     private sealed class RecordingAlertsManager : IAlertsManager
     {
+        public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
+
+        public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason)
+        {
+            Alerts.Add(new PeerBlockedAlert
+            {
+                Id = AlertId.PeerBlocked,
+                Torrent = torrent,
+                Endpoint = endpoint,
+                Reason = reason
+            });
+        }
+
+        public void ListenPortChangedAlert(int requestedPort, int actualPort, ListenTransport transport) { }
         public List<Alert> Alerts { get; } = [];
         public void PostAlert(Alert alert) => Alerts.Add(alert);
         public void MetadataAlert(AlertId id, ITorrent torrent) { }

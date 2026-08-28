@@ -262,18 +262,16 @@ internal static class ProtocolConstants
 
     /// <summary>
     /// Maximum pipeline depth for request pipelining (250 blocks = 4MB in-flight).
-    /// Reduced from 2000 to prevent:
-    /// - Massive request backlogs causing stalls when peers choke
-    /// - Long recovery times after peer state changes
-    /// - Memory pressure from thousands of pending requests
-    /// 250 blocks is sufficient for 1 Gbps with 30ms RTT.
+    /// Matches libtorrent's <c>max_out_request_queue</c>. The cost of a deep queue is one small
+    /// record per outstanding block on this side - the data is buffered by the sender - against the
+    /// risk of having asked for more than a peer serves before choking us.
     /// </summary>
-    public const int MaxPipelineDepth = 128;
+    public const int MaxPipelineDepth = PeerSharp.Internals.Peers.PipelineDepthCalculator.MaxPipeline;
 
     /// <summary>
-    /// Minimum pipeline depth for request pipelining (8 blocks = 128KB in-flight).
+    /// Minimum pipeline depth, matching libtorrent's <c>min_request_queue</c>.
     /// </summary>
-    public const int MinPipelineDepth = 8;
+    public const int MinPipelineDepth = PeerSharp.Internals.Peers.PipelineDepthCalculator.MinPipeline;
 
     /// <summary>
     /// Soft timeout before duplicating a request to another peer (5 seconds).

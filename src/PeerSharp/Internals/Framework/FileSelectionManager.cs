@@ -8,6 +8,14 @@ internal class FileSelectionManager : IFileSelectionManager
     private List<FileSelection> _fileSelection = [];
     private IReadOnlyList<FileSelection>? _fileSelectionSnapshot;
     private IFileSelectionObserver? _observer;
+
+    /// <summary>
+    /// <see cref="PiecesProgress.Generation"/> as it stood when the selected-piece counters were last
+    /// known to agree with the map, or -1 before the first count. A generation is needed rather than
+    /// the received count: a recheck can replace one valid piece with another and leave that count
+    /// unchanged, even though the selected-piece answer changed.
+    /// </summary>
+    private long _piecesGenerationAtLastSync = -1;
     private PiecesProgress? _pieces; // Set during Initialize
 
     public FileSelectionManager(TorrentFileMetadata metadata)
@@ -30,6 +38,8 @@ internal class FileSelectionManager : IFileSelectionManager
                 {
                     return _pieces.ReceivedCount == _pieces.Count;
                 }
+
+                EnsureStatsFresh();
                 return ReceivedSelectedPieces >= TotalSelectedPieces;
             }
         }
@@ -48,6 +58,7 @@ internal class FileSelectionManager : IFileSelectionManager
 
         lock (_selectionLock)
         {
+            EnsureStatsFresh();
             ulong bytes = (ulong)ReceivedSelectedPieces * _metadata.Info.PieceSize;
 
             // Adjust for last piece if it's smaller and selected/received
@@ -80,6 +91,7 @@ internal class FileSelectionManager : IFileSelectionManager
 
         lock (_selectionLock)
         {
+            EnsureStatsFresh();
             if (_fileSelection.Count == 0 || TotalSelectedPieces == 0)
             {
                 return 1.0f;
@@ -151,9 +163,23 @@ internal class FileSelectionManager : IFileSelectionManager
 
         lock (_selectionLock)
         {
-            if (_metadata.Info.IsPieceNeeded(pieceIndex, _fileSelection))
+            // The piece map is the authority. One new piece is what this call is reporting, so the
+            // increment is safe; any other change means the map moved without us and the counters
+            // have to be rebuilt from it. This also absorbs a repeated notification for a piece
+            // already counted, which would otherwise silently overshoot the total.
+            long generation = _pieces.Generation;
+            if (generation == _piecesGenerationAtLastSync + 1)
             {
-                ReceivedSelectedPieces++;
+                if (_metadata.Info.IsPieceNeeded(pieceIndex, _fileSelection))
+                {
+                    ReceivedSelectedPieces++;
+                }
+
+                _piecesGenerationAtLastSync = generation;
+            }
+            else
+            {
+                RecalculateSelectionStats();
             }
         }
     }
@@ -304,6 +330,7 @@ internal class FileSelectionManager : IFileSelectionManager
             return;
         }
 
+        long generationBefore = _pieces.Generation;
         int total = 0;
         int received = 0;
         for (int i = 0; i < _pieces.Count; i++)
@@ -317,8 +344,30 @@ internal class FileSelectionManager : IFileSelectionManager
                 }
             }
         }
+
+        long generationAfter = _pieces.Generation;
         TotalSelectedPieces = total;
         ReceivedSelectedPieces = received;
+
+        // A concurrent update can make this scan a transient mixture. Do not spin until a large,
+        // active torrent happens to pause; leave it marked stale so the queued piece notification or
+        // the next read recalculates it.
+        _piecesGenerationAtLastSync = generationBefore == generationAfter ? generationAfter : -1;
+    }
+
+    /// <summary>
+    /// Rebuilds the counters when the piece map has moved behind their back.
+    /// </summary>
+    /// <remarks>
+    /// Must be called inside <c>_selectionLock</c>. This is the backstop for any path that adds
+    /// pieces without announcing them - a recheck today, and whatever is written next. Comparing one
+    /// generation keeps the ordinary case free and still notices an equal-count bitfield replacement.
+    /// </remarks>
+    private void EnsureStatsFresh()
+    {
+        if (_pieces != null && _pieces.Generation != _piecesGenerationAtLastSync)
+        {
+            RecalculateSelectionStats();
+        }
     }
 }
-

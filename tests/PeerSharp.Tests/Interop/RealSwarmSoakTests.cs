@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Clients;
 using System.Diagnostics;
@@ -312,7 +312,10 @@ public class RealSwarmSoakTests
         }
 
         var duration = DurationFromEnvironment("PEERSHARP_SOAK_SEED_SECONDS", TimeSpan.FromMinutes(15));
-        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(10));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(duration + TimeSpan.FromMinutes(10));
 
         var source = await ResolveTorrentSourceAsync(cts.Token);
         if (source is not TorrentFile torrentFile)
@@ -455,7 +458,10 @@ public class RealSwarmSoakTests
         RequireSoakEnabled();
 
         var duration = DurationFromEnvironment("PEERSHARP_SOAK_SECONDS", TimeSpan.FromMinutes(10));
-        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(5));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(duration + TimeSpan.FromMinutes(5));
 
         var sources = await ResolveTorrentSourcesAsync(cts.Token);
         if (sources.Count < 2)
@@ -541,7 +547,10 @@ public class RealSwarmSoakTests
         RequireSoakEnabled();
 
         var duration = DurationFromEnvironment("PEERSHARP_SOAK_SECONDS", TimeSpan.FromMinutes(10));
-        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(5));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(duration + TimeSpan.FromMinutes(5));
 
         var source = await ResolveTorrentSourceAsync(cts.Token);
         var (engine, downloadPath) = CreateEngine();
@@ -591,7 +600,10 @@ public class RealSwarmSoakTests
         RequireSoakEnabled();
 
         var duration = DurationFromEnvironment("PEERSHARP_SOAK_SECONDS", TimeSpan.FromMinutes(5));
-        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(5));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(duration + TimeSpan.FromMinutes(5));
 
         var source = await ResolveTorrentSourceAsync(cts.Token);
         var (engine, downloadPath) = CreateEngine();
@@ -663,7 +675,10 @@ public class RealSwarmSoakTests
         RequireSoakEnabled();
 
         var duration = DurationFromEnvironment("PEERSHARP_SOAK_SECONDS", TimeSpan.FromMinutes(5));
-        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(5));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(duration + TimeSpan.FromMinutes(5));
 
         var source = await ResolveTorrentSourceAsync(cts.Token);
         // Capture everything, but judge the rate on Debug alone - Trace is the level you opt into
@@ -744,7 +759,10 @@ public class RealSwarmSoakTests
         RequireSoakEnabled();
 
         var duration = DurationFromEnvironment("PEERSHARP_SOAK_CHURN_SECONDS", TimeSpan.FromMinutes(30));
-        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(5));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(duration + TimeSpan.FromMinutes(5));
 
         var source = await ResolveTorrentSourceAsync(cts.Token);
         var (engine, downloadPath) = CreateEngine();
@@ -799,7 +817,10 @@ public class RealSwarmSoakTests
         RequireSoakEnabled();
 
         var duration = DurationFromEnvironment("PEERSHARP_SOAK_COMPLETION_SECONDS", TimeSpan.FromMinutes(30));
-        using var cts = new CancellationTokenSource(duration + TimeSpan.FromMinutes(5));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(duration + TimeSpan.FromMinutes(5));
 
         var source = await ResolveTorrentSourceAsync(cts.Token);
         var (engine, downloadPath) = CreateEngine();

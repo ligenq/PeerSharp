@@ -38,6 +38,12 @@ internal class PiecePicker : IDisposable
     private bool _selectionInvalidated = true;
 
     /// <summary>
+    /// Where a sequential scan starts: no piece below this index is still wanted. Guarded by
+    /// <see cref="_selectionLock"/>.
+    /// </summary>
+    private int _sequentialCursor;
+
+    /// <summary>
     /// Creates a PiecePicker with full dependency injection.
     /// </summary>
     public PiecePicker(IPiecePickerContext context, TimeProvider timeProvider, Random random)
@@ -139,6 +145,11 @@ internal class PiecePicker : IDisposable
         {
             _selectionInvalidated = true;
             _fileSelectionSnapshot = _context.GetFileSelectionSnapshot();
+
+            // A recheck can turn a held piece back into a missing one, and this is the notification
+            // that reaches the picker when it does. Rewinding costs one scan and keeps the cursor
+            // from skipping a piece the torrent no longer has.
+            _sequentialCursor = 0;
         }
     }
 
@@ -193,7 +204,13 @@ internal class PiecePicker : IDisposable
         // SEQUENTIAL MODE: Pick pieces in order
         if (_context.DownloadStrategy == DownloadStrategy.Sequential)
         {
-            for (int i = 0; i < _context.PieceCount; i++)
+            // Start from the first piece we do not already hold rather than from zero. Every pick
+            // used to re-walk the completed prefix, so the scan grew with progress and was longest
+            // exactly when the torrent was nearly done - on a large torrent that is tens of
+            // thousands of wasted checks per pick, per peer. Only completed pieces are skipped, so
+            // a piece that was passed over for any other reason is still reconsidered next time.
+            int start = AdvanceSequentialCursor();
+            for (int i = start; i < _context.PieceCount; i++)
             {
                 if (CanPick(i, peer, selection))
                 {
@@ -300,6 +317,33 @@ internal class PiecePicker : IDisposable
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Moves the sequential cursor past pieces we already hold and returns where a scan should
+    /// begin. Held pieces are the only ones skipped, which is what makes this safe to cache: a
+    /// piece can go from held back to missing only through a recheck or a piece-count change, and
+    /// both reset the cursor.
+    /// </summary>
+    private int AdvanceSequentialCursor()
+    {
+        lock (_selectionLock)
+        {
+            int cursor = _sequentialCursor;
+            int pieceCount = _context.PieceCount;
+            if (cursor > pieceCount)
+            {
+                cursor = 0;
+            }
+
+            while (cursor < pieceCount && _context.HasPiece(cursor))
+            {
+                cursor++;
+            }
+
+            _sequentialCursor = cursor;
+            return cursor;
+        }
     }
 
     public void RefreshSelection()
@@ -426,18 +470,15 @@ internal class PiecePicker : IDisposable
         }
     }
 
+    /// <summary>
+    /// Orders <paramref name="list"/> by ascending availability, shuffling within each availability
+    /// group so that peers picking at the same moment do not all converge on the same piece.
+    /// Bucketing gives both properties at once, which is why there is no separate small-list path:
+    /// a comparison sort would need a shuffle afterwards to break ties randomly, and bucketing is
+    /// already O(n).
+    /// </summary>
     private void BucketSort(List<int> list, int[] availability)
     {
-        // For small lists, standard sort is fine
-        if (list.Count < 100)
-        {
-            ShuffleList(list); // Ensure random order before unstable sort? No, random order is needed for equal keys.
-            // Since Sort is unstable, we should shuffle AFTER if we want random order for equal keys?
-            // Actually, if we want random order for equal keys, we need to group them.
-            // Bucketing handles this naturally.
-            // But for small lists, let's just use buckets too for consistency, it's cheap enough.
-        }
-
         const int MaxBuckets = 128;
         var buckets = new List<int>[MaxBuckets];
 
@@ -485,6 +526,7 @@ internal class PiecePicker : IDisposable
         Array.Copy(_pieceAvailability, next, _pieceAvailability.Length);
         _pieceAvailability = next;
         _selectionInvalidated = true;
+        _sequentialCursor = 0;
     }
 
     private bool CanPick(int i, IPeerPieceInfo peer, IReadOnlyList<FileSelection>? selection)

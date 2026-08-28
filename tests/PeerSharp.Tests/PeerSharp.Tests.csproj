@@ -13,22 +13,28 @@
     </None>
   </ItemGroup>
 
+  <!-- The recorded handshake is read from the output directory at run time, but lives in the
+       source tree so it can be reviewed in a diff. -->
   <ItemGroup>
+    <Content Include="Core\Peers\Fixtures\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CsCheck" Version="4.8.0" />
     <PackageReference Include="coverlet.collector" Version="10.0.1">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.10" />
-    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.8.0" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.9.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageReference Include="Microsoft.Testing.Extensions.TrxReport" Version="2.3.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.Coyote" Version="1.7.11" />
-    <PackageReference Include="Microsoft.Coyote.Test" Version="1.7.11" />
-    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.v3" Version="4.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -37,6 +43,20 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+  </ItemGroup>
+
+
+  <!-- Mutation runs only.
+       Stryker executes the suite once per mutant, and its runner gives the initial run about three
+       minutes before it cancels and reports "no test result". The integration lane alone accounts for
+       almost all of the suite's three and a half minutes, so it is the one left out; everything else
+       stays, because excluding a lane also removes whatever coverage it provided and mutants then
+       come back as "no coverage" rather than as findings.
+
+       StrykerRun is set only by the mutation job, so every ordinary build and CI lane still compiles
+       and runs the whole suite. -->
+  <ItemGroup Condition="'$(StrykerRun)' == 'true'">
+    <Compile Remove="Integration/**" />
   </ItemGroup>
 
 </Project>

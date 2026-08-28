@@ -1,6 +1,4 @@
-using Microsoft.Coyote;
-using Microsoft.Coyote.SystematicTesting;
-using Microsoft.Extensions.Time.Testing;
+﻿using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals.Utp;
 using PeerSharp.Internals.Network;
 using System.Net;
@@ -9,7 +7,7 @@ using System.Reflection;
 
 namespace PeerSharp.Tests.Concurrency;
 
-[Collection("Coyote")]
+[Collection("Concurrency")]
 public class UtpDataPathTests
 {
     private readonly ITestOutputHelper _output;
@@ -19,23 +17,8 @@ public class UtpDataPathTests
         _output = output;
     }
 
-    private void RunCoyoteTest(Action test, uint iterations = 100)
-    {
-        var config = Configuration.Create()
-            .WithTestingIterations(iterations)
-            .WithMaxSchedulingSteps(1000);
-
-        using var engine = TestingEngine.Create(config, test);
-        engine.Run();
-
-        var report = engine.TestReport;
-        if (report.NumOfFoundBugs > 0)
-        {
-            _output.WriteLine($"Found {report.NumOfFoundBugs} bug(s)!");
-            _output.WriteLine(engine.GetReport());
-            Assert.Fail($"Coyote found {report.NumOfFoundBugs} concurrency bug(s). See test output for details.");
-        }
-    }
+    private void RunConcurrencyStress(Action scenario, uint iterations = 100)
+        => ConcurrencyStress.Run(scenario, iterations, _output);
 
     private class MockUtpManager : IUtpManager
     {
@@ -58,7 +41,7 @@ public class UtpDataPathTests
     [Fact]
     public void UtpStream_ConcurrentDataTransfer_WithReordering()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var manager = new MockUtpManager();
@@ -129,7 +112,7 @@ public class UtpDataPathTests
                                 // We assume roughly 1 byte per packet for this simple test or 
                                 // we just ack until done. 
                                 // Since we sent 1000 bytes, and MSS is likely > 1000, it's probably 1 packet.
-                                // But Coyote might interleave such that WriteAsync splits it?
+                                // An unlucky interleaving could still split the write.
                                 // WriteAsync uses GetPayloadMss.
 
                                 acked += data.Length - 20;
@@ -153,7 +136,7 @@ public class UtpDataPathTests
     [Fact]
     public void UtpStream_PacketLoss_Retransmits()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var manager = new MockUtpManager();

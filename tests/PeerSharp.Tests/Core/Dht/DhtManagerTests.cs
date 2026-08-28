@@ -48,7 +48,6 @@ public class DhtManagerTests
             return Task.CompletedTask;
         }
 
-        public void Stop() { }
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
         public static void Dispose() { }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

@@ -1,7 +1,4 @@
-using System.Collections.Concurrent;
-using Microsoft.Coyote;
-using Microsoft.Coyote.Specifications;
-using Microsoft.Coyote.SystematicTesting;
+﻿using System.Collections.Concurrent;
 using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Bandwidth;
@@ -11,40 +8,29 @@ using CoreTransferStats = PeerSharp.Internals.TransferStats;
 namespace PeerSharp.Tests.Concurrency;
 
 /// <summary>
-/// Coyote-based concurrency tests for finding race conditions and deadlocks.
-/// These tests use Microsoft Coyote's systematic testing to explore different
-/// thread interleavings and find concurrency bugs.
+/// Concurrency tests for finding race conditions and deadlocks: each repeats a concurrent scenario
+/// many times, asserting an invariant that only an unlucky interleaving can break.
+///
+/// <para>
+/// These ran under Microsoft Coyote until it was removed. See <see cref="ConcurrencyStress"/> for
+/// why that changed nothing about what they detect.
+/// </para>
 /// </summary>
-[Collection("Coyote")]
-public class CoyoteTests
+[Collection("Concurrency")]
+public class SystematicConcurrencyTests
 {
     private readonly ITestOutputHelper _output;
 
-    public CoyoteTests(ITestOutputHelper output)
+    public SystematicConcurrencyTests(ITestOutputHelper output)
     {
         _output = output;
     }
 
     /// <summary>
-    /// Helper to run a Coyote test with systematic exploration.
+    /// Repeats a concurrent scenario, failing on the first iteration that breaks its invariant.
     /// </summary>
-    private void RunCoyoteTest(Action test, uint iterations = 100)
-    {
-        var config = Configuration.Create()
-            .WithTestingIterations(iterations)
-            .WithMaxSchedulingSteps(1000);
-
-        using var engine = TestingEngine.Create(config, test);
-        engine.Run();
-
-        var report = engine.TestReport;
-        if (report.NumOfFoundBugs > 0)
-        {
-            _output.WriteLine($"Found {report.NumOfFoundBugs} bug(s)!");
-            _output.WriteLine(engine.GetReport());
-            Assert.Fail($"Coyote found {report.NumOfFoundBugs} concurrency bug(s). See test output for details.");
-        }
-    }
+    private void RunConcurrencyStress(Action scenario, uint iterations = 100)
+        => ConcurrencyStress.Run(scenario, iterations, _output);
 
 
     #region BandwidthChannel Tests
@@ -56,7 +42,7 @@ public class CoyoteTests
     [Fact]
     public void BandwidthChannel_ConcurrentUseQuota_RespectsBounds()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var channel = new BandwidthChannel(timeProvider);
@@ -88,7 +74,7 @@ public class CoyoteTests
             int minAllowed = -(limit * 3);
             int available = channel.AvailableQuota;
 
-            Specification.Assert(available >= minAllowed,
+            Assert.True(available >= minAllowed,
                 $"Quota {available} went below minimum allowed {minAllowed}");
         });
     }
@@ -100,7 +86,7 @@ public class CoyoteTests
     [Fact]
     public void BandwidthChannel_ConcurrentUpdateQuota_RespectsBounds()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var channel = new BandwidthChannel(timeProvider);
@@ -129,7 +115,7 @@ public class CoyoteTests
             int maxAllowed = limit * 3;
             int available = channel.AvailableQuota;
 
-            Specification.Assert(available <= maxAllowed,
+            Assert.True(available <= maxAllowed,
                 $"Quota {available} exceeded maximum allowed {maxAllowed}");
         });
     }
@@ -142,7 +128,7 @@ public class CoyoteTests
     [Fact]
     public void BandwidthChannel_ConcurrentUpdateAndUse_MaintainsBounds()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var channel = new BandwidthChannel(timeProvider);
@@ -195,7 +181,7 @@ public class CoyoteTests
             int maxAllowed = limit * 3;
             int available = channel.AvailableQuota;
 
-            Specification.Assert(available >= minAllowed && available <= maxAllowed,
+            Assert.True(available >= minAllowed && available <= maxAllowed,
                 $"Quota {available} out of bounds [{minAllowed}, {maxAllowed}]");
         });
     }
@@ -207,7 +193,7 @@ public class CoyoteTests
     [Fact]
     public void BandwidthChannel_SubQuotaOverflow_HandledCorrectly()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var channel = new BandwidthChannel(timeProvider);
@@ -236,7 +222,7 @@ public class CoyoteTests
             int available = channel.AvailableQuota;
 
             // The quota should be positive and bounded
-            Specification.Assert(available >= 0 && available <= 300,
+            Assert.True(available >= 0 && available <= 300,
                 $"Quota {available} seems incorrect after subquota accumulation");
         });
     }
@@ -252,7 +238,7 @@ public class CoyoteTests
     [Fact]
     public void PieceState_ConcurrentTryAddBlock_OnlyOneSucceeds()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var piece = new PieceState(0, 10);
             const int blockIndex = 5;
@@ -288,11 +274,11 @@ public class CoyoteTests
             Task.WaitAll(tasks.ToArray());
 
             // Exactly one thread should have succeeded
-            Specification.Assert(successCount == 1,
+            Assert.True(successCount == 1,
                 $"Expected exactly 1 successful add, got {successCount}");
 
             // Received count should be 1
-            Specification.Assert(piece.ReceivedCount == 1,
+            Assert.True(piece.ReceivedCount == 1,
                 $"Expected ReceivedCount of 1, got {piece.ReceivedCount}");
         });
     }
@@ -304,7 +290,7 @@ public class CoyoteTests
     [Fact]
     public void PieceState_ConcurrentCompletion_OnlyOneWriteClaim()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int blocksCount = 4;
             var piece = new PieceState(0, blocksCount);
@@ -338,10 +324,10 @@ public class CoyoteTests
             Task.WaitAll(tasks.ToArray());
 
             // Exactly one thread should have claimed write
-            Specification.Assert(writeClaimCount == 1,
+            Assert.True(writeClaimCount == 1,
                 $"Expected exactly 1 write claim, got {writeClaimCount}");
 
-            Specification.Assert(piece.IsWriting,
+            Assert.True(piece.IsWriting,
                 "IsWriting should be true after successful claim");
         });
     }
@@ -353,7 +339,7 @@ public class CoyoteTests
     [Fact]
     public void PieceState_AddBlockAfterWriting_AllFail()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int blocksCount = 4;
             var piece = new PieceState(0, blocksCount);
@@ -400,7 +386,7 @@ public class CoyoteTests
             Task.WaitAll(tasks.ToArray());
 
             // No adds should succeed after writing is set
-            Specification.Assert(addSuccessCount == 0,
+            Assert.True(addSuccessCount == 0,
                 $"Expected 0 successful adds after writing, got {addSuccessCount}");
         });
     }
@@ -412,7 +398,7 @@ public class CoyoteTests
     [Fact]
     public void PieceState_ConcurrentReset_MaintainsConsistency()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int blocksCount = 4;
             var piece = new PieceState(0, blocksCount);
@@ -452,10 +438,10 @@ public class CoyoteTests
 
             // After all operations, state should be consistent
             int receivedCount = piece.ReceivedCount;
-            Specification.Assert(receivedCount >= 0 && receivedCount <= blocksCount,
+            Assert.True(receivedCount >= 0 && receivedCount <= blocksCount,
                 $"ReceivedCount {receivedCount} out of valid range [0, {blocksCount}]");
 
-            Specification.Assert(!piece.IsWriting,
+            Assert.True(!piece.IsWriting,
                 "IsWriting should be false after reset");
         });
     }
@@ -471,7 +457,7 @@ public class CoyoteTests
     [Fact]
     public void AlertsManager_ConcurrentPostAlert_RespectsQueueBound()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var manager = new AlertsManager(timeProvider);
@@ -503,7 +489,7 @@ public class CoyoteTests
 
             // MaxAlertQueueSize is 1000, with 5 threads * 200 = 1000 total posts
             // Due to the bounding logic, we should have approximately 1000 or less
-            Specification.Assert(alerts.Count <= 1100, // Allow 10% slack for race window
+            Assert.True(alerts.Count <= 1100, // Allow 10% slack for race window
                 $"Alert queue grew too large: {alerts.Count}");
         });
     }
@@ -515,7 +501,7 @@ public class CoyoteTests
     [Fact]
     public void AlertsManager_ConcurrentPostAndPop_NoAlertsLost()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var manager = new AlertsManager(timeProvider);
@@ -572,7 +558,7 @@ public class CoyoteTests
             totalPopped += remaining.Count;
 
             // All posted alerts should eventually be popped
-            Specification.Assert(totalPopped == totalPosted,
+            Assert.True(totalPopped == totalPosted,
                 $"Posted {totalPosted} but popped {totalPopped}");
         });
     }
@@ -584,7 +570,7 @@ public class CoyoteTests
     [Fact]
     public void AlertsManager_ConcurrentRegisterAndPost_NoCrash()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var manager = new AlertsManager(timeProvider);
@@ -627,7 +613,7 @@ public class CoyoteTests
 
             // Just verify we didn't crash and state is valid
             var alerts = manager.PopAlerts();
-            Specification.Assert(alerts.Count >= 0, "PopAlerts returned negative count");
+            Assert.True(alerts.Count >= 0, "PopAlerts returned negative count");
         });
     }
 
@@ -642,7 +628,7 @@ public class CoyoteTests
     [Fact]
     public void TransferStats_ConcurrentUpdates_AccurateCount()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var stats = new CoreTransferStats();
             const int threads = 5;
@@ -668,9 +654,9 @@ public class CoyoteTests
             long expectedDownloaded = threads * addsPerThread * bytesPerAdd;
             long expectedUploaded = threads * addsPerThread * (bytesPerAdd / 2);
 
-            Specification.Assert(stats.Downloaded == expectedDownloaded,
+            Assert.True(stats.Downloaded == expectedDownloaded,
                 $"Downloaded: expected {expectedDownloaded}, got {stats.Downloaded}");
-            Specification.Assert(stats.Uploaded == expectedUploaded,
+            Assert.True(stats.Uploaded == expectedUploaded,
                 $"Uploaded: expected {expectedUploaded}, got {stats.Uploaded}");
         });
     }
@@ -748,7 +734,7 @@ public class CoyoteTests
     [Fact]
     public void DualIndex_ConcurrentAdd_MaintainsCoherence()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var model = new DualIndexModel<int, string>();
 
@@ -773,9 +759,9 @@ public class CoyoteTests
             // Check coherence
             var (primary, secondary, counter) = model.GetCounts();
 
-            Specification.Assert(primary == secondary,
+            Assert.True(primary == secondary,
                 $"Index mismatch: primary={primary}, secondary={secondary}");
-            Specification.Assert(primary == counter,
+            Assert.True(primary == counter,
                 $"Counter mismatch: count={counter}, actual={primary}");
         });
     }
@@ -786,7 +772,7 @@ public class CoyoteTests
     [Fact]
     public void DualIndex_ConcurrentAddRemove_MaintainsCoherence()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var model = new DualIndexModel<int, string>();
 
@@ -831,7 +817,7 @@ public class CoyoteTests
             // Check coherence
             var (primary, secondary, counter) = model.GetCounts();
 
-            Specification.Assert(primary == secondary,
+            Assert.True(primary == secondary,
                 $"Index mismatch after add/remove: primary={primary}, secondary={secondary}");
         });
     }
@@ -842,7 +828,7 @@ public class CoyoteTests
     [Fact]
     public void DualIndex_DuplicateAdd_OnlyOneSucceeds()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var model = new DualIndexModel<int, string>();
             int successCount = 0;
@@ -868,11 +854,11 @@ public class CoyoteTests
 
             Task.WaitAll(tasks.ToArray());
 
-            Specification.Assert(successCount == 1,
+            Assert.True(successCount == 1,
                 $"Expected 1 successful add, got {successCount}");
 
             var (primary, secondary, counter) = model.GetCounts();
-            Specification.Assert(counter == 1,
+            Assert.True(counter == 1,
                 $"Expected count of 1, got {counter}");
         });
     }
@@ -936,7 +922,7 @@ public class CoyoteTests
     [Fact]
     public void PieceAvailability_ConcurrentIncrement_AccurateCount()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int pieceCount = 100;
             var model = new PieceAvailabilityModel(pieceCount);
@@ -969,7 +955,7 @@ public class CoyoteTests
 
             for (int i = 0; i < pieceCount; i++)
             {
-                Specification.Assert(snapshot[i] == expectedAvailability,
+                Assert.True(snapshot[i] == expectedAvailability,
                     $"Piece {i}: expected availability {expectedAvailability}, got {snapshot[i]}");
             }
         });
@@ -982,7 +968,7 @@ public class CoyoteTests
     [Fact]
     public void PieceAvailability_ConcurrentIncrementDecrement_NeverNegative()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int pieceCount = 50;
             var model = new PieceAvailabilityModel(pieceCount);
@@ -1036,7 +1022,7 @@ public class CoyoteTests
             for (int i = 0; i < pieceCount; i++)
             {
                 // With 10 initial + 60 increments - 60 decrements = 10
-                Specification.Assert(snapshot[i] == 10,
+                Assert.True(snapshot[i] == 10,
                     $"Piece {i}: expected 10, got {snapshot[i]}");
             }
         });
@@ -1049,7 +1035,7 @@ public class CoyoteTests
     [Fact]
     public void PieceAvailability_MoreDecrementsThanIncrements_HandlesNegative()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int pieceCount = 20;
             var model = new PieceAvailabilityModel(pieceCount);
@@ -1083,7 +1069,7 @@ public class CoyoteTests
             for (int i = 0; i < pieceCount; i++)
             {
                 // 2 initial - 5 decrements = -3
-                Specification.Assert(snapshot[i] == -3,
+                Assert.True(snapshot[i] == -3,
                     $"Piece {i}: expected -3, got {snapshot[i]}");
             }
         });
@@ -1100,7 +1086,7 @@ public class CoyoteTests
     [Fact]
     public void BoundedChannel_ConcurrentWrites_NoDataLoss()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var channel = System.Threading.Channels.Channel.CreateBounded<int>(
                 new System.Threading.Channels.BoundedChannelOptions(100)
@@ -1155,7 +1141,7 @@ public class CoyoteTests
             Task.WaitAll(tasks.ToArray());
             readerTask.Wait(TimeSpan.FromSeconds(5));
 
-            Specification.Assert(totalWritten == totalRead,
+            Assert.True(totalWritten == totalRead,
                 $"Data loss: written={totalWritten}, read={totalRead}");
         });
     }
@@ -1166,7 +1152,7 @@ public class CoyoteTests
     [Fact]
     public void BoundedChannel_DropNewest_NoExceptions()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var channel = System.Threading.Channels.Channel.CreateBounded<int>(
                 new System.Threading.Channels.BoundedChannelOptions(10)
@@ -1200,7 +1186,7 @@ public class CoyoteTests
             }
 
             // Should have at most capacity items (some were dropped)
-            Specification.Assert(readCount <= 10,
+            Assert.True(readCount <= 10,
                 $"Channel exceeded capacity: {readCount}");
         });
     }
@@ -1257,7 +1243,7 @@ public class CoyoteTests
     [Fact]
     public void DisposalPattern_ConcurrentOperationsAndDispose_Safe()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var model = new DisposableModel();
             int successfulOps = 0;
@@ -1299,11 +1285,11 @@ public class CoyoteTests
             Task.WaitAll(tasks.ToArray());
 
             // After dispose, no operations should be in progress
-            Specification.Assert(model.GetOperationCount() == 0,
+            Assert.True(model.GetOperationCount() == 0,
                 $"Operations still in progress after dispose: {model.GetOperationCount()}");
 
             // Verify disposal happened
-            Specification.Assert(model.IsDisposed,
+            Assert.True(model.IsDisposed,
                 "Model should be disposed");
         });
     }
@@ -1315,7 +1301,7 @@ public class CoyoteTests
     [Fact]
     public void DisposalPattern_MultipleConcurrentDispose_OnlyOneExecutes()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var model = new DisposableModel();
             object countLock = new();
@@ -1338,7 +1324,7 @@ public class CoyoteTests
 
             Task.WaitAll(tasks.ToArray());
 
-            Specification.Assert(model.IsDisposed,
+            Assert.True(model.IsDisposed,
                 "Model should be disposed after multiple dispose calls");
         });
     }

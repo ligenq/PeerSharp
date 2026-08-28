@@ -1,4 +1,5 @@
-using PeerSharp.Internals.Bandwidth;
+﻿using PeerSharp.Internals.Bandwidth;
+using System.Collections.Concurrent;
 
 namespace PeerSharp.Internals;
 
@@ -13,6 +14,8 @@ internal sealed class TorrentConfiguration
     private long _downloadLimitBytesPerSecond;
     private long _diskReadLimitBytesPerSecond;
     private long _diskWriteLimitBytesPerSecond;
+    private int _maxConnections;
+    private int _maxUploadSlots;
     private long _uploadLimitBytesPerSecond;
 
     public TorrentConfiguration(ITorrent torrent, IBandwidthManager bandwidth)
@@ -57,10 +60,33 @@ internal sealed class TorrentConfiguration
     // Streaming
     public DownloadStrategy DownloadStrategy { get; set; } = DownloadStrategy.RarestFirst;
 
+    // Caller-set priorities for individual pieces, overriding what the file selection implies. Read
+    // by the picker on its hot path, hence concurrent - and checked for emptiness first, so a torrent
+    // that never sets one pays a field read rather than a lookup per piece.
+    public ConcurrentDictionary<int, Priority> PiecePriorities { get; } = new();
+
+    // 0 means "use the engine-wide setting", matching how the rate limits treat 0.
+    public int MaxConnections
+    {
+        get => Volatile.Read(ref _maxConnections);
+        set => Volatile.Write(ref _maxConnections, value);
+    }
+
+    public int MaxUploadSlots
+    {
+        get => Volatile.Read(ref _maxUploadSlots);
+        set => Volatile.Write(ref _maxUploadSlots, value);
+    }
+
     public bool QueueAutoStart { get; set; } = true;
     public int QueuePriority { get; set; }
     public float? RatioLimit { get; set; }
     public TimeSpan? SeedTimeLimit { get; set; }
+
+    // Lives here rather than on SuperSeedManager because that manager is rebuilt when a magnet's
+    // metadata arrives, and the caller's choice has to survive the rebuild.
+    public bool SuperSeeding { get; set; }
+
 
     public long UploadLimitBytesPerSecond
     {

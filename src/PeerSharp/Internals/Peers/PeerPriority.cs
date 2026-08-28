@@ -4,59 +4,54 @@ using System.Net.Sockets;
 namespace PeerSharp.Internals.Peers;
 
 /// <summary>
-/// BEP 40: Canonical Peer Priority
-/// Calculates deterministic peer priority to reduce connection churn in the swarm.
-/// Higher priority peers should be preferred for connections.
+/// BEP 40 canonical peer priority: a value both ends of a connection compute for themselves and
+/// agree on.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Agreement is the entire point. When two peers connect to each other at the same moment, or when
+/// one has to drop a connection to make room, both sides deciding the same way is what stops them
+/// making opposite choices and churning. A priority only this client agrees with keeps the
+/// determinism and loses the interoperability, which is most of the value.
+/// </para>
+/// <para>
+/// The formula is <c>crc32c(sort(masked_client_ip, masked_peer_ip))</c>. The closer the two
+/// addresses are, the more of them survives masking, so peers on the same network are still ordered
+/// against each other rather than collapsing to one value. Ports stand in when the addresses are
+/// identical, and the info hash takes no part - it is the same for everyone in the swarm and so
+/// cannot order anything within it.
+/// </para>
+/// </remarks>
 internal static class PeerPriority
 {
     // CRC32-C (Castagnoli) lookup table
     private static readonly uint[] Crc32CTable = GenerateCrc32CTable();
 
     /// <summary>
-    /// Calculate BEP 40 peer priority between two IP addresses for a given torrent.
-    /// Priority = CRC32-C(XOR(our_ip_masked, peer_ip_masked) || info_hash)
+    /// The BEP 40 priority for a connection between us and a peer.
     /// </summary>
-    /// <param name="ourIp">Our IP address</param>
-    /// <param name="peerIp">Peer's IP address</param>
-    /// <param name="infoHash">Torrent info hash (20 bytes)</param>
-    /// <returns>Priority value (higher = more preferred)</returns>
-    public static uint Calculate(IPAddress ourIp, IPAddress peerIp, byte[] infoHash)
+    /// <remarks>
+    /// Both endpoints are needed, and each end passes them the other way round; sorting the masked
+    /// values is what makes the two calls agree.
+    /// </remarks>
+    public static uint Calculate(IPEndPoint ourEndPoint, IPEndPoint peerEndPoint)
     {
-        // BEP 40: Apply masks - /16 for IPv4, /48 for IPv6
-        byte[] ourMasked = MaskIp(ourIp);
-        byte[] peerMasked = MaskIp(peerIp);
+        ArgumentNullException.ThrowIfNull(ourEndPoint);
+        ArgumentNullException.ThrowIfNull(peerEndPoint);
 
-        // Ensure both are same length (for mixed IPv4/IPv6 scenarios)
-        if (ourMasked.Length != peerMasked.Length)
+        byte[] peer = peerEndPoint.Address.GetAddressBytes();
+        byte[] ours = NormaliseToPeerFamily(ourEndPoint.Address, peerEndPoint.Address).GetAddressBytes();
+
+        if (ours.AsSpan().SequenceEqual(peer))
         {
-            // If IPs are different types, use a default priority
-            // This handles IPv4 client connecting to IPv6 peer or vice versa
-            return CalculateFallback(peerIp, infoHash);
+            // "If the IP addresses are the same, the port numbers should be used instead."
+            return ComputeCrc32C(Concatenate(
+                [(byte)(ourEndPoint.Port >> 8), (byte)ourEndPoint.Port],
+                [(byte)(peerEndPoint.Port >> 8), (byte)peerEndPoint.Port]));
         }
 
-        // XOR the masked IPs
-        byte[] xored = new byte[ourMasked.Length];
-        for (int i = 0; i < ourMasked.Length; i++)
-        {
-            xored[i] = (byte)(ourMasked[i] ^ peerMasked[i]);
-        }
-
-        // Concatenate XOR result with info hash
-        byte[] data = new byte[xored.Length + infoHash.Length];
-        xored.CopyTo(data, 0);
-        infoHash.CopyTo(data, xored.Length);
-
-        // Calculate CRC32-C (Castagnoli)
-        return ComputeCrc32C(data);
-    }
-
-    /// <summary>
-    /// Calculate priority when we don't know our own IP (use peer IP + info hash only).
-    /// </summary>
-    public static uint Calculate(IPAddress peerIp, byte[] infoHash)
-    {
-        return CalculateFallback(peerIp, infoHash);
+        byte[] mask = MaskFor(ours, peer);
+        return ComputeCrc32C(Concatenate(Apply(ours, mask), Apply(peer, mask)));
     }
 
     /// <summary>
@@ -69,16 +64,84 @@ internal static class PeerPriority
     }
 
     /// <summary>
-    /// Fallback priority calculation using just peer IP and info hash.
-    /// Used when our IP is unknown or when IPs are mixed IPv4/IPv6.
+    /// Our address as it must be to pair with this peer's: the same family, and the unspecified
+    /// address when we do not know our own.
     /// </summary>
-    private static uint CalculateFallback(IPAddress peerIp, byte[] infoHash)
+    /// <remarks>
+    /// A client that has not yet learned its public address still has to rank peers, so the
+    /// unspecified address stands in and the calculation stays the specified one - the same thing
+    /// libtorrent does, whose external address table starts out holding exactly that. The value is
+    /// not canonical until the real address is known, because the peer at the other end is using our
+    /// actual address, but it is a well-formed priority in the meantime and becomes canonical by
+    /// itself once the address arrives. Nothing here is cached, so that transition needs no help.
+    /// </remarks>
+    private static IPAddress NormaliseToPeerFamily(IPAddress ours, IPAddress peer)
     {
-        byte[] peerBytes = peerIp.GetAddressBytes();
-        byte[] data = new byte[peerBytes.Length + infoHash.Length];
-        peerBytes.CopyTo(data, 0);
-        infoHash.CopyTo(data, peerBytes.Length);
-        return ComputeCrc32C(data);
+        if (ours.AddressFamily == peer.AddressFamily)
+        {
+            return ours;
+        }
+
+        return peer.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any;
+    }
+
+    private static byte[] Apply(byte[] address, byte[] mask)
+    {
+        byte[] masked = new byte[address.Length];
+        for (int i = 0; i < address.Length; i++)
+        {
+            masked[i] = (byte)(address[i] & mask[i]);
+        }
+
+        return masked;
+    }
+
+    /// <summary>
+    /// Concatenates two byte strings in ascending order, so both ends of a connection produce the
+    /// same input whichever way round they hold the pair.
+    /// </summary>
+    private static byte[] Concatenate(byte[] left, byte[] right)
+    {
+        bool leftFirst = left.AsSpan().SequenceCompareTo(right) <= 0;
+        byte[] first = leftFirst ? left : right;
+        byte[] second = leftFirst ? right : left;
+
+        byte[] combined = new byte[first.Length + second.Length];
+        first.CopyTo(combined, 0);
+        second.CopyTo(combined, first.Length);
+        return combined;
+    }
+
+    /// <summary>
+    /// The BEP 40 mask for a pair of addresses, followed by 0x55 bytes for the remaining suffix.
+    /// </summary>
+    /// <remarks>
+    /// IPv4 keeps at least two whole bytes and includes the first byte that differs. IPv6 keeps at
+    /// least six whole bytes and, as libtorrent's BEP 40 implementation does, one byte beyond the
+    /// first differing byte. The latter then advances through /48, /56, /64, /72 and so on rather
+    /// than stopping at /64. Keeping bytes beyond the shared prefix is what stops every peer inside
+    /// our own network masking down to the same value and so sorting identically.
+    /// </remarks>
+    private static byte[] MaskFor(byte[] ours, byte[] peer)
+    {
+        int shared = 0;
+        while (shared < ours.Length && ours[shared] == peer[shared])
+        {
+            shared++;
+        }
+
+        bool ipv6 = ours.Length == 16;
+        int wholeBytes = ipv6
+            ? Math.Clamp(shared + 2, 6, 16)
+            : Math.Clamp(shared + 1, 2, 4);
+
+        byte[] mask = new byte[ours.Length];
+        for (int i = 0; i < mask.Length; i++)
+        {
+            mask[i] = i < wholeBytes ? (byte)0xFF : (byte)0x55;
+        }
+
+        return mask;
     }
 
     /// <summary>
@@ -119,32 +182,5 @@ internal static class PeerPriority
             table[i] = crc;
         }
         return table;
-    }
-
-    /// <summary>
-    /// Apply BEP 40 IP mask: /16 for IPv4, /48 for IPv6
-    /// </summary>
-    private static byte[] MaskIp(IPAddress ip)
-    {
-        byte[] bytes = ip.GetAddressBytes();
-
-        if (ip.AddressFamily == AddressFamily.InterNetwork)
-        {
-            // IPv4: /16 mask - keep first 2 bytes, zero the rest
-            return [bytes[0], bytes[1], 0, 0];
-        }
-        else if (ip.AddressFamily == AddressFamily.InterNetworkV6)
-        {
-            // IPv6: /48 mask - keep first 6 bytes, zero the rest
-            byte[] masked = new byte[16];
-            for (int i = 0; i < 6 && i < bytes.Length; i++)
-            {
-                masked[i] = bytes[i];
-            }
-            return masked;
-        }
-
-        // Unknown address family - return as-is
-        return bytes;
     }
 }

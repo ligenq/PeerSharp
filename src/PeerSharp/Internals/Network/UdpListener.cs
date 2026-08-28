@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Utilities;
@@ -58,7 +58,7 @@ internal class UdpListener : IUdpListener
     {
         if (_disposal.MarkDisposed())
         {
-            await StopAsync().ConfigureAwait(false);
+            await StopAsync(CancellationToken.None).ConfigureAwait(false);
         }
         GC.SuppressFinalize(this);
     }
@@ -107,11 +107,25 @@ internal class UdpListener : IUdpListener
             return;
         }
 
+        var proxy = _settings.Proxy;
+        bool utpEnabled = _settings.Connection.EnableUtpIn || _settings.Connection.EnableUtpOut;
+        bool proxySharedUdp = _settings.Dht.Enabled || (utpEnabled && proxy.ProxyPeers);
+        var decision = UdpProxyPolicy.Decide(proxy, proxySharedUdp);
+
+        if (decision == UdpProxyPolicy.Decision.Refuse)
+        {
+            // Only SOCKS5 can tunnel UDP. Binding a direct socket here would put the real address in
+            // front of every DHT node while the traffic the proxy was configured for goes through it.
+            throw new InvalidOperationException(
+                $"A {proxy.Type} proxy is configured, which cannot carry UDP. Refusing to send DHT and " +
+                "uTP traffic directly, because that would expose the address the proxy exists to hide. " +
+                "Use a SOCKS5 proxy, or turn off DHT and uTP.");
+        }
+
         _running = true;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
-        var proxy = _settings.Proxy;
-        if (proxy.Type == ProxyType.Socks5 && !string.IsNullOrEmpty(proxy.Host))
+        if (decision == UdpProxyPolicy.Decision.TunnelThroughSocks5)
         {
             _logger.LogInformation("Starting UDP listener via SOCKS5 proxy {ProxyHost}:{ProxyPort}", proxy.Host, proxy.Port);
             try
@@ -137,15 +151,7 @@ internal class UdpListener : IUdpListener
         else
         {
             var bindAddress = _settings.Connection.BindAddress;
-            if (bindAddress == null)
-            {
-                _client = _socketFactory.Create(_port);
-            }
-            else
-            {
-                _client = _socketFactory.Create(bindAddress.AddressFamily);
-                _client.Client.Bind(new IPEndPoint(bindAddress, _port));
-            }
+            _client = ListenPortBinder.Bind(_port, port => CreateBoundSocket(bindAddress, port), _logger, "UDP");
             _logger.LogInformation("UDP listener bound to {LocalEndPoint}", _client.Client.LocalEndPoint);
         }
 
@@ -162,31 +168,28 @@ internal class UdpListener : IUdpListener
         _receiveTask = ReceiveLoopAsync();
     }
 
-    public void Stop()
+    /// <summary>
+    /// Creates a socket bound to one candidate port, leaking nothing if the bind fails.
+    /// </summary>
+    private IUdpSocket CreateBoundSocket(IPAddress? bindAddress, int port)
     {
-        StopInternal();
+        if (bindAddress == null)
+        {
+            return _socketFactory.Create(port);
+        }
 
-        // Wait for processing task to complete synchronously
+        var client = _socketFactory.Create(bindAddress.AddressFamily);
         try
         {
-            _processTask?.Wait(TimeSpan.FromSeconds(2));
+            client.Client.Bind(new IPEndPoint(bindAddress, port));
+            return client;
         }
-        catch (AggregateException ex)
+        catch
         {
-            _logger.LogTrace(ex, "UdpListener process task exception during stop (likely cancelled)");
+            // The binder retries on the next port, so this socket must not outlive the attempt.
+            client.Dispose();
+            throw;
         }
-
-        // Wait for receive task to complete synchronously
-        try
-        {
-            _receiveTask?.Wait(TimeSpan.FromSeconds(2));
-        }
-        catch (AggregateException ex)
-        {
-            _logger.LogTrace(ex, "UdpListener receive task exception during stop (likely cancelled)");
-        }
-
-        CleanupResources();
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
@@ -304,7 +307,7 @@ internal class UdpListener : IUdpListener
 
                 if (_receiveChannel != null)
                 {
-                    await _receiveChannel.Writer.WriteAsync((data, remoteEndPoint)).ConfigureAwait(false);
+                    await _receiveChannel.Writer.WriteAsync((data, remoteEndPoint), CancellationToken.None).ConfigureAwait(false);
                 }
             }
             catch (ObjectDisposedException)

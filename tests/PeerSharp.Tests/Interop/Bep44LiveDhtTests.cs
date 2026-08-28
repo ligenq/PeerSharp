@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.BEncoding;
 using PeerSharp.Core;
 using PeerSharp.Internals;
@@ -121,7 +121,13 @@ public class Bep44LiveDhtTests
     {
         RequireInteropEnabled();
 
-        using var cts = new CancellationTokenSource(Budget);
+        // Linked to the test's own token: the budget below is what this test is about, and the
+
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        cts.CancelAfter(Budget);
         await using var node = await StartLiveNodeAsync(cts.Token);
 
         // Unique payload, so a hit cannot be someone else's item at a colliding address.
@@ -147,7 +153,13 @@ public class Bep44LiveDhtTests
     {
         RequireInteropEnabled();
 
-        using var cts = new CancellationTokenSource(Budget);
+        // Linked to the test's own token: the budget below is what this test is about, and the
+
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        cts.CancelAfter(Budget);
         await using var node = await StartLiveNodeAsync(cts.Token);
 
         var seed = Ed25519.GenerateSeed();
@@ -173,7 +185,13 @@ public class Bep44LiveDhtTests
     {
         RequireInteropEnabled();
 
-        using var cts = new CancellationTokenSource(Budget);
+        // Linked to the test's own token: the budget below is what this test is about, and the
+
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        cts.CancelAfter(Budget);
         await using var node = await StartLiveNodeAsync(cts.Token);
 
         var seed = Ed25519.GenerateSeed();
@@ -197,7 +215,13 @@ public class Bep44LiveDhtTests
     {
         RequireInteropEnabled();
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        cts.CancelAfter(TimeSpan.FromMinutes(5));
         await using var node = await StartLiveNodeAsync(cts.Token);
 
         var seed = Ed25519.GenerateSeed();
@@ -231,7 +255,13 @@ public class Bep44LiveDhtTests
     {
         RequireInteropEnabled();
 
-        using var cts = new CancellationTokenSource(Budget);
+        // Linked to the test's own token: the budget below is what this test is about, and the
+
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        cts.CancelAfter(Budget);
         await using var node = await StartLiveNodeAsync(cts.Token);
 
         // BEP 44 test 3: the immutable item holding "Hello World!".

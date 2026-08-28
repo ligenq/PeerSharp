@@ -78,18 +78,18 @@ public class PeerCommunicationTests
         var metadata = CreateMetadataV1();
         string path = CreateTempPath();
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
-        torrent.Settings.Transfer.EstimatedBandwidthBytesPerSec = 10 * 1024 * 1024;
-        torrent.Settings.Transfer.EstimatedRttMs = 50;
+        torrent.Settings.Transfer.EstimatedBandwidthBytesPerSec = 256 * 1024;
+        torrent.Settings.Transfer.RequestQueueTimeSeconds = 3;
 
         var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
 
         int depth = peer.GetOptimalPipelineDepth();
 
-        long estimatedBytesInFlight = (long)torrent.Settings.Transfer.EstimatedBandwidthBytesPerSec * torrent.Settings.Transfer.EstimatedRttMs / 1000;
-        long expected = (estimatedBytesInFlight * 3 / 2) / (16 * 1024);
-        int clamped = (int)Math.Clamp(expected, 16, 250);
+        // Seconds of work at the estimated rate, since nothing has been measured yet.
+        long expected = (long)torrent.Settings.Transfer.EstimatedBandwidthBytesPerSec
+            * torrent.Settings.Transfer.RequestQueueTimeSeconds / (16 * 1024);
 
-        Assert.Equal(clamped, depth);
+        Assert.Equal(expected, depth);
 
         await torrent.DisposeAsync();
         CleanupPath(path);
@@ -108,16 +108,22 @@ public class PeerCommunicationTests
         SetPrivateField(peer, "_smoothedRttMs", 100);
 
         int baseDepth = peer.GetOptimalPipelineDepth();
+        int perStrike = PipelineDepthCalculator.MaxPipeline / 10;
 
         peer.Strikes = 2;
         int reduced = peer.GetAdaptivePipelineDepth();
-        Assert.Equal(Math.Max(ProtocolConstants.MinPipelineDepth, baseDepth - 20), reduced);
+        Assert.Equal(Math.Max(ProtocolConstants.MinPipelineDepth, baseDepth - (2 * perStrike)), reduced);
 
+        // Round trip no longer sizes the queue, so the optimal depth is unchanged by it - but a peer
+        // this slow to answer still has its adapted depth halved.
         SetPrivateField(peer, "_smoothedRttMs", 900);
         int highRttOptimal = peer.GetOptimalPipelineDepth();
-        int expectedHighRtt = Math.Max(ProtocolConstants.MinPipelineDepth, Math.Max(ProtocolConstants.MinPipelineDepth, highRttOptimal - 20) / 2);
-        int highRtt = peer.GetAdaptivePipelineDepth();
-        Assert.Equal(expectedHighRtt, highRtt);
+        Assert.Equal(baseDepth, highRttOptimal);
+
+        int expectedHighRtt = Math.Max(
+            ProtocolConstants.MinPipelineDepth,
+            Math.Max(ProtocolConstants.MinPipelineDepth, highRttOptimal - (2 * perStrike)) / 2);
+        Assert.Equal(expectedHighRtt, peer.GetAdaptivePipelineDepth());
 
         await torrent.DisposeAsync();
         CleanupPath(path);

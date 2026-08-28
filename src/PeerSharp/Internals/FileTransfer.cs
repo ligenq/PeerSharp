@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
@@ -9,6 +9,8 @@ using System.Net;
 using System.Threading.Channels;
 using PeerSharp.Messages;
 using PeerSharp.Internals.Transfers;
+
+using PeerSharp.Exceptions;
 
 namespace PeerSharp.Internals;
 
@@ -391,6 +393,23 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     private const int MaxOverflowConcurrency = 16;
 
     private const int MaxRequestAttempts = 3;
+
+    /// <summary>
+    /// Most partial pieces carried in resume data. Bounds how many pieces of progress a restart can
+    /// keep.
+    /// </summary>
+    private const int MaxSavedPieces = 32;
+
+    /// <summary>
+    /// Most partial piece <em>bytes</em> carried in resume data, which is the limit that actually
+    /// bounds the cost. Every byte here is copied, base64-encoded into JSON and flushed to the
+    /// physical device on each autosave, so the piece count alone says nothing about the work: 32
+    /// pieces is 8 MiB at a 256 KiB piece size and 512 MiB at the 16 MiB one BEP 52 allows. At
+    /// 16 MiB the write stays in the same range whatever the torrent's piece size, and what is
+    /// dropped is only the least-complete partial pieces - blocks that get re-requested.
+    /// </summary>
+    private const long MaxSavedPieceBytes = 16L * 1024 * 1024;
+
     private const int MaxSoftTimeoutMs = 15000;
 
     // ADAPTIVE TIMEOUTS: Based on peer RTT to handle high-latency connections
@@ -494,7 +513,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _pieceProcessingQueue = Channel.CreateBounded<PieceState>(new BoundedChannelOptions(maxConcurrentPieces)
         {
             FullMode = BoundedChannelFullMode.Wait, // Backpressure: stop accepting blocks if processing lags
-            SingleReader = true
+            SingleReader = false
         });
 
         Logger.LogDebug("Piece processing queue initialized with capacity {MaxConcurrentPieces} (configurable via MaxConcurrentPieceProcessing)", maxConcurrentPieces);
@@ -576,7 +595,17 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         // Track background tasks for proper disposal and error handling
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessIncomingBlocksAsync, "ProcessIncomingBlocks"));
         _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessPeerEvaluationsAsync, "ProcessPeerEvaluations"));
-        _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessPieceQueueAsync, "ProcessPieceQueue"));
+
+        // One reader per unit of allowed concurrency. A single reader awaited each piece's hash and
+        // write before taking the next, so the queue's only parallelism came from its overflow path -
+        // which made the queue's capacity a proxy for how much work ran at once, and in the wrong
+        // direction. Raising the capacity from 16 to 64 spilled less often, ran more of the work
+        // through that one sequential reader, and cost a measured 227 MB/s of download throughput,
+        // down to 45. Concurrency is stated here instead, and the capacity is only a buffer again.
+        for (int i = 0; i < maxConcurrentPieces; i++)
+        {
+            _backgroundTasks.Add(RunBackgroundTaskAsync(ProcessPieceQueueAsync, $"ProcessPieceQueue-{i}"));
+        }
     }
 
     long IFileTransfer.Downloaded => Downloader.Downloaded;
@@ -656,13 +685,13 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         {
             try
             {
-                await _torrent.StopAsync().ConfigureAwait(false);
+                await _torrent.StopAsync(CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception stopEx)
             {
                 Logger.LogError(stopEx, "Failed to stop torrent after fatal storage error");
             }
-        });
+        }, CancellationToken.None);
     }
 
     public async Task BlockRejectedAsync(PeerCommunication peer, PeerMessage msg)
@@ -954,19 +983,17 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     public List<TorrentStateData.UnfinishedPieceData> GetUnfinishedPiecesState()
     {
-        // Cap the number of saved pieces to limit memory usage during serialization.
         // Prioritize pieces with the most progress (highest received block count).
-        const int MaxSavedPieces = 32;
-
         var snapshot = _pieceStateManager.ActivePieces.Values.ToList();
 
         // Sort by progress descending so we save the most complete pieces first
         snapshot.Sort((a, b) => b.ReceivedCount.CompareTo(a.ReceivedCount));
 
         var list = new List<TorrentStateData.UnfinishedPieceData>();
+        long budget = MaxSavedPieceBytes;
         foreach (var piece in snapshot)
         {
-            if (list.Count >= MaxSavedPieces)
+            if (list.Count >= MaxSavedPieces || budget <= 0)
             {
                 break;
             }
@@ -974,6 +1001,17 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             if (piece.ReceivedCount > 0)
             {
                 long pSize = _torrent.InfoFile.Info.GetPieceSize(piece.Index);
+
+                // The piece cap alone bounds the wrong axis: this data is copied whole, base64'd
+                // into JSON and flushed to disk on every autosave, so its cost is piece size times
+                // the cap, not the cap. At the 16 MiB pieces BEP 52 permits, 32 pieces is half a
+                // gigabyte written every minute. Whichever limit binds first wins.
+                if (pSize > budget && list.Count > 0)
+                {
+                    break;
+                }
+
+                budget -= pSize;
 
                 var data = new byte[pSize];
                 for (int i = 0; i < piece.BlockData.Length; i++)
@@ -1040,6 +1078,28 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         {
             if (_torrent.Pieces.HasPiece(p.Index))
             {
+                continue;
+            }
+
+            // Everything below indexes arrays off numbers that came out of a file. A truncated
+            // write, a hand-edited resume file or a torrent whose metadata has moved on all produce
+            // the same shapes, so check them rather than letting Array.Copy report it as a crash.
+            if ((uint)p.Index >= (uint)_torrent.Pieces.Count)
+            {
+                Logger.LogWarning("Ignoring resumed piece {PieceIndex}: outside this torrent's {PieceCount} pieces", p.Index, _torrent.Pieces.Count);
+                continue;
+            }
+
+            long pieceSize = _torrent.InfoFile.Info.GetPieceSize(p.Index);
+            int expectedBlocks = (int)((pieceSize + BlockSize - 1) / BlockSize);
+            if (p.Blocks.Length != expectedBlocks || p.Data.Length < pieceSize)
+            {
+                Logger.LogWarning(
+                    "Ignoring resumed piece {PieceIndex}: {Blocks} block flags and {DataLength} bytes do not describe a {PieceSize}-byte piece",
+                    p.Index,
+                    p.Blocks.Length,
+                    p.Data.Length,
+                    pieceSize);
                 continue;
             }
 
@@ -1242,7 +1302,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 {
                     try
                     {
-                        await Task.WhenAll(_backgroundTasks).WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+                        await Task.WhenAll(_backgroundTasks).WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None).ConfigureAwait(false);
                     }
                     catch (TimeoutException ex)
                     {
@@ -1262,7 +1322,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 {
                     try
                     {
-                        await Task.WhenAll(overflowTasksSnapshot).WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                        await Task.WhenAll(overflowTasksSnapshot).WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
                     }
                     catch (TimeoutException ex)
                     {
@@ -1528,6 +1588,14 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                             "Piece {PieceIndex} failed hash after {Failures} attempt(s), will be retried",
                             pieceToProcess.Index,
                             pieceToProcess.HashFailures);
+
+                        // Named only when one peer supplied the whole piece: with several
+                        // contributors the alert would be pointing at somebody innocent.
+                        _torrent.Alerts.PieceHashFailedAlert(
+                            _torrent,
+                            pieceToProcess.Index,
+                            pieceToProcess.HashFailures,
+                            soleSupplier ? contributors[0].RemoteEndPoint : null);
 
                         // The quarantine is keyed by IP address, so one failed piece must count once
                         // per address as well. Multiple connections behind the same NAT can all have

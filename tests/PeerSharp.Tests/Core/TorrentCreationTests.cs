@@ -127,7 +127,13 @@ public class TorrentCreationTests
             .Build();
 
         Assert.Equal(2, torrent.FileCount);
-        Assert.Equal(28 * 1024, torrent.TotalSize);
+
+        // The content, not the piece space. This asserted 28 KiB - the two files plus the padding
+        // between them - while the rest of the test asserts the padding is hidden from the caller.
+        // A size that counts bytes the caller is told do not exist cannot be the size to report, and
+        // for a v2 torrent, whose padding is implied rather than listed, the same reasoning leaves a
+        // remaining-bytes count that can never reach zero.
+        Assert.Equal((8 + 12) * 1024, torrent.TotalSize);
 
         var files = torrent.GetFiles().ToList();
         Assert.Equal(2, files.Count);

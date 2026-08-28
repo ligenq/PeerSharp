@@ -126,6 +126,18 @@ internal sealed class PeerHistory
     public int HandshakeFailureCount { get; set; }
 
     /// <summary>
+    /// How many times the backoff has been waived for this peer to let it be tried again promptly
+    /// with the other encryption choice.
+    /// </summary>
+    /// <remarks>
+    /// libtorrent's <c>fast_reconnects</c>, and bounded the same way. It rewinds a peer's reconnect
+    /// clock when it starts an encrypted handshake - "if this fails, we need to reconnect fast" - and
+    /// stops honouring that past the second time, so a peer that answers neither costs two extra
+    /// dials rather than an unbounded stream of them.
+    /// </remarks>
+    public int FastReconnects { get; set; }
+
+    /// <summary>
     /// Records that a handshake completed, and settles the encryption choice on whatever worked.
     /// </summary>
     public void RegisterHandshakeSuccess(bool wasEncrypted)

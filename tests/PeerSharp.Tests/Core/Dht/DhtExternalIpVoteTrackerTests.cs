@@ -46,15 +46,20 @@ public class DhtExternalIpVoteTrackerTests
     public void ProcessReport_SameAddress_ReachesConfirmationThresholdOnce()
     {
         var tracker = new DhtExternalIpVoteTracker(requiredVotes: 3);
-        byte[] ip = IPAddress.Parse("203.0.113.10").GetAddressBytes();
+        var address = IPAddress.Parse("203.0.113.10");
+        byte[] ip = address.GetAddressBytes();
 
+        Assert.Null(tracker.ConfirmedAddress);
         Assert.Equal(DhtExternalIpVoteStatus.FirstReport, tracker.ProcessReport(ip).Status);
+        Assert.Null(tracker.ConfirmedAddress);
         Assert.Equal(DhtExternalIpVoteStatus.Progress, tracker.ProcessReport(ip).Status);
+        Assert.Null(tracker.ConfirmedAddress);
         var confirmed = tracker.ProcessReport(ip);
         var alreadyConfirmed = tracker.ProcessReport(ip);
 
         Assert.Equal(DhtExternalIpVoteStatus.Confirmed, confirmed.Status);
         Assert.Equal(3, confirmed.Votes);
+        Assert.Equal(address, tracker.ConfirmedAddress);
         Assert.Equal(DhtExternalIpVoteStatus.AlreadyConfirmed, alreadyConfirmed.Status);
         Assert.Equal(3, alreadyConfirmed.Votes);
     }
@@ -73,6 +78,7 @@ public class DhtExternalIpVoteTrackerTests
         Assert.Equal(DhtExternalIpVoteStatus.Changed, changed.Status);
         Assert.Equal(secondIp, changed.Address);
         Assert.Equal(1, changed.Votes);
+        Assert.Null(tracker.ConfirmedAddress);
     }
 
     [Fact]

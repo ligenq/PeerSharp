@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Framework;
@@ -223,29 +223,29 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (_torrent.Blocklist?.IsBlocked(remote) == true)
         {
             _logger.LogDebug("Blocked incoming connection from {Remote} (blocklist)", remote);
+            ReportBlocked(remote, PeerBlockReason.Blocklist);
             stream.Close();
             return;
         }
 
-        // Calculate priority early for BEP 40 decisions
-        uint incomingPriority = remote != null
-            ? PeerPriority.Calculate(remote.Address, _torrent.Hash.ToArray())
-            : 0;
+        // Priority decides which connection gives way when we are at the limit, and the peer at the
+        // other end works it out for itself and has to reach the same answer - see PeerPriority.
+        uint incomingPriority = remote != null ? CalculatePeerPriority(remote) : 0;
 
         // Check connection limits for incoming connections
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
-            // BEP 40: Try to replace lowest priority peer if incoming has higher priority
+            // Replace the lowest priority peer if the incoming one outranks it.
             var lowestPriorityPeer = TryGetLowestPriorityPeer();
             if (lowestPriorityPeer != null && incomingPriority > lowestPriorityPeer.Priority)
             {
-                _logger.LogDebug("BEP 40: Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
+                _logger.LogDebug("Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
                 await lowestPriorityPeer.CloseAsync().ConfigureAwait(false);
             }
             else
             {
-                _logger.LogDebug("Rejecting incoming stream connection - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
+                _logger.LogDebug("Rejecting incoming stream connection - at limit ({MaxPeers})", MaxPeersForThisTorrent);
                 stream.Close();
                 return;
             }
@@ -282,7 +282,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (peer.RemoteEndPoint != null)
         {
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-            // BEP 40: Use already calculated priority
+            // Reuse the priority already calculated above.
             peer.Priority = incomingPriority;
 
             // Refused in both directions, or a peer that has been dropped for serving bad data simply
@@ -292,6 +292,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 _logger.LogDebug(
                     "Rejecting incoming connection from {RemoteEndPoint} - it has served bad data before",
                     peer.RemoteEndPoint);
+                ReportBlocked(peer.RemoteEndPoint, PeerBlockReason.BadData);
                 // The peer has not joined _connectedPeers yet, so CloseAsync cannot release the
                 // governor slot (ConnectionClosedAsync only releases slots owned by registered
                 // peers). Undo the provisional endpoint claim and slot explicitly.
@@ -339,13 +340,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        // Calculate priority early for BEP 40 decisions
         var remoteEp = NetworkUtils.NormalizeEndPoint(client.Client.RemoteEndPoint as IPEndPoint);
 
         // Check blocklist first
         if (_torrent.Blocklist?.IsBlocked(remoteEp) == true)
         {
             _logger.LogDebug("Blocked incoming connection from {RemoteEp} (blocklist)", remoteEp);
+            ReportBlocked(remoteEp, PeerBlockReason.Blocklist);
             client.Close();
             return;
         }
@@ -355,27 +356,26 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _logger.LogDebug(
                 "Rejecting incoming TCP connection from {RemoteEp} - it has served bad data before",
                 remoteEp);
+            ReportBlocked(remoteEp, PeerBlockReason.BadData);
             client.Close();
             return;
         }
-        uint incomingPriority = remoteEp != null
-            ? PeerPriority.Calculate(remoteEp.Address, _torrent.Hash.ToArray())
-            : 0;
+        uint incomingPriority = remoteEp != null ? CalculatePeerPriority(remoteEp) : 0;
 
         // Check connection limits for incoming connections
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
-            // BEP 40: Try to replace lowest priority peer if incoming has higher priority
+            // Replace the lowest priority peer if the incoming one outranks it.
             var lowestPriorityPeer = TryGetLowestPriorityPeer();
             if (lowestPriorityPeer != null && incomingPriority > lowestPriorityPeer.Priority)
             {
-                _logger.LogDebug("BEP 40: Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
+                _logger.LogDebug("Disconnecting low-priority peer {LowestPeer} (priority={LowestPriority}) for higher-priority incoming peer (priority={IncomingPriority})", lowestPriorityPeer.RemoteEndPoint, lowestPriorityPeer.Priority, incomingPriority);
                 await lowestPriorityPeer.CloseAsync().ConfigureAwait(false);
             }
             else
             {
-                _logger.LogDebug("Rejecting incoming connection - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
+                _logger.LogDebug("Rejecting incoming connection - at limit ({MaxPeers})", MaxPeersForThisTorrent);
                 client.Close();
                 return;
             }
@@ -404,7 +404,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (peer.RemoteEndPoint != null)
         {
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-            // BEP 40: Calculate canonical peer priority
+            // Deterministic per-peer ordering.
             peer.Priority = incomingPriority;
 
             // See AddIncomingPeerAsync: an incoming connection's source port is not a dialable address.
@@ -463,6 +463,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
         // BEP 16: Clean up superseed state
         _torrent.SuperSeedManager.HandlePeerDisconnected(p);
+
+        // BEP 9: drop the peer from the metadata fetch as well. This had been written and unit
+        // tested but never called from anywhere, so a peer that went away stayed in the active list
+        // forever - which suppressed the recovery that only runs when no peers are left, kept
+        // requests going to a closed connection, and is why the CLI could report no peers while the
+        // metadata download still claimed one.
+        _torrent.MetadataDownloadInternal?.PeerDisconnected(p);
 
         bool wasRegistered = _connectedPeers.TryRemove(p, out _);
         if (wasRegistered)
@@ -592,7 +599,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return failures >= MaxHashFailuresPerAddress;
     }
 
-    /// <summary>Whether this address has served enough bad data to be left alone.</summary>
+    /// <summary>
+    /// Announces a refusal that happens before any connection exists, so nothing else would report it.
+    /// </summary>
+    private void ReportBlocked(IPEndPoint? endpoint, PeerBlockReason reason)
+    {
+        if (endpoint is not null)
+        {
+            _torrent.Alerts.PeerBlockedAlert(_torrent, endpoint, reason);
+        }
+    }
+
     private bool IsRefusedForBadData(IPAddress address)
         => _hashFailuresByAddress.TryGetValue(NormaliseForBadDataKey(address), out int failures)
             && failures >= MaxHashFailuresPerAddress;
@@ -632,7 +649,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return configured;
         }
 
-        int wanted = _settings.Connection.MaxPeersPerTorrent - currentConnections;
+        int wanted = MaxPeersForThisTorrent - currentConnections;
         return Math.Clamp(wanted, 0, configured);
     }
 
@@ -660,6 +677,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (_torrent.Blocklist?.IsBlocked(ip) == true)
         {
             _logger.LogDebug("Blocked outgoing connection to {Ip}:{Port} (blocklist)", ip, port);
+            if (IPAddress.TryParse(ip, out var blockedAddress))
+            {
+                ReportBlocked(new IPEndPoint(blockedAddress, port), PeerBlockReason.Blocklist);
+            }
+
             return;
         }
 
@@ -671,6 +693,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (IPAddress.TryParse(ip, out var parsedForBadData) && IsRefusedForBadData(parsedForBadData))
         {
             _logger.LogDebug("Not dialling {Ip}:{Port} - it has served bad data before", ip, port);
+            ReportBlocked(new IPEndPoint(parsedForBadData, port), PeerBlockReason.BadData);
             return;
         }
 
@@ -679,7 +702,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         int currentConnecting = Interlocked.CompareExchange(ref _connectingPeersCount, 0, 0);
 
         // Limit active connections
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent && !forceUtp)
+        if (currentConnections >= MaxPeersForThisTorrent && !forceUtp)
         {
             return;
         }
@@ -876,13 +899,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (!_torrent.HasMetadata &&
                 _torrent.MetadataDownloadInternal?.Active == true &&
                 p.RemoteSupportsExtensions &&
-                p.RemoteExtensions?.MessageIds.ContainsKey(UtMetadata.Name) == true)
+                handshake.GetEnabledMessageId(UtMetadata.Name).HasValue &&
+                p.UtMetadata.RemoteMessageId.HasValue)
             {
                 _logger.LogDebug(
                     "Peer {RemoteEndPoint} supports ut_metadata (id={MessageId}, size={MetadataSize})",
                     p.RemoteEndPoint,
                     p.UtMetadata.RemoteMessageId,
-                    p.RemoteExtensions.MetadataSize);
+                    handshake.MetadataSize);
                 FireAndForget(p.SetInterestedAsync(true), "SetInterested (Metadata)");
             }
         }
@@ -1439,11 +1463,15 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             if (!_activeConnectionTasks.IsEmpty)
             {
-                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
+                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500), CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (TimeoutException) { /* Ignore timeout */ }
-        catch (Exception ex) { _logger.LogError(ex, "Error awaiting connection tasks during stop"); }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error awaiting connection tasks during stop");
+            Defect.ReportIfDefect(ex, "Error awaiting connection tasks during stop", _logger);
+        }
 
         _activeConnectionTasks.Clear();
         _pendingConnections.Clear();
@@ -1471,7 +1499,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             var closeTasks = toClose.Select(p => p.CloseAsync()).ToArray();
             try
             {
-                await Task.WhenAll(closeTasks).WaitAsync(TimeSpan.FromMilliseconds(250)).ConfigureAwait(false);
+                await Task.WhenAll(closeTasks).WaitAsync(TimeSpan.FromMilliseconds(250), CancellationToken.None).ConfigureAwait(false);
             }
             catch (TimeoutException)
             {
@@ -1509,7 +1537,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             if (!_activeConnectionTasks.IsEmpty)
             {
-                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
+                await Task.WhenAll([.. _activeConnectionTasks.Keys]).WaitAsync(TimeSpan.FromMilliseconds(500), CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (TimeoutException)
@@ -1742,6 +1770,39 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     }
 
     private Task CheckPeerHealthAsync() => _peerHealth.CheckAsync(_connectedPeers.Keys, ConnectedCount);
+
+    /// <summary>
+    /// Re-sends the extended handshake to every connected peer so they learn we now want nothing.
+    /// </summary>
+    /// <remarks>
+    /// BEP 21's <c>upload_only</c> was only ever sent in the opening handshake, which happens while we
+    /// are still downloading and therefore always said we wanted data. A peer we finish against is
+    /// never told otherwise, so it keeps a slot open for a download that will never be requested. BEP
+    /// 10 allows the handshake to be re-sent, and the builder already sets the key from the torrent's
+    /// own state, so announcing completion is the same message sent again.
+    /// </remarks>
+    internal async Task AnnounceUploadOnlyAsync()
+    {
+        foreach (var peer in _connectedPeers.Keys)
+        {
+            try
+            {
+                await peer.RefreshExtendedHandshakeAfterMetadataAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // A peer that has gone away needs no announcement, and the rest still do.
+                _logger.LogDebug(ex, "Could not announce upload_only to {RemoteEndPoint}", peer.RemoteEndPoint);
+            }
+        }
+
+        // The redundant connections this creates are closed by the next periodic health check rather
+        // than here. Sweeping them immediately was tried and reverted: it is what libtorrent does, but
+        // it disconnects our seeds at the instant we finish, and PeerSharp finishes downloading well
+        // before it has served the peers downloading from us - so the swarm lost its seeds while
+        // uploads were still in flight. The periodic sweep costs at most five seconds of one
+        // connection slot, against the two minutes this replaced, and leaves the uploads alone.
+    }
     private void CleanupPendingConnections()
     {
         long now = Environment.TickCount64;
@@ -1753,6 +1814,31 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 _pendingConnections.TryRemove(kvp.Key, out _);
             }
         }
+    }
+
+    /// <summary>
+    /// Grants a peer that hung up mid-MSE one prompt retry, and returns the address to dial.
+    /// </summary>
+    /// <remarks>
+    /// The decision itself is <see cref="FastReconnectPolicy"/>, which carries the reasoning. This
+    /// records it: the earlier finding that an immediate plaintext retry failed 72 times in 77 was
+    /// about retrying inside one attempt, on the socket the peer had just closed. What is granted
+    /// here is a fresh connection offering the other choice.
+    /// </remarks>
+    private IPEndPoint? ClaimFastReconnectAfterEncryptionHangUp(PeerCommunication peer, PeerHistory history)
+    {
+        if (!FastReconnectPolicy.ShouldRetryImmediately(peer.HungUpDuringEncryptionHandshake, history.FastReconnects))
+        {
+            return null;
+        }
+
+        history.FastReconnects++;
+
+        // The rewind itself: libtorrent moves the peer's last_connected back so the reconnect gate
+        // lets it through at once, and this is the same thing said forwards.
+        history.NextConnectAttempt = _timeProvider.GetUtcNow();
+
+        return history.EndPoint;
     }
 
     private void ApplyConnectionBackoff(PeerHistory history)
@@ -1780,6 +1866,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private async Task ConnectAndHandleAsync(PeerCommunication peer, string ip, int port, IReadOnlyList<TransportPreference> transportPlan, bool useGovernor, bool isHolepunch)
     {
         IPEndPoint? endpoint = null;
+
+        // Set when this attempt earns a prompt retry with the other encryption choice; acted on in
+        // the finally, once every guard this attempt holds has been released.
+        IPEndPoint? fastReconnectTarget = null;
+        bool fastReconnectEncrypted = false;
+
         try
         {
             endpoint = NetworkUtils.NormalizeEndPoint(new IPEndPoint(IPAddress.Parse(ip), port));
@@ -1832,7 +1924,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     remainingTimeoutMs, hasFallback, fallbackTimeoutMs);
 
                 bool attemptUtp = transport == TransportPreference.Utp;
-                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption).ConfigureAwait(false);
+                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, CancellationToken.None).ConfigureAwait(false);
 
                 if (success)
                 {
@@ -1883,6 +1975,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 // costs nothing extra because the attempt was going to happen anyway; a peer that only
                 // speaks one of them is reached on the following try.
                 history.RegisterHandshakeFailure();
+                fastReconnectTarget = ClaimFastReconnectAfterEncryptionHangUp(peer, history);
+                fastReconnectEncrypted = history.OfferEncryptionNext;
             }
 
             // Remove from connecting list regardless of outcome
@@ -1896,6 +1990,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             {
                 _governor.ReleasePendingSlot();
             }
+
 
             if (!success)
             {
@@ -1969,8 +2064,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (peer.RemoteEndPoint != null)
             {
                 peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-                // BEP 40: Calculate canonical peer priority
-                peer.Priority = PeerPriority.Calculate(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
+                // Deterministic per-peer ordering.
+                peer.Priority = CalculatePeerPriority(peer.RemoteEndPoint);
             }
 
             // The connection may have died between ConnectAsync succeeding and the registration
@@ -2017,6 +2112,20 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (endpoint != null)
             {
                 _pendingConnections.TryRemove(endpoint, out _);
+            }
+
+            // Only now, with the pending guard, the connecting-list entry and the governor slot all
+            // given back. The retry is an ordinary dial and goes through the ordinary gates, and this
+            // attempt still holding any of them is exactly what those gates exist to turn away.
+            if (fastReconnectTarget is not null)
+            {
+                _logger.LogDebug(
+                    "Retrying {EndPoint} promptly with encryption={OfferEncryption} after it hung up mid-handshake",
+                    fastReconnectTarget,
+                    fastReconnectEncrypted);
+
+                try { ConnectTo(fastReconnectTarget.Address.ToString(), fastReconnectTarget.Port); }
+                catch (Exception ex) { _logger.LogDebug(ex, "Failed to queue the prompt retry"); }
             }
         }
     }
@@ -2148,6 +2257,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             {
                 Exception exception = t.Exception.GetBaseException();
                 _logger.LogWarning(exception, "Async operation failed: {Context}", context);
+
+                // A dropped peer failing here is ordinary and stays a warning. A null reference is
+                // not, and without this it was indistinguishable from one: the escalation below only
+                // fires on a rate, so a single genuine defect on any of these paths was logged as a
+                // network hiccup and never reached the defect observers.
+                Defect.ReportIfDefect(exception, context, _logger);
+
                 RecordInternalFailure(context, exception);
             }
         }, TaskScheduler.Default);
@@ -2323,13 +2439,21 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
                 // UpdateSpeeds - every 1 second
                 try { await UpdateSpeedsAsync().ConfigureAwait(false); }
-                catch (Exception ex) { _logger.LogError(ex, "UpdateSpeeds error"); }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "UpdateSpeeds error");
+                    Defect.ReportIfDefect(ex, "UpdateSpeeds error", _logger);
+                }
 
                 // CheckPeerHealth (Watchdog) - every 5 seconds
                 if (tickCount % WatchdogIntervalSeconds == 0)
                 {
                     try { await CheckPeerHealthAsync().ConfigureAwait(false); }
-                    catch (Exception ex) { _logger.LogError(ex, "CheckPeerHealth error"); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "CheckPeerHealth error");
+                        Defect.ReportIfDefect(ex, "CheckPeerHealth error", _logger);
+                    }
                 }
 
                 // DHT peer lookup. This has to repeat, and the reason is a race that used to make it
@@ -2361,7 +2485,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     }
 
                     try { CleanupPendingConnections(); }
-                    catch (Exception ex) { _logger.LogError(ex, "CleanupPendingConnections error"); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "CleanupPendingConnections error");
+                        Defect.ReportIfDefect(ex, "CleanupPendingConnections error", _logger);
+                    }
                 }
 
                 // BroadcastPex - every 60 seconds
@@ -2371,7 +2499,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 if (tickCount % pexIntervalSeconds == 0)
                 {
                     try { BroadcastPex(); }
-                    catch (Exception ex) { _logger.LogError(ex, "BroadcastPex error"); }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "BroadcastPex error");
+                        Defect.ReportIfDefect(ex, "BroadcastPex error", _logger);
+                    }
                 }
             }
         }
@@ -2454,7 +2586,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
 
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
             return false;
         }
@@ -2505,9 +2637,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // The endpoint gate above only stops the exact same address and port twice. One host
             // dialling from a different source port each time gets past it, and can take as many slots
             // as it likes. libtorrent matches on address alone for the same reason.
-            if (!_settings.Connection.AllowMultipleConnectionsPerIp && SharesAddressWithAnotherPeer(peer))
+            int allowedPerAddress = _settings.Connection.AllowMultipleConnectionsPerIp
+                ? _settings.Connection.MaxConnectionsPerIp
+                : 1;
+
+            if (allowedPerAddress > 0 && CountPeersSharingAddress(peer) >= allowedPerAddress)
             {
                 _connectedEndpoints.TryRemove(KeyValuePair.Create(peer.RemoteEndPoint, peer));
+                _logger.LogDebug(
+                    "Rejecting {RemoteEndPoint}: its address already holds {Allowed} connections on this torrent",
+                    peer.RemoteEndPoint,
+                    allowedPerAddress);
                 return false;
             }
 
@@ -2515,19 +2655,20 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    /// <summary>Whether some other live connection is already using this peer's address.</summary>
-    private bool SharesAddressWithAnotherPeer(PeerCommunication peer)
+    /// <summary>How many other live connections are already using this peer's address.</summary>
+    private int CountPeersSharingAddress(PeerCommunication peer)
     {
         var address = peer.RemoteEndPoint!.Address;
+        int count = 0;
         foreach (var (endpoint, other) in _connectedEndpoints)
         {
             if (!ReferenceEquals(other, peer) && endpoint.Address.Equals(address))
             {
-                return true;
+                count++;
             }
         }
 
-        return false;
+        return count;
     }
 
     /// <summary>
@@ -2694,6 +2835,19 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     internal int GetOptimisticUnchokeIntervalSecondsForTesting() => _choker.GetOptimisticUnchokeIntervalSeconds();
 
+    /// <summary>
+    /// The peer ceiling for this torrent: its own <see cref="Interfaces.ITorrent.MaxConnections"/>
+    /// when the caller set one, otherwise the engine-wide default.
+    /// </summary>
+    private int MaxPeersForThisTorrent
+    {
+        get
+        {
+            int perTorrent = _torrent.MaxConnections;
+            return perTorrent > 0 ? perTorrent : _settings.Connection.MaxPeersPerTorrent;
+        }
+    }
+
     internal int GetUploadSlotsForTesting() => _choker.GetUploadSlotsForTesting(ConnectedCount);
 
     internal Task CheckPeerHealthForTestingAsync() => CheckPeerHealthAsync();
@@ -2816,7 +2970,25 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     }
 
     /// <summary>
-    /// BEP 40: Get the lowest priority connected peer, or null if no peers.
+    /// The BEP 40 priority for a connection to this peer.
+    /// </summary>
+    /// <remarks>
+    /// Our own public address is what the DHT has learned, and null until enough nodes agree on it.
+    /// PeerPriority stands the unspecified address in for it meanwhile, which is what libtorrent
+    /// does too; the value only becomes canonical - the same number the peer at the other end
+    /// computes - once the real address is known. It is recalculated on each decision rather than
+    /// cached, so that happens on its own, and a later change of address is picked up as well.
+    /// </remarks>
+    private uint CalculatePeerPriority(IPEndPoint remote)
+    {
+        var ourAddress = _torrent.DhtManager?.ExternalIp ?? IPAddress.Any;
+        int ourPort = _torrent.PortListener?.Port ?? _torrent.Settings.Connection.TcpPort;
+
+        return PeerPriority.Calculate(new IPEndPoint(ourAddress, ourPort), remote);
+    }
+
+    /// <summary>
+    /// The lowest priority connected peer, or null if there are none.
     /// </summary>
     private PeerCommunication? TryGetLowestPriorityPeer()
     {
@@ -2826,9 +2998,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         foreach (var kvp in _connectedPeers)
         {
             var peer = kvp.Key;
-            if (peer.Priority < lowestPriority)
+            uint priority = peer.RemoteEndPoint is { } remote
+                ? CalculatePeerPriority(remote)
+                : peer.Priority;
+
+            // The public address may have become known (or changed) since the connection was
+            // registered. Keep the observable value current as well as using it for this decision.
+            peer.Priority = priority;
+
+            if (priority < lowestPriority)
             {
-                lowestPriority = peer.Priority;
+                lowestPriority = priority;
                 lowestPeer = peer;
             }
         }
@@ -3000,6 +3180,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (_torrent.Blocklist?.IsBlocked(remote) == true)
         {
             _logger.LogDebug("Blocked connected stream peer from {Remote} (blocklist)", remote);
+            ReportBlocked(remote, PeerBlockReason.Blocklist);
             stream.Close();
             return Task.CompletedTask;
         }
@@ -3009,14 +3190,15 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _logger.LogDebug(
                 "Rejecting connected stream peer from {Remote} - it has served bad data before",
                 remote);
+            ReportBlocked(remote, PeerBlockReason.BadData);
             stream.Close();
             return Task.CompletedTask;
         }
 
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
-        if (currentConnections >= _settings.Connection.MaxPeersPerTorrent)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
-            _logger.LogDebug("Rejecting connected stream peer - at limit ({MaxPeers})", _settings.Connection.MaxPeersPerTorrent);
+            _logger.LogDebug("Rejecting connected stream peer - at limit ({MaxPeers})", MaxPeersForThisTorrent);
             stream.Close();
             return Task.CompletedTask;
         }
@@ -3045,7 +3227,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (peer.RemoteEndPoint != null)
         {
             peer.Country = _geoIp.GetCountry(peer.RemoteEndPoint.Address);
-            peer.Priority = PeerPriority.Calculate(peer.RemoteEndPoint.Address, _torrent.Hash.ToArray());
+            peer.Priority = CalculatePeerPriority(peer.RemoteEndPoint);
 
             var history = GetOrAddKnownPeerHistory(peer.RemoteEndPoint, isListenAddress: initiator);
             history.UpdateSource(sourceKind);

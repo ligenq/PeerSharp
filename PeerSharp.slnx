@@ -4,7 +4,9 @@
   <Project Path="samples/PeerSharp.WebTorrent.Demo/PeerSharp.WebTorrent.Demo.csproj" />
   <Project Path="samples/PeerSharp.Cli/PeerSharp.Cli.csproj" />
   <Project Path="benchmarks/PeerSharp.Benchmarks/PeerSharp.Benchmarks.csproj" />
+  <Project Path="benchmarks/PeerSharp.EndToEnd/PeerSharp.EndToEnd.csproj" />
   <Project Path="tests/PeerSharp.TrimSmoke/PeerSharp.TrimSmoke.csproj" />
+  <Project Path="tests/PeerSharp.Fuzz/PeerSharp.Fuzz.csproj" />
   <Project Path="tests/PeerSharp.Tests/PeerSharp.Tests.csproj" />
   <Project Path="tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj" />
 </Solution>

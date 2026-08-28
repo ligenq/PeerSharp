@@ -2,6 +2,8 @@ using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
 using PeerSharp.Internals;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Tests.Core.Utilities;
 
 public class TorrentFileParserTests
@@ -179,7 +181,7 @@ public class TorrentFileParserTests
         var root = new BDict();
         root.Dict["info"] = info;
 
-        var ex = Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+        var ex = Assert.Throws<TorrentMetadataException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
         Assert.Contains("piece layers", ex.Message, StringComparison.OrdinalIgnoreCase);
 
         var pieceLayer = MerkleTree.GetPieceLayer(leaves, 16_384);
@@ -236,7 +238,7 @@ public class TorrentFileParserTests
         var root = new BDict();
         root.Dict["info"] = info;
 
-        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+        Assert.Throws<TorrentMetadataException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
     }
 
     [Fact]
@@ -266,7 +268,7 @@ public class TorrentFileParserTests
         var root = new BDict();
         root.Dict["info"] = info;
 
-        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+        Assert.Throws<TorrentMetadataException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
     }
 
     [Fact]
@@ -276,7 +278,7 @@ public class TorrentFileParserTests
         var root = new BDict();
         root.Dict["info"] = info;
 
-        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+        Assert.Throws<TorrentMetadataException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
     }
 
     [Fact]
@@ -290,7 +292,7 @@ public class TorrentFileParserTests
         var root = new BDict();
         root.Dict["info"] = info;
 
-        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+        Assert.Throws<TorrentMetadataException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
     }
 
     [Fact]
@@ -300,7 +302,7 @@ public class TorrentFileParserTests
         var root = new BDict();
         root.Dict["info"] = info;
 
-        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+        Assert.Throws<TorrentMetadataException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
     }
 
     [Fact]
@@ -310,7 +312,7 @@ public class TorrentFileParserTests
         var root = new BDict();
         root.Dict["info"] = info;
 
-        Assert.Throws<FormatException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+        Assert.Throws<TorrentMetadataException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
     }
 
     private static BDict CreateSingleFileV1Info(long pieceLength, long length, byte[] pieces)

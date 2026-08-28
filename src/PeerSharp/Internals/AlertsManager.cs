@@ -14,7 +14,13 @@ internal interface IAlertsManager : IAlerts
 
     void MetadataProgressAlert(ITorrent torrent, float progress, int receivedPieces, int totalPieces);
 
+    void ListenPortChangedAlert(int requestedPort, int actualPort, ListenTransport transport);
+
+    void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason);
+
     void PieceCompletedAlert(ITorrent torrent, int pieceIndex, int completedPieces, int totalPieces);
+
+    void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer);
 
     void PostAlert(Alert alert);
 
@@ -150,6 +156,58 @@ internal class AlertsManager : IAlertsManager
             PieceIndex = pieceIndex,
             CompletedPieces = completedPieces,
             TotalPieces = totalPieces,
+            Timestamp = _timeProvider.GetUtcNow()
+        });
+    }
+
+    public void ListenPortChangedAlert(int requestedPort, int actualPort, ListenTransport transport)
+    {
+        if (!IsAlertRegistered(AlertId.ListenPortChanged))
+        {
+            return;
+        }
+
+        PostAlert(new ListenPortChangedAlert
+        {
+            Id = AlertId.ListenPortChanged,
+            RequestedPort = requestedPort,
+            ActualPort = actualPort,
+            Transport = transport,
+            Timestamp = _timeProvider.GetUtcNow()
+        });
+    }
+
+    public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason)
+    {
+        if (!IsAlertRegistered(AlertId.PeerBlocked))
+        {
+            return;
+        }
+
+        PostAlert(new PeerBlockedAlert
+        {
+            Id = AlertId.PeerBlocked,
+            Torrent = torrent,
+            Endpoint = endpoint,
+            Reason = reason,
+            Timestamp = _timeProvider.GetUtcNow()
+        });
+    }
+
+    public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer)
+    {
+        if (!IsAlertRegistered(AlertId.PieceHashFailed))
+        {
+            return;
+        }
+
+        PostAlert(new PieceHashFailedAlert
+        {
+            Id = AlertId.PieceHashFailed,
+            Torrent = torrent,
+            PieceIndex = pieceIndex,
+            Failures = failures,
+            SuspectedPeer = suspectedPeer,
             Timestamp = _timeProvider.GetUtcNow()
         });
     }

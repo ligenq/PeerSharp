@@ -1,4 +1,4 @@
-using PeerSharp.PiecePicking;
+﻿using PeerSharp.PiecePicking;
 using Microsoft.Extensions.Time.Testing;
 
 namespace PeerSharp.Tests.Core.Pieces;
@@ -233,6 +233,157 @@ public class PiecePickerTests
         bool success = picker.PickNextPiece(peer, out int picked);
         Assert.True(success);
         Assert.Equal(1, picked);
+    }
+
+    [Fact]
+    public void PickNextPiece_Sequential_SkipsThePrefixItAlreadyHolds()
+    {
+        // The scan starts from the first piece we do not hold, rather than re-walking the completed
+        // prefix on every pick. What must not change is the answer: still the lowest piece the peer
+        // can serve.
+        var ctx = new MockContext { PieceCount = 10, DownloadStrategy = DownloadStrategy.Sequential };
+        for (int i = 0; i < 6; i++)
+        {
+            ctx.CompletedPieces.Add(i);
+        }
+
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+        var peer = new MockPeer();
+        peer.Pieces.Add(9);
+        peer.Pieces.Add(7);
+
+        Assert.True(picker.PickNextPiece(peer, out int picked));
+        Assert.Equal(7, picked);
+    }
+
+    [Fact]
+    public void PickNextPiece_Sequential_StillReconsidersPiecesSkippedForOtherReasons()
+    {
+        // Only held pieces may be skipped permanently. A piece passed over because it was active, or
+        // because that peer did not have it, has to be offered again - otherwise the cursor would
+        // walk past pieces the torrent still needs.
+        var ctx = new MockContext { PieceCount = 6, DownloadStrategy = DownloadStrategy.Sequential };
+        ctx.CompletedPieces.Add(0);
+        ctx.ActivePieces.Add(1);
+
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+        var peer = new MockPeer();
+        peer.Pieces.Add(1);
+        peer.Pieces.Add(2);
+
+        Assert.True(picker.PickNextPiece(peer, out int first));
+        Assert.Equal(2, first);
+
+        // Piece 1 finishes downloading elsewhere and is released.
+        ctx.ActivePieces.Remove(1);
+
+        Assert.True(picker.PickNextPiece(peer, out int second));
+        Assert.Equal(1, second);
+    }
+
+    [Fact]
+    public void PickNextPiece_Sequential_AfterARecheckLosesPieces_RewindsToThem()
+    {
+        // A recheck can turn a held piece back into a missing one. InvalidateSelection is the
+        // notification that reaches the picker, so the cursor rewinds there.
+        var ctx = new MockContext { PieceCount = 8, DownloadStrategy = DownloadStrategy.Sequential };
+        for (int i = 0; i < 5; i++)
+        {
+            ctx.CompletedPieces.Add(i);
+        }
+
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+        var peer = new MockPeer();
+        for (int i = 0; i < 8; i++)
+        {
+            peer.Pieces.Add(i);
+        }
+
+        Assert.True(picker.PickNextPiece(peer, out int picked));
+        Assert.Equal(5, picked);
+
+        // The recheck finds piece 2 corrupt.
+        ctx.CompletedPieces.Remove(2);
+        picker.InvalidateSelection();
+
+        Assert.True(picker.PickNextPiece(peer, out int afterRecheck));
+        Assert.Equal(2, afterRecheck);
+    }
+
+    [Fact]
+    public void PickNextPiece_Sequential_WhenEverythingIsHeld_ReturnsFalse()
+    {
+        var ctx = new MockContext { PieceCount = 4, DownloadStrategy = DownloadStrategy.Sequential };
+        for (int i = 0; i < 4; i++)
+        {
+            ctx.CompletedPieces.Add(i);
+        }
+
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+        var peer = new MockPeer();
+        for (int i = 0; i < 4; i++)
+        {
+            peer.Pieces.Add(i);
+        }
+
+        Assert.False(picker.PickNextPiece(peer, out _));
+
+        // And a second call, with the cursor now parked at the end, must not walk off it.
+        Assert.False(picker.PickNextPiece(peer, out _));
+    }
+
+    [Fact]
+    public void PickNextPiece_Sequential_SurvivesAPieceCountChange()
+    {
+        var ctx = new MockContext { PieceCount = 4, DownloadStrategy = DownloadStrategy.Sequential };
+        for (int i = 0; i < 4; i++)
+        {
+            ctx.CompletedPieces.Add(i);
+        }
+
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+        var peer = new MockPeer();
+        peer.Pieces.Add(3);
+
+        Assert.False(picker.PickNextPiece(peer, out _));
+
+        // A magnet's metadata arrives and the torrent turns out to be larger.
+        ctx.PieceCount = 10;
+        picker.IncrementAvailability(9);
+        peer.Pieces.Add(6);
+
+        Assert.True(picker.PickNextPiece(peer, out int picked));
+        Assert.Equal(6, picked);
+    }
+
+    [Fact]
+    public void PickNextPiece_Sequential_SurvivesThePieceCountShrinking()
+    {
+        // The cursor is an index into a piece count that is not fixed for a magnet. Growth resets it
+        // through EnsureCapacity; a count that shrinks would otherwise leave the cursor past the end
+        // and the picker would report nothing to do for a torrent that still needs pieces.
+        var ctx = new MockContext { PieceCount = 10, DownloadStrategy = DownloadStrategy.Sequential };
+        for (int i = 0; i < 8; i++)
+        {
+            ctx.CompletedPieces.Add(i);
+        }
+
+        var picker = new PiecePicker(ctx, _timeProvider, _random);
+        var peer = new MockPeer();
+        for (int i = 0; i < 10; i++)
+        {
+            peer.Pieces.Add(i);
+        }
+
+        Assert.True(picker.PickNextPiece(peer, out int picked));
+        Assert.Equal(8, picked);
+
+        // The torrent turns out to be smaller than the cursor now assumes.
+        ctx.PieceCount = 4;
+        ctx.CompletedPieces.Remove(1);
+
+        Assert.True(picker.PickNextPiece(peer, out int afterShrink));
+        Assert.Equal(1, afterShrink);
     }
 
     [Fact]

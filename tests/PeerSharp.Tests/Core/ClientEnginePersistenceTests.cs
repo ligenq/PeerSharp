@@ -58,6 +58,7 @@ public class ClientEnginePersistenceTests
     {
         public DhtState? StateToReturn { get; set; }
         public InfoHash NodeId { get; } = new InfoHash(new byte[20]);
+        public System.Net.IPAddress? ExternalIp => null;
         public void Announce(InfoHash infoHash, int port) { }
         public int FindPeers(InfoHash infoHash)
         {

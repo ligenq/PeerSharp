@@ -4,6 +4,8 @@ using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
 using System.Collections;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Internals.Extensions;
 
 internal class MetadataDownload : IMetadataDownload, IDisposable
@@ -61,6 +63,18 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     }
 
     private readonly Dictionary<IPeerCommunication, MetadataPeerRecord> _peerRecords = [];
+
+    /// <summary>Test hook: number of peers this download believes it can still ask.</summary>
+    internal int ActivePeerCountForTesting
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _activePeers.Count;
+            }
+        }
+    }
 
     /// <summary>Test hook: number of in-flight metadata piece requests.</summary>
     internal int PendingRequestCountForTesting
@@ -238,7 +252,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 {
                     newMetadata = TorrentFileParser.ParseInfoBytes(_metadataBuffer, _loggerFactory);
                 }
-                catch (FormatException ex)
+                catch (TorrentMetadataException ex)
                 {
                     _logger.LogWarning(ex, "Downloaded metadata is not a valid info dictionary. Discarding metadata.");
                     RejectCompletedMetadata();
@@ -381,21 +395,24 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 return;
             }
 
-            if (peer.RemoteSupportsExtensions && peer.RemoteExtensions?.MessageIds.ContainsKey(UtMetadata.Name) == true)
+            if (peer.RemoteSupportsExtensions &&
+                peer.RemoteExtensions is { } remoteExtensions &&
+                remoteExtensions.GetEnabledMessageId(UtMetadata.Name).HasValue &&
+                peer.UtMetadata.RemoteMessageId.HasValue)
             {
                 if (!_activePeers.Contains(peer))
                 {
                     _activePeers.Add(peer);
                 }
-                _logger.LogInformation("Metadata peer connected {PeerId} (id={MessageId}, size={MetadataSize})", peer.PeerId, peer.UtMetadata.RemoteMessageId, peer.RemoteExtensions.MetadataSize);
+                _logger.LogInformation("Metadata peer connected {PeerId} (id={MessageId}, size={MetadataSize})", peer.PeerId, peer.UtMetadata.RemoteMessageId, remoteExtensions.MetadataSize);
                 _logger.LogDebug("Peer {PeerId} supports ut_metadata. Adding to active list.", peer.PeerId);
 
                 // Request metadata_size if peer sent it
-                if (peer.RemoteExtensions.MetadataSize.HasValue)
+                if (remoteExtensions.MetadataSize.HasValue)
                 {
                     if (_metadataSize == 0)
                     {
-                        InitializeMetadataBuffer(peer.RemoteExtensions.MetadataSize.Value);
+                        InitializeMetadataBuffer(remoteExtensions.MetadataSize.Value);
                     }
 
                     if (Active && !Finished)

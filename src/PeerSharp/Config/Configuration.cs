@@ -83,6 +83,34 @@ public sealed class ConnectionSettings
     public bool AllowMultipleConnectionsPerIp { get; set; } = true;
 
     /// <summary>
+    /// How many connections one IP address may hold on a single torrent. Zero, the default, means no
+    /// limit. Ignored when <see cref="AllowMultipleConnectionsPerIp"/> is <see langword="false"/>,
+    /// which is the stricter policy.
+    ///
+    /// <para>
+    /// This is the middle ground the flag above lacks. Allowing many connections per address is the
+    /// right default because of carrier-grade NAT, but on a host you control - a seedbox, or an
+    /// engine facing a swarm you do not trust - "many" should not have to mean "all of them": one
+    /// host cycling source ports can otherwise hold every slot a torrent has, and
+    /// <see cref="MaxConnections"/> bounds only how much of the engine that costs, not how much of
+    /// one swarm.
+    /// </para>
+    ///
+    /// <para>
+    /// Off by default, because the number that is safe depends on the deployment and a wrong guess
+    /// refuses real peers. What this counts is live connection <em>registrations</em>, and a single
+    /// logical peer can briefly hold more than one: a dial may try uTP and TCP, a handshake in
+    /// progress is already registered, and a reconnect overlaps the connection it replaces. Anywhere
+    /// peers genuinely share an address the count therefore sits well above the peer count - most
+    /// sharply on loopback, where every local engine is <c>127.0.0.1</c> and a swarm of twenty-four
+    /// leechers is twenty-four connections from one address before any of that. Set it from what the
+    /// deployment looks like: a public seedbox can afford a small number, a client behind CGNAT
+    /// should leave it off.
+    /// </para>
+    /// </summary>
+    public int MaxConnectionsPerIp { get; set; }
+
+    /// <summary>
     /// How often, at most, one peer is told about swarm changes over ut_pex (BEP 11).
     ///
     /// <para>
@@ -316,16 +344,31 @@ public sealed class ConnectionSettings
     public int StableSpeedThresholdBytesPerSec { get; set; } = 2_000_000;
 
     /// <summary>
-    /// The TCP port to listen on for incoming connections. Set to 0 for OS-assigned port.
-    /// Default is 55125. Use a value in the range 49152-65535 to avoid conflicts with system services.
+    /// The TCP port to listen on for incoming connections. Set to 0 for an OS-assigned port.
+    /// Default is 6881.
     /// </summary>
-    public ushort TcpPort { get; set; } = 55125;
+    /// <remarks>
+    /// <para>
+    /// 6881 is the first of the range BitTorrent has used since the original client, and the
+    /// default in libtorrent, qBittorrent and Deluge. Prefer a port below 49152. The range above it
+    /// is the dynamic range, which the OS hands out to outbound connections and which Windows
+    /// reserves blocks of for Hyper-V, WSL and Docker; a bind inside one of those reserved blocks
+    /// fails with a permission error even though nothing is listening, and the blocks move between
+    /// reboots. An earlier default of 55125 sat in that range.
+    /// </para>
+    /// <para>
+    /// If the port cannot be bound the engine tries the next few and then falls back to an
+    /// OS-assigned one rather than refusing to start, so a busy or reserved port costs inbound
+    /// reachability at worst. Set an explicit port when forwarding one through a router.
+    /// </para>
+    /// </remarks>
+    public ushort TcpPort { get; set; } = 6881;
 
     /// <summary>
-    /// The UDP port to listen on for DHT, uTP, and LSD. Set to 0 for OS-assigned port.
-    /// Default is 55125. It is recommended to use the same value as TcpPort for simplicity.
+    /// The UDP port to listen on for DHT, uTP, and LSD. Set to 0 for an OS-assigned port.
+    /// Default is 6881, matching <see cref="TcpPort"/>; see its remarks for how the port is chosen.
     /// </summary>
-    public ushort UdpPort { get; set; } = 55125;
+    public ushort UdpPort { get; set; } = 6881;
 
     /// <summary>
     /// Whether to attempt UPnP port mapping. Default is false.
@@ -487,7 +530,7 @@ public sealed class FilesSettings
     /// <summary>
     /// Number of 16KiB blocks to prefetch when sequential reads are detected.
     /// </summary>
-    public int ReadAheadBlocks { get; set; } = 4;
+    public int ReadAheadBlocks { get; set; } = 16;
 
     /// <summary>
     /// Global disk read speed limit in bytes per second. 0 for unlimited. Negative values are rejected.
@@ -679,6 +722,18 @@ public sealed class TransferSettings
     /// <summary>Estimated round-trip time for startup pipeline calculation (ms).</summary>
     public int EstimatedRttMs { get; set; } = 50;
 
+    /// <summary>
+    /// Seconds of work to keep queued on each peer, which is what sets the request pipeline depth.
+    /// </summary>
+    /// <remarks>
+    /// Depth is this many seconds multiplied by the peer's measured download rate, so a fast peer
+    /// earns a deep queue and a slow one does not. Raising it costs a request record per outstanding
+    /// block and risks asking for more than a peer will serve before it is choked; lowering it below
+    /// the round trip leaves the peer idle between requests. Matches libtorrent's
+    /// <c>request_queue_time</c>.
+    /// </remarks>
+    public int RequestQueueTimeSeconds { get; set; } = 3;
+
     /// <summary>Initial request pipeline depth for new peer connections.</summary>
     public int InitialPipelineDepth { get; set; } = 16;
 
@@ -692,9 +747,10 @@ public sealed class TransferSettings
     public int MaxConcurrentPieceWrites { get; set; } = 8;
 
     /// <summary>
-    /// Maximum outstanding requests per peer to cap pipeline growth.
+    /// Maximum outstanding requests per peer to cap pipeline growth. Matches libtorrent's
+    /// <c>max_out_request_queue</c>.
     /// </summary>
-    public int MaxRequestsPerPeer { get; set; } = 128;
+    public int MaxRequestsPerPeer { get; set; } = 500;
 
     /// <summary>
     /// Maximum number of distinct metadata pieces requested in parallel (ut_metadata).

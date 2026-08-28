@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Peers;
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
@@ -197,6 +198,62 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         }
 
         return Task.CompletedTask;
+    }
+
+    public async Task ScrapeAsync(string? url = null, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        List<TrackerInfo> toScrape = [];
+        lock (_lock)
+        {
+            if (_disposal.IsDisposed)
+            {
+                return;
+            }
+
+            if (url != null)
+            {
+                var info = _trackers.FirstOrDefault(t => t.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
+                if (info != null)
+                {
+                    toScrape.Add(info);
+                }
+            }
+            else
+            {
+                toScrape.AddRange(GetActiveTrackersLocked());
+            }
+        }
+
+        if (toScrape.Count == 0)
+        {
+            return;
+        }
+
+        // Awaited rather than scheduled, unlike an announce: the caller asked for counts and has
+        // nowhere to read them from until the replies land.
+        await Task.WhenAll(toScrape.Select(info => ScrapeOneAsync(info, cancellationToken))).ConfigureAwait(false);
+    }
+
+    private async Task ScrapeOneAsync(TrackerInfo info, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await info.Tracker.ScrapeAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // One tracker refusing or not implementing scrape says nothing about the others, and the
+            // counts a caller does get are still worth having. The failure is already reflected in
+            // the tracker's status.
+            Defect.ReportIfDefect(ex, $"scrape of {info.Url}", _logger);
+            _logger.LogDebug(ex, "Scrape of {TrackerUrl} failed", info.Url);
+        }
     }
 
     public void AnnounceCompleted()

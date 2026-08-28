@@ -14,13 +14,13 @@ public class UtpTests
 
         // Setup Listener 1
         var socketFactory = new UdpSocketFactory();
-        var listener1 = new UdpListener(50001, socketFactory, settings);
+        var listener1 = new UdpListener(0, socketFactory, settings);
         await listener1.StartAsync();
         var mgr1 = new UtpManager(TimeProvider.System);
         mgr1.Start(listener1);
 
         // Setup Listener 2
-        var listener2 = new UdpListener(50002, socketFactory, settings);
+        var listener2 = new UdpListener(0, socketFactory, settings);
         await listener2.StartAsync();
         var mgr2 = new UtpManager(TimeProvider.System);
         mgr2.Start(listener2);
@@ -35,11 +35,12 @@ public class UtpTests
         };
 
         // Connect 1 -> 2
-        var clientStream = mgr1.CreateStream(new IPEndPoint(IPAddress.Loopback, 50002));
+        var clientStream = mgr1.CreateStream(new IPEndPoint(IPAddress.Loopback, listener2.Port));
         await clientStream.ConnectAsync();
 
-        // Wait for server to accept
-        await Task.WhenAny(connectionTcs.Task, Task.Delay(1000));
+        // Wait for server to accept. A second is generous on loopback and was not on a loaded CI
+        // runner, where this failed as "Server did not receive connection".
+        await Task.WhenAny(connectionTcs.Task, Task.Delay(TimeSpan.FromSeconds(10)));
         Assert.True(serverSideStream != null, "Server did not receive connection");
 
         // Send Data 1 -> 2
@@ -68,12 +69,12 @@ public class UtpTests
     {
         var settings = new Settings();
         var socketFactory = new UdpSocketFactory();
-        var listener1 = new UdpListener(50011, socketFactory, settings);
+        var listener1 = new UdpListener(0, socketFactory, settings);
         await listener1.StartAsync();
         var mgr1 = new UtpManager(TimeProvider.System);
         mgr1.Start(listener1);
 
-        var listener2 = new UdpListener(50012, socketFactory, settings);
+        var listener2 = new UdpListener(0, socketFactory, settings);
         await listener2.StartAsync();
         var mgr2 = new UtpManager(TimeProvider.System);
         mgr2.Start(listener2);
@@ -82,7 +83,7 @@ public class UtpTests
         var connectionTcs = new TaskCompletionSource<bool>();
         mgr2.OnNewConnection = (stream) => { serverSideStream = stream; connectionTcs.SetResult(true); };
 
-        var clientStream = mgr1.CreateStream(new IPEndPoint(IPAddress.Loopback, 50012));
+        var clientStream = mgr1.CreateStream(new IPEndPoint(IPAddress.Loopback, listener2.Port));
         await clientStream.ConnectAsync();
         await connectionTcs.Task;
 
@@ -115,12 +116,12 @@ public class UtpTests
     {
         var settings = new Settings();
         var socketFactory = new UdpSocketFactory();
-        var listener1 = new UdpListener(50021, socketFactory, settings);
+        var listener1 = new UdpListener(0, socketFactory, settings);
         await listener1.StartAsync();
         var mgr1 = new UtpManager(TimeProvider.System);
         mgr1.Start(listener1);
 
-        var listener2 = new UdpListener(50022, socketFactory, settings);
+        var listener2 = new UdpListener(0, socketFactory, settings);
         await listener2.StartAsync();
         var mgr2 = new UtpManager(TimeProvider.System);
         mgr2.Start(listener2);
@@ -129,7 +130,7 @@ public class UtpTests
         var connectionTcs = new TaskCompletionSource<bool>();
         mgr2.OnNewConnection = (stream) => { serverSideStream = stream; connectionTcs.SetResult(true); };
 
-        var clientStream = mgr1.CreateStream(new IPEndPoint(IPAddress.Loopback, 50022));
+        var clientStream = mgr1.CreateStream(new IPEndPoint(IPAddress.Loopback, listener2.Port));
         await clientStream.ConnectAsync();
         await connectionTcs.Task;
 

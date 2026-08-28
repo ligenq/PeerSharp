@@ -22,11 +22,15 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
         long totalSize,
         IBandwidthManager bandwidth,
         string torrentHash,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        IReadOnlyDictionary<int, string>? renamedFiles)
     {
         DownloadPath = path;
         var diskLimiter = new DiskBandwidthLimiter(bandwidth, torrentHash);
-        _storage = new Storage(metadata, path, new PathValidator(path), handleCache, enableSparseFiles, diskLimiter, loggerFactory);
+        _storage = new Storage(metadata, path, new PathValidator(path), handleCache, enableSparseFiles, diskLimiter, loggerFactory)
+        {
+            RenamedFiles = renamedFiles
+        };
         _blockCache = new BlockCache(cacheSizeBytes, readAheadBlocks, enableReadAhead, totalSize);
         _blockCache.Initialize(_storage);
     }
@@ -39,6 +43,8 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
     public string DownloadPath { get; }
 
     public bool IsDisposed => _disposal.IsDisposed;
+
+    internal bool IsInitialized => _storage is Storage storage && storage.IsInitialized;
 
     /// <summary>
     /// Creates a Files instance with optional custom download path.
@@ -66,12 +72,23 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
             torrent.InfoFile.Info.FullSize,
             torrent.Bandwidth,
             torrent.Hash.ToHexStringUpper(),
-            loggerFactory);
+            loggerFactory,
+            torrent.GetRenamedFileMap());
     }
 
     public Task DeleteFilesAsync(CancellationToken ct = default)
     {
         return _storage.DeleteAllAsync(ct);
+    }
+
+    public Task MoveFilesAsync(string newRootPath, CancellationToken ct = default)
+    {
+        return _storage.MoveAsync(newRootPath, ct);
+    }
+
+    public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default)
+    {
+        return _storage.RenameFileAsync(fileIndex, newRelativePath, ct);
     }
 
     public async ValueTask DisposeAsync()
@@ -82,6 +99,18 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
             await _storage.DisposeAsync().ConfigureAwait(false);
         }
         GC.SuppressFinalize(this);
+    }
+
+    public Task<bool> FlushAsync(CancellationToken ct = default)
+    {
+        // Writes are write-through (see BlockCache.WriteAsync), so there is no cache layer to drain
+        // first - the storage flush is the whole barrier.
+        if (_disposal.IsDisposed)
+        {
+            return Task.FromResult(false);
+        }
+
+        return _storage.FlushAsync(ct);
     }
 
     public Task InitializeAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default)

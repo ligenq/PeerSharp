@@ -57,6 +57,16 @@ internal sealed class DiskBandwidthLimiter : IBandwidthUser
         _bandwidth.ReturnBandwidth(amount, _writeChannels);
     }
 
+    /// <summary>
+    /// Whether any read limit is in force. Callers use this to skip the metering entirely, which on
+    /// an unlimited torrent is the whole of the cost: a task allocation, two channel lookups under a
+    /// lock, and a return of the grant, paid once per sixteen-kilobyte block.
+    /// </summary>
+    internal bool IsReadLimitedNow() => IsReadLimited();
+
+    /// <summary>Whether any write limit is in force. See <see cref="IsReadLimitedNow"/>.</summary>
+    internal bool IsWriteLimitedNow() => IsWriteLimited();
+
     private bool IsReadLimited()
     {
         return _bandwidth.GetChannel(BandwidthManager.GlobalDiskRead).GetLimit() > 0 ||

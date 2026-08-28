@@ -16,18 +16,23 @@ public class MerkleTreeTests
     }
 
     [Fact]
-    public void ComputeLeaves_PartialBlock_HashesPaddedData()
+    public void ComputeLeaves_PartialBlock_HashesTheDataAtItsRealLength()
     {
+        // BEP 52 pads the tree with zero hashes past the end of the data; it does not pad the data.
+        // libtorrent hashes exactly min(block_size, remaining) bytes, and this used to widen the
+        // buffer to 16 KiB first - which every full-size piece survived and the last piece of every
+        // file did not.
         byte[] data = new byte[1234];
         Random.Shared.NextBytes(data);
 
         var leaves = MerkleTree.ComputeLeaves(data);
 
         Assert.Single(leaves);
+        Assert.Equal(SHA256.HashData(data), leaves[0]);
 
         byte[] padded = new byte[MerkleTree.BlockSize];
         data.CopyTo(padded);
-        Assert.Equal(SHA256.HashData(padded), leaves[0]);
+        Assert.NotEqual(SHA256.HashData(padded), leaves[0]);
     }
 
     [Fact]

@@ -104,7 +104,6 @@ internal static class UpnpDiscovery
         return gateways;
     }
 
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S1075:URIs should not be hardcoded", Justification = "URL separator, not path delimiter")]
     internal static async Task<UpnpGateway?> ParseDescriptionAsync(string location, IPAddress localIp, CancellationToken ct)
     {
         return await ParseDescriptionAsync(location, localIp, NullLogger.Instance, ct).ConfigureAwait(false);

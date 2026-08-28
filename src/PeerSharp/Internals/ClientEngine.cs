@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Dht;
@@ -38,6 +38,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     private readonly ITrackerFactory _trackerFactory;
     private AtomicDisposal _disposal = new();
     private int _bandwidthStarted;
+
+    // Session-wide pause. The set records what was running so Resume puts back exactly that, rather
+    // than starting everything the engine happens to hold.
+    private readonly SemaphoreSlim _pauseGate = new(1, 1);
+    private readonly Lock _pauseLock = new();
+    private readonly HashSet<InfoHash> _pausedTorrents = [];
+    private int _paused;
     private int _initialized;
     private INetworkManager? _networkManager;
     private CancellationTokenSource? _dhtSaveCts;
@@ -78,6 +85,50 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _geoIp = new GeoIpService();
         _peerFactory = new PeerCommunicationFactory(loggerFactory);
         _trackerFactory = new TrackerFactory(loggerFactory);
+
+        // Reads through GetStats, which refuses a disposed engine - hence the guard rather than the
+        // call alone. Nothing is measured unless something subscribes to the meter.
+        _metrics = new EngineMetrics(
+            () => _disposal.IsDisposed ? null : GetStats(),
+            () => _disposal.IsDisposed ? null : GetLifetimeTotals(),
+            _engineId,
+            scope: this);
+    }
+
+    /// <summary>
+    /// Distinguishes this engine's measurements from another's in the same process. Not derived from
+    /// settings: two engines can legitimately share a configuration.
+    /// </summary>
+    private readonly string _engineId = Guid.NewGuid().ToString("N")[..8];
+
+    private readonly EngineMetrics _metrics;
+
+    // GetStats sums the torrents currently registered, which is the right answer for "what is this
+    // engine doing now" and the wrong one for a counter. These are the counter's figures, and the
+    // removal and the read are kept indivisible - see LifetimeByteTotals for why that matters more
+    // than the arithmetic does.
+    private LifetimeByteTotals? _lifetimeTotals;
+
+    private LifetimeByteTotals LifetimeTotals =>
+        _lifetimeTotals ??= new LifetimeByteTotals(
+            () => _registry.GetAll().Select(torrent => (torrent.TotalDownloaded, torrent.TotalUploaded)));
+
+    /// <summary>
+    /// Bytes moved over the engine's whole life, including by torrents that have been removed. Only
+    /// ever increases, which is what a counter has to promise.
+    /// </summary>
+    internal (long Downloaded, long Uploaded) GetLifetimeTotals() => LifetimeTotals.Read();
+
+    /// <summary>
+    /// Takes a torrent out of the registry and folds its totals into the engine's lifetime figures,
+    /// as one step. Returns whether this call is the one that removed it.
+    /// </summary>
+    private bool RemoveAndRetire(Torrent torrent, bool transient = false)
+    {
+        return LifetimeTotals.RemoveAndRetire(
+            () => transient ? _registry.RemoveTransient(torrent) : _registry.Remove(torrent),
+            torrent.TotalDownloaded,
+            torrent.TotalUploaded);
     }
 
     public IAlerts Alerts => _alerts;
@@ -256,7 +307,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 try
                 {
                     _logger.LogInformation("Saving session data before shutdown...");
-                    await _sessionManager.SaveAllResumeDataAsync().ConfigureAwait(false);
+                    await _sessionManager.SaveAllResumeDataAsync(CancellationToken.None).ConfigureAwait(false);
                     _logger.LogInformation("Session data saved successfully");
                 }
                 catch (Exception ex)
@@ -282,7 +333,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 {
                     // 15s: torrent disposal flushes the block cache and closes file handles,
                     // which can take several seconds on slow storage or large write queues.
-                    await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
+                    await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(15), CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -302,6 +353,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             _logger.LogDebug("Shutdown phase network completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
 
             phaseStopwatch.Restart();
+            _metrics.Dispose();
             _fileHandleCache.Dispose();
 
             // Dispose bandwidth manager
@@ -368,6 +420,157 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         _disposal.ThrowIfDisposed(this);
         return _registry.GetAll();
+    }
+
+    public bool IsPaused => Volatile.Read(ref _paused) == 1;
+
+    public async Task PauseAsync(CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+
+        await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_pauseLock)
+            {
+                Volatile.Write(ref _paused, 1);
+            }
+
+            // Always rescan. A cancelled earlier pause may have stopped only part of the session,
+            // and a retry must finish the operation instead of treating the flag as proof.
+            foreach (var torrent in _registry.GetAll())
+            {
+                if (!torrent.Started)
+                {
+                    continue;
+                }
+
+                lock (_pauseLock)
+                {
+                    _pausedTorrents.Add(torrent.Hash);
+                }
+
+                // Cleared before stopping, so the queue cannot pick this torrent up again between the
+                // stop and the next one - the queue only starts torrents that want auto-start.
+                torrent.QueueAutoStart = false;
+
+                try
+                {
+                    await torrent.StopAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // One torrent failing to stop must not leave the rest running, which is what the
+                    // caller asked to prevent.
+                    Defect.ReportIfDefect(ex, $"pausing torrent {torrent.Hash}", _logger);
+                    _logger.LogWarning(ex, "Torrent {Hash} could not be stopped while pausing the session", torrent.Hash);
+                }
+            }
+        }
+        finally
+        {
+            _pauseGate.Release();
+        }
+    }
+
+    public async Task ResumeAsync(CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+
+        await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!IsPaused)
+            {
+                return;
+            }
+
+            while (true)
+            {
+                InfoHash[] toStart;
+                lock (_pauseLock)
+                {
+                    if (_pausedTorrents.Count == 0)
+                    {
+                        Volatile.Write(ref _paused, 0);
+                        return;
+                    }
+
+                    toStart = [.. _pausedTorrents];
+                }
+
+                foreach (var hash in toStart)
+                {
+                    if (!_registry.TryGet(hash, out var torrent) || torrent is null)
+                    {
+                        lock (_pauseLock)
+                        {
+                            _pausedTorrents.Remove(hash);
+                        }
+                        continue;
+                    }
+
+                    bool removeFromPaused = false;
+                    try
+                    {
+                        // StartAsync restores QueueAutoStart, so nothing has to put it back here.
+                        await torrent.StartCoreAsync(cancellationToken).ConfigureAwait(false);
+                        removeFromPaused = true;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // StartAsync sets auto-start before doing cancellable work. Keep a cancelled
+                        // resume from leaking this torrent back into the queue while the session is
+                        // still paused.
+                        torrent.QueueAutoStart = false;
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        removeFromPaused = true;
+                        Defect.ReportIfDefect(ex, $"resuming torrent {hash}", _logger);
+                        _logger.LogWarning(ex, "Torrent {Hash} could not be restarted while resuming the session", hash);
+                    }
+                    finally
+                    {
+                        if (removeFromPaused)
+                        {
+                            lock (_pauseLock)
+                            {
+                                _pausedTorrents.Remove(hash);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _pauseGate.Release();
+        }
+    }
+
+    private async Task StartUnlessSessionPausedAsync(Torrent torrent, CancellationToken cancellationToken)
+    {
+        await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            lock (_pauseLock)
+            {
+                if (IsPaused)
+                {
+                    torrent.QueueAutoStart = false;
+                    _pausedTorrents.Add(torrent.Hash);
+                    return;
+                }
+            }
+
+            await torrent.StartCoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _pauseGate.Release();
+        }
     }
 
     /// <summary>
@@ -660,6 +863,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
         var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
 
+        if (!transient)
+        {
+            torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
+        }
+
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
@@ -699,6 +907,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         var fsm = new FileSelectionManager(metadata);
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
         var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
+        if (!transient)
+        {
+            torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
+        }
 
         torrent.DhtManager = Dht;
         torrent.UtpManager = Utp;
@@ -760,7 +972,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             _sessionManager?.RegisterTorrentData(torrent.Hash, bytes, null);
             if (Settings.Session.Enabled && _sessionManager != null)
             {
-                await _sessionManager.SaveTorrentEntryAsync(torrent, bytes, null).ConfigureAwait(false);
+                await _sessionManager.SaveTorrentEntryAsync(torrent, bytes, null, CancellationToken.None).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
@@ -824,8 +1036,12 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
             if (!negotiated.Success)
             {
+                // Returned rather than thrown. This is the ordinary outcome for an inbound peer that
+                // hangs up or never finishes the handshake, the catch that received it is twenty
+                // lines below in this same method, and it was costing an exception per attempt on a
+                // path that runs for every incoming connection.
                 _logger.LogDebug("uTP handshake from {Remote} did not complete", stream.RemoteEndPoint);
-                throw new InvalidDataException("Invalid handshake");
+                return;
             }
 
             var torrent = ResolveTorrentForBackgroundWork(negotiated.InfoHash);
@@ -836,7 +1052,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 _logger.LogDebug(
                     "Refusing incoming uTP connection for {TorrentName}: the torrent is not running",
                     stopped.Name);
-                throw new InvalidOperationException("Torrent is not running");
+                return;
             }
 
             if (torrent is Torrent t)
@@ -987,6 +1203,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // Preserve the configured port when no listener was bound (e.g. TCP disabled in
         // WebTorrent-only setups) so trackers don't receive port=0, which some reject as
         // "invalid port".
+        // Captured before the settings are overwritten below, which is what makes the comparison
+        // possible at all - afterwards the configured port and the bound one are the same value.
+        int requestedTcpPort = Settings.Connection.TcpPort;
+        int requestedUdpPort = Settings.Connection.UdpPort;
+
         if (_networkManager.BoundTcpPort > 0)
         {
             Settings.Connection.TcpPort = (ushort)_networkManager.BoundTcpPort;
@@ -994,6 +1215,17 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (_networkManager.BoundUdpPort > 0)
         {
             Settings.Connection.UdpPort = (ushort)_networkManager.BoundUdpPort;
+        }
+
+        // Port 0 asks for whatever is free, so being given something else is the answer, not a
+        // surprise worth an alert.
+        if (requestedTcpPort != 0 && _networkManager.BoundTcpPort > 0 && _networkManager.BoundTcpPort != requestedTcpPort)
+        {
+            _alerts.ListenPortChangedAlert(requestedTcpPort, _networkManager.BoundTcpPort, ListenTransport.Tcp);
+        }
+        if (requestedUdpPort != 0 && _networkManager.BoundUdpPort > 0 && _networkManager.BoundUdpPort != requestedUdpPort)
+        {
+            _alerts.ListenPortChangedAlert(requestedUdpPort, _networkManager.BoundUdpPort, ListenTransport.Udp);
         }
 
         // BandwidthManager is intentionally kept alive across a failed initialization because it
@@ -1142,6 +1374,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 QueuePriority = entry.Options?.QueuePriority ?? 0,
                 RatioLimit = entry.Options?.RatioLimit,
                 SeedTimeLimit = entry.Options?.SeedTimeLimit,
+                SuperSeeding = entry.Options?.SuperSeeding ?? false,
                 DownloadStrategy = entry.Options?.DownloadStrategy ?? DownloadStrategy.RarestFirst,
                 ResumeData = entry.ResumeData
             };
@@ -1366,6 +1599,14 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 }
             }
 
+            if (options?.AdditionalWebSeeds != null)
+            {
+                foreach (var webSeed in options.AdditionalWebSeeds)
+                {
+                    torrent.WebSeeds.Add(webSeed);
+                }
+            }
+
             // Apply options
             if (options != null)
             {
@@ -1379,6 +1620,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 torrent.QueuePriority = options.QueuePriority;
                 torrent.RatioLimit = options.RatioLimit;
                 torrent.SeedTimeLimit = options.SeedTimeLimit;
+                torrent.SuperSeeding = options.SuperSeeding;
                 torrent.QueueAutoStart = options.StartImmediately;
             }
 
@@ -1398,7 +1640,14 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // Start if requested
             if (options?.StartImmediately ?? true)
             {
-                await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
+                if (transient)
+                {
+                    await torrent.StartCoreAsync(cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await StartUnlessSessionPausedAsync(torrent, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
         catch
@@ -1529,15 +1778,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         {
             // By identity for a transient one: removing by hash could take a real torrent the
             // caller holds for the same hash.
-            if (transient)
-            {
-                _registry.RemoveTransient(torrent);
-            }
-            else
-            {
-                _registry.Remove(torrent.Hash, out _);
-            }
-
+            RemoveAndRetire(torrent, transient);
             _bandwidth.RemoveTorrentChannels(torrent);
             await torrent.DisposeAsync().ConfigureAwait(false);
         }
@@ -1664,13 +1905,14 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 torrent.QueuePriority = options.QueuePriority;
                 torrent.RatioLimit = options.RatioLimit;
                 torrent.SeedTimeLimit = options.SeedTimeLimit;
+                torrent.SuperSeeding = options.SuperSeeding;
                 torrent.QueueAutoStart = options.StartImmediately;
             }
 
             // Start if requested
             if (options?.StartImmediately ?? true)
             {
-                await torrent.StartAsync(cancellationToken).ConfigureAwait(false);
+                await StartUnlessSessionPausedAsync(torrent, cancellationToken).ConfigureAwait(false);
             }
         }
         catch
@@ -1790,7 +2032,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 continue;
             }
 
-            _registry.Remove(torrent.Hash, out _);
+            RemoveAndRetire(torrent);
             _bandwidth.RemoveTorrentChannels(torrent);
             try
             {
@@ -1850,7 +2092,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // removals both running the teardown. Everything past it is uncancellable, so a tripped
         // token can never leave a torrent that is stopped but still registered, or removed but
         // still holding bandwidth channels and its session entry.
-        if (!_registry.Remove(t.Hash, out _))
+        if (!RemoveAndRetire(t))
         {
             throw new TorrentNotFoundException(t.Hash);
         }

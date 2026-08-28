@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
 
@@ -97,6 +97,152 @@ public class SessionManagerTests
             saved.Options!.PeerPreferences!.OrderBy(preference => preference.Port),
             preference => Assert.False(preference.UtpSupported),
             preference => Assert.False(preference.OfferEncryptionNext));
+    }
+
+    // ── Ordering between the bitfield and the bytes it claims ────────────────
+    //
+    // Resume data is written durably: temp file, flush to the device, atomic rename. Piece data was
+    // not flushed at all, so the durable half was the claim and the volatile half was the data it
+    // claimed. After a power cut the engine would restart, trust the bitfield, and serve whatever
+    // the disk actually held - piece verification runs when a piece arrives and never again.
+
+    [Fact(Timeout = 30000)]
+    public async Task SaveTorrentEntryAsync_FlushesPieceDataBeforeWritingTheBitfield()
+    {
+        using var fixture = await StorageBackedTorrent.CreateAsync();
+        await fixture.Torrent.FilesInternal.WriteAsync(0, new byte[16384], TestContext.Current.CancellationToken);
+
+        Assert.True(fixture.HasUnflushedWrites, "the write should leave the file dirty until a flush");
+
+        await _sessionManager.SaveTorrentEntryAsync(fixture.Torrent, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.False(fixture.HasUnflushedWrites, "saving resume data must flush the pieces it is about to claim");
+        Assert.NotNull(Assert.Single(_persistence.SavedEntries).ResumeData);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SaveTorrentEntryAsync_WhenPieceDataCannotBeFlushed_WritesNoResumeData()
+    {
+        // The older resume file on disk claims no more than this one would have, so leaving it alone
+        // is always the safe direction. Writing a fresh bitfield we cannot stand behind is not.
+        using var fixture = await StorageBackedTorrent.CreateAsync();
+        await fixture.Torrent.FilesInternal.WriteAsync(0, new byte[16384], TestContext.Current.CancellationToken);
+        await fixture.Torrent.FilesInternal.DisposeAsync();
+
+        await _sessionManager.SaveTorrentEntryAsync(fixture.Torrent, cancellationToken: TestContext.Current.CancellationToken);
+
+        var saved = Assert.Single(_persistence.SavedEntries);
+        Assert.Null(saved.ResumeData);
+
+        // The rest of the entry is still written: options and the torrent file itself do not depend
+        // on the disk being in any particular state.
+        Assert.NotNull(saved.Options);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SaveTorrentEntryAsync_SavesForOneTorrent_DoNotOverlap()
+    {
+        // The persistence layer serialises its file writes, but that alone does not order the
+        // snapshots: two saves that captured in one order can reach the writes in the other, leaving
+        // the older bitfield on disk. Holding a gate across capture, flush and write is what makes
+        // the sequence indivisible.
+        var torrent = TorrentTestUtility.CreateMinimal();
+        _registry.Add(torrent);
+
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _persistence.SaveGate = gate;
+
+        var first = _sessionManager.SaveTorrentEntryAsync(torrent, cancellationToken: TestContext.Current.CancellationToken);
+        var second = _sessionManager.SaveTorrentEntryAsync(torrent, cancellationToken: TestContext.Current.CancellationToken);
+
+        // The first save is parked inside the persistence layer. The second must be waiting on the
+        // gate outside it, not queued up behind it having already taken its snapshot.
+        await TorrentTestUtility.WaitUntilAsync(
+            () => _persistence.PeakConcurrentSaves >= 1,
+            because: "the first save to reach the persistence layer");
+
+        Assert.Equal(1, _persistence.PeakConcurrentSaves);
+
+        gate.SetResult();
+        await Task.WhenAll(first, second);
+
+        Assert.Equal(1, _persistence.PeakConcurrentSaves);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SaveAllResumeDataAsync_StillSavesDifferentTorrentsInParallel()
+    {
+        // Serialising per torrent must not serialise the whole sweep: a session with many torrents
+        // would then save them one at a time.
+        for (int i = 0; i < 4; i++)
+        {
+            var metadata = new TorrentFileMetadata();
+            metadata.Info.Name = $"torrent-{i}";
+            metadata.Info.Hash = InfoHash.CreateRandom();
+            _registry.Add(TorrentTestUtility.CreateMinimal(metadata));
+        }
+
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _persistence.SaveGate = gate;
+
+        var sweep = _sessionManager.SaveAllResumeDataAsync(TestContext.Current.CancellationToken);
+
+        await TorrentTestUtility.WaitUntilAsync(
+            () => _persistence.PeakConcurrentSaves > 1,
+            because: "several torrents to be saved at once");
+
+        gate.SetResult();
+        await sweep;
+    }
+
+    /// <summary>A torrent with real metadata and real files behind it, on a temp path.</summary>
+    private sealed class StorageBackedTorrent : IDisposable
+    {
+        public required Torrent Torrent { get; init; }
+        public required string Path { get; init; }
+
+        /// <summary>Whether the storage still holds writes that have not reached the device.</summary>
+        public bool HasUnflushedWrites
+        {
+            get
+            {
+                var files = Torrent.FilesInternal;
+                var storage = files.GetType()
+                    .GetField("_storage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                    .GetValue(files)!;
+                var flags = (bool[])storage.GetType()
+                    .GetField("_fileDirty", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                    .GetValue(storage)!;
+                return flags.Any(dirty => dirty);
+            }
+        }
+
+        public static async Task<StorageBackedTorrent> CreateAsync()
+        {
+            var metadata = new TorrentFileMetadata();
+            metadata.Info.Name = "flush-ordering";
+            metadata.Info.PieceSize = 16384;
+            metadata.Info.FullSize = 16384 * 4;
+            metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "payload.bin", Size = metadata.Info.FullSize, Offset = 0 });
+            metadata.Info.Pieces = [.. Enumerable.Range(0, 4).Select(_ => new byte[20])];
+
+            string path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                "PeerSharpFlushOrdering",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(path);
+
+            var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
+            await torrent.FilesInternal.InitializeAsync([]);
+
+            return new StorageBackedTorrent { Torrent = torrent, Path = path };
+        }
+
+        public void Dispose()
+        {
+            Torrent.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            try { Directory.Delete(Path, true); } catch { /* best effort */ }
+        }
     }
 
     [Fact]
@@ -217,6 +363,14 @@ public class SessionManagerTests
         private readonly Lock _sync = new();
         private readonly List<SavedTorrentEntry> _savedEntries = [];
 
+        private int _concurrentSaves;
+
+        /// <summary>Highest number of saves seen inside <c>SaveAsync</c> at one time.</summary>
+        public int PeakConcurrentSaves { get; private set; }
+
+        /// <summary>Held open by <c>SaveAsync</c> while set, so a save can be parked mid-flight.</summary>
+        public TaskCompletionSource? SaveGate { get; set; }
+
         public IReadOnlyList<SavedTorrentEntry> SavedEntries
         {
             get { lock (_sync) { return [.. _savedEntries]; } }
@@ -253,7 +407,33 @@ public class SessionManagerTests
             }
         }
 
-        public Task SaveAsync(SavedTorrentEntry entry, CancellationToken cancellationToken = default)
+        public async Task SaveAsync(SavedTorrentEntry entry, CancellationToken cancellationToken = default)
+        {
+            lock (_sync)
+            {
+                _concurrentSaves++;
+                PeakConcurrentSaves = Math.Max(PeakConcurrentSaves, _concurrentSaves);
+            }
+
+            try
+            {
+                if (SaveGate is { } gate)
+                {
+                    await gate.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await SaveCoreAsync(entry, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_sync)
+                {
+                    _concurrentSaves--;
+                }
+            }
+        }
+
+        private Task SaveCoreAsync(SavedTorrentEntry entry, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
 

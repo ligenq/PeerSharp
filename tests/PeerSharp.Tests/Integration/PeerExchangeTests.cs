@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
@@ -84,7 +84,7 @@ public class PeerExchangeTests : IDisposable
         {
             timeProvider.Advance(TimeSpan.FromSeconds(1));
             // Small real delay to allow the background task to resume and process the tick
-            await Task.Delay(5);
+            await Task.Delay(5, cancellationToken: TestContext.Current.CancellationToken);
         }
 
         // 6. Verify Discovery

@@ -8,6 +8,9 @@ public class PieceCheckerTests
 {
     private class MockFiles : IInternalFiles
     {
+        public Task MoveFilesAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         public bool Checking { get; set; }
         public string DownloadPath => "";
         public List<(long Offset, byte[] Data)> Writes { get; } = [];
@@ -23,6 +26,8 @@ public class PieceCheckerTests
         public SemaphoreSlim? ReadGate { get; set; }
 
         public void DeleteFiles() { }
+
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
 
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
         {
