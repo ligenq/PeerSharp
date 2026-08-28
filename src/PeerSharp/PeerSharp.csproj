@@ -21,7 +21,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp 4.0.0 is a major release. Breaking: the library's failures now share one root, PeerSharpException - parse failures are TorrentMetadataException rather than FormatException, and StorageException and UdpTrackerException moved to PeerSharp.Exceptions. TotalSize now reports content rather than piece space. The default listen port is 6881. A configured proxy that cannot carry UDP now refuses DHT and uTP instead of sending them directly. Fixes include v2 file layout, v2 tail-piece verification, BEP 10 extension id zero, and selection counters after a recheck. See https://github.com/ligenq/PeerSharp/blob/main/CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp 4.0.0 is a major release. Breaking: the library's failures now share one root, PeerSharpException - parse failures are TorrentMetadataException rather than FormatException, and StorageException and UdpTrackerException moved to PeerSharp.Exceptions. TotalSize now reports content rather than piece space. The default listen port is 6881. A configured proxy that cannot carry UDP now refuses DHT, proxied uTP, and proxied UDP tracker traffic instead of sending it directly. Fixes include v2 file layout, v2 tail-piece verification, BEP 10 extension id zero, and selection counters after a recheck. See https://github.com/ligenq/PeerSharp/blob/main/CHANGELOG.md.</PackageReleaseNotes>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<IsTrimmable>true</IsTrimmable>
 	</PropertyGroup>

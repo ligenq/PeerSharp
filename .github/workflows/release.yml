@@ -49,13 +49,18 @@ jobs:
             exit 1
           fi
 
-      - name: Fail if tag already exists
+      - name: Verify release tag
         if: ${{ !inputs.dry_run }}
         run: |
           git fetch --tags --quiet
-          if git rev-parse -q --verify "refs/tags/v${{ steps.version.outputs.version }}" > /dev/null; then
-            echo "::error::Tag v${{ steps.version.outputs.version }} already exists. Bump <Version> in Directory.Build.props before releasing."
-            exit 1
+          TAG="v${{ steps.version.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+            TAG_COMMIT=$(git rev-list -n 1 "$TAG")
+            if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG points to $TAG_COMMIT, not the release commit $GITHUB_SHA."
+              exit 1
+            fi
+            echo "Tag $TAG already points to this release commit; the GitHub release will reuse it."
           fi
 
       - name: Restore
