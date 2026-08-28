@@ -185,3 +185,41 @@ jobs:
           name: webtorrent-${{ matrix.os }}-test-results
           path: TestResults/*.trx
           if-no-files-found: ignore
+
+  ci:
+    # Branch protection requires one stable check name. Requiring every matrix expansion directly
+    # makes the repository rule drift whenever a lane or operating system changes, while this gate
+    # still fails unless every required job (and every member of each matrix) succeeded.
+    name: CI
+    if: ${{ always() }}
+    needs:
+      - core-tests
+      - trim-smoke
+      - benchmarks-smoke
+      - fuzz-harness-smoke
+      - webtorrent-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required jobs
+        env:
+          CORE_TESTS: ${{ needs.core-tests.result }}
+          TRIM_SMOKE: ${{ needs.trim-smoke.result }}
+          BENCHMARKS_SMOKE: ${{ needs.benchmarks-smoke.result }}
+          FUZZ_HARNESS_SMOKE: ${{ needs.fuzz-harness-smoke.result }}
+          WEBTORRENT_TESTS: ${{ needs.webtorrent-tests.result }}
+        run: |
+          failed=0
+          for result in \
+            "core-tests=$CORE_TESTS" \
+            "trim-smoke=$TRIM_SMOKE" \
+            "benchmarks-smoke=$BENCHMARKS_SMOKE" \
+            "fuzz-harness-smoke=$FUZZ_HARNESS_SMOKE" \
+            "webtorrent-tests=$WEBTORRENT_TESTS"
+          do
+            echo "$result"
+            if [ "${result#*=}" != "success" ]; then
+              failed=1
+            fi
+          done
+          exit "$failed"
