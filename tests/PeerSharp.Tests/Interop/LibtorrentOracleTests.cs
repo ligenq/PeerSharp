@@ -338,6 +338,10 @@ public class LibtorrentOracleTests : IDisposable
             "--enable_lsd=0",
             "--enable_upnp=0",
             "--enable_natpmp=0",
+            // x.pe peers are considered uTP-capable by libtorrent. The synthetic oracle listens on
+            // TCP because these assertions inspect the TCP BitTorrent stream, so pin that transport
+            // instead of waiting for a uTP dial the peer deliberately cannot accept.
+            "--enable_outgoing_utp=0",
             "--allow_multiple_connections_per_ip=1",
             "--alert_mask=error,status,connect,peer",
 

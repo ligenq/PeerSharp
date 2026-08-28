@@ -157,9 +157,9 @@ written without matching on message strings.
   through to an ordinary socket, so tracker and peer traffic went through the proxy while the DHT
   announced the real address - the leak a proxy is bought to prevent. The shared UDP listener and UDP
   trackers now refuse instead, which **throws at startup** for a configuration that previously ran:
-  an HTTP proxy with DHT or uTP enabled. Use a SOCKS5 proxy, turn off DHT and uTP, or set
-  `ProxySettings.ProxyPeers` to false to send peer traffic directly on purpose. libtorrent refuses
-  the same way, per packet, in `udp_socket::send`.
+  an HTTP proxy with DHT or proxied uTP enabled. Use a SOCKS5 proxy, disable DHT or uTP as applicable,
+  or explicitly permit direct peer or tracker traffic by clearing `ProxySettings.ProxyPeers` or
+  `ProxySettings.ProxyTrackers`. libtorrent refuses the same way, per packet, in `udp_socket::send`.
 
 Deliberately unchanged: `ArgumentException` and its relatives, `InvalidOperationException` for an
 operation attempted in the wrong state, and `OperationCanceledException`. Those say the calling code
@@ -551,7 +551,8 @@ new member.
 Verified against Transmission 4.1.3 and qBittorrent, 64 MiB over MSE on loopback. PeerSharp to
 qBittorrent 108.2 MiB/s, qBittorrent to PeerSharp 64.0 MiB/s, PeerSharp to Transmission 31.6 MiB/s.
 Leeching from a stock Transmission 4.1.3 on Windows measures 0.5 MiB/s because of an upstream
-send-buffer bug, fixed upstream on `main` and documented in FUTURE_IMPROVEMENTS.md; against a patched
+send-buffer bug, fixed upstream on `main` and documented in
+[`INVESTIGATION_NOTES.md`](INVESTIGATION_NOTES.md); against a patched
 build it is 196.5 MiB/s.
 
 ## 3.0.0
