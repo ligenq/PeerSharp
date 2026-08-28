@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.BEncoding;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Dht;
@@ -46,7 +46,13 @@ public class Bep44SupportSurveyTests
     {
         RequireInteropEnabled();
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        cts.CancelAfter(TimeSpan.FromMinutes(4));
 
         var settings = new Settings();
         await using var listener = new UdpListener(0, new UdpSocketFactory(), settings, NullLoggerFactory.Instance, TimeProvider.System);
@@ -119,7 +125,13 @@ public class Bep44SupportSurveyTests
     {
         RequireInteropEnabled();
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+        // Linked to the test's own token: the budget below is what this test is about, and the
+
+        // link is what lets its Timeout actually stop the work rather than only fail the verdict.
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        cts.CancelAfter(TimeSpan.FromMinutes(4));
 
         var settings = new Settings();
         await using var listener = new UdpListener(0, new UdpSocketFactory(), settings, NullLoggerFactory.Instance, TimeProvider.System);

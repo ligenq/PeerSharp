@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
@@ -67,10 +67,10 @@ public sealed class FullSystemTests : IDisposable
 
         var leecherTorrent = await leecherEngine.AddTorrentAsync(torrentFile);
 
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10));
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
         await WaitForConditionAsync(leecherTorrent, t => t.Finished, TimeSpan.FromSeconds(30), "uTP download completion",
-            onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [GetSeedEndpoint(seedEngine)]));
+            onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [GetSeedEndpoint(seedEngine)]), cancellationToken: TestContext.Current.CancellationToken);
 
         byte[] downloadedData = await ReadAllBytesSharedAsync(Path.Combine(_pathB, fileName));
 
@@ -117,13 +117,13 @@ public sealed class FullSystemTests : IDisposable
 
         var leecherTorrent = await leecherEngine.AddTorrentAsync(torrentFile);
 
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10));
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
         await WaitForConditionAsync(leecherTorrent, t => t.PiecesReceived > 0 || t.Finished, TimeSpan.FromSeconds(30), "encrypted download start",
-            onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [GetSeedEndpoint(seedEngine)]));
+            onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [GetSeedEndpoint(seedEngine)]), cancellationToken: TestContext.Current.CancellationToken);
 
         await WaitForConditionAsync(leecherTorrent, t => t.Finished, TimeSpan.FromSeconds(45), "encrypted download completion",
-            onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [GetSeedEndpoint(seedEngine)]));
+            onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [GetSeedEndpoint(seedEngine)]), cancellationToken: TestContext.Current.CancellationToken);
 
         byte[] downloadedData = await ReadAllBytesSharedAsync(Path.Combine(_pathB, fileName));
 
@@ -171,7 +171,7 @@ public sealed class FullSystemTests : IDisposable
 
         var leecherTorrent = await leecherEngine.AddTorrentAsync(torrentFile);
 
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10));
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
         // Connect via IPv6 Loopback
 
@@ -181,10 +181,10 @@ public sealed class FullSystemTests : IDisposable
 
         leecherEngine.OnPeersFound(leecherTorrent.Hash, [ipv6Endpoint]);
 
-        await WaitForConditionAsync(leecherTorrent, t => t.Peers.ConnectedCount > 0, TimeSpan.FromSeconds(5), "IPv6 connection");
+        await WaitForConditionAsync(leecherTorrent, t => t.Peers.ConnectedCount > 0, TimeSpan.FromSeconds(5), "IPv6 connection", cancellationToken: TestContext.Current.CancellationToken);
 
         await WaitForConditionAsync(leecherTorrent, t => t.Finished, TimeSpan.FromSeconds(20), "IPv6 download completion",
-            onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [ipv6Endpoint]));
+            onPoll: () => leecherEngine.OnPeersFound(leecherTorrent.Hash, [ipv6Endpoint]), cancellationToken: TestContext.Current.CancellationToken);
 
         byte[] downloadedData = await ReadAllBytesSharedAsync(Path.Combine(_pathB, fileName));
 
@@ -252,10 +252,13 @@ public sealed class FullSystemTests : IDisposable
         await File.WriteAllBytesAsync(fullPath, data);
     }
 
-    private static async Task EnsureConnectedAsync(ClientEngine leecherEngine, ITorrent leecherTorrent, ClientEngine seedEngine, TimeSpan timeout)
+    private static async Task EnsureConnectedAsync(ClientEngine leecherEngine, ITorrent leecherTorrent, ClientEngine seedEngine, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         var seedEndpoint = GetSeedEndpoint(seedEngine);
-        var cts = new CancellationTokenSource(timeout);
+        // Linked to the caller's token, so a test timeout ends the poll rather than leaving it
+        // running out its own deadline after the verdict is already in.
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
 
         while (leecherTorrent.Peers.ConnectedCount == 0 && !cts.IsCancellationRequested)
         {
@@ -267,9 +270,12 @@ public sealed class FullSystemTests : IDisposable
             $"Timed out waiting for peer connection. {IntegrationTestDiagnostics.DescribeTorrent(leecherTorrent)}");
     }
 
-    private static async Task WaitForConditionAsync(ITorrent torrent, Func<ITorrent, bool> condition, TimeSpan timeout, string description, Action? onPoll = null)
+    private static async Task WaitForConditionAsync(ITorrent torrent, Func<ITorrent, bool> condition, TimeSpan timeout, string description, Action? onPoll = null, CancellationToken cancellationToken = default)
     {
-        var cts = new CancellationTokenSource(timeout);
+        // Linked to the caller's token, so a test timeout ends the poll rather than leaving it
+        // running out its own deadline after the verdict is already in.
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
         while (!condition(torrent) && !cts.IsCancellationRequested)
         {
             if (torrent.LastException != null)

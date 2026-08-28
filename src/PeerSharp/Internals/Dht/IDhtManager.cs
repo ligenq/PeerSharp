@@ -6,6 +6,12 @@ internal interface IDhtManager : IAsyncDisposable
 {
     InfoHash NodeId { get; }
 
+    /// <summary>
+    /// This node's own public address, once enough sources agree, otherwise null.
+    /// </summary>
+    IPAddress? ExternalIp { get; }
+
+
     void Announce(InfoHash infoHash, int port);
 
     /// <summary>

@@ -63,7 +63,12 @@ public class FileSelectionManagerTests
         var pieces = new PiecesProgress(3);
         _manager.Initialize(null, pieces);
 
+        // The piece map is the authority and the engine adds to it before announcing, so the
+        // announcement alone no longer moves the counter. It used to, which is how the counter came
+        // to disagree with the map after a recheck filled it directly.
+        pieces.AddPiece(0);
         _manager.OnPieceVerified(0);
+
         Assert.Equal(1, _manager.ReceivedSelectedPieces);
     }
 
@@ -73,8 +78,32 @@ public class FileSelectionManagerTests
         var pieces = new PiecesProgress(3);
         _manager.Initialize(null, pieces);
 
+        pieces.AddPiece(0);
         _manager.OnPieceVerified(0);
+
         Assert.Equal(1.0f / 3.0f, _manager.CalculateSelectionProgress());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task EqualCountBitfieldReplacement_RecalculatesSelectedPieces()
+    {
+        var pieces = new PiecesProgress(3);
+        _manager.Initialize(null, pieces);
+
+        // With f2 deselected, pieces 0 and 1 are selected while piece 2 is not.
+        await _manager.SetFilePriorityAsync(1, Priority.DoNotDownload);
+
+        pieces.FromBitfield([0b1100_0000]);
+        Assert.True(_manager.IsSelectionFinished);
+        Assert.Equal(2, _manager.ReceivedSelectedPieces);
+
+        // A recheck replaces selected piece 1 with unselected piece 2. The global count is still two,
+        // so a count-only freshness token incorrectly leaves the selection looking complete.
+        pieces.FromBitfield([0b1010_0000]);
+
+        Assert.False(_manager.IsSelectionFinished);
+        Assert.Equal(1, _manager.ReceivedSelectedPieces);
+        Assert.Equal(0.5f, _manager.CalculateSelectionProgress());
     }
 
     [Fact(Timeout = 30000)]
@@ -177,7 +206,6 @@ public class FileSelectionManagerTests
         }
     }
 }
-
 
 
 

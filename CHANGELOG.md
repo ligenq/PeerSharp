@@ -1,7 +1,317 @@
-# Changelog
+﻿# Changelog
 
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
+
+## Unreleased
+
+### Fixed
+
+- **A v2 download wrote every file after the first to the wrong place.** BEP 52 starts each file on a
+  piece boundary, so a v2 torrent's piece space is larger than the sum of its files by that padding.
+  Storage laid its files out along their sizes instead, putting each one earlier than it belonged by
+  the accumulated gap. Nothing noticed, because a piece is verified when it is assembled and before
+  it is written: the hashes passed, the download reported 100%, and the data on disk was corrupt from
+  the second file onward. Checked byte for byte against libtorrent's own copy, a three-file v2
+  download now matches on every file where two of the three previously did not.
+- **A v2-only torrent could never report itself finished.** `HasMetadata` asked for the v1 SHA-1
+  `pieces` string or a BEP 30 merkle root, and a v2 torrent has neither - it describes its pieces per
+  file, in the file tree. Nothing on the download path consulted it, so the transfer completed and
+  verified and then sat at 100% forever, never announcing completion and never releasing the peers
+  that had served it.
+- **`TotalSize` counted padding as content.** For a v2 torrent it reported the piece space, which
+  overstates the torrent by the alignment padding and leaves the remaining-bytes count unable to
+  reach zero; for a v1 torrent with BEP 47 padding entries it counted bytes the same API hides from
+  the file list. It is now the content: the sum of the real files. **This changes the value returned
+  by `ITorrent.TotalSize` and `TorrentFile.TotalSize`** for any torrent containing padding.
+
+- **A v2 torrent's last piece per file never verified**, so a v2 or hybrid download from any other
+  client died on the first tail piece it completed - the peer that supplied it is dropped as the sole
+  source of a bad piece. PeerSharp zero-padded the data of a short final block to 16 KiB before
+  hashing it; BEP 52 pads the tree with zero *hashes* past the end of the data and never pads the
+  data, which is what libtorrent does. The same mistake was made when building torrents as when
+  verifying them, so PeerSharp agreed with itself and with nothing else, and every existing merkle
+  test passed either way. Against a torrent from libtorrent's `connection_tester`, piece verification
+  goes from six of nine to nine of nine, and a hybrid transfer that previously failed outright now
+  runs to completion at 699 MB/s.
+
+- **v2 and hybrid torrents were unreachable by the hash everything actually uses.** BEP 52 gives a v2
+  torrent two identities - the full SHA-256 of its info dictionary and that hash truncated to twenty
+  bytes - and every protocol with a twenty-byte field uses the second: the peer handshake, tracker
+  announces, DHT lookups. The engine resolved an incoming hash against the stored v1 and full v2
+  hashes only, so a v2 torrent matched none of them. Inbound connections were dropped mid-handshake
+  and DHT and tracker callbacks were discarded on arrival. Hybrid torrents were half-affected:
+  reachable by their v1 hash, invisible to a peer that used the v2 one.
+
+### Performance
+
+- **Upload CPU is roughly half what it was and throughput a quarter higher** - 5.2 s and 1200 MB/s
+  before, 2.8 s and 1525 MB/s after, against libtorrent's 699 MB/s on the same run. Read-ahead was
+  issuing one sixteen-kilobyte read per block, awaited one after another and each taking the
+  read-ahead semaphore, which is the same work moved earlier rather than amortised. A profile of
+  seeding put the majority of PeerSharp's CPU in thread-pool parking and about seven per cent in the
+  syscalls, which is what a queue of tiny asynchronous operations looks like from outside. The window
+  is now a single contiguous read, and `FilesSettings.ReadAheadBlocks` rises from 4 to 16 to make it
+  worth more.
+- **A read that lies inside one file no longer takes the engine's file-selection lock**, which every
+  concurrent read of every file previously queued on, nor allocates the two lists the general path
+  needs. That is nearly every read a seeding torrent does.
+
+- **Download throughput is around 36 times what it was**, measured against libtorrent's
+  `connection_tester` over loopback: 24 MB/s before, 857 MB/s after, where libtorrent itself manages
+  300 MB/s on the same workload. Two independent causes, both about keeping work in flight rather
+  than about doing it faster - PeerSharp was using a fifth of one core while it was 12 times slower.
+  - Request queue depth was sized as bandwidth multiplied by round-trip time, which feeds back on
+    itself: the depth it produces limits the rate, and the lowered rate then justifies the depth. On
+    a link whose latency rounds to nothing the product collapses to the floor. Depth is now seconds
+    of queued work, as libtorrent sizes it, and `TransferSettings.RequestQueueTimeSeconds` (default
+    3, matching libtorrent's `request_queue_time`) is the knob. `MaxRequestsPerPeer` rises from 128
+    to 500 to match `max_out_request_queue`.
+  - Completed pieces were hashed and written by a single sequential reader, so the piece queue's only
+    parallelism came from the overflow path it takes when full. Queue capacity was therefore acting
+    as a proxy for concurrency, and inversely: raising it made throughput five times worse. The
+    readers are now as many as the configured concurrency allows.
+
+### Added
+
+Controls a consumer needed and could not reach. Most of these close gaps found by comparing the public
+surface against libtorrent's `torrent_handle` and `session_handle`.
+
+- **Super-seeding (BEP 16) can now be turned on.** `ITorrent.SuperSeeding`, or
+  `AddTorrentOptions.SuperSeeding` when adding. The BEP 16 implementation was complete and unit
+  tested, but the flag that enables it lived on an internal type and nothing in the library ever set
+  it - the feature was listed as supported and was unreachable. The setting survives a magnet's
+  metadata fetch and is kept in the session state.
+- **`ITorrent.MoveStorageAsync`** relocates a torrent's downloaded data and continues from the new
+  path. `SetDownloadPathAsync` only ever repointed, leaving the data behind for the next start to not
+  find; it still does, and now says so. A move that fails partway puts back what it had already
+  moved rather than leaving the torrent split across two directories.
+- **`ITorrent.RenameFileAsync`** stores one of a torrent's files under a different name, moving what
+  has been downloaded. The name is kept in the resume data, since rebuilding paths from the torrent's
+  own metadata would otherwise undo it on the next start. `GetRenamedFiles` reports them.
+- **`ITorrent.SetPiecePriority` / `GetPiecePriority` / `ClearPiecePriorities`** for priorities below
+  the level of a file - a media header, a range about to be read, an archive's trailing index. An
+  override outranks the file selection in both directions.
+- **`ITorrent.ReadPieceAsync`** reads a downloaded piece back from disk.
+- **`ITorrent.MaxConnections` and `ITorrent.MaxUploadSlots`** apply per torrent, overriding the
+  engine-wide `MaxPeersPerTorrent` and the calculated upload slot count.
+- **`ITorrent.WebSeeds`** adds and removes BEP 19 web seeds at runtime, including removing one the
+  torrent's own metadata declared. `AddTorrentOptions.AdditionalWebSeeds` covers the same at add time.
+- **`ITrackers.ScrapeAsync`** asks trackers for seeder and leecher counts on demand. Scrape already
+  worked on a timer and the counts were already on `TrackerStatus`; there was no way to ask.
+- **`IClientEngine.PauseAsync` / `ResumeAsync` / `IsPaused`** stop every running torrent and start
+  back exactly those, leaving alone any the user had stopped by hand. A torrent added while paused
+  waits for the resume.
+- **`TryParse` now states when its `error` is set.** The `out string? error` overloads of
+  `TorrentFile.TryParse` and `MagnetLink.TryParse` carry `[NotNullWhen(false)]`, so reading the
+  message in the failure branch no longer warns. The produced value already carried
+  `[NotNullWhen(true)]`. An architecture test now requires every public `Try` method to say when each
+  of its reference-typed out parameters is null.
+- **Three new alerts.** `PieceHashFailed` names the piece and, where one peer supplied all of it, the
+  peer. `PeerBlocked` reports an address refused by the blocklist or for having served bad data.
+  `ListenPortChanged` fires when a listener could not bind the configured port - the case where port
+  forwarding silently stops reaching the session.
+
+### Breaking changes
+
+This is a major version. The library's own failures now share one root, `PeerSharp.Exceptions.PeerSharpException`,
+so a consumer can tell a malformed torrent from a tracker refusal from a disk that could not be
+written without matching on message strings.
+
+- **`FormatException` from parsing is now `TorrentMetadataException`.** Affects `TorrentFile.Parse`,
+  `TorrentFile.Load`, `TorrentFile.LoadAsync`, `MagnetLink.Parse`, and metadata received from peers.
+  A `catch (FormatException)` around any of those needs changing. The original parse failure is kept
+  as `InnerException`. `BencodeParser` is unchanged and still throws `FormatException`: it is a
+  bencode codec, not a torrent reader, and callers of it are working at that level.
+- **`StorageException` moved** from `PeerSharp.PieceWriter` to `PeerSharp.Exceptions`.
+- **`UdpTrackerException` moved** from `PeerSharp.Internals.Trackers` to `PeerSharp.Exceptions`, and
+  now derives from the new `TrackerException`. It should never have been public from a namespace
+  called `Internals`.
+- **`TorrentException` now derives from `PeerSharpException`** rather than `Exception`. Existing
+  `catch (TorrentException)` blocks are unaffected.
+
+Deliberately unchanged: `ArgumentException` and its relatives, `InvalidOperationException` for an
+operation attempted in the wrong state, and `OperationCanceledException`. Those say the calling code
+has a bug or changed its mind, not that the library failed, and wrapping them would hide the first
+from whoever has to fix it. The `TryParse` pattern is also unchanged, and still reports bad input
+without throwing at all.
+
+
+A review of the engine outside its protocol code: what happens when the host dies mid-write, what a
+stranger can make the DHT server spend, and what a consumer can see from outside the process.
+
+### Upgrade notes
+
+- **Resume data is now validated before it is adopted.** A resume file whose recorded info hash names
+  a different torrent, or whose recorded piece size, content length or bitfield length disagrees with
+  the torrent, is discarded, and the torrent starts from an empty bitfield rather than claiming pieces
+  it never verified. Resume data written by a newer format version is discarded for the same reason.
+  A magnet cannot be checked when it is added, so the same validation runs again once its metadata
+  arrives. Files written by 3.2.0 and earlier are accepted unchanged — they already carried the fields
+  this checks, nothing read them. A missing hash or geometry field means "not recorded" and is not
+  grounds for rejection.
+- **Saving resume data now flushes piece data to the disk first.** Saves cost an fsync of the files
+  written since the last save. If the flush fails, that torrent's resume data is skipped for that
+  round and the previous copy is left in place; the save is retried on the next interval.
+- **Partial pieces in resume data are capped at 16 MiB in total**, not just at 32 pieces. Torrents
+  with piece sizes above 512 KiB carry fewer partial pieces across a restart than before and
+  re-request those blocks. Torrents at ordinary piece sizes are unaffected.
+- **A DHT node stores peers for at most 2000 info-hashes.** Beyond that, announces for hashes not
+  already held are answered but not recorded. This bounds the store; it does not change what the
+  engine's own torrents can find.
+- **Inbound DHT queries are budgeted at 60 per source address per minute.** Over-budget queries are
+  dropped without a reply, and the sender is not added to the routing table. Well above what an
+  iterative lookup from one node costs. Once more than 20,000 addresses are being tracked at once,
+  sources that cannot be tracked individually draw on a shared allowance of 600 queries per minute
+  rather than being waved through.
+- **The default listen port is now 6881, was 55125**, for both TCP and UDP. 55125 sat inside the
+  dynamic range (49152-65535), which the OS allocates outbound connections from and which Windows
+  reserves blocks of for Hyper-V, WSL and Docker; a bind inside a reserved block fails with a
+  permission error although nothing is listening, and the blocks move between reboots. 6881 is the
+  first of the range BitTorrent has used since the original client and the default in libtorrent,
+  qBittorrent and Deluge. Anyone forwarding a port through a router, or relying on the old default
+  from outside the process, should set `ConnectionSettings.TcpPort` and `UdpPort` explicitly.
+- **A listen port that cannot be bound no longer stops the engine starting.** Reported against 3.2.0
+  as a `SocketException` out of `ClientEngine.InitializeAsync`: "an attempt was made to access a
+  socket in a way forbidden by its access permissions", with nothing listening on the port. The configured port is
+  tried, then the next ten, then an OS-assigned one, with a warning naming the port actually bound.
+  The bound port is written back to the settings and announced from there, so trackers and the DHT
+  stay consistent. Previously a busy or reserved UDP port failed startup outright.
+
+### Added
+
+- `ConnectionSettings.MaxConnectionsPerIp` — how many connections one address may hold on a torrent.
+  The middle ground `AllowMultipleConnectionsPerIp` lacked, which could only allow one connection per
+  address or unlimited. **Off by default**: it counts live registrations, and a single logical peer
+  briefly holds more than one while a dial tries both transports or a reconnect overlaps the
+  connection it replaces, so any non-zero value has to be set from what the deployment looks like.
+- Metrics, on a `Meter` named `PeerSharp` — aggregate rates, lifetime byte totals, torrent counts and
+  connected peers. Subscribe with `builder.AddMeter(PeerSharpMetrics.MeterName)`. Every instrument is
+  observable, so nothing is measured unless a collector polls and a process that never subscribes
+  pays nothing. Each engine's meter carries itself as `Meter.Scope`, so several engines in one
+  process stay distinguishable. The byte counters cover the engine's whole life, including torrents
+  since removed, so they only ever increase — `EngineStats` still reports the torrents present now.
+
+### Fixed
+
+- **An unclean shutdown could leave resume data claiming pieces whose bytes were never written.**
+  Resume data was written durably — temp file, flush to device, atomic rename — while piece data was
+  handed to the operating system and never flushed, so the durable half was the claim and the
+  volatile half was the data it claimed. Piece verification runs when a piece arrives and never
+  again, so nothing downstream would have caught it: the engine would restart, trust the bitfield and
+  serve whatever the disk held.
+- **A malformed or stale resume file could throw while loading partial pieces.** Piece indices and
+  block counts read out of the file were used to index arrays without being checked against the
+  torrent, so a truncated write produced a negative copy length rather than a rejected piece.
+- **The number of info-hashes a DHT node stored peers for was unbounded.** Peers per hash were capped
+  at 200 and the number of hashes was not, so the size of the table was decided by whoever was
+  announcing.
+- **Inbound DHT queries had no per-source budget.** Answering costs a parse, a routing-table walk and
+  a reply larger than the query, and the source address of a UDP datagram is unverified.
+- **Sequential downloads rescanned the completed prefix on every pick**, so the scan grew with
+  progress and was longest when the torrent was nearly done.
+- **Resume data could claim a piece that finished during the save.** The bitfield was captured after
+  the flush rather than before it, leaving a window in which a piece completing in between was
+  recorded as durable without having been flushed. Saves for one torrent are also serialised now, so
+  two overlapping saves cannot write their snapshots in the opposite order to the one they were taken.
+- **Deselecting a file dropped its pending flush.** A file written and then deselected before the next
+  save had its dirty flag cleared without a durability barrier, while the completed pieces covering it
+  stayed in the bitfield and were persisted as present.
+- **Dialling a peer that is not there no longer throws.** Connecting is the engine's most repeated
+  failure - most addresses a swarm hands out are gone, closed or behind a NAT that never answers - and
+  both transports reported it by throwing: TCP because `Socket`'s task-based connect has no other way
+  to say so, uTP because an unanswered SYN faulted the connect task. Measured over 45 seconds of
+  connection churn that was 280 first-chance exceptions on TCP and 277 on uTP, the latter at nearly
+  four per dead peer once the throw had crossed each await and faulted the stream's pipe. Both now
+  report the outcome: TCP through `SocketAsyncEventArgs`, uTP by completing its connect with `false`.
+  The same failures are still logged, at Debug, exactly as before. Costs nothing in throughput - a
+  throw is under two microseconds - but every first-chance exception is a round trip to an attached
+  debugger, which is why stepping through an application using this engine felt sluggish.
+- **Roughly one inbound encrypted peer in 256 was refused.** Whether an incoming connection was
+  plaintext or encrypted was decided on its first byte alone: 19 meant a plaintext handshake, anything
+  else an MSE key exchange. An MSE key is indistinguishable from random bytes by design, so about one
+  in 256 begins with 19 - and those connections had 96 bytes of key read as a handshake, producing an
+  info hash matching no torrent and dropping a peer that was behaving correctly. Too rare to look like
+  anything but ordinary swarm churn. The protocol name is now checked before committing to plaintext,
+  and anything else is handed to the encryption handshake instead.
+- **Streaming refused the last chunk of every file.** A `Range` header whose end position was at or
+  past the end of the file was answered with 416, where RFC 7233 §2.1 requires it to be served as the
+  remainder of the file - satisfiability is decided by the *start* position alone. Media players
+  request fixed-size chunks, so the final chunk of any file asks for more than is left, as does every
+  chunk of a file smaller than one chunk; both were rejected. The end position is now clamped, and a
+  range is refused only when it begins at or past the end of the file.
+- **Peer priority did not implement BEP 40, despite naming it.** It masked both addresses to /16,
+  XORed them and appended the info hash, which is not the specified calculation and does not produce
+  the values the BEP publishes. Two consequences: no other client computed the same priority, so the
+  agreement the BEP exists to provide - both ends of a connection independently reaching the same
+  decision about which one gives way - was absent; and because a /16 mask makes every address in our
+  own network XOR to zero, every such peer received an identical priority. Now the specified
+  calculation, checked against both worked examples in the BEP, and the connection paths now use it:
+  they pass the public address the DHT has learned, or the unspecified address until enough sources
+  agree on one, which is how libtorrent handles the same gap. Nothing caches the result, so a
+  priority becomes canonical as soon as the address is known and follows it if it later changes.
+  Peers on one distant network now rank alike rather than being spread out, which is the intent of
+  the specified masking - it is what stops a single network taking the swarm one slot at a time.
+- **The count of pieces in flight drifted upwards, and only upwards.** Replacing an active piece used
+  `ConcurrentDictionary.AddOrUpdate` and incremented a separate counter from inside the add factory,
+  which neither runs exactly once nor necessarily belongs to the branch that won - so concurrent
+  starts counted additions that had in fact been updates. That counter caps how many pieces may be
+  downloaded at once, so as it drifted the engine started fewer and fewer pieces than it had room
+  for, and pruning fired when it should not have. Blocks arrive on whichever peer's thread received
+  them, so the race is ordinary rather than rare. The same path also dropped the piece it replaced
+  without disposing it, leaking its pooled block buffers for the life of the process. Found by the
+  new property tests over `PieceStateManager`.
+- **The block cache could serve bytes that had since been overwritten.** Only whole aligned 16 KiB
+  blocks are cached, so a write that covered part of a block was written through to storage and then
+  skipped - leaving any cached copy of that block holding pre-write bytes, which the next aligned read
+  returned in preference to storage. Reachable whenever a partly-covered block had been read before:
+  the last block of a torrent is partial, and repair and end-game rewrite blocks that have already
+  been served. The stale bytes went to whichever peer asked for that block. Every block a write
+  touches is now either refreshed in full or dropped from the cache. Found by the new property tests
+  over `BlockCache`.
+- **A torrent containing an empty file could silently lose data.** Empty files are legal and nothing
+  filtered them out, but one sitting between two other files shares a cumulative offset with its
+  neighbour, and the binary search resolving an offset to a file could settle on the empty one. It
+  has no room, which the range walk read as the end of the range: every byte after the empty file was
+  dropped from the operation list without an error. Storage writes exactly that list, so the tail of
+  each affected block was never written, while the piece it belonged to was hashed in memory,
+  verified and recorded as present. Found by the new property tests over `FileMapper`.
+- **Bandwidth quota could be spent past its floor.** Spending added and then clamped as two separate
+  interlocked steps, so a spend large enough to break the debt floor could be lifted back above it by
+  a refund arriving in between; the clamp re-read a value that no longer needed clamping and the floor
+  went unenforced. Quota is spent from a deliberately lock-free path while a tick loop refills it, so
+  the interleaving is reachable. Each operation now commits in one step, which also made the channel
+  faster under contention — the previous version retried two nested compare-and-swap loops per call.
+
+### Changed
+
+- **Dependencies updated across the solution**, which needed three follow-ups. `xunit.v3` 4.0 moved to
+  Microsoft.Testing.Platform and dropped VSTest support on the .NET 10 SDK, so `dotnet test` is opted
+  into the platform's own mode via `global.json` and the CI lanes use its filter and TRX options.
+  SonarAnalyzer 10.32 added two rules that a `-warnaserror` build treats as errors; all 37 sites are
+  fixed, one of which was a false positive and is suppressed with the reason recorded. xunit's new
+  xUnit1069 fires on 471 existing tests; the 73 in the lanes that hold real resources - integration,
+  interop, concurrency and robustness - now observe the token, so a test that overruns its deadline
+  stops instead of holding a port while the next one starts. The 398 in-memory Core tests are held at
+  `suggestion`, where an overrun costs a few allocations.
+- **Microsoft Coyote removed.** Its last release was March 2024, but the reason for dropping it is
+  what measurement showed rather than its release cadence: nothing ran `coyote rewrite`, so the engine
+  was executing each scenario repeatedly rather than exploring interleavings, and Coyote 1.7.11 does
+  not model `System.Threading.Lock`, which this engine uses almost everywhere. A test passed against an
+  implementation with its synchronisation deleted outright. The scenarios and their assertions are
+  unchanged and now run through a plain repetition harness, so what the suite actually detected is
+  exactly what it detected before - it is just no longer described as something it was not.
+- **Mutation testing added**, weekly and non-blocking, via `stryker-config.json` and a `Mutation`
+  workflow. Scoped to seven small pure-logic units - the DHT query rate limiter, the lifetime byte
+  counters and the connection calculators - where a surviving mutant is unambiguously a test gap. The
+  first run killed all 147 mutants. Three things make it work and are documented where they are set:
+  `--test-runner mtp` (xunit.v3 4.0 is MTP-only, and Stryker's VSTest runner hangs), the integration
+  lane compiled out of the assembly for mutation runs (Stryker's runner cancels an initial run of about
+  three minutes), and `"coverage-analysis": "off"` (its per-test attribution reports covered code as
+  uncovered here, producing a fictional score).
+- The interop suite runs nightly in CI. It is the lane that found the late bitfield, the dead-socket
+  plaintext fallback and the inbound uTP rejection, and no CI job ran it. Tests whose counterpart
+  client is not installed skip rather than fail.
 
 ## 3.2.0 — 2026-08-16
 

@@ -17,6 +17,21 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     private const int ExternalIpVotesRequired = 3;
     private const int MaxTransactions = 5000;
     private const int MaxPeersPerInfoHash = 200;
+
+    /// <summary>
+    /// How many distinct info-hashes we hold peers for on behalf of the network.
+    ///
+    /// <para>
+    /// Everything in this store arrived from a stranger: <c>announce_peer</c> costs one
+    /// <c>get_peers</c> round trip for a token, and nothing else. The per-hash cap bounded the width
+    /// of the store and left the length unbounded, so the size of the table was decided by whoever
+    /// was announcing at us. 2000 matches libtorrent's <c>max_torrents</c>, and once it is reached
+    /// new hashes are declined until the maintenance sweep ages some out - we stop recording, we do
+    /// not stop answering.
+    /// </para>
+    /// </summary>
+    private const int MaxTrackedInfoHashes = 2000;
+
     private const int MaxRecentQueries = 10000;
 
     /// <summary>
@@ -38,6 +53,9 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
     /// <summary>BEP 44 items held on behalf of the network.</summary>
     private readonly DhtItemStore _itemStore;
+
+    /// <summary>Per-source budget for the queries strangers send us.</summary>
+    private readonly DhtQueryRateLimiter _queryRateLimiter;
 
     /// <summary>BEP 51: the rotating subset of stored info-hashes offered to indexers.</summary>
     private readonly DhtInfoHashSampler _infoHashSampler;
@@ -89,6 +107,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         _logger = loggerFactory.CreateLogger<DhtManager>();
         _lastSecretRotation = _timeProvider.GetUtcNow();
         _itemStore = new DhtItemStore(_timeProvider);
+        _queryRateLimiter = new DhtQueryRateLimiter(_timeProvider);
         _infoHashSampler = new DhtInfoHashSampler(_timeProvider);
         _listener.RegisterReceiver(this);
     }
@@ -188,7 +207,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     {
         if (_disposal.MarkDisposed())
         {
-            await StopAsync().ConfigureAwait(false);
+            await StopAsync(CancellationToken.None).ConfigureAwait(false);
         }
         GC.SuppressFinalize(this);
     }
@@ -418,7 +437,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
     private void AddRoutingNode(ReadOnlySpan<byte> id, IPEndPoint endpoint)
     {
-        var normalized = NetworkUtils.NormalizeEndPoint(endpoint)!;
+        var normalized = NetworkUtils.NormalizeEndPoint(endpoint);
         RoutingTableFor(normalized).AddNode(id, normalized);
     }
 
@@ -646,6 +665,14 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             return;
         }
 
+        // Before anything that costs work or produces a reply. Answering is what makes a query
+        // expensive to us and useful to a reflector, so the budget has to be checked ahead of the
+        // routing-table insert as well as ahead of the response.
+        if (!_queryRateLimiter.IsQueryAllowed(remote.Address))
+        {
+            return;
+        }
+
         var id = a.GetBytes("id");
         if (id != null)
         {
@@ -817,18 +844,30 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 var hashStr = Convert.ToHexString(infoHash.Value.Span);
                 var ep = new IPEndPoint(remote.Address, p);
 
-                var peerList = _peers.GetOrAdd(hashStr, _ => []);
-                lock (peerList)
+                // Only take on a hash we are not already holding when there is room for it. Refusing
+                // to record is not refusing to answer: BEP 5 expects a response either way, and a
+                // node that stores nothing is still a correct participant.
+                if (_peers.TryGetValue(hashStr, out var peerList) || _peers.Count < MaxTrackedInfoHashes)
                 {
-                    var existing = peerList.FirstOrDefault(x => x.EndPoint.Equals(ep));
-                    if (existing != null)
+                    peerList ??= _peers.GetOrAdd(hashStr, _ => []);
+                    lock (peerList)
                     {
-                        existing.LastSeen = _timeProvider.GetUtcNow();
+                        var existing = peerList.FirstOrDefault(x => x.EndPoint.Equals(ep));
+                        if (existing != null)
+                        {
+                            existing.LastSeen = _timeProvider.GetUtcNow();
+                        }
+                        else if (peerList.Count < MaxPeersPerInfoHash)
+                        {
+                            peerList.Add(new DhtPeer { EndPoint = ep, LastSeen = _timeProvider.GetUtcNow() });
+                        }
                     }
-                    else if (peerList.Count < MaxPeersPerInfoHash)
-                    {
-                        peerList.Add(new DhtPeer { EndPoint = ep, LastSeen = _timeProvider.GetUtcNow() });
-                    }
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "Not storing peers for a new info-hash: already holding {Count}",
+                        MaxTrackedInfoHashes);
                 }
 
                 SendResponse(t, r, remote);
@@ -1211,6 +1250,9 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// reports, so a tracker cannot single-handedly move our node ID - the vote threshold still has
     /// to be met, and the caller is responsible for not submitting the same tracker's opinion twice.
     /// </summary>
+    /// <inheritdoc />
+    public IPAddress? ExternalIp => _externalIpVoteTracker.ConfirmedAddress;
+
     public void ReportExternalIp(IPAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);
@@ -1468,6 +1510,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             }
         }
 
+        // Drop rate-limit windows that have closed, so the limiter's table tracks live sources
+        // rather than every address that has ever queried us.
+        _queryRateLimiter.Prune();
+
         // Cleanup peers - direct enumeration
         foreach (var kvp in _peers)
         {
@@ -1491,6 +1537,9 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     internal int TransactionCount => _transactions.Count;
     internal int RecentQueryCount => _recentGetPeersQueries.Count;
     internal int PeerCacheEntryCount => _peers.Count;
+    internal static int MaxPeerCacheEntries => MaxTrackedInfoHashes;
+    internal long RateLimitedQueryCount => _queryRateLimiter.DroppedQueries;
+    internal int KnownNodeCount => GetAllKnownNodes(int.MaxValue).Count;
 
     internal void InjectTransaction(string key, DateTimeOffset timestamp)
     {

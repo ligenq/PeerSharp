@@ -1,12 +1,10 @@
-using Microsoft.Coyote;
-using Microsoft.Coyote.SystematicTesting;
-using PeerSharp.PieceWriter;
+﻿using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Bandwidth;
 using Microsoft.Extensions.Time.Testing;
 
 namespace PeerSharp.Tests.Concurrency;
 
-[Collection("Coyote")]
+[Collection("Concurrency")]
 public class DiskBandwidthLimiterTests
 {
     private readonly ITestOutputHelper _output;
@@ -16,28 +14,13 @@ public class DiskBandwidthLimiterTests
         _output = output;
     }
 
-    private void RunCoyoteTest(Action test, uint iterations = 100)
-    {
-        var config = Configuration.Create()
-            .WithTestingIterations(iterations)
-            .WithMaxSchedulingSteps(1000);
-
-        using var engine = TestingEngine.Create(config, test);
-        engine.Run();
-
-        var report = engine.TestReport;
-        if (report.NumOfFoundBugs > 0)
-        {
-            _output.WriteLine($"Found {report.NumOfFoundBugs} bug(s)!");
-            _output.WriteLine(engine.GetReport());
-            Assert.Fail($"Coyote found {report.NumOfFoundBugs} concurrency bug(s). See test output for details.");
-        }
-    }
+    private void RunConcurrencyStress(Action scenario, uint iterations = 100)
+        => ConcurrencyStress.Run(scenario, iterations, _output);
 
     [Fact]
     public void DiskBandwidthLimiter_ConcurrentRequests_Safe()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var timeProvider = new FakeTimeProvider();
             var bandwidth = new BandwidthManager(10, timeProvider);
@@ -53,8 +36,8 @@ public class DiskBandwidthLimiterTests
             {
                 tasks.Add(Task.Run(async () =>
                 {
-                    var readTask = limiter.RequestReadAsync(100, CancellationToken.None);
-                    var writeTask = limiter.RequestWriteAsync(100, CancellationToken.None);
+                    var readTask = limiter.RequestReadAsync(100, TestContext.Current.CancellationToken);
+                    var writeTask = limiter.RequestWriteAsync(100, TestContext.Current.CancellationToken);
 
                     // We might not get all bandwidth immediately, but it shouldn't deadlock
                     await Task.WhenAny(Task.WhenAll(readTask, writeTask), Task.Delay(10));
@@ -74,7 +57,7 @@ public class DiskBandwidthLimiterTests
         // No disk limits set — unlimited path
         var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
 
-        int result = await limiter.RequestReadAsync(1000, CancellationToken.None);
+        int result = await limiter.RequestReadAsync(1000, TestContext.Current.CancellationToken);
 
         Assert.Equal(1000, result);
         await bandwidth.DisposeAsync();
@@ -87,7 +70,7 @@ public class DiskBandwidthLimiterTests
         var bandwidth = new BandwidthManager(10, timeProvider);
         var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
 
-        int result = await limiter.RequestWriteAsync(500, CancellationToken.None);
+        int result = await limiter.RequestWriteAsync(500, TestContext.Current.CancellationToken);
 
         Assert.Equal(500, result);
         await bandwidth.DisposeAsync();
@@ -103,7 +86,7 @@ public class DiskBandwidthLimiterTests
         var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
 
         // Quota starts at 0, so the request should block
-        var task = limiter.RequestReadAsync(100, CancellationToken.None);
+        var task = limiter.RequestReadAsync(100, TestContext.Current.CancellationToken);
         Assert.False(task.IsCompleted);
 
         // Simulate 1 s of elapsed time → 1 MB of quota replenished
@@ -124,7 +107,7 @@ public class DiskBandwidthLimiterTests
 
         var limiter = new DiskBandwidthLimiter(bandwidth, "DEADBEEF");
 
-        var task = limiter.RequestWriteAsync(100, CancellationToken.None);
+        var task = limiter.RequestWriteAsync(100, TestContext.Current.CancellationToken);
         Assert.False(task.IsCompleted);
 
         timeProvider.Advance(TimeSpan.FromSeconds(1));
@@ -148,7 +131,7 @@ public class DiskBandwidthLimiterTests
         timeProvider.Advance(TimeSpan.FromSeconds(1));
         bandwidth.Update(null);
 
-        int granted = await limiter.RequestReadAsync(100, CancellationToken.None);
+        int granted = await limiter.RequestReadAsync(100, TestContext.Current.CancellationToken);
         Assert.Equal(100, granted);
 
         limiter.ReturnRead(granted); // should not throw
@@ -167,7 +150,7 @@ public class DiskBandwidthLimiterTests
         timeProvider.Advance(TimeSpan.FromSeconds(1));
         bandwidth.Update(null);
 
-        int granted = await limiter.RequestWriteAsync(100, CancellationToken.None);
+        int granted = await limiter.RequestWriteAsync(100, TestContext.Current.CancellationToken);
         Assert.Equal(100, granted);
 
         limiter.ReturnWrite(granted); // should not throw

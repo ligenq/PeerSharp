@@ -74,9 +74,9 @@ internal class UtPex : IUtPex, IDisposable
 
     public void Init(ExtensionHandshake handshake)
     {
-        if (handshake.MessageIds.TryGetValue(Name, out int id))
+        if (handshake.MessageIds.ContainsKey(Name))
         {
-            RemoteMessageId = id;
+            RemoteMessageId = handshake.GetEnabledMessageId(Name);
         }
     }
 

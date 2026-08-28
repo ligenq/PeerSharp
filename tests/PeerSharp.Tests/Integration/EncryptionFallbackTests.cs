@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using System.Net;
@@ -103,7 +103,7 @@ public class EncryptionFallbackTests : IDisposable
             Assert.False(connected, "The stub never completes a handshake, so the attempt must report failure.");
 
             // Give any stray reconnect time to arrive before concluding there was not one.
-            await Task.Delay(TimeSpan.FromSeconds(2));
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken: TestContext.Current.CancellationToken);
 
             Assert.True(
                 Volatile.Read(ref connectionCount) == 1,
@@ -165,7 +165,7 @@ public class EncryptionFallbackTests : IDisposable
             _ = peer.ConnectAsync(
                 IPAddress.Loopback.ToString(), port, useUtp: false, timeoutMs: 5000, offerEncryption: false);
 
-            var completed = await Task.WhenAny(opening.Task, Task.Delay(TimeSpan.FromSeconds(10)));
+            var completed = await Task.WhenAny(opening.Task, Task.Delay(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
             Assert.True(completed == opening.Task, "Nothing was sent to the listener.");
 
             // A plaintext handshake opens with the length-prefixed protocol name. An MSE handshake opens

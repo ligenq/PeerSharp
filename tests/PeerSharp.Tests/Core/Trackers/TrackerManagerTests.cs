@@ -16,6 +16,7 @@ public class TrackerManagerTests
         public List<IPAddress> Reports { get; } = [];
         public bool ThrowOnReport { get; set; }
         public InfoHash NodeId { get; } = new InfoHash(new byte[20]);
+        public System.Net.IPAddress? ExternalIp => null;
 
         public void ReportExternalIp(IPAddress address)
         {
@@ -44,9 +45,11 @@ public class TrackerManagerTests
         public string Url { get; private set; } = string.Empty;
         public ITrackerCallback? Callback { get; private set; }
         public int AnnounceCount { get; private set; }
+        public int ScrapeCount { get; private set; }
         public int DeinitCount { get; private set; }
         public TrackerEvent LastEvent { get; private set; }
         public Func<TrackerEvent, CancellationToken, Task>? AnnounceHandler { get; set; }
+        public Func<CancellationToken, Task>? ScrapeHandler { get; set; }
         private readonly SemaphoreSlim _announceSemaphore = new(0);
         private readonly SemaphoreSlim _deinitSemaphore = new(0);
 
@@ -82,7 +85,8 @@ public class TrackerManagerTests
 
         public Task ScrapeAsync(CancellationToken ct = default)
         {
-            return Task.CompletedTask;
+            ScrapeCount++;
+            return ScrapeHandler?.Invoke(ct) ?? Task.CompletedTask;
         }
 
         public void TriggerResult(bool success, AnnounceResponse response, string? error = null)
@@ -133,6 +137,43 @@ public class TrackerManagerTests
         Assert.True(_factory.Trackers.ContainsKey(url));
         var tracker = _factory.Trackers[url];
         Assert.Equal(url, tracker.Url);
+    }
+
+    [Fact]
+    public async Task ScrapeAsync_AsksEveryActiveTrackerAndWaitsForThem()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string firstUrl = "http://one.example/announce";
+        const string secondUrl = "udp://two.example:6969/announce";
+        manager.AddTracker(firstUrl);
+        manager.AddTracker(secondUrl);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _factory.Trackers[secondUrl].ScrapeHandler = _ => completion.Task;
+
+        Task scrape = manager.ScrapeAsync();
+
+        Assert.Equal(1, _factory.Trackers[firstUrl].ScrapeCount);
+        Assert.Equal(1, _factory.Trackers[secondUrl].ScrapeCount);
+        Assert.False(scrape.IsCompleted);
+
+        completion.SetResult();
+        await scrape;
+    }
+
+    [Fact]
+    public async Task ScrapeAsync_OneTrackerFailureDoesNotHideAnotherResult()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string failedUrl = "http://failed.example/announce";
+        const string successfulUrl = "http://successful.example/announce";
+        manager.AddTracker(failedUrl);
+        manager.AddTracker(successfulUrl);
+        _factory.Trackers[failedUrl].ScrapeHandler = _ => Task.FromException(new IOException("offline"));
+
+        await manager.ScrapeAsync();
+
+        Assert.Equal(1, _factory.Trackers[failedUrl].ScrapeCount);
+        Assert.Equal(1, _factory.Trackers[successfulUrl].ScrapeCount);
     }
 
     [Fact]

@@ -1,8 +1,330 @@
-# Investigation Notes
+﻿# Investigation Notes
 
 Settled investigations, negative results and measurement baselines. These are retained because they
 explain decisions and prevent old questions from being mistaken for new defects. They are not pending
 work; genuinely open items live in [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md).
+
+---
+
+## Property-based concurrency testing: what the parameters have to be to find anything
+
+CsCheck's `SampleParallel` checks linearizability: it runs generated operations concurrently, then
+asks whether the observed final state matches *any* sequential ordering of them. Whether it finds
+anything depends entirely on how much interleaving the parameters buy.
+
+Measured against `BandwidthChannel` with its atomicity deleted (`AddSaturating`'s compare-and-swap
+loop replaced by a plain read-modify-write):
+
+| `maxParallelOperations` | `iter` | `threads` | mutant | runtime |
+| --- | --- | --- | --- | --- |
+| 4 | 200 | 2 | **survived** | 0.7 s |
+| 8 | 5000 | 4 | killed 5/5 | 0.9 s |
+
+The first row is the Coyote failure repeating: a concurrency test that passes against an
+implementation with its synchronisation removed. The cost of the second row is nil, so there is no
+trade-off to weigh here — the weak settings simply bought nothing. `PieceState` needed the same
+treatment: at `iter: 300` it killed its mutant 4 times in 5, at `iter: 2000` 8 times in 8.
+
+Strengthening the bandwidth test then failed against unmodified code, roughly twice in thirteen runs,
+which was a real defect rather than flakiness — see the CHANGELOG entry on the quota floor. CsCheck
+shrank it to three operations and printed the valid orderings beside the observed state, which is
+what made it diagnosable at all.
+
+### The fix was also faster
+
+Replacing the interlocked add-then-clamp with one short critical section, measured against the
+previous implementation on the same machine, 80% spends / 18% refunds / 2% refills:
+
+| threads | interlocked | `Lock` | |
+| --- | --- | --- | --- |
+| 1 | 43.8M ops/s | 57.4M ops/s | 1.31x |
+| 2 | 14.0M ops/s | 27.6M ops/s | 1.97x |
+| 4 | 11.3M ops/s | 25.7M ops/s | 2.26x |
+| 8 | 7.8M ops/s | 23.3M ops/s | 2.98x |
+
+Two nested compare-and-swap retry loops per call cost more under contention than taking a lock. The
+lock-free version was neither correct nor fast; the assumption that it was cheaper is what kept it.
+
+---
+
+## What generative testing found that the examples did not
+
+Two properties were added over pure, non-concurrent code, on the argument that the existing tests
+were thin for the arithmetic involved - `FileMapper` had four tests for the offset arithmetic of
+every read and write in the engine.
+
+`FileMapper` failed immediately, and CsCheck shrank the counterexample to something a person can
+check by hand: files of `[18, 0, 15]`, a 20-byte range from 0, of which only 18 bytes were covered.
+An empty file shares its cumulative offset with the file after it, so the binary search resolving an
+offset can return either; landing on the empty one gave a chunk size of zero, which the enumerator
+read as the end of the range. The remaining bytes were dropped silently. That is a data-loss bug in
+the write path - see the CHANGELOG entry - and it needs three files in a particular arrangement,
+which is why no example test had it.
+
+`PathValidator` did not fail, over 20,000 generated paths built from traversal sequences, UNC and
+drive-rooted prefixes, reserved device names, unstorable characters and trailing dots. That is worth
+recording as a negative result: the defences there are layered, and on Windows `..` is removed by the
+trailing-dot rewrite before the explicit traversal check ever sees it. Removing any single guard
+still yields a safe result, so the properties were confirmed to have teeth by removing all three at
+once, which they caught.
+
+A second round covered bencode's round trip, the DHT routing table and the block cache. The cache
+failed the same way, and shrank just as usefully: read a 16 KiB block, write 16383 bytes over it,
+read it again and get the bytes from before the write. Only whole aligned blocks are cached, so the
+partial write was written through to storage and skipped here - without dropping the copy the cache
+was still holding. Again a data bug, again in arithmetic around an edge case, again three operations
+to reproduce and none of them exotic.
+
+Bencode passed, which was worth confirming for one property in particular: keys must be written in
+ascending *byte* order, because an info hash is the hash of the encoded dictionary and an encoder
+that orders keys its own way computes a hash no other client agrees with. The current code sorts with
+`StringComparer.Ordinal` over keys the parser decoded as Latin1, where one char is one byte, so
+ordinal order is byte order. That is correct and it is fragile: changing the key encoding to UTF-8
+would look like a tidy-up and would silently break every info hash the engine computes. The property
+now pins it.
+
+The routing table turned up only a contract wart - `GetAllNodes(0)` returned one node, because the
+loop adds before testing its limit. Its one caller already refuses a limit of zero, so nothing was
+reachable, but a limit a method does not keep is a trap for the next caller.
+
+### A property test that exercised nothing
+
+The file handle cache came through clean, and the check that this meant anything very nearly did not
+happen. Deleting the reference-count guard from its eviction path - the mutation that should let it
+close a handle somebody was still holding - failed no generated sequence at all, while an existing
+example test caught it immediately.
+
+Two reasons, both worth remembering. The cache floors its limit with `Math.Max(32, maxOpenFiles)`, so
+the limit of 2 the test asked for was silently 32, and with five files eviction never ran once. And
+even after raising the file count, the case where a careless eviction differs from a careful one only
+arises when the *least recently used* handle is still leased, which needs more handles held at once
+than the cache will keep - so the generator had to be weighted heavily towards acquiring before it
+reached the state at all.
+
+The lesson is not about this cache. A property test can pass for the same reason an empty test file
+passes, and nothing in the output distinguishes the two. Only mutating the code says which one
+happened, and it is worth doing before believing a clean run means anything.
+
+The general lesson is the one the mutation work already suggested: the value is in the code where
+arithmetic meets an awkward edge case, not in the code that looks most dangerous. Three of the five
+subjects picked on that basis had a bug in them; the two chosen because they sounded dangerous, the
+path validator and the DHT codecs, did not.
+
+---
+
+## Exceptions on the connect path, measured before changing anything
+
+Exceptions being expensive in .NET is folklore worth checking rather than repeating. Measured on
+.NET 10, no debugger attached:
+
+| | cost |
+| --- | --- |
+| Return a failure result | 0.02 us |
+| throw + catch, shallow | 0.81 us |
+| throw + catch, 16 frames | 3.71 us |
+| throw + catch `SocketException` | 1.47 us |
+| exception across 8 awaits | 30.8 us (3.1 us without) |
+
+So the folklore is stale for throughput, and the async case is the one that matters here.
+
+What the engine actually threw, counted with the soak test's own first-chance counter:
+
+| Scenario | notifications | distinct | amplification |
+| --- | --- | --- | --- |
+| Clean 8 MiB loopback transfer | 0 | 0 | - |
+| 30s, 50 unreachable peers, TCP | 280 | 140 | 2.0x |
+| 45s, 50 unreachable peers, uTP | 277 | 72 | 3.8x |
+
+The happy path throws nothing; every one of these is a connection that did not happen. At those
+rates the runtime cost is about a thousandth of a percent of a core - not worth changing on its own.
+What made it worth changing is that each first-chance exception is a round trip to an attached
+debugger, so a consumer stepping through their own application pays for how often this engine dials a
+dead peer, and pays it as visible sluggishness. That was reported from Peerfluence.
+
+The 2.0x on TCP is a floor, not a defect: one notification where the exception is raised and one as
+it crosses the await. A standalone benchmark with the catch immediately around the await reproduced
+exactly 2.0x, so no amount of restructuring gets below it while the API throws. Only not throwing
+does.
+
+libtorrent settles the design question. Its `peer_connection::on_connection_complete(error_code
+const& e)` takes asio's error_code overload, so a refused connection is an ordinary branch costing no
+exception at all. .NET has the same thing in `SocketAsyncEventArgs`, which reports through
+`SocketError` where the task-based overloads throw.
+
+After the change, with the same workloads: TCP 280 to 0, uTP 277 to 48. The 48 are
+`TaskCanceledException` from the connect deadline firing before uTP exhausts its SYN retries, and
+those were left alone - cancellation surfacing as an exception is the .NET contract, it is tested
+here deliberately, and changing it would be fighting the language rather than the design.
+
+The log counts confirm the drop is real rather than the engine having quietly stopped trying: over
+the same 30 seconds it still logged 120 connect failures and 30 connect timeouts, and still completed
+the transfer.
+
+---
+
+## The domain error model, and what stayed a framework exception
+
+Closed the improvement entry that had been deferred to a major version, and it went to 4.0.0 for it.
+The complaint was concrete: telling "the tracker refused this announce" from "the disk is full" from
+"this .torrent is malformed" meant matching on `ex.Message`, because all three arrived as framework
+exceptions from three different namespaces - two of which were implementation namespaces that had no
+business being public at all.
+
+Everything the library reports as its own failure now descends from `PeerSharpException`. What did
+*not* move is the more interesting half, and follows directly from the defect work that preceded it:
+
+| Stays as it was | Why |
+| --- | --- |
+| `ArgumentException` and relatives | The caller has a bug. Wrapping it hides that from whoever must fix it. |
+| `InvalidOperationException` for wrong-state calls | Same: a misuse, not a failure. |
+| `OperationCanceledException` | The caller changed its mind. Every .NET caller already knows this contract. |
+| `FormatException` from `BencodeParser` | It is a bencode codec, not a torrent reader. Callers of it work at that level. |
+| `TryParse` | Unchanged, and still the cheap path: expected bad input costs no exception at all. |
+
+The boundary for the new `TorrentMetadataException` is `TorrentFileParser`, not the public API
+surface. Putting it only at the public entry points was the option the improvement entry called the
+cheap cosmetic one, because it leaves the interior throwing something different from what it reports.
+Putting it where bytes stop being bencode and start being a torrent means one answer at every level
+above it.
+
+The cost of the wrap is one extra first-chance exception per malformed torrent, since the underlying
+parse failure is caught and re-thrown as the domain type with the original as `InnerException`. That
+is once per torrent added, not per message, and it buys a caller the distinction the entry existed
+for.
+
+### The edit that reported success and did nothing
+
+Reparenting `TorrentException` onto the new root silently failed - a string replace that matched
+nothing, with a print statement afterwards that announced success regardless. The test asserting the
+common root caught it. That is the fifth time this session the same shape has appeared: an operation
+that reports success without checking it did anything. Assert on the anchor, not on reaching the next
+line.
+
+---
+
+## A timeout is not a cancellation
+
+Two more sources of exceptions on ordinary paths, found by profiling with the DHT switched on - the
+earlier profiles had disabled it, so anything it or the inbound uTP path threw was invisible.
+
+`ClientEngine.HandleIncomingUtpAsync` threw `InvalidDataException` for a handshake that did not
+complete, and caught it twenty lines below in its own `catch`. A throw used to jump within one
+method, on the path every inbound connection takes, for a condition already sitting in a bool. Now a
+`return`.
+
+The other is the interesting one. What remained of the uTP connect path was
+`TaskCanceledException`, and it came from folding two different things into one token: the caller's
+cancellation, and this engine's own "give up after N milliseconds". A linked source cannot tell them
+apart afterwards, so an ordinary unanswered peer arrived as an abort.
+
+They are not the same, and separating them is the fix:
+
+- A `CancellationToken` means the caller changed its mind. `OperationCanceledException` is the right
+  way to report that, it is what every caller expects, and it stays.
+- A deadline the operation owns is part of what the operation promises. Running out of it is an
+  outcome, and belongs in the return value.
+
+`UtpStream.ConnectAsync` now takes the deadline as a parameter and completes with `false` when it
+expires, while the token still throws. This is the same distinction `HttpClient` is criticised for
+missing - a request timeout there surfaces as `TaskCanceledException`, indistinguishable from the
+caller cancelling, which is why .NET 5 had to add a `TimeoutException` inner exception to tell them
+apart.
+
+### What is left, and why it stays
+
+| Source | share |
+| --- | --- |
+| Peer teardown cancelling read and send loops | ~90% |
+| DHT sends to unreachable hosts | ~1% |
+
+The teardown exceptions are one `OperationCanceledException` per closed connection, multiplied by the
+stream layers it crosses on the way out - rate limiter, encryption, uTP - at about five notifications
+per teardown. That is the idiomatic .NET shutdown pattern: a pending `ReadAsync` observes its token
+and throws. Avoiding it means read loops that poll instead of awaiting, which is worse code for a
+cost that is already negligible, so it stays.
+
+### The measurement is noisy
+
+Totals ranged from 774 to 2,082 across identical 60-second runs, because the harness re-offers fifty
+unreachable peers four times a second - far more connection churn than real use. The attribution is
+stable and the removed sources are gone from every run; the absolute totals are not worth quoting.
+
+---
+
+## Testing encryption against ourselves proved less than it looked
+
+Every test of the MSE handshake ran our initiator against our own responder. That shows the two
+halves agree with each other. It cannot show that either agrees with any other client, and the two
+are not the same claim - a change that moves both halves the same way leaves every such test green.
+
+Measured, by mutating the implementation and running both kinds of test against it:
+
+| Mutation | Loopback tests (12) | Recorded qBittorrent handshake |
+| --- | --- | --- |
+| RC4 discard 1024 -> 1023 | 5 failed | failed |
+| **keyA/keyB swapped in `InitRC4`** | **0 failed** | **failed** |
+
+The second row is the whole argument. Swapping which derived key encrypts and which decrypts is
+symmetric: run it against itself and everything still works, because both ends made the same
+substitution. Run it against qBittorrent and nothing works at all. Twelve tests, none of which could
+see it.
+
+### Replaying a recording needs the key back
+
+The handshake is randomised on both sides - private keys, padding lengths, padding contents - so a
+captured exchange cannot simply be replayed: with a fresh private key the shared secret differs and
+the recording decrypts to noise. `DiffieHellman` therefore gained an internal constructor taking a
+private key, used only to replay, and the fixed key is written into the fixture. Our own outgoing
+bytes are still not reproducible, and are not asserted; what the far side replied to was our public
+key, which the fixed private key reproduces exactly.
+
+Two things the capture got wrong first, both worth knowing before recording a protocol:
+
+- RC4 decrypts **in place**. The first recording stored the same array it then decrypted, so the
+  fixture held plaintext where it claimed ciphertext and replay decrypted it a second time. Record a
+  copy.
+- qBittorrent sends its BitTorrent handshake in a **separate segment** after the key exchange. A
+  capture that stopped at `IsComplete` recorded the exchange and never the first thing the keys are
+  actually used on, which is the part that proves the derivation.
+
+The counterparty is a local qBittorrent rather than the public swarm: repeatable, version-stamped in
+the fixture, and no stranger's bytes in the repository.
+
+---
+
+## The default listen port was unbindable, and nothing was listening on it
+
+Two tests began failing with `SocketException: An attempt was made to access a socket in a way
+forbidden by its access permissions` (`WSAEACCES`) on a machine where they had passed hours earlier,
+with no relevant code change in between.
+
+The cause was the host, not the engine. Windows reserves blocks of the dynamic port range for
+Hyper-V, WSL and Docker, and `netsh int ipv4 show excludedportrange protocol=udp` showed
+54981-55280 reserved — which contains the then-default `UdpPort` of 55125. Binding it directly:
+
+| UDP port | result |
+| --- | --- |
+| 55125 (old default) | `AccessDenied` |
+| 55080, 55181 | `AccessDenied` |
+| 6881 (new default) | binds |
+
+Nothing was listening on any of them. These reservations are assigned at boot and move, so a port
+that works today can be unbindable tomorrow, which makes any fixed default in 49152-65535 a
+liability rather than a choice. What other implementations do:
+
+| Implementation | Default |
+| --- | --- |
+| libtorrent | 6881, then the next ports, then OS-assigned |
+| qBittorrent | 6881 |
+| Deluge | 6881-6891 |
+| Transmission | 51413 (inside the dynamic range) |
+| MonoTorrent | 0 — OS-assigned |
+| PeerSharp, previously | 55125, no fallback, hard failure |
+
+The number was changed to 6881, but the number is the smaller half of the fix: libtorrent's
+behaviour of walking forward and then falling back to an OS-assigned port is what makes the choice
+survive a host that has taken it. PeerSharp already writes the bound port back into settings and
+announces from there, so the fallback needed no other plumbing.
 
 ---
 
@@ -32,6 +354,177 @@ observability risks:
   rejected, and quota arithmetic saturates instead of overflowing.
 
 The public API snapshot and deterministic tests were updated with these contracts.
+
+---
+
+## Making Stryker run at all: three constraints, each measured
+
+**Settled.** Mutation testing is worth having here - applied by hand it twice overturned a conclusion,
+once where 100% line coverage hid an untested branch and once where a concurrency test passed against
+an implementation with its synchronisation deleted. Getting `dotnet-stryker` to run against this
+repository took three specific accommodations, all of them recorded in configuration rather than
+folklore.
+
+**1. The VSTest runner hangs; MTP is required.** `xunit.v3` 4.0 runs on Microsoft.Testing Platform and
+the .NET 10 SDK dropped the VSTest bridge. Stryker's default runner discovers all 2505 tests and then
+sits there: measured at twenty minutes with every `testhost` and `vstest.console` process accumulating
+under five seconds of CPU. `--test-runner mtp` works, and is marked preview by Stryker.
+
+**2. The MTP runner cancels an initial test run that takes about three minutes.** The failure surfaces
+as `Stryker.NET failed to mutate your project ... No test result reported`, which reads like a
+discovery problem and is not one. The debug log names it exactly:
+
+```
+[DBG] "MtpRunner-0": Test run for "PeerSharp.Tests.dll" failed on attempt 1/2; discarding crashed server
+System.Threading.Tasks.TaskCanceledException: A task was canceled.
+   at Stryker.TestRunner.MicrosoftTestPlatform.AssemblyTestServer.RunTestsAsync(...)
+```
+
+Two attempts, roughly three minutes each. The whole suite takes 3m25s, so it never finishes. The
+integration lane accounts for almost all of that, and it is compiled out of the assembly for mutation
+runs only - `<Compile Remove="Integration/**">` under `StrykerRun`. What remains runs in 46 seconds.
+
+**Excluding more than that is counterproductive, and this was measured too.** A first attempt also
+removed the concurrency, robustness and interop lanes; every mutant in `LifetimeByteTotals` then came
+back `NoCoverage`, because the tests that cover it live in the concurrency lane. Removing a lane
+removes its coverage, and mutants report as untested rather than as findings.
+
+**3. Half the mutants would not compile.** Nullable analysis is escalated to errors here, so Stryker's
+rewrites trip CS8602 and friends and its "Safe Mode" discards the whole enclosing method: 11,992 of
+25,169 mutants on the first run. `StrykerRun` reaches MSBuild as a global property and relaxes exactly
+that list for the mutation job; ordinary builds stay strict, which
+`dotnet msbuild -getProperty:WarningsAsErrors` confirms either way.
+
+**4. Per-test coverage attribution is broken, and the default configuration reports a fictional
+score.** A first full run over thirteen files returned 678 `NoCoverage`, 30 `Killed`, 0 `Survived` -
+a 4.24% score. It is not a verdict on the tests: `PiecePicker` was reported as 215 uncovered mutants
+while `PiecePickerTests` has 31 passing tests against it. The check that settles it:
+
+| `coverage-analysis` | `LifetimeByteTotals` result |
+| --- | --- |
+| `perTest` (default) | 9 `NoCoverage` |
+| `off` | 9 `Killed` |
+
+Identical mutants, identical tests. So the tests do kill them and Stryker's MTP runner is failing to
+attribute which test covers which mutant. `"coverage-analysis": "off"` is therefore mandatory here,
+not a tuning choice, and a score produced without it should be discarded rather than investigated.
+
+**Which is what bounds the scope.** Without per-test selection every mutant runs the whole 46-second
+lane, so `stryker-config.json` names only small units where that arithmetic finishes: the rate
+limiter, the lifetime counters, and the connection calculators. `PiecePicker`, `PathValidator`,
+`DhtSecurity`, `DhtItemStore`, `FileMapper` and `PeerPriority` are all worth mutating and are left out
+purely on runtime - roughly 700 mutants at 46 seconds each. Add them back the moment per-test coverage
+works, not before.
+
+Independently of the runtime limit, the transfer and networking paths are a poor fit regardless: a
+mutant that merely makes a timing-dependent test flaky is reported as survived, which is noise wearing
+the costume of a finding.
+
+**The first real result: 147 mutants, 147 killed, 0 survived, in 56 minutes.** Every mutant across the
+seven configured files was detected by an existing test - the rate limiter's budget arithmetic, the
+lifetime counters, and all four connection calculators. Worth stating plainly because a perfect score
+is usually a smell: it is not vacuous here, since each of the 147 ran the whole 46-second lane and
+`Survived`, `NoCoverage` and `Timeout` were all zero. Eleven further mutants still fail to compile even
+with the relaxed nullable settings, ten of them in `DhtQueryRateLimiter`; those are untested rather
+than killed and are the honest asterisk on the number.
+
+The result is a baseline, not a victory lap. These seven files were chosen partly *because* they are
+well covered, so 100% says the configuration works and these units are genuinely pinned - not that the
+engine as a whole would score anywhere near it. The files left out on runtime are where the interesting
+answer is.
+
+---
+
+## Why Microsoft Coyote was removed
+
+**Settled, by mutation testing. Historical: Coyote is no longer a dependency.** The decision was not
+about its release cadence - it was that the suite explored far less than its presence implied, and the
+cause was a version gap rather than anything about how the tests were written. The scenarios and
+assertions survive unchanged behind `ConcurrencyStress`, so what the suite detects is exactly what it
+detected before.
+
+**Two things have to be true for a Coyote test to mean anything**, and neither holds by default here:
+
+1. *The assembly must be rewritten.* Nothing runs `coyote rewrite` - not CI, not the build - so an
+   ordinary `dotnet test` runs these as repeated stress runs on real threads. Rewritten, the engine
+   reports controlling 4-5 operations; unrewritten, 1.
+2. *The synchronisation under test must be a primitive Coyote recognises.* Coyote 1.7.11 targets
+   .NET 8 and does not know `System.Threading.Lock` (.NET 9+), which is what this codebase uses almost
+   everywhere. Without a scheduling point at the acquisition, a critical section is atomic as far as
+   the explorer is concerned, and the interleaving that would break it is never generated.
+
+**Measured, not inferred.** Against `LifetimeByteTotals`, whose whole purpose is that a removal and a
+read cannot interleave:
+
+| Implementation | Lock type | Systematic run |
+| --- | --- | --- |
+| correct | `Lock` | passes |
+| removal and retirement as two steps | `Lock` | **passes** - the bug is invisible |
+| no synchronisation at all | `Lock` | **passes** - still invisible |
+| removal and retirement as two steps | `object` (Monitor) | fails, correctly |
+
+A test that passes against an implementation with the locking deleted is not testing the locking.
+`LifetimeByteTotals` was briefly switched to a `Monitor` lock to make that row reproducible; it went
+back to `Lock` with the rest of the codebase once Coyote was removed, since nothing observes the
+difference any more.
+
+**Rewriting the library is not currently a way out.** Adding `PeerSharp.dll` to `rewrite.coyote.json`
+does give Coyote scheduling points inside production code - it is what makes the `Monitor` row above
+fail as it should - but classes that use `System.Threading.Lock` then block a controlled thread and
+the deadlock monitor reports a hang. `DhtQueryRateLimiter` does exactly that. So the choice today is
+between vacuous exploration and spurious hangs, and the config is left as it was.
+
+**The two join patterns are mutually exclusive, which is worth knowing before anyone "fixes" one.**
+Unrewritten, `Task.Run` is not controlled, so awaiting `Task.WhenAll` leaves the main operation
+waiting on something Coyote cannot see and it reports a deadlock; every test fails. Rewritten, the
+blocking `Task.WaitAll` that the whole suite uses is itself reported as a hang. So `WaitAll` is not a
+mistake in the existing tests - it is the only pattern that works in the path CI runs. Converting to
+`WhenAll` is a prerequisite for rewriting rather than an improvement on its own, and doing it without
+also rewriting turns the suite red.
+
+**What would change the picture:** a systematic explorer that models `System.Threading.Lock` - a
+maintained Coyote, or a fork such as InterleaveX once it publishes packages. The scenarios are
+unchanged, so adopting one means replacing `ConcurrencyStress.Run` and nothing else. Until then, read
+the concurrency suite as stress rather than proof.
+
+**Reproducing the table above** now requires restoring the dependency: add `Microsoft.Coyote` and
+`Microsoft.Coyote.Test` to the test project and `microsoft.coyote.cli` to the tool manifest, write a
+`rewrite.coyote.json` naming both `PeerSharp.Tests.dll` and `PeerSharp.dll`, then build, run
+`dotnet coyote rewrite`, and run the `LifetimeTotals` tests. The measurements are recorded here
+precisely so nobody has to.
+
+---
+
+## A per-IP connection cap cannot be defaulted on
+
+**Settled, by measurement.** `ConnectionSettings.MaxConnectionsPerIp` was added to give
+`AllowMultipleConnectionsPerIp` a middle ground - the flag can only permit one connection per address
+or unlimited - and was initially defaulted to 8. That default rejects real connections.
+
+`PexLiveExchangeTests` failed one run in six with it on, and passed 8 out of 8 with it off. The
+mechanism was isolated rather than guessed at, by separating the two things the setting controls:
+
+| Default | Address scan runs | Rejection possible | Result |
+| --- | --- | --- | --- |
+| 8 | yes | yes | 1 failure in 6 |
+| 100000 | yes | no | 0 in 8 |
+| 0 | no | no | 0 in 8 |
+| (pristine, before the change) | n/a | n/a | 0 in 6 |
+
+So it is the rejection firing, not the cost of the scan or a race it perturbs.
+
+**Why 8 is reachable with three peers.** The cap counts live entries in `_connectedEndpoints`, and one
+logical peer holds more than one for a while: a dial may try uTP and TCP, a handshake in progress is
+already registered, and a reconnect overlaps the connection it replaces. Wherever peers genuinely
+share an address the count runs well ahead of the peer count - and on loopback every engine is
+`127.0.0.1`, so a local swarm is the worst case there is. `ManyPeerSoakTests` puts 24 leechers on one
+address against a single seeder, which is the clearest statement of why no small default can be safe:
+the engine's own test suite would be the first thing it broke.
+
+**Left off by default.** The knob is worth having for a seedbox or an engine facing a swarm it does
+not trust, where the operator knows what the address distribution looks like. A default cannot know
+that, and the cost of guessing low is refusing real peers silently. Do not turn it on globally without
+measuring against the deployment it is meant for.
 
 ---
 

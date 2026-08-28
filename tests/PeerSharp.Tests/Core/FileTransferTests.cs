@@ -1,4 +1,4 @@
-using PeerSharp.Internals;
+﻿using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.PieceWriter;
@@ -107,6 +107,190 @@ public class FileTransferTests
         Assert.True(unfinished[0].Blocks[0]);
         Assert.False(unfinished[0].Blocks[1]);
         Assert.Equal(42, unfinished[0].Data[0]);
+    }
+
+    // ── What resume data carries away from a transfer ────────────────────────
+    //
+    // Each partial piece here is copied whole, base64-encoded into JSON and flushed to the physical
+    // device on every autosave. Capping the piece *count* alone bounds the wrong axis: 32 pieces is
+    // 8 MiB at a 256 KiB piece size and half a gigabyte at the 16 MiB one BEP 52 allows, written
+    // every minute, per torrent.
+
+    [Fact]
+    public void GetUnfinishedPiecesState_WithLargePieces_IsBoundedByBytesNotPieceCount()
+    {
+        using var fixture = LargePieceFixture.Create(pieceSize: 8 * 1024 * 1024, activePieces: 5);
+
+        var saved = fixture.FileTransfer.GetUnfinishedPiecesState();
+
+        // 16 MiB of budget over 8 MiB pieces: two, not the five that are in progress.
+        Assert.Equal(2, saved.Count);
+        Assert.True(
+            saved.Sum(piece => (long)piece.Data.Length) <= 16L * 1024 * 1024,
+            "the saved snapshot must fit the byte budget");
+    }
+
+    [Fact]
+    public void GetUnfinishedPiecesState_WithOnePieceLargerThanTheBudget_StillSavesOne()
+    {
+        // Saving nothing would mean a restart re-downloads a whole 32 MiB piece from scratch. One
+        // over-budget piece is worth more than an empty snapshot.
+        using var fixture = LargePieceFixture.Create(pieceSize: 32 * 1024 * 1024, activePieces: 3);
+
+        var saved = fixture.FileTransfer.GetUnfinishedPiecesState();
+
+        Assert.Single(saved);
+    }
+
+    [Fact]
+    public void GetUnfinishedPiecesState_StopsAtThePieceThatWouldOverrunTheBudget()
+    {
+        // The budget can be partly spent rather than exactly exhausted: two 12 MiB pieces do not fit
+        // in 16 MiB, so the second is left out even though there is still room for a smaller one.
+        // Taking it anyway would put the write half again over the cap.
+        using var fixture = LargePieceFixture.Create(pieceSize: 12 * 1024 * 1024, activePieces: 3);
+
+        var saved = fixture.FileTransfer.GetUnfinishedPiecesState();
+
+        Assert.Single(saved);
+    }
+
+    [Fact]
+    public void GetUnfinishedPiecesState_WithSmallPieces_IsStillBoundedByPieceCount()
+    {
+        // The two limits are belt and braces: at ordinary piece sizes the count is what binds, and
+        // the byte budget must not quietly loosen it.
+        using var fixture = LargePieceFixture.Create(pieceSize: 64 * 1024, activePieces: 40);
+
+        var saved = fixture.FileTransfer.GetUnfinishedPiecesState();
+
+        Assert.Equal(32, saved.Count);
+    }
+
+    [Fact]
+    public void GetUnfinishedPiecesState_SavesTheMostCompletePiecesFirst()
+    {
+        // What gets dropped should be the pieces closest to worthless, since dropping a piece costs
+        // re-requesting the blocks it held.
+        using var fixture = LargePieceFixture.Create(pieceSize: 8 * 1024 * 1024, activePieces: 4, blocksPerPieceIndex: true);
+
+        var saved = fixture.FileTransfer.GetUnfinishedPiecesState();
+
+        Assert.Equal(2, saved.Count);
+        Assert.Equal([3, 2], [.. saved.Select(piece => piece.Index)]);
+    }
+
+    [Fact]
+    public void LoadUnfinishedPiecesState_IgnoresAPieceOutsideTheTorrent()
+    {
+        // A resume file is just bytes on disk: truncated by a crash, edited by hand, or left over
+        // from a torrent whose metadata has moved on. Indexing arrays off those numbers is how that
+        // becomes a crash instead of a re-download.
+        var data = new List<TorrentStateData.UnfinishedPieceData>
+        {
+            new() { Index = 9999, Blocks = [true, false], Data = new byte[32768] }
+        };
+
+        _fileTransfer.LoadUnfinishedPiecesState(data);
+
+        Assert.Empty(_fileTransfer.GetUnfinishedPiecesState());
+    }
+
+    [Fact]
+    public void LoadUnfinishedPiecesState_IgnoresAPieceWithTheWrongBlockCount()
+    {
+        var data = new List<TorrentStateData.UnfinishedPieceData>
+        {
+            new() { Index = 0, Blocks = [true, false, true, false], Data = new byte[32768] }
+        };
+
+        _fileTransfer.LoadUnfinishedPiecesState(data);
+
+        Assert.Empty(_fileTransfer.GetUnfinishedPiecesState());
+    }
+
+    [Fact]
+    public void LoadUnfinishedPiecesState_IgnoresAPieceWithTruncatedData()
+    {
+        // Two block flags say 32768 bytes; the payload stops at 100. Copying block 1 out of it used
+        // to compute a negative length.
+        var data = new List<TorrentStateData.UnfinishedPieceData>
+        {
+            new() { Index = 0, Blocks = [true, true], Data = new byte[100] }
+        };
+
+        var exception = Record.Exception(() => _fileTransfer.LoadUnfinishedPiecesState(data));
+
+        Assert.Null(exception);
+        Assert.Empty(_fileTransfer.GetUnfinishedPiecesState());
+    }
+
+    [Fact]
+    public void LoadUnfinishedPiecesState_KeepsTheValidPiecesAlongsideTheRejectedOnes()
+    {
+        var data = new List<TorrentStateData.UnfinishedPieceData>
+        {
+            new() { Index = 9999, Blocks = [true, false], Data = new byte[32768] },
+            new() { Index = 1, Blocks = [true, false], Data = new byte[32768] }
+        };
+        data[1].Data[0] = 7;
+
+        _fileTransfer.LoadUnfinishedPiecesState(data);
+
+        var loaded = Assert.Single(_fileTransfer.GetUnfinishedPiecesState());
+        Assert.Equal(1, loaded.Index);
+        Assert.Equal(7, loaded.Data[0]);
+    }
+
+    /// <summary>
+    /// A torrent with a configurable piece size and some pieces part-way downloaded. Piece state is
+    /// installed directly rather than through <c>LoadUnfinishedPiecesState</c>, which would need a
+    /// full-size buffer per piece just to set one block.
+    /// </summary>
+    private sealed class LargePieceFixture : IDisposable
+    {
+        public required Torrent Torrent { get; init; }
+        public required FileTransfer FileTransfer { get; init; }
+
+        /// <param name="blocksPerPieceIndex">
+        /// When set, piece <c>i</c> receives <c>i + 1</c> blocks, so the pieces differ in how
+        /// complete they are.
+        /// </param>
+        public static LargePieceFixture Create(int pieceSize, int activePieces, bool blocksPerPieceIndex = false)
+        {
+            var metadata = new TorrentFileMetadata();
+            metadata.Info.PieceSize = (uint)pieceSize;
+            metadata.Info.FullSize = (long)pieceSize * (activePieces + 1);
+            metadata.Info.Pieces = [.. Enumerable.Range(0, activePieces + 1).Select(_ => new byte[20])];
+
+            var torrent = TorrentTestUtility.CreateMinimal(metadata);
+            var fileTransfer = new FileTransfer(torrent, TimeProvider.System);
+
+            var manager = GetField<PieceStateManager>(fileTransfer, "_pieceStateManager");
+            int blocksPerPiece = pieceSize / ProtocolConstants.BlockSize;
+
+            for (int i = 0; i < activePieces; i++)
+            {
+                var state = new PieceState(i, blocksPerPiece);
+                int received = blocksPerPieceIndex ? Math.Min(i + 1, blocksPerPiece) : 1;
+                for (int block = 0; block < received; block++)
+                {
+                    state.Blocks[block] = true;
+                    state.BlockData[block] = new Block(i, block * ProtocolConstants.BlockSize, ProtocolConstants.BlockSize);
+                }
+
+                state.SetReceivedCountForInit(received);
+                manager.AddOrReplacePiece(state);
+            }
+
+            return new LargePieceFixture { Torrent = torrent, FileTransfer = fileTransfer };
+        }
+
+        public void Dispose()
+        {
+            FileTransfer.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            Torrent.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
     }
 
     [Fact]

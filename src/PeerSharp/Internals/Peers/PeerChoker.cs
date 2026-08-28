@@ -134,6 +134,14 @@ internal sealed class PeerChoker
 
     private int GetUploadSlots(int connectedCount)
     {
+        // A caller who named a number gets that number. The computation below is a guess from the
+        // upload limit, and a guess should not overrule an instruction.
+        int requested = _torrent.MaxUploadSlots;
+        if (requested > 0)
+        {
+            return Math.Min(requested, Math.Max(1, connectedCount));
+        }
+
         int minSlots = Math.Max(1, _torrent.Settings.Connection.UploadSlotsMin);
         int maxSlots = Math.Max(minSlots, _torrent.Settings.Connection.UploadSlotsMax);
         long uploadLimit = _torrent.UploadLimitBytesPerSecond;

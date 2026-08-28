@@ -114,8 +114,16 @@ public class HttpStreamServerTests
     // Closed range, valid.
     [InlineData("bytes=15-15", 16, true, true, 15, 15)]
     [InlineData("bytes=0-0", 16, true, true, 0, 0)]
-    // Closed range, out of bounds.
+    // RFC 7233 2.1: a last-byte-pos at or past the end is not unsatisfiable - it is clamped to the
+    // remainder of the representation. Players ask for fixed-size chunks, so the final chunk of any
+    // file lands here, as does every chunk of a file smaller than the chunk size.
+    [InlineData("bytes=0-100", 16, true, true, 0, 15)]
+    [InlineData("bytes=10-100", 16, true, true, 10, 15)]
+    [InlineData("bytes=0-16", 16, true, true, 0, 15)]
+    [InlineData("bytes=0-15", 16, true, true, 0, 15)]
+    // Unsatisfiable is about first-byte-pos alone: at or past the end there is nothing to send.
     [InlineData("bytes=16-16", 16, false, true, 16, 16)]
+    [InlineData("bytes=16-", 16, false, true, 16, 15)]
     // start > end => 416.
     [InlineData("bytes=8-7", 16, false, true, 8, 7)]
     public void RangeParser_ParsesRanges(string? header, long totalLength, bool valid, bool partial, long start, long end)
@@ -266,6 +274,34 @@ public class HttpStreamServerTests
 
     private sealed class FakeTorrent : ITorrent
     {
+        public bool SuperSeeding { get; set; }
+
+        public int MaxConnections { get; set; }
+
+        public int MaxUploadSlots { get; set; }
+
+        public IWebSeeds WebSeeds => throw new NotSupportedException();
+
+        public Task MoveStorageAsync(string path, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newPath, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public IReadOnlyDictionary<int, string> GetRenamedFiles() => new Dictionary<int, string>();
+
+        public Task<byte[]> ReadPieceAsync(int pieceIndex, CancellationToken cancellationToken = default) => Task.FromResult(Array.Empty<byte>());
+
+        public void SetPiecePriority(int pieceIndex, Priority priority) { }
+
+        public Priority GetPiecePriority(int pieceIndex) => Priority.Normal;
+
+        public void ClearPiecePriorities() { }
+        public bool HasSameIdentity(ITorrent? other)
+        {
+            return other != null
+                && ((!Hash.IsEmpty && !other.Hash.IsEmpty && Hash == other.Hash)
+                    || (!HashV2.IsEmpty && !other.HashV2.IsEmpty && HashV2 == other.HashV2));
+        }
+
         private readonly byte[] _data;
         private readonly IReadOnlyList<TorrentFileInfo> _files;
         private readonly Func<Stream>? _streamFactory;

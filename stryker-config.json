@@ -1,0 +1,31 @@
+{
+  "stryker-config": {
+    "project": "PeerSharp.csproj",
+    "test-projects": [
+      "tests/PeerSharp.Tests/PeerSharp.Tests.csproj"
+    ],
+    "solution": "PeerSharp.slnx",
+    "test-runner": "mtp",
+    "concurrency": 4,
+    "reporters": [
+      "cleartext",
+      "html",
+      "json"
+    ],
+    "mutate": [
+      "**/Internals/LifetimeByteTotals.cs",
+      "**/Internals/Dht/DhtQueryRateLimiter.cs",
+      "**/Internals/Peers/ConnectionBudgetCalculator.cs",
+      "**/Internals/Peers/ConnectionBackoffCalculator.cs",
+      "**/Internals/Peers/PipelineDepthCalculator.cs",
+      "**/Internals/Peers/SeedingChoker.cs",
+      "**/Internals/Transfers/RequestQueuePolicy.cs"
+    ],
+    "thresholds": {
+      "high": 80,
+      "low": 60,
+      "break": 0
+    },
+    "coverage-analysis": "off"
+  }
+}

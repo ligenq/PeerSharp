@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using PeerSharp.Tests.Analyzers;
 
 namespace PeerSharp.Tests.ArchitectureTests;
@@ -2388,6 +2388,100 @@ public class ArchitectureTests
                name.EndsWith("Data") ||
                name.EndsWith("Entry") ||
                name.EndsWith("Events");
+    }
+
+    /// <summary>
+    /// Ensures a public <c>bool Try...</c> method states, for every reference-typed <c>out</c>
+    /// parameter, when that parameter is null.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Motivation: the Try pattern's whole contract is "the return value tells you whether the out
+    /// parameter is usable", and nullable flow analysis cannot infer that. Without an annotation a
+    /// consumer who writes the correct code still gets a warning:
+    /// <c>if (TorrentFile.TryParse(data, out var file)) { file.Name }</c> warns on <c>file</c>,
+    /// because as far as the compiler knows a <c>TorrentFile?</c> is a <c>TorrentFile?</c> whatever
+    /// the method returned. The usual reaction is a null-forgiving <c>!</c> at the call site, which
+    /// suppresses the warning for that line and every future one.
+    /// </para>
+    /// <para>
+    /// The rule asks only that some annotation is present, not which. The two directions both occur
+    /// on the same method here: the produced value is non-null when the method returns true, and the
+    /// failure reason is non-null when it returns false. Demanding
+    /// <see cref="System.Diagnostics.CodeAnalysis.NotNullWhenAttribute"/> with <c>true</c> everywhere
+    /// would have forced the wrong answer onto the second one.
+    /// </para>
+    /// <para>
+    /// Scope is the public surface only. Inside the assembly the compiler already sees every caller,
+    /// so a missing annotation is a local nuisance; across an assembly boundary it is a contract a
+    /// consumer cannot recover by reading the code. Value-typed out parameters are skipped - they
+    /// cannot be null and have nothing to declare.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void Public_Try_Methods_Must_Declare_When_Their_Out_Parameters_Are_Null()
+    {
+        // Any of these answers the question. Which one is right depends on the parameter's role, and
+        // that is the author's call rather than this test's.
+        var nullabilityAttributes = new[]
+        {
+            "NotNullWhenAttribute",
+            "MaybeNullWhenAttribute",
+            "NotNullIfNotNullAttribute",
+            "MaybeNullAttribute",
+            "NotNullAttribute"
+        };
+
+        var errors = new List<string>();
+
+        foreach (var type in AllTypes.Where(t => t.IsPublic && (t.Namespace?.StartsWith(RootNamespace) ?? false)))
+        {
+            foreach (var method in type.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly))
+            {
+                if (method.ReturnType != typeof(bool) || !method.Name.StartsWith("Try", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                foreach (var parameter in method.GetParameters())
+                {
+                    if (!parameter.IsOut)
+                    {
+                        continue;
+                    }
+
+                    // An out parameter is a by-ref type; the thing that can be null is what it points
+                    // at. Asking IsValueType of the by-ref type itself answers false for every one of
+                    // them, which would quietly turn this rule on parameters that cannot be null.
+                    var parameterType = parameter.ParameterType.GetElementType() ?? parameter.ParameterType;
+
+                    bool canBeNull = !parameterType.IsValueType || Nullable.GetUnderlyingType(parameterType) != null;
+                    if (!canBeNull)
+                    {
+                        continue;
+                    }
+
+                    bool declared = parameter.GetCustomAttributes(inherit: false)
+                        .Any(a => nullabilityAttributes.Contains(a.GetType().Name));
+
+                    if (!declared)
+                    {
+                        errors.Add(
+                            $"{type.FullName}.{method.Name} - out parameter '{parameter.Name}' " +
+                            $"({parameterType.Name}) does not say when it is null");
+                    }
+                }
+            }
+        }
+
+        if (errors.Count != 0)
+        {
+            Assert.Fail(
+                $"Try methods with unannotated out parameters:{Environment.NewLine}" +
+                $"{string.Join(Environment.NewLine, errors)}{Environment.NewLine}" +
+                "Add [NotNullWhen(true)] to the value the method produces, [NotNullWhen(false)] to a " +
+                "failure reason, or [MaybeNullWhen(true)] where success can legitimately yield null.");
+        }
     }
 
     private static bool IsRecord(Type type)

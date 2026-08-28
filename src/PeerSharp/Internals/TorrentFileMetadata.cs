@@ -186,6 +186,141 @@ internal class TorrentFileInfo
         return result;
     }
 
+    /// <summary>
+    /// The bytes of actual content: what a consumer is downloading, and what a progress bar should be
+    /// measured against.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="FullSize"/>, which is the size of the piece space. The two differ
+    /// wherever the layout contains padding - BEP 47 padding entries in a v1 torrent, or the implicit
+    /// gaps BEP 52 leaves after a file that does not end on a piece boundary. Reporting the piece
+    /// space as the torrent's size overstates a v2 torrent by the whole of that padding, and leaves
+    /// its remaining-bytes count unable to reach zero.
+    /// </remarks>
+    public long ContentSize
+    {
+        get
+        {
+            long total = 0;
+            foreach (var file in Files)
+            {
+                if (!file.IsPadding)
+                {
+                    total += file.Size;
+                }
+            }
+
+            // A magnet has no file list until its metadata arrives, so FullSize is the only size it
+            // can carry. Once files are present, however, zero is a real content size: an empty
+            // torrent or a torrent containing only padding must not report its piece space as data.
+            return Files.Count == 0 ? FullSize : total;
+        }
+    }
+
+    /// <summary>
+    /// Returns the amount of real file content represented by one piece, excluding explicit and
+    /// implicit padding.
+    /// </summary>
+    public long GetPieceContentSize(int pieceIndex)
+    {
+        int pieceCount = GetPieceCount();
+        if ((uint)pieceIndex >= (uint)pieceCount || PieceSize == 0)
+        {
+            return 0;
+        }
+
+        long pieceStart = (long)pieceIndex * PieceSize;
+        long pieceEnd = pieceStart > long.MaxValue - PieceSize
+            ? long.MaxValue
+            : pieceStart + PieceSize;
+        pieceEnd = Math.Min(pieceEnd, FullSize);
+
+        // Files are stored in piece-space order. Start at the last file whose offset is not after
+        // this piece, then walk only the files the piece actually touches.
+        int low = 0;
+        int high = Files.Count - 1;
+        int firstCandidate = 0;
+        while (low <= high)
+        {
+            int middle = low + ((high - low) / 2);
+            if (Files[middle].Offset <= pieceStart)
+            {
+                firstCandidate = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        long contentBytes = 0;
+        for (int i = firstCandidate; i < Files.Count; i++)
+        {
+            var file = Files[i];
+            if (file.Offset >= pieceEnd)
+            {
+                break;
+            }
+
+            if (file.IsPadding || file.Size <= 0 || file.Offset < 0)
+            {
+                continue;
+            }
+
+            long fileEnd = file.Offset > long.MaxValue - file.Size
+                ? long.MaxValue
+                : file.Offset + file.Size;
+            fileEnd = Math.Min(fileEnd, FullSize);
+            long overlapStart = Math.Max(pieceStart, file.Offset);
+            long overlapEnd = Math.Min(pieceEnd, fileEnd);
+            if (overlapEnd > overlapStart)
+            {
+                contentBytes += overlapEnd - overlapStart;
+            }
+        }
+
+        return contentBytes;
+    }
+
+    /// <summary>
+    /// How much of the torrent's piece space each file occupies, in file order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is not the same as the file's size. BEP 52 starts every file on a piece boundary, so a v2
+    /// torrent's piece space has a gap after any file that does not end on one, and the offsets the
+    /// parser recorded already account for it. A v1 torrent packs files end to end and spells out any
+    /// alignment as explicit padding entries, so there the span is the size.
+    /// </para>
+    /// <para>
+    /// Storage has to lay files out along this, not along their sizes. Mapping a piece-space offset
+    /// through the sizes put every file after the first one earlier by the accumulated gap, which
+    /// wrote each file's data into the wrong place while every piece still verified - verification
+    /// happens on the assembled piece before it is written. A v2 download reported 100% and left the
+    /// first file correct and every other file corrupt.
+    /// </para>
+    /// <para>
+    /// Derived from the recorded offsets rather than from the version, so it stays right for a
+    /// torrent whose padding is explicit and one whose padding is implied.
+    /// </para>
+    /// </remarks>
+    public List<long> GetPieceSpaceSpans()
+    {
+        var spans = new List<long>(Files.Count);
+        for (int i = 0; i < Files.Count; i++)
+        {
+            long next = i + 1 < Files.Count ? Files[i + 1].Offset : FullSize;
+            long span = next - Files[i].Offset;
+
+            // A file can never occupy less of the piece space than it holds; if the recorded offsets
+            // say otherwise they are not usable and the size is the safer answer.
+            spans.Add(Math.Max(span, Files[i].Size));
+        }
+
+        return spans;
+    }
+
     public long GetPieceSize(int pieceIndex)
     {
         int pieceCount = GetPieceCount();

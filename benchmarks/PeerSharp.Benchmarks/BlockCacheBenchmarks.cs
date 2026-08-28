@@ -74,7 +74,12 @@ public class BlockCacheBenchmarks
     /// </summary>
     private sealed class InMemoryStorage(long totalSize) : IStorage
     {
+        public Task MoveAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         public Task DeleteAllAsync(CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
 
         public Task InitAsync(IReadOnlyList<FileSelection>? selection = null, CancellationToken ct = default)
             => Task.CompletedTask;

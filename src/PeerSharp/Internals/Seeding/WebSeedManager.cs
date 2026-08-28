@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
@@ -61,6 +61,66 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Adds a source, or returns false if the URL is unusable or already present.
+    /// </summary>
+    public bool AddSource(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != "http" && uri.Scheme != "https" && uri.Scheme != "ftp"))
+        {
+            return false;
+        }
+
+        bool isMultiFile = _torrent.InfoFile.Info.Files.Count > 1;
+
+        lock (_lock)
+        {
+            if (_sources.Any(source => Matches(source, url)))
+            {
+                return false;
+            }
+
+            _sources.Add(new WebSeedSource(url, isMultiFile));
+        }
+
+        _logger.LogInformation("Added web seed: {Url}", url);
+        return true;
+    }
+
+    /// <summary>
+    /// Removes a source. Downloads already in flight against it are left to finish.
+    /// </summary>
+    public bool RemoveSource(string url)
+    {
+        lock (_lock)
+        {
+            int index = _sources.FindIndex(source => Matches(source, url));
+            if (index < 0)
+            {
+                return false;
+            }
+
+            _sources.RemoveAt(index);
+        }
+
+        _logger.LogInformation("Removed web seed: {Url}", url);
+        return true;
+    }
+
+    private static bool Matches(WebSeedSource source, string url)
+        => source.IsDirectory == url.EndsWith("/", StringComparison.Ordinal)
+            && source.Url.Equals(url.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The URLs currently in use.</summary>
+    public IReadOnlyList<string> GetSourceUrls()
+    {
+        lock (_lock)
+        {
+            return [.. _sources.Select(source => source.IsDirectory ? source.Url + "/" : source.Url)];
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposal.MarkDisposed())
@@ -109,7 +169,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         {
             try
             {
-                await _workerTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                await _workerTask.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception)
             {

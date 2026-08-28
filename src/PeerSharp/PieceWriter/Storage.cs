@@ -1,56 +1,12 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32.SafeHandles;
 using PeerSharp.Internals;
 using System.Diagnostics;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.PieceWriter;
-
-/// <summary>
-/// Exception thrown for storage-related errors with recovery information.
-/// </summary>
-public class StorageException : Exception
-{
-    /// <summary>Initializes a new instance with no message.</summary>
-    public StorageException()
-    {
-    }
-
-    /// <summary>Initializes a new instance with the specified message.</summary>
-    /// <param name="message">A description of the failure.</param>
-    public StorageException(string message)
-        : base(message)
-    {
-    }
-
-    /// <summary>Initializes a new instance with the specified message and cause.</summary>
-    /// <param name="message">A description of the failure.</param>
-    /// <param name="innerException">The underlying I/O error.</param>
-    public StorageException(string message, Exception innerException)
-        : base(message, innerException)
-    {
-    }
-
-    /// <summary>Initializes a new instance and records whether the failure can be retried.</summary>
-    /// <param name="message">A description of the failure.</param>
-    /// <param name="inner">The underlying I/O error, if any.</param>
-    /// <param name="isRecoverable">
-    /// <see langword="true"/> if retrying may succeed; <see langword="false"/> for terminal
-    /// conditions such as a full disk or a file that has failed repeatedly.
-    /// </param>
-    public StorageException(string message, Exception? inner, bool isRecoverable)
-        : base(message, inner)
-    {
-        IsRecoverable = isRecoverable;
-    }
-
-    /// <summary>
-    /// Gets a value indicating whether the operation may succeed if retried. When
-    /// <see langword="false"/>, the torrent stops rather than looping on a failure that cannot
-    /// clear itself.
-    /// </summary>
-    public bool IsRecoverable { get; }
-}
 
 internal sealed class Storage : IStorage
 {
@@ -80,6 +36,10 @@ internal sealed class Storage : IStorage
 
     private bool[] _fileSkipped = default!; // Tracks which files are skipped due to DoNotDownload
 
+    // Files written since the last successful flush. Only these are pushed to the physical device,
+    // so a periodic flush costs nothing on a torrent that is seeding or idle.
+    private bool[] _fileDirty = default!;
+
     // Graceful shutdown tracking
     private int _inFlightWrites = 0;
     private TaskCompletionSource _writesDrained = CreateCompletedSignal();
@@ -103,6 +63,14 @@ internal sealed class Storage : IStorage
         _diskLimiter = diskLimiter;
         _logger = loggerFactory.CreateLogger<Storage>();
     }
+
+    /// <summary>
+    /// Names the caller chose for individual files, keyed by file index, replacing the ones the
+    /// torrent declares. Read once, when paths are assigned in <see cref="InitAsync"/>.
+    /// </summary>
+    public IReadOnlyDictionary<int, string>? RenamedFiles { get; init; }
+
+    internal bool IsInitialized => Volatile.Read(ref _initialized) == 1;
 
     public void DeleteAll()
     {
@@ -168,6 +136,264 @@ internal sealed class Storage : IStorage
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error during storage deletion");
+        }
+    }
+
+    /// <summary>
+    /// Moves this torrent's files under a new root, preserving their relative layout.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A partial move is the failure worth designing for: a torrent whose data is half here and half
+    /// there matches nothing on a recheck and looks to the user like the download was lost. So the
+    /// files that moved are tracked and put back if a later one fails, and the exception describes the
+    /// original failure rather than the rollback.
+    /// </para>
+    /// <para>
+    /// Files are moved rather than copied where the filesystem allows it. A move that crosses a volume
+    /// cannot be a rename, so those fall back to copy-then-delete, which is why this can take as long
+    /// as the data is large.
+    /// </para>
+    /// </remarks>
+    public async Task MoveAsync(string newRootPath, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(newRootPath);
+
+        // Handles held against the old paths would keep the files locked on Windows and would go on
+        // pointing at the old location everywhere else.
+        _handleCache.CloseTorrentHandles(_rootPath);
+
+        if (_files == null || _files.Length == 0)
+        {
+            return;
+        }
+
+        string oldRoot = Path.GetFullPath(_rootPath);
+        string newRoot = Path.GetFullPath(newRootPath);
+
+        if (string.Equals(oldRoot, newRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var moved = new List<(string From, string To)>();
+
+        try
+        {
+            foreach (var file in _files)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (file.FullPath == null || !File.Exists(file.FullPath))
+                {
+                    // Nothing on disk yet - a skipped file, or one this torrent has not reached.
+                    continue;
+                }
+
+                string relative = Path.GetRelativePath(oldRoot, file.FullPath);
+                if (EscapesRoot(relative) || Path.IsPathRooted(relative))
+                {
+                    // Outside the root we were told we own. Refuse rather than write somewhere unrelated.
+                    throw new StorageException(
+                        $"'{file.FullPath}' is not inside the torrent's download path, so it cannot be moved with it.",
+                        null,
+                        isRecoverable: false);
+                }
+
+                string destination = Path.Combine(newRoot, relative);
+                string? destinationDirectory = Path.GetDirectoryName(destination);
+                if (!string.IsNullOrEmpty(destinationDirectory))
+                {
+                    Directory.CreateDirectory(destinationDirectory);
+                }
+
+                await MoveOneAsync(file.FullPath, destination, ct).ConfigureAwait(false);
+                moved.Add((file.FullPath, destination));
+            }
+        }
+        catch (Exception ex)
+        {
+            await RollBackAsync(moved).ConfigureAwait(false);
+
+            if (ex is StorageException or OperationCanceledException)
+            {
+                throw;
+            }
+
+            throw new StorageException(
+                $"The torrent's files could not be moved to '{newRootPath}': {ex.Message}",
+                ex,
+                isRecoverable: false);
+        }
+
+        RemoveEmptyDirectories(moved.Select(m => m.From), oldRoot);
+        _logger.LogInformation("Moved {Count} file(s) from {OldPath} to {NewPath}", moved.Count, oldRoot, newRoot);
+    }
+
+    public async Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(newRelativePath);
+
+        if (_files == null || fileIndex < 0 || fileIndex >= _files.Length)
+        {
+            // Nothing allocated yet: the new name is recorded by the caller and applied when this
+            // storage is next built, which is the whole effect a rename has on an untouched torrent.
+            return;
+        }
+
+        string? sanitized = SanitizeFilePath(newRelativePath);
+        if (sanitized == null)
+        {
+            throw new StorageException(
+                $"'{newRelativePath}' is not a usable file name under the torrent's download path.",
+                null,
+                isRecoverable: false);
+        }
+
+        string? current = _files[fileIndex].FullPath;
+        if (current == null)
+        {
+            return;
+        }
+
+        if (string.Equals(Path.GetFullPath(current), Path.GetFullPath(sanitized), StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (!File.Exists(current))
+        {
+            // Match libtorrent's rename semantics: an absent file still adopts the new path so the
+            // first write creates it under the requested name.
+            _files[fileIndex] = _files[fileIndex] with { FullPath = sanitized };
+            return;
+        }
+
+        _handleCache.CloseTorrentHandles(_rootPath);
+
+        try
+        {
+            string? directory = Path.GetDirectoryName(sanitized);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            await MoveOneAsync(current, sanitized, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new StorageException(
+                $"'{current}' could not be renamed to '{newRelativePath}': {ex.Message}",
+                ex,
+                isRecoverable: false);
+        }
+
+        _files[fileIndex] = _files[fileIndex] with { FullPath = sanitized };
+        RemoveEmptyDirectories([current], Path.GetFullPath(_rootPath));
+    }
+
+    private static async Task MoveOneAsync(string source, string destination, CancellationToken ct)
+    {
+        try
+        {
+            File.Move(source, destination, overwrite: true);
+        }
+        catch (IOException)
+        {
+            // Across volumes a rename is not available, so pay for the copy. Copy to a sibling
+            // temporary file first: cancellation or an I/O failure must not leave a truncated file
+            // at the destination that looks like a completed move.
+            string directory = Path.GetDirectoryName(destination) ?? Directory.GetCurrentDirectory();
+            string temporary = Path.Combine(directory, $".peersharp-{Guid.NewGuid():N}.tmp");
+            try
+            {
+                await using (var from = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 0, useAsync: true))
+                await using (var to = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 0, useAsync: true))
+                {
+                    await from.CopyToAsync(to, ct).ConfigureAwait(false);
+                    await to.FlushAsync(ct).ConfigureAwait(false);
+                }
+
+                File.Move(temporary, destination, overwrite: true);
+                File.Delete(source);
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(temporary);
+                }
+                catch (IOException)
+                {
+                    // Do not replace the move's cancellation or original I/O failure with a
+                    // best-effort temporary-file cleanup failure.
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // As above; the source remains authoritative unless the final rename succeeded.
+                }
+            }
+        }
+    }
+
+    private async Task RollBackAsync(List<(string From, string To)> moved)
+    {
+        for (int i = moved.Count - 1; i >= 0; i--)
+        {
+            var (from, to) = moved[i];
+            try
+            {
+                string? directory = Path.GetDirectoryName(from);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                await MoveOneAsync(to, from, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Reported, not thrown: the caller needs the failure that started this, and a torrent
+                // whose data is now split is exactly what the log has to record.
+                _logger.LogError(ex, "Could not move {Path} back to {Original} after a failed storage move", to, from);
+            }
+        }
+    }
+
+    private static bool EscapesRoot(string relativePath)
+        => relativePath.Equals("..", StringComparison.Ordinal)
+            || relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+            || relativePath.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
+
+    private void RemoveEmptyDirectories(IEnumerable<string> vacatedFiles, string root)
+    {
+        var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string file in vacatedFiles)
+        {
+            string? directory = Path.GetDirectoryName(file);
+            while (!string.IsNullOrEmpty(directory) &&
+                   directory.StartsWith(root, StringComparison.OrdinalIgnoreCase) &&
+                   directory.Length > root.Length)
+            {
+                directories.Add(directory);
+                directory = Path.GetDirectoryName(directory);
+            }
+        }
+
+        foreach (string directory in directories.OrderByDescending(d => d.Length))
+        {
+            try
+            {
+                if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any())
+                {
+                    Directory.Delete(directory);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete empty directory {Path} after moving storage", directory);
+            }
         }
     }
 
@@ -274,8 +500,9 @@ internal sealed class Storage : IStorage
                 _files = new FileEntry[count];
                 _fileSkipped = new bool[count];
                 _fileFailed = new bool[count];
+                _fileDirty = new bool[count];
                 _fileLocks = new SemaphoreSlim[count];
-                _fileMapper = new FileMapper(files.ConvertAll(f => f.Size));
+                _fileMapper = new FileMapper(_info.Info.GetPieceSpaceSpans());
 
                 for (int i = 0; i < count; i++)
                 {
@@ -320,7 +547,13 @@ internal sealed class Storage : IStorage
                         isSelected = sel.Selected && sel.Priority != Priority.DoNotDownload;
                     }
 
-                    string? fullPath = SanitizeFilePath(file.Path);
+                    // A caller-supplied name wins over the torrent's own, and goes through the same
+                    // sanitizing: a rename is still untrusted input as far as the filesystem cares.
+                    string declaredPath = RenamedFiles != null && RenamedFiles.TryGetValue(i, out string? renamed)
+                        ? renamed
+                        : file.Path;
+
+                    string? fullPath = SanitizeFilePath(declaredPath);
                     if (fullPath == null)
                     {
                         _logger.LogWarning("Skipping malicious/invalid file path in torrent: {FilePath}", file.Path);
@@ -395,8 +628,45 @@ internal sealed class Storage : IStorage
         }
     }
 
+    public async Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct = default)
+    {
+        byte[] buffer = GC.AllocateUninitializedArray<byte>(length);
+        await ReadAsync(offset, buffer, ct).ConfigureAwait(false);
+        return buffer;
+    }
+
     public async ValueTask ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
     {
+        // A block that lies inside one file, which is almost every read a seeding torrent does. The
+        // general path below takes the selection lock, materialises the operations into a list and
+        // collects a second list of the locks it took, all for one read of sixteen kilobytes. Under
+        // load that lock is the contended one - every concurrent read of every file queues on it -
+        // and a profile of seeding put the majority of PeerSharp's CPU in thread-pool parking rather
+        // than in the reads themselves.
+        //
+        // The mapper is immutable and assigned once, so it does not need the lock to be read. What
+        // the lock otherwise orders here is UpdateFileSelectionAsync flipping a file's skipped flag,
+        // and that flag is a single bool read by index: a read that crosses the change either serves
+        // the file or serves zeros, both of which it could already have done depending on when it
+        // arrived.
+        var mapper = Volatile.Read(ref _fileMapper);
+        if (mapper != null && IsInitialized)
+        {
+            var enumerator = mapper.MapRange(offset, buffer.Length).GetEnumerator();
+            if (!enumerator.MoveNext())
+            {
+                return;
+            }
+
+            var only = enumerator.Current;
+            if (!enumerator.MoveNext())
+            {
+                await ReadFromOneFileAsync(only.FileIndex, only.FileOffset, buffer.Slice(only.BufferOffset, only.Length), ct)
+                    .ConfigureAwait(false);
+                return;
+            }
+        }
+
         var fileOperations = new List<(int FileIdx, long FileOffset, int ReadSize, int BufferOffset)>();
 
         await _fileSelectionLock.WaitAsync(ct).ConfigureAwait(false);
@@ -472,11 +742,55 @@ internal sealed class Storage : IStorage
         }
     }
 
-    public async Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct = default)
+    /// <summary>
+    /// Reads a range that lies wholly inside one file, holding only that file's lock.
+    /// </summary>
+    private async ValueTask ReadFromOneFileAsync(int fileIdx, long fileOffset, Memory<byte> destination, CancellationToken ct)
     {
-        byte[] buffer = GC.AllocateUninitializedArray<byte>(length);
-        await ReadAsync(offset, buffer, ct).ConfigureAwait(false);
-        return buffer;
+        if (_fileSkipped[fileIdx])
+        {
+            // Deselected file - the data legitimately does not exist locally.
+            destination.Span.Clear();
+            return;
+        }
+
+        if (_fileFailed[fileIdx])
+        {
+            // Serving zeroed data for a failed file would poison uploads. See the general path.
+            throw new StorageException(
+                $"File '{_info.Info.Files[fileIdx].Path}' is marked failed after repeated I/O errors",
+                null,
+                isRecoverable: false);
+        }
+
+        var entry = _files[fileIdx];
+        if (entry.FullPath == null)
+        {
+            destination.Span.Clear();
+            return;
+        }
+
+        var fileLock = _fileLocks[fileIdx];
+        await fileLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            using var lease = await _handleCache.GetHandleAsync(entry.FullPath, false, ct).ConfigureAwait(false);
+            await ReadWithThrottleAsync(lease.Handle, destination, fileOffset, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            var fileName = _info.Info.Files[fileIdx].Path;
+            _logger.LogError(ex, "Read error for file {FileName}", fileName);
+            throw new StorageException($"Read failed for file '{fileName}'", ex, isRecoverable: true);
+        }
+        finally
+        {
+            fileLock.Release();
+        }
     }
 
     public async Task UpdateFileSelectionAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default)
@@ -574,6 +888,7 @@ internal sealed class Storage : IStorage
         _files = [];
         _fileSkipped = [];
         _fileFailed = [];
+        _fileDirty = [];
         _fileLocks = [];
         _fileMapper = null;
         _initialized = 0;
@@ -637,6 +952,9 @@ internal sealed class Storage : IStorage
                         {
                             using var lease = await _handleCache.GetHandleAsync(entry.FullPath, true, ct).ConfigureAwait(false);
                             await WriteWithThrottleAsync(lease.Handle, data.Slice(dataOffset, writeSize), fileOffset, ct).ConfigureAwait(false);
+                            // Set under the file lock that FlushAsync also takes, so a flush cannot
+                            // observe the write and clear the flag before this marks it.
+                            _fileDirty[fileIdx] = true;
                             Interlocked.Exchange(ref _consecutiveErrors, 0);
                         }
                         catch (IOException ex) when (ex.HResult == unchecked((int)0x80070070)) // ERROR_DISK_FULL
@@ -669,6 +987,106 @@ internal sealed class Storage : IStorage
         {
             EndWrite();
         }
+    }
+
+    /// <summary>
+    /// Forces every file written since the last flush out to the physical device, and reports
+    /// whether all of them made it.
+    ///
+    /// <para>
+    /// This exists to order two things that were previously unordered. Resume data is written
+    /// durably - temp file, flush, atomic rename - while piece data was handed to the operating
+    /// system and never flushed, so a power loss could leave a bitfield claiming pieces whose bytes
+    /// were still in the write cache. Verification runs on the way in, so nothing downstream would
+    /// have caught it: the engine would restart, believe the bitfield, and serve whatever the disk
+    /// happened to contain. Flushing before the claim is written is what makes the bitfield a
+    /// statement about the disk rather than about the cache.
+    /// </para>
+    ///
+    /// <para>
+    /// Returns <see langword="false"/> rather than throwing when a file cannot be flushed. The
+    /// caller's correct response is to skip this round of resume saving and leave the older copy in
+    /// place - older resume data claims fewer pieces, so it is always the safe direction - and a
+    /// flush failure is not by itself a reason to fault the torrent.
+    /// </para>
+    /// </summary>
+    public async Task<bool> FlushAsync(CancellationToken ct = default)
+    {
+        if (_disposal.IsDisposed || Volatile.Read(ref _initialized) == 0)
+        {
+            return false;
+        }
+
+        // Snapshot the arrays: a concurrent shutdown may replace them while this runs, and taking
+        // the references once means the loop cannot see a torn pair of dirty flags and locks.
+        var dirty = _fileDirty;
+        var locks = _fileLocks;
+        var files = _files;
+        bool allFlushed = true;
+
+        for (int i = 0; i < dirty.Length && i < locks.Length && i < files.Length; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (!Volatile.Read(ref dirty[i]))
+            {
+                continue;
+            }
+
+            var fileLock = locks[i];
+            try
+            {
+                await fileLock.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Shutting down underneath us; nothing left to promise about this file.
+                return false;
+            }
+
+            try
+            {
+                // Re-check under the lock: another flush may have cleared it in between.
+                if (!dirty[i])
+                {
+                    continue;
+                }
+
+                // Deliberately not conditioned on _fileSkipped. A file can be written while selected
+                // and deselected before the next save, and deselecting it does not retract the
+                // completed pieces covering it - those stay in the bitfield and get persisted as
+                // present. Clearing the flag without the barrier would leave exactly the claim this
+                // whole mechanism exists to prevent. Only a padding entry, which has no path and is
+                // never written, can be cleared for free.
+                string? path = files[i].FullPath;
+                if (path == null)
+                {
+                    dirty[i] = false;
+                    continue;
+                }
+
+                using var lease = await _handleCache.GetHandleAsync(path, true, ct).ConfigureAwait(false);
+                RandomAccess.FlushToDisk(lease.Handle);
+                dirty[i] = false;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Leave the flag set so the next flush retries this file.
+                allFlushed = false;
+                _logger.LogWarning(ex, "Failed to flush '{FilePath}' to disk", files[i].FullPath);
+            }
+            finally
+            {
+                try { fileLock.Release(); }
+                catch (ObjectDisposedException) { /* Ignored - storage shutting down */ }
+            }
+        }
+
+        return allFlushed;
     }
 
     /// <summary>
@@ -813,7 +1231,11 @@ internal sealed class Storage : IStorage
 
     private async Task ReadWithThrottleAsync(SafeFileHandle handle, Memory<byte> buffer, long fileOffset, CancellationToken ct)
     {
-        if (_diskLimiter == null)
+        // The metering below is per chunk, and a block is one chunk, so on a torrent with no disk
+        // limit it buys nothing and costs a task allocation and two locked channel lookups per block.
+        // At the rates this reaches while seeding that is tens of thousands of them a second, and it
+        // showed up in a profile as thread-pool churn rather than as disk work.
+        if (_diskLimiter == null || !_diskLimiter.IsReadLimitedNow())
         {
             await RandomAccess.ReadAsync(handle, buffer, fileOffset, ct).ConfigureAwait(false);
             return;
@@ -864,7 +1286,7 @@ internal sealed class Storage : IStorage
 
     private async Task WriteWithThrottleAsync(SafeFileHandle handle, ReadOnlyMemory<byte> data, long fileOffset, CancellationToken ct)
     {
-        if (_diskLimiter == null)
+        if (_diskLimiter == null || !_diskLimiter.IsWriteLimitedNow())
         {
             await RandomAccess.WriteAsync(handle, data, fileOffset, ct).ConfigureAwait(false);
             return;

@@ -25,6 +25,64 @@ public class TorrentRegistryTests
     }
 
     [Fact]
+    public void TryGetForRouting_FindsAV2TorrentByItsTruncatedHash()
+    {
+        // BEP 52 gives a v2 torrent two identities, and the twenty-byte one is what the world uses:
+        // the peer handshake, tracker announces and DHT lookups all have room for nothing else.
+        // Matching only the stored hashes meant a v2 torrent was unreachable by the only name any of
+        // them could ask for - libtorrent's connection_tester got "ERROR READ HANDSHAKE: End of file"
+        // because the inbound connection resolved to no torrent and was dropped mid-handshake.
+        var torrent = CreateV2Torrent();
+        _registry.Add(torrent);
+
+        var handshakeHash = torrent.HashV2.TruncateToV1();
+
+        Assert.True(_registry.TryGetForRouting(handshakeHash, out var routed));
+        Assert.Same(torrent, routed);
+    }
+
+    [Fact]
+    public void TryGetForRouting_FindsAHybridTorrentByEitherOfItsHashes()
+    {
+        // A hybrid torrent was half-reachable: fine for a peer that used its v1 hash, invisible to
+        // one that used the truncated v2.
+        var torrent = CreateV2Torrent(withV1Hash: true);
+        _registry.Add(torrent);
+
+        Assert.True(_registry.TryGetForRouting(torrent.Hash, out _));
+        Assert.True(_registry.TryGetForRouting(torrent.HashV2.TruncateToV1(), out var byV2));
+        Assert.Same(torrent, byV2);
+    }
+
+    [Fact]
+    public void TryGetForRouting_DoesNotMatchAnUnrelatedHash()
+    {
+        // The truncation must not turn the lookup into something that matches loosely.
+        var torrent = CreateV2Torrent();
+        _registry.Add(torrent);
+
+        Assert.False(_registry.TryGetForRouting(InfoHash.CreateRandom(), out _));
+        Assert.False(_registry.TryGetForRouting(InfoHash.CreateRandomV2(), out _));
+    }
+
+    private static Torrent CreateV2Torrent(bool withV1Hash = false)
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Version = withV1Hash ? TorrentVersion.Hybrid : TorrentVersion.V2;
+        metadata.Info.HashV2 = InfoHash.CreateRandomV2();
+        if (withV1Hash)
+        {
+            metadata.Info.Hash = InfoHash.CreateRandom();
+        }
+
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384;
+        metadata.Info.Files.Add(new PeerSharp.Internals.TorrentFileEntry { Path = "file.bin", Size = 16384, Offset = 0 });
+
+        return TorrentTestUtility.CreateMinimal(metadata);
+    }
+
+    [Fact]
     public void Add_DuplicateHash_ThrowsTorrentAlreadyExistsException()
     {
         var torrent = TorrentTestUtility.CreateMinimal();

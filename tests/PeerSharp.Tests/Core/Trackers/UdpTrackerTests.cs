@@ -246,6 +246,53 @@ public class UdpTrackerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_WithHttpTrackerProxy_RefusesBeforeDnsOrSocketCreation()
+    {
+        int resolutions = 0;
+        var factory = new FamilyUdpSocketFactory();
+        var tracker = new UdpTracker(
+            _timeProvider,
+            factory,
+            NullLoggerFactory.Instance,
+            (_, _) =>
+            {
+                Interlocked.Increment(ref resolutions);
+                return Task.FromResult(new[] { IPAddress.Loopback });
+            });
+        _torrent.Settings.Proxy.Type = ProxyType.Http;
+        _torrent.Settings.Proxy.Host = "127.0.0.1";
+        _torrent.Settings.Proxy.Port = 8080;
+        _torrent.Settings.Proxy.ProxyTrackers = true;
+        tracker.Init("udp://tracker.example:80/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.False(_callback.Success);
+        Assert.Contains("cannot carry UDP tracker traffic", _callback.AnnounceErrorMessage, StringComparison.Ordinal);
+        Assert.Equal(0, resolutions);
+        Assert.Empty(factory.RequestedFamilies);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_WithTrackerProxyingDisabled_UsesDirectUdp()
+    {
+        _torrent.Settings.Proxy.Type = ProxyType.Http;
+        _torrent.Settings.Proxy.Host = "127.0.0.1";
+        _torrent.Settings.Proxy.Port = 8080;
+        _torrent.Settings.Proxy.ProxyTrackers = false;
+        var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
+
+        Task announce = tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+        await CompleteConnectAsync(0, 0x1234);
+        await CompleteAnnounceAsync(1);
+        await announce;
+
+        Assert.True(_callback.Success);
+        Assert.Equal(2, _socketFactory.LastSocket.SentPackets.Count);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_UnboundHostname_AnnouncesBothFamiliesAndMergesPeers()
     {
         int resolutions = 0;
@@ -1666,4 +1713,3 @@ public class UdpTrackerTests
 
 
 }
-

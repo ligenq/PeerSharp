@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
@@ -42,14 +42,24 @@ public class PeerDiscoveryTests : IDisposable
         await torrentA.StartAsync();
         await torrentB.StartAsync();
 
-        timeProvider.Advance(TimeSpan.FromSeconds(6));
+        // LSD announces five seconds after the manager starts and then only every five minutes, so on
+        // a fake clock this test used to get exactly one multicast datagram and no retry. That is not
+        // a thing to depend on: multicast is unreliable by design, and under load the other engine may
+        // not have finished joining the group by the time the first one is sent. Advancing again for
+        // each attempt is what real time would do, and the waiting in between is real because the
+        // connect and handshake that follow an announce are real work.
+        bool discovered = false;
+        for (int attempt = 0; attempt < AnnounceAttempts && !discovered; attempt++)
+        {
+            timeProvider.Advance(attempt == 0 ? TimeSpan.FromSeconds(6) : LsdAnnounceInterval);
 
-        await WaitForConditionAsync(() =>
-            torrentA.Peers.ConnectedCount > 0 || torrentB.Peers.ConnectedCount > 0,
-            TimeSpan.FromSeconds(5),
-            "LSD Discovery");
+            discovered = await WaitForConditionOrTimeoutAsync(
+                () => torrentA.Peers.ConnectedCount > 0 || torrentB.Peers.ConnectedCount > 0,
+                TimeSpan.FromSeconds(5),
+                TestContext.Current.CancellationToken);
+        }
 
-        Assert.True(torrentA.Peers.ConnectedCount > 0 || torrentB.Peers.ConnectedCount > 0);
+        Assert.True(discovered, "neither engine discovered the other over LSD");
     }
 
     private async Task<ClientEngine> CreateEngineAsync(string downloadPath, TimeProvider timeProvider, bool enableLsd = true, bool enableDht = false, int bootstrapPort = 0)
@@ -106,12 +116,42 @@ public class PeerDiscoveryTests : IDisposable
              .Build();
     }
 
-    private static async Task WaitForConditionAsync(Func<bool> condition, TimeSpan timeout, string description)
+    /// <summary>How often <c>LsdManager</c> re-announces after its first announce.</summary>
+    private static readonly TimeSpan LsdAnnounceInterval = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// How many announces to allow. Each costs up to five real seconds, against this test's
+    /// thirty-second budget.
+    /// </summary>
+    private const int AnnounceAttempts = 3;
+
+    /// <summary>
+    /// Waits for a condition, reporting whether it came true rather than throwing when it does not.
+    /// </summary>
+    private static async Task<bool> WaitForConditionOrTimeoutAsync(Func<bool> condition, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
+
+        while (!cts.IsCancellationRequested)
+        {
+            if (condition())
+            {
+                return true;
+            }
+
+            try { await Task.Delay(100, cts.Token); } catch (OperationCanceledException) { break; }
+        }
+
+        return condition();
+    }
+
+    private static async Task WaitForConditionAsync(Func<bool> condition, TimeSpan timeout, string description, CancellationToken cancellationToken = default)
     {
         using var cts = new CancellationTokenSource(timeout);
         try
         {
-            while (!condition())
+            while (!condition() && !cancellationToken.IsCancellationRequested)
             {
                 await Task.Delay(100, cts.Token);
             }
@@ -233,7 +273,6 @@ public class PeerDiscoveryTests : IDisposable
         }
 
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public void Stop() { }
         public Task StopAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
         public ValueTask DisposeAsync()

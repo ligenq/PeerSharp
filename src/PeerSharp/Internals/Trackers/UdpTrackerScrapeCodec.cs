@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
 
+using PeerSharp.Exceptions;
+
 namespace PeerSharp.Internals.Trackers;
 
 internal static class UdpTrackerScrapeCodec

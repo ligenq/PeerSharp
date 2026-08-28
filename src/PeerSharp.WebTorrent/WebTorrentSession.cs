@@ -1,4 +1,4 @@
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
@@ -343,7 +343,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
         {
             if (signal.AnswerSdp != null && signal.OfferId != null && signal.AnswerType?.Equals("offer", StringComparison.OrdinalIgnoreCase) == true)
             {
-                await _peerManager.HandleOfferAsync(signal.OfferId, signal.PeerId!, signal.AnswerSdp, runtime, SendAnswerAsync, _cts.Token).ConfigureAwait(false);
+                await _peerManager.HandleOfferAsync(signal.OfferId, signal.PeerId, signal.AnswerSdp, runtime, SendAnswerAsync, _cts.Token).ConfigureAwait(false);
             }
             else if (signal.AnswerSdp != null && signal.OfferId != null && (signal.AnswerType?.Equals("answer", StringComparison.OrdinalIgnoreCase) != false))
             {
@@ -351,7 +351,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
             }
             else if (signal.OfferSdp != null && signal.OfferId != null)
             {
-                await _peerManager.HandleOfferAsync(signal.OfferId, signal.PeerId!, signal.OfferSdp, runtime, SendAnswerAsync, _cts.Token).ConfigureAwait(false);
+                await _peerManager.HandleOfferAsync(signal.OfferId, signal.PeerId, signal.OfferSdp, runtime, SendAnswerAsync, _cts.Token).ConfigureAwait(false);
             }
 
             if (signal.Candidate != null && signal.OfferId != null)

@@ -23,7 +23,6 @@ internal class MockUdpListener : IUdpListener, IDisposable
         return Task.CompletedTask;
     }
 
-    public void Stop() { }
 
     public Task StopAsync(CancellationToken cancellationToken = default)
     {
@@ -700,7 +699,7 @@ public class UtpExhaustiveTests
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.ConnectAsync(cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.ConnectAsync(cancellationToken: cts.Token));
         Assert.Empty(_listener.SentPackets);
         Assert.Equal(UtpState.None, stream.State);
     }
@@ -711,7 +710,7 @@ public class UtpExhaustiveTests
         var stream = _manager.CreateStream(_remoteParams);
         using var cts = new CancellationTokenSource();
 
-        var connectTask = stream.ConnectAsync(cts.Token);
+        var connectTask = stream.ConnectAsync(cancellationToken: cts.Token);
         // SYN is sent but no SYN-ACK comes; cancel instead
         cts.Cancel();
 
@@ -771,7 +770,10 @@ public class UtpExhaustiveTests
         }
 
         Assert.Equal(UtpState.Closed, stream.State);
-        await Assert.ThrowsAnyAsync<Exception>(() => tcs.Task);
+
+        // Completed with a result rather than faulted - see the note on the SYN timeout in
+        // UtpStream: it is the ordinary outcome, not a failure worth an exception.
+        Assert.False(await tcs.Task);
     }
 
     [Fact(Timeout = 10000)]

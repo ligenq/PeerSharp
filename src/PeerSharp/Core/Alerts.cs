@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace PeerSharp.Core;
 
 /// <summary>
@@ -13,6 +15,9 @@ public enum AlertCategory : uint
 
     /// <summary>Alerts related to configuration changes.</summary>
     Config = 0xF00000,
+
+    /// <summary>Alerts about the engine itself rather than any one torrent.</summary>
+    Session = 0xF000000,
 }
 
 /// <summary>
@@ -66,6 +71,12 @@ public enum AlertId : uint
     /// <summary>A peer connection closed and its final transfer totals are available.</summary>
     PeerDisconnected = 1 << 13,
 
+    /// <summary>A completed piece did not match its hash and has to be downloaded again.</summary>
+    PieceHashFailed = 1 << 14,
+
+    /// <summary>A peer was refused because of the IP blocklist or repeated bad data.</summary>
+    PeerBlocked = 1 << 15,
+
     /// <summary>Metadata was fetched from the swarm, so the file list is now known.</summary>
     MetadataInitialized = 1 << 16,
 
@@ -77,6 +88,9 @@ public enum AlertId : uint
 
     /// <summary>A configuration value was changed at runtime.</summary>
     ConfigChanged = 1 << 20,
+
+    /// <summary>A listener could not use the configured port and is on a different one.</summary>
+    ListenPortChanged = 1u << 24,
 }
 
 /// <summary>
@@ -126,6 +140,87 @@ public sealed record SimpleTorrentAlert : TorrentAlert;
 /// Simple alert type for metadata events that don't carry extra data.
 /// </summary>
 public sealed record SimpleMetadataAlert : MetadataAlert;
+
+/// <summary>
+/// Alert fired when a downloaded piece fails its hash check and has to be fetched again.
+/// </summary>
+/// <remarks>
+/// Some of these are normal on a large torrent. A rate that keeps climbing is not, and usually means
+/// one peer sending bad data or a disk returning something other than what was written -
+/// <see cref="SuspectedPeer"/> separates the two when the piece came from a single source.
+/// </remarks>
+public sealed record PieceHashFailedAlert : TorrentAlert
+{
+    /// <summary>Gets the index of the piece that failed.</summary>
+    public required int PieceIndex { get; init; }
+
+    /// <summary>Gets how many times this particular piece has now failed.</summary>
+    public required int Failures { get; init; }
+
+    /// <summary>
+    /// Gets the peer that supplied the whole piece, when exactly one did and no web seed
+    /// contributed. Null when the piece came from several sources, in which case none of them can be
+    /// blamed for it.
+    /// </summary>
+    public IPEndPoint? SuspectedPeer { get; init; }
+}
+
+/// <summary>
+/// Alert fired when a peer is refused before any connection is made to it.
+/// </summary>
+public sealed record PeerBlockedAlert : TorrentAlert
+{
+    /// <summary>Gets the address that was refused.</summary>
+    public required IPEndPoint Endpoint { get; init; }
+
+    /// <summary>Gets why it was refused.</summary>
+    public required PeerBlockReason Reason { get; init; }
+}
+
+/// <summary>
+/// Alert fired when a listener could not bind the configured port and is using another.
+/// </summary>
+/// <remarks>
+/// Worth surfacing rather than logging: any port forwarding or firewall rule the user set up for the
+/// configured port no longer reaches this session, and nothing else about the engine will look wrong.
+/// </remarks>
+public sealed record ListenPortChangedAlert : Alert
+{
+    /// <summary>Gets the port that was asked for.</summary>
+    public required int RequestedPort { get; init; }
+
+    /// <summary>Gets the port actually in use.</summary>
+    public required int ActualPort { get; init; }
+
+    /// <summary>Gets which listener this concerns.</summary>
+    public required ListenTransport Transport { get; init; }
+}
+
+/// <summary>
+/// Why a peer was refused.
+/// </summary>
+public enum PeerBlockReason
+{
+    /// <summary>The address is in the loaded IP blocklist.</summary>
+    Blocklist,
+
+    /// <summary>
+    /// The address is quarantined for having supplied data that failed its hash check.
+    /// </summary>
+    BadData,
+}
+
+/// <summary>
+/// Which of the engine's listeners an alert concerns.
+/// </summary>
+public enum ListenTransport
+{
+    /// <summary>The TCP listener, which accepts incoming peer connections.</summary>
+    Tcp,
+
+    /// <summary>The UDP listener, shared by uTP and the DHT.</summary>
+    Udp,
+}
 
 /// <summary>
 /// Alert fired when a configuration setting changes.

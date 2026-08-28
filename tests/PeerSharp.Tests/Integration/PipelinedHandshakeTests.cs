@@ -1,4 +1,4 @@
-using PeerSharp.Internals;
+﻿using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Messages;
 using PeerSharp.Tests.Core.Peers;
@@ -81,7 +81,7 @@ public class PipelinedHandshakeTests : IDisposable
                 sent.TrySetResult(true);
 
                 // Hold it open so a lost Unchoke shows as a stalled state rather than a disconnect.
-                await Task.Delay(TimeSpan.FromSeconds(20));
+                await Task.Delay(TimeSpan.FromSeconds(20), cancellationToken: TestContext.Current.CancellationToken);
             }
             catch (Exception ex)
             {
@@ -111,7 +111,7 @@ public class PipelinedHandshakeTests : IDisposable
             var deadline = DateTime.UtcNow.AddSeconds(15);
             while (peer.PeerChoking && DateTime.UtcNow < deadline)
             {
-                await Task.Delay(50);
+                await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
             }
 
             Assert.False(

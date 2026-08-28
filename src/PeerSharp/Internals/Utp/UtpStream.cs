@@ -250,9 +250,14 @@ internal class UtpStream : Stream
                     // Debug, not warning: see the SYN-RECV case above. The caller reports this too, so
                     // at warning level one unreachable peer produced two lines and a stack trace.
                     _logger.LogDebug("uTP {Remote}: SYN timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
-                    var ex = new TimeoutException($"Connection to {RemoteEndPoint} timed out after {MaxSynRetries} SYN retries");
-                    _connectTcs?.TrySetException(ex);
-                    CloseInternal(false, ex);
+
+                    // Reported as a result, not thrown. Most addresses a swarm hands out sit behind a
+                    // NAT that never answers a SYN, so this is the ordinary outcome of dialling a
+                    // stranger - and throwing it cost four first-chance exceptions per dead peer:
+                    // one here, one crossing each await on the way out, and one more when the faulted
+                    // close completed the pipe. Closing without an error keeps the pipe clean.
+                    _connectTcs?.TrySetResult(false);
+                    CloseInternal(false);
                     return;
                 }
 
@@ -397,11 +402,32 @@ internal class UtpStream : Stream
         CloseInternal(true);
     }
 
-    public async Task ConnectAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Opens the stream, or reports that the peer never answered.
+    /// </summary>
+    /// <param name="timeout">
+    /// How long to wait before giving up. This is the operation's own deadline, so running out of it
+    /// is a result rather than a cancellation - see the remarks. Defaults to no deadline, which is
+    /// what the SYN retry budget already bounds.
+    /// </param>
+    /// <param name="cancellationToken">The caller asking to stop, which does throw.</param>
+    /// <returns>
+    /// <see langword="true"/> once connected, <see langword="false"/> when the peer did not answer in
+    /// time. Cancellation and genuine faults still throw - those are not ordinary outcomes.
+    /// </returns>
+    /// <remarks>
+    /// The two are deliberately separate. A cancellation token means the caller changed its mind, and
+    /// <see cref="OperationCanceledException"/> is the right way to report that; a deadline this
+    /// method owns is part of what it promises to do, and a peer that did not answer inside it is the
+    /// ordinary outcome rather than an abort. Folding the deadline into the token - which is what a
+    /// linked source does - turns every unanswered peer back into an exception, which is the mistake
+    /// HttpClient is still criticised for.
+    /// </remarks>
+    public async Task<bool> ConnectAsync(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        Task connectTask;
+        Task<bool> connectTask;
         TaskCompletionSource<bool> connectTcs;
         lock (_lock)
         {
@@ -417,14 +443,29 @@ internal class UtpStream : Stream
             connectTask = connectTcs.Task;
         }
 
-        // Register cancellation to abort the connection attempt
+        // The caller giving up: an abort, and reported as one.
         await using var registration = cancellationToken.Register(() =>
         {
-            connectTcs.TrySetCanceled(cancellationToken);
-            CloseInternal(false);
+            // A reply may have won immediately before this callback. Do not turn a successful
+            // connection into a closed stream while the async continuation is still disposing the
+            // registration.
+            if (connectTcs.TrySetCanceled(cancellationToken))
+            {
+                CloseInternal(false);
+            }
         });
 
-        await connectTask.ConfigureAwait(false);
+        // Our own deadline: an outcome, and reported as one.
+        using var deadline = new CancellationTokenSource(timeout ?? Timeout.InfiniteTimeSpan, _timeProvider);
+        await using var deadlineRegistration = deadline.Token.Register(() =>
+        {
+            if (connectTcs.TrySetResult(false))
+            {
+                CloseInternal(false);
+            }
+        });
+
+        return await connectTask.ConfigureAwait(false);
     }
 
     public override async ValueTask DisposeAsync()
@@ -436,7 +477,6 @@ internal class UtpStream : Stream
             // Wait for pipe write task to complete (with timeout to avoid hanging)
             if (_pipeWriteTask?.IsCompleted == false)
             {
-#pragma warning disable RCS1075 // Avoid empty catch clause that catches System.Exception
                 try
                 {
                     await _pipeWriteTask.WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
@@ -445,7 +485,6 @@ internal class UtpStream : Stream
                 {
                     // Task may have faulted, ignore during dispose
                 }
-#pragma warning restore RCS1075 // Avoid empty catch clause that catches System.Exception
             }
 
             _writeSemaphore.Dispose();

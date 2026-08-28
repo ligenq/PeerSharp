@@ -4,6 +4,10 @@ BenchmarkDotNet suites covering the engine's hot paths. These exist so performan
 checked rather than assumed — the suite was added after a parallelisation change shipped that
 turned out to be slower on the most-executed path in the engine.
 
+For controlled whole-transfer comparisons against an exact libtorrent checkout, use the
+[`PeerSharp.EndToEnd`](../PeerSharp.EndToEnd/README.md) harness instead. Its process-level results and
+these method-level results answer different questions and should not be combined into one baseline.
+
 ## Running
 
 Benchmarks must run in Release; BenchmarkDotNet refuses a Debug build.

@@ -1,0 +1,125 @@
+# Interop, on a schedule rather than per-PR.
+#
+# These are the most valuable tests in the repository and the only lane no CI job ran. They are what
+# found the late bitfield that made every strict client ignore us, the plaintext fallback reusing a
+# dead socket, and the inbound uTP path rejecting every encrypted peer - none of which any amount of
+# testing against ourselves could have caught, because our own parser was tolerant of all three.
+# Until now that record depended on someone remembering to run them by hand, on one machine, against
+# whatever client version happened to be installed.
+#
+# Nightly rather than per-PR because they need real client binaries and real transfers: minutes per
+# run, and an apt mirror or a client release is enough to fail a job for reasons that have nothing to
+# do with the change under review. Nightly puts a bound on how long a real interop regression can sit
+# unnoticed without putting a flaky gate in front of every pull request.
+#
+# Every test that needs an external client skips itself when the binary is absent, so a failed
+# install degrades this job to the loopback interop tests rather than reporting a false failure. Read
+# the skip count in the summary: a run where everything skipped proves nothing.
+name: Interop
+
+on:
+  schedule:
+    # 04:00 UTC daily, well clear of the working day in the maintainer's timezone.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+
+jobs:
+  interop:
+    name: Interop (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # transmission-daemon rather than transmission-qt: the harness already special-cases a "daemon"
+      # executable name, drives everything over RPC and needs no display, so it is the build that runs
+      # headless. continue-on-error because a missing client must skip the test, not fail the job.
+      - name: Install Transmission (Linux)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y transmission-daemon
+          # Ubuntu's package starts the daemon under its own user and would hold the RPC port the
+          # test wants to bind.
+          sudo systemctl stop transmission-daemon || true
+          sudo systemctl disable transmission-daemon || true
+          transmission-daemon --version || true
+
+      - name: Install Transmission (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: choco install transmission --no-progress -y
+
+      - name: Locate Transmission (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if [ -x /usr/bin/transmission-daemon ]; then
+            echo "PEERSHARP_TRANSMISSION_INTEROP=1" >> "$GITHUB_ENV"
+            echo "PEERSHARP_TRANSMISSION_EXE=/usr/bin/transmission-daemon" >> "$GITHUB_ENV"
+          else
+            echo "Transmission not installed; its tests will skip."
+          fi
+
+      - name: Locate Transmission (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "C:\Program Files\Transmission\transmission-daemon.exe",
+            "C:\Program Files\Transmission\transmission-qt.exe"
+          )
+          $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($found) {
+            "PEERSHARP_TRANSMISSION_INTEROP=1" | Out-File -FilePath $env:GITHUB_ENV -Append
+            "PEERSHARP_TRANSMISSION_EXE=$found" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+            Write-Host "Transmission not installed; its tests will skip."
+          }
+
+      # qBittorrent is deliberately not installed. Its harness drives the GUI build's command line
+      # (--no-splash, a written qBittorrent.ini) and reads results off disk rather than through the
+      # WebUI, which qbittorrent-nox does not accept unchanged. Porting it to nox is worth doing and
+      # is not something to do blind in a workflow file - until then those tests skip here and are
+      # run by hand on a desktop.
+
+      - name: Restore
+        run: dotnet restore tests/PeerSharp.Tests/PeerSharp.Tests.csproj
+
+      - name: Build (warnings as errors)
+        run: dotnet build tests/PeerSharp.Tests/PeerSharp.Tests.csproj --no-restore --configuration Release -warnaserror
+
+      - name: Test interop
+        run: >
+          dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj
+          --no-build
+          --configuration Release
+          --
+          --filter-namespace PeerSharp.Tests.Interop
+          --report-trx
+          --report-trx-filename interop-${{ matrix.os }}.trx
+          --results-directory TestResults
+
+      # The interop tests log what they measured - rates, unchoke counts, framing failures - and the
+      # numbers are the point. A pass/fail alone would throw away the part worth reading.
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-${{ matrix.os }}-test-results
+          path: TestResults/*.trx
+          if-no-files-found: ignore

@@ -150,6 +150,29 @@ public class PiecesProgressTests
         Assert.True(progress.IsFull);
         Assert.Equal(10, progress.ReceivedCount);
     }
+
+    [Fact]
+    public void PieceWeightsFollowIndividualAndBitfieldUpdates()
+    {
+        long[] weights = [1L, 16_384L, 7L];
+        var progress = new PiecesProgress(3, i => weights[i], weights.Sum());
+
+        progress.AddPiece(0);
+        progress.AddPiece(2);
+        Assert.Equal(8, progress.ReceivedWeight);
+
+        progress.FromBitfield([0x40]); // piece 1 only
+        Assert.Equal(16_384, progress.ReceivedWeight);
+
+        progress.SetHaveAll();
+        Assert.Equal(16_392, progress.ReceivedWeight);
+
+        progress.RemovePiece(1);
+        Assert.Equal(8, progress.ReceivedWeight);
+
+        progress.SetHaveNone();
+        Assert.Equal(0, progress.ReceivedWeight);
+    }
 }
 
 

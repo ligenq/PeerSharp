@@ -1,0 +1,488 @@
+using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+
+namespace PeerSharp.Tests.Integration.Synthetic;
+
+/// <summary>
+/// A BitTorrent peer written for the tests, sharing no code with PeerSharp.
+///
+/// <para>
+/// It exists because the reference implementation cannot test the half of interop that matters most.
+/// libtorrent is a conformant client: it will never send a malformed message, never pick an awkward
+/// extension id to see whether we route by it, and never hang up at exactly the wrong moment. Every
+/// interop defect found so far has been PeerSharp agreeing with itself and with nothing else, and
+/// catching that needs a counterpart that behaves in ways a well-behaved client never would.
+/// libtorrent reached the same conclusion about their own engine - <c>simulation/fake_peer.hpp</c> in
+/// their tree is this, including a <c>send_invalid_message</c>.
+/// </para>
+///
+/// <para>
+/// It does not implement BitTorrent. It writes bytes, records the bytes that come back, and lets a
+/// test make claims about them. Frames are kept raw: assertions run against what actually crossed the
+/// socket rather than against PeerSharp's reading of it, because a decoder defect that is allowed to
+/// interpret its own output will always look correct.
+/// </para>
+/// </summary>
+internal sealed class SyntheticPeer : IAsyncDisposable
+{
+    private readonly TcpListener _listener;
+    private readonly SyntheticPeerOptions _options;
+    private readonly CancellationTokenSource _stopping = new();
+    private readonly List<SyntheticConnection> _connections = [];
+    private readonly List<TcpClient> _clients = [];
+    private readonly Task _acceptLoop;
+    private readonly byte[] _peerId = BuildPeerId();
+
+    private SyntheticPeer(TcpListener listener, SyntheticPeerOptions options)
+    {
+        _listener = listener;
+        _options = options;
+        Port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        _acceptLoop = Task.Run(AcceptLoopAsync);
+    }
+
+    /// <summary>Binds a loopback port and begins accepting.</summary>
+    public static SyntheticPeer Start(SyntheticPeerOptions options)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        return new SyntheticPeer(listener, options);
+    }
+
+    public int Port { get; }
+
+    public IPEndPoint EndPoint => new(IPAddress.Loopback, Port);
+
+    /// <summary>How many times PeerSharp has dialled, including attempts this peer then abandoned.</summary>
+    public int ConnectionCount
+    {
+        get
+        {
+            lock (_connections)
+            {
+                return _connections.Count;
+            }
+        }
+    }
+
+    /// <summary>A snapshot of every connection so far, in the order they arrived.</summary>
+    public IReadOnlyList<SyntheticConnection> Connections
+    {
+        get
+        {
+            lock (_connections)
+            {
+                return [.. _connections];
+            }
+        }
+    }
+
+    /// <summary>Waits for the connection at <paramref name="ordinal"/> (zero-based) to arrive.</summary>
+    public async Task<SyntheticConnection> WaitForConnectionAsync(
+        int ordinal, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        bool arrived = await WaitForAsync(() => ConnectionCount > ordinal, timeout, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!arrived)
+        {
+            throw new TimeoutException(
+                $"Connection {ordinal + 1} never arrived within {timeout.TotalSeconds:0.#}s; " +
+                $"{ConnectionCount} connection(s) were made in total.");
+        }
+
+        return Connections[ordinal];
+    }
+
+    /// <summary>Polls a condition. Simpler than a signal per thing a test might wait on, and enough here.</summary>
+    public static async Task<bool> WaitForAsync(Func<bool> condition, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var deadline = System.Diagnostics.Stopwatch.StartNew();
+        while (deadline.Elapsed < timeout)
+        {
+            if (condition())
+            {
+                return true;
+            }
+
+            await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+        }
+
+        return condition();
+    }
+
+    private async Task AcceptLoopAsync()
+    {
+        while (!_stopping.IsCancellationRequested)
+        {
+            TcpClient client;
+            try
+            {
+                client = await _listener.AcceptTcpClientAsync(_stopping.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException)
+            {
+                return;
+            }
+
+            SyntheticConnection connection;
+            lock (_connections)
+            {
+                _clients.Add(client);
+                connection = new SyntheticConnection(_connections.Count);
+                _connections.Add(connection);
+            }
+
+            // Each connection runs on its own so a peer that hangs up on the first does not stall the
+            // second - which is the whole subject of the fast-reconnect test.
+            _ = Task.Run(() => ServeAsync(client, connection));
+        }
+    }
+
+    private async Task ServeAsync(TcpClient client, SyntheticConnection connection)
+    {
+        try
+        {
+            using var stream = client.GetStream();
+            connection.AttachStream(stream);
+
+            // The first byte decides what this is. A plaintext handshake opens with the protocol
+            // string's length; anything else is the MSE key exchange, which begins with a Diffie-
+            // Hellman public key and is indistinguishable from random.
+            byte[] first = new byte[1];
+            if (await stream.ReadAsync(first, _stopping.Token).ConfigureAwait(false) == 0)
+            {
+                connection.Complete();
+                return;
+            }
+
+            bool plaintext = first[0] == 19;
+            connection.RecordOpening(plaintext);
+
+            if (_options.HangUpDuringHandshake)
+            {
+                // Hard reset rather than a graceful close: this imitates a peer at its connection
+                // limit, or one that has gone away, and it must not look like an orderly refusal.
+                client.Client.LingerState = new LingerOption(true, 0);
+                client.Close();
+                connection.Complete();
+                return;
+            }
+
+            if (!plaintext)
+            {
+                // The synthetic peer speaks no MSE. Tests that get here are about what PeerSharp does
+                // when encryption goes unanswered, so the connection is left to time out.
+                connection.Complete();
+                return;
+            }
+
+            byte[] rest = new byte[67];
+            await ReadExactlyAsync(stream, rest, _stopping.Token).ConfigureAwait(false);
+            connection.RecordHandshake(rest);
+
+            await stream.WriteAsync(BuildHandshake(rest.AsSpan(27, 20)), _stopping.Token).ConfigureAwait(false);
+
+            if (_options.AdvertiseExtensionProtocol)
+            {
+                await SendExtensionHandshakeAsync(stream).ConfigureAwait(false);
+            }
+
+            // Everything we owe the peer has gone out, so a test may now send whatever it likes.
+            connection.MarkReady();
+
+            await ReadFramesAsync(stream, connection).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException or SocketException)
+        {
+            // A closed connection ends this connection's story, not the test's.
+        }
+        finally
+        {
+            connection.Complete();
+        }
+    }
+
+    /// <summary>Our 68-byte handshake, echoing the info hash the dialler asked for.</summary>
+    private byte[] BuildHandshake(ReadOnlySpan<byte> infoHash)
+    {
+        byte[] handshake = new byte[68];
+        handshake[0] = 19;
+        "BitTorrent protocol"u8.CopyTo(handshake.AsSpan(1));
+
+        if (_options.AdvertiseExtensionProtocol)
+        {
+            handshake[25] |= 0x10; // BEP 10 extension protocol.
+        }
+
+        handshake[27] |= 0x04; // BEP 6 fast extension.
+
+        infoHash.CopyTo(handshake.AsSpan(28));
+        _peerId.CopyTo(handshake.AsSpan(48));
+
+        return handshake;
+    }
+
+    /// <summary>
+    /// A peer id unique to this instance. It has to be: a peer id identifies a peer rather than a
+    /// connection, so two synthetic peers sharing one are a single peer dialled twice, and PeerSharp
+    /// correctly closes the second as a duplicate. A test that stands two of them up and wonders why
+    /// only one gets talked to has found its own bug.
+    /// </summary>
+    private static byte[] BuildPeerId()
+    {
+        byte[] peerId = new byte[20];
+        Encoding.ASCII.GetBytes("-SY0001-").CopyTo(peerId.AsSpan());
+        System.Security.Cryptography.RandomNumberGenerator.Fill(peerId.AsSpan(8));
+        return peerId;
+    }
+
+    /// <summary>
+    /// Our BEP 10 handshake. The extension ids here are the ones we are telling PeerSharp to address
+    /// us by, and the numbers are chosen by us alone - that is the property the ut_metadata test turns
+    /// on.
+    /// </summary>
+    private async Task SendExtensionHandshakeAsync(NetworkStream stream)
+    {
+        var extensions = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (var pair in _options.Extensions)
+        {
+            extensions[pair.Key] = pair.Value;
+        }
+
+        var handshake = new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["m"] = extensions,
+            ["v"] = "SyntheticPeer/1.0",
+            ["p"] = (long)Port
+        };
+
+        long? metadataSize = _options.Metadata?.LongLength ?? _options.MetadataSize;
+        if (metadataSize is { } size)
+        {
+            handshake["metadata_size"] = size;
+        }
+
+        byte[] body = SyntheticBencode.Encode(handshake);
+        byte[] payload = new byte[2 + body.Length];
+        payload[0] = 20; // Extended.
+        payload[1] = 0;  // The handshake is always extended id zero.
+        body.CopyTo(payload.AsSpan(2));
+
+        await SendFrameAsync(stream, payload).ConfigureAwait(false);
+    }
+
+    private async Task SendFrameAsync(NetworkStream stream, byte[] payload)
+    {
+        byte[] framed = new byte[4 + payload.Length];
+        BinaryPrimitives.WriteInt32BigEndian(framed, payload.Length);
+        payload.CopyTo(framed.AsSpan(4));
+        await stream.WriteAsync(framed, _stopping.Token).ConfigureAwait(false);
+        await stream.FlushAsync(_stopping.Token).ConfigureAwait(false);
+    }
+
+    private async Task ReadFramesAsync(NetworkStream stream, SyntheticConnection connection)
+    {
+        byte? remoteUtMetadataId = null;
+        bool pexSent = false;
+        byte[] header = new byte[4];
+        while (!_stopping.IsCancellationRequested)
+        {
+            await ReadExactlyAsync(stream, header, _stopping.Token).ConfigureAwait(false);
+            int length = BinaryPrimitives.ReadInt32BigEndian(header);
+
+            if (length == 0)
+            {
+                connection.Record(new WireFrame(WireFrame.KeepAlive, []));
+                continue;
+            }
+
+            if (length < 0 || length > 1 << 20)
+            {
+                throw new InvalidOperationException($"A frame claimed {length} bytes, which no message can be.");
+            }
+
+            byte[] payload = new byte[length];
+            await ReadExactlyAsync(stream, payload, _stopping.Token).ConfigureAwait(false);
+            var frame = new WireFrame(payload[0], payload[1..]);
+            connection.Record(frame);
+
+            if (!frame.IsExtended)
+            {
+                continue;
+            }
+
+            if (frame.ExtendedId == 0)
+            {
+                remoteUtMetadataId = ReadEnabledExtensionId(frame.ExtendedPayload, "ut_metadata");
+
+                byte? remoteUtPexId = ReadEnabledExtensionId(frame.ExtendedPayload, "ut_pex");
+                if (!pexSent && remoteUtPexId is { } pexId && _options.PexAdded.Count > 0)
+                {
+                    await SendPexAsync(stream, pexId, _options.PexAdded).ConfigureAwait(false);
+                    pexSent = true;
+                }
+
+                continue;
+            }
+
+            if (_options.Metadata is { } metadata &&
+                _options.Extensions.TryGetValue("ut_metadata", out long localId) &&
+                localId is > 0 and <= byte.MaxValue &&
+                frame.ExtendedId == (byte)localId &&
+                remoteUtMetadataId is { } responseId)
+            {
+                await TryServeMetadataAsync(stream, connection, frame, responseId, metadata).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>Sends one independently encoded BEP 11 compact IPv4 peer list.</summary>
+    private async Task SendPexAsync(
+        NetworkStream stream, byte responseId, IReadOnlyList<IPEndPoint> peers)
+    {
+        byte[] compact = new byte[peers.Count * 6];
+        for (int index = 0; index < peers.Count; index++)
+        {
+            IPEndPoint peer = peers[index];
+            byte[] address = peer.Address.MapToIPv4().GetAddressBytes();
+            address.CopyTo(compact.AsSpan(index * 6, 4));
+            BinaryPrimitives.WriteUInt16BigEndian(
+                compact.AsSpan(index * 6 + 4, 2), checked((ushort)peer.Port));
+        }
+
+        byte[] body = SyntheticBencode.Encode(new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["added"] = compact,
+            ["added.f"] = new byte[peers.Count]
+        });
+
+        byte[] payload = new byte[2 + body.Length];
+        payload[0] = WireFrame.Extended;
+        payload[1] = responseId;
+        body.CopyTo(payload.AsSpan(2));
+        await SendFrameAsync(stream, payload).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads one enabled extension id from the engine's own BEP 10 handshake.</summary>
+    private static byte? ReadEnabledExtensionId(ReadOnlySpan<byte> payload, string name)
+    {
+        try
+        {
+            Dictionary<string, object> handshake = SyntheticBencode.DecodeDictionary(payload, "The engine's BEP 10 handshake");
+            Dictionary<string, object>? messages = SyntheticBencode.TryGetDictionary(handshake, "m");
+            long? id = messages is null ? null : SyntheticBencode.TryGetInteger(messages, name);
+            return id is > 0 and <= byte.MaxValue ? (byte)id.Value : null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Answers a valid BEP 9 request using the extension id the engine assigned itself.</summary>
+    private async Task TryServeMetadataAsync(
+        NetworkStream stream,
+        SyntheticConnection connection,
+        WireFrame frame,
+        byte responseId,
+        byte[] metadata)
+    {
+        Dictionary<string, object> request;
+        try
+        {
+            request = SyntheticBencode.DecodeDictionary(frame.ExtendedPayload, "The BEP 9 metadata request");
+        }
+        catch (InvalidOperationException)
+        {
+            return;
+        }
+
+        long? piece = SyntheticBencode.TryGetInteger(request, "piece");
+        int pieceCount = (metadata.Length + 16 * 1024 - 1) / (16 * 1024);
+        if (SyntheticBencode.TryGetInteger(request, "msg_type") != 0 ||
+            piece is not >= 0 || piece >= pieceCount)
+        {
+            return;
+        }
+
+        int pieceIndex = (int)piece.Value;
+        int offset = pieceIndex * 16 * 1024;
+
+        int blockLength = Math.Min(16 * 1024, metadata.Length - offset);
+        byte[] body = SyntheticBencode.Encode(new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["msg_type"] = 1L,
+            ["piece"] = (long)pieceIndex,
+            ["total_size"] = (long)metadata.Length
+        });
+
+        byte[] payload = new byte[2 + body.Length + blockLength];
+        payload[0] = WireFrame.Extended;
+        payload[1] = responseId;
+        body.CopyTo(payload.AsSpan(2));
+        metadata.AsSpan(offset, blockLength).CopyTo(payload.AsSpan(2 + body.Length));
+
+        await SendFrameAsync(stream, payload).ConfigureAwait(false);
+        connection.RecordServedMetadataPiece(pieceIndex, connection.Frames.Count);
+    }
+
+    private static async Task ReadExactlyAsync(NetworkStream stream, byte[] buffer, CancellationToken cancellationToken)
+    {
+        int read = 0;
+        while (read < buffer.Length)
+        {
+            int received = await stream.ReadAsync(buffer.AsMemory(read), cancellationToken).ConfigureAwait(false);
+            if (received == 0)
+            {
+                throw new IOException("The peer closed the connection.");
+            }
+
+            read += received;
+        }
+    }
+
+    private int _disposed;
+
+    public async ValueTask DisposeAsync()
+    {
+        // Idempotent: a test that takes the peer away mid-run and then disposes it again in a finally
+        // is the ordinary shape of these tests, and the second call must be a no-op rather than an
+        // ObjectDisposedException from the cancellation source.
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+        {
+            return;
+        }
+
+        await _stopping.CancelAsync().ConfigureAwait(false);
+        _listener.Stop();
+
+        lock (_connections)
+        {
+            foreach (var client in _clients)
+            {
+                try
+                {
+                    client.Close();
+                }
+                catch (SocketException)
+                {
+                    // Already gone.
+                }
+            }
+        }
+
+        try
+        {
+            await _acceptLoop.ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException)
+        {
+            // Shutdown races the accept.
+        }
+
+        _stopping.Dispose();
+    }
+}

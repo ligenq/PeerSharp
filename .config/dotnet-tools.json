@@ -2,12 +2,17 @@
   "version": 1,
   "isRoot": true,
   "tools": {
-    "microsoft.coyote.cli": {
-      "version": "1.7.11",
+    "sharpfuzz.commandline": {
+      "version": "2.3.0",
       "commands": [
-        "coyote"
-      ],
-      "rollForward": false
+        "sharpfuzz"
+      ]
+    },
+    "microsoft.sbom.dotnettool": {
+      "version": "4.1.5",
+      "commands": [
+        "sbom-tool"
+      ]
     }
   }
 }

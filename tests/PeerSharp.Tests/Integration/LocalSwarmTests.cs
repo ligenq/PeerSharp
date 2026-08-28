@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using PeerSharp.Internals;
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
@@ -60,9 +60,9 @@ public class LocalSwarmTests : IDisposable
         await using var leecherEngine = await CreateEngineAsync(_pathB);
         var leecherTorrent = await leecherEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = true });
 
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout);
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout, cancellationToken: TestContext.Current.CancellationToken);
 
-        await WaitForConditionAsync(leecherTorrent, t => t.Finished, DownloadTimeout, "download completion");
+        await WaitForConditionAsync(leecherTorrent, t => t.Finished, DownloadTimeout, "download completion", cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Equal(dummyData.Length, (long)leecherTorrent.FinishedBytes);
 
@@ -118,10 +118,10 @@ public class LocalSwarmTests : IDisposable
         await using var leecherEngine = await CreateEngineAsync(_pathB);
         var leecherTorrent = await leecherEngine.AddMagnetAsync(magnet, new AddTorrentOptions { StartImmediately = true });
 
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout);
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout, cancellationToken: TestContext.Current.CancellationToken);
 
-        await WaitForConditionAsync(leecherTorrent, t => t.HasMetadata, MetadataTimeout, "metadata download");
-        await WaitForConditionAsync(leecherTorrent, t => t.Finished, DownloadTimeout, "download completion");
+        await WaitForConditionAsync(leecherTorrent, t => t.HasMetadata, MetadataTimeout, "metadata download", cancellationToken: TestContext.Current.CancellationToken);
+        await WaitForConditionAsync(leecherTorrent, t => t.Finished, DownloadTimeout, "download completion", cancellationToken: TestContext.Current.CancellationToken);
 
         var downloadedInfo = leecherTorrent.GetFileInfo(0);
         byte[] downloadedData = await ReadAllBytesSharedAsync(Path.Combine(_pathB, downloadedInfo.Path));
@@ -179,8 +179,8 @@ public class LocalSwarmTests : IDisposable
         await leecherTorrent.SetFilePriorityAsync(1, Priority.DoNotDownload);
         await leecherTorrent.StartAsync();
 
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout);
-        await WaitForConditionAsync(leecherTorrent, t => t.SelectionFinished, DownloadTimeout, "selected files completion");
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout, cancellationToken: TestContext.Current.CancellationToken);
+        await WaitForConditionAsync(leecherTorrent, t => t.SelectionFinished, DownloadTimeout, "selected files completion", cancellationToken: TestContext.Current.CancellationToken);
 
         var keptInfo = leecherTorrent.GetFileInfo(0);
         var skippedInfo = leecherTorrent.GetFileInfo(1);
@@ -215,7 +215,8 @@ public class LocalSwarmTests : IDisposable
 
         await using var leecherEngine = await CreateEngineAsync(_pathB);
 
-        using var cts = new CancellationTokenSource(MetadataTimeout + ConnectionTimeout);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(MetadataTimeout + ConnectionTimeout);
         var fetchTask = leecherEngine.GetMagnetMetadataAsync(magnet, cts.Token);
 
         // Bootstrap the transient torrent's connection to the seed (no tracker/DHT in tests)
@@ -227,7 +228,7 @@ public class LocalSwarmTests : IDisposable
             // so there is nothing to probe for. OnPeersFound resolves through the engine's own
             // routing, which does see it, and no-ops until it exists.
             leecherEngine.OnPeersFound(torrentFile.InfoHash, [seedEndpoint]);
-            await Task.Delay(100);
+            await Task.Delay(100, cancellationToken: TestContext.Current.CancellationToken);
         }
 
         var fetched = await fetchTask;
@@ -254,7 +255,8 @@ public class LocalSwarmTests : IDisposable
 
         // Unreachable swarm: metadata can never arrive
         string magnet = $"magnet:?xt=urn:btih:{new string('a', 40)}";
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMilliseconds(500));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => engine.GetMagnetMetadataAsync(magnet, cts.Token));
@@ -273,10 +275,11 @@ public class LocalSwarmTests : IDisposable
 
         var infoHash = InfoHash.FromHex(new string('b', 40));
         string magnet = $"magnet:?xt=urn:btih:{infoHash.ToHexString()}";
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(1));
         var fetchTask = engine.GetMagnetMetadataAsync(magnet, cts.Token);
 
-        await Task.Delay(300);
+        await Task.Delay(300, cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.Empty(engine.GetTorrents());
         Assert.Null(engine.GetTorrent(infoHash));
@@ -305,9 +308,10 @@ public class LocalSwarmTests : IDisposable
         await using var engine = await CreateEngineAsync(_pathB);
 
         string magnet = $"magnet:?xt=urn:btih:{torrentFile.InfoHash.ToHexString()}";
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(2));
         var fetchTask = engine.GetMagnetMetadataAsync(magnet, cts.Token);
-        await Task.Delay(300);
+        await Task.Delay(300, cancellationToken: TestContext.Current.CancellationToken);
 
         var added = await engine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
 
@@ -354,9 +358,9 @@ public class LocalSwarmTests : IDisposable
 
         await leecherTorrent.StartAsync();
 
-        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout);
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout, cancellationToken: TestContext.Current.CancellationToken);
 
-        await WaitForConditionAsync(leecherTorrent, t => t.SelectionFinished, DownloadTimeout, "selected file completion");
+        await WaitForConditionAsync(leecherTorrent, t => t.SelectionFinished, DownloadTimeout, "selected file completion", cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.False(leecherTorrent.Finished);
         Assert.Equal(1, leecherTorrent.PiecesReceived);
@@ -406,9 +410,9 @@ public class LocalSwarmTests : IDisposable
         await using (var leecherEngine = await CreateEngineAsync(_pathB, throttle))
         {
             var leecherTorrent = await leecherEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = true });
-            await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout);
+            await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout, cancellationToken: TestContext.Current.CancellationToken);
 
-            await WaitForConditionAsync(leecherTorrent, t => t.PiecesReceived >= 2 || t.Finished, TimeSpan.FromSeconds(10), "partial download");
+            await WaitForConditionAsync(leecherTorrent, t => t.PiecesReceived >= 2 || t.Finished, TimeSpan.FromSeconds(10), "partial download", cancellationToken: TestContext.Current.CancellationToken);
 
             await leecherTorrent.StopAsync();
             piecesBefore = leecherTorrent.PiecesReceived;
@@ -427,9 +431,9 @@ public class LocalSwarmTests : IDisposable
         Assert.True(resumedTorrent.PiecesReceived >= piecesBefore);
 
         await resumedTorrent.StartAsync();
-        await EnsureConnectedAsync(resumedEngine, resumedTorrent, seedEngine, ConnectionTimeout);
+        await EnsureConnectedAsync(resumedEngine, resumedTorrent, seedEngine, ConnectionTimeout, cancellationToken: TestContext.Current.CancellationToken);
 
-        await WaitForConditionAsync(resumedTorrent, t => t.Finished, DownloadTimeout, "resume completion");
+        await WaitForConditionAsync(resumedTorrent, t => t.Finished, DownloadTimeout, "resume completion", cancellationToken: TestContext.Current.CancellationToken);
 
         byte[] downloadedData = await ReadAllBytesSharedAsync(Path.Combine(_pathB, fileName));
         Assert.Equal(data, downloadedData);
@@ -468,7 +472,7 @@ public class LocalSwarmTests : IDisposable
         return engine;
     }
 
-    private static async Task EnsureConnectedAsync(ClientEngine leecherEngine, ITorrent leecherTorrent, ClientEngine seedEngine, TimeSpan timeout)
+    private static async Task EnsureConnectedAsync(ClientEngine leecherEngine, ITorrent leecherTorrent, ClientEngine seedEngine, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         var portListener = seedEngine.PortListener ?? throw new InvalidOperationException("Seed engine has no port listener.");
         int port = portListener.Port;
@@ -476,7 +480,7 @@ public class LocalSwarmTests : IDisposable
 
         var seedEndpoint = new IPEndPoint(IPAddress.Loopback, port);
         var sw = Stopwatch.StartNew();
-        while (leecherTorrent.Peers.ConnectedCount == 0 && sw.Elapsed < timeout)
+        while (leecherTorrent.Peers.ConnectedCount == 0 && sw.Elapsed < timeout && !cancellationToken.IsCancellationRequested)
         {
             leecherEngine.OnPeersFound(leecherTorrent.Hash, [seedEndpoint]);
             await Task.Delay(200);
@@ -486,10 +490,10 @@ public class LocalSwarmTests : IDisposable
             $"Timed out after {timeout} waiting for peer connection. {IntegrationTestDiagnostics.DescribeTorrent(leecherTorrent)}");
     }
 
-    private static async Task WaitForConditionAsync(ITorrent torrent, Func<ITorrent, bool> condition, TimeSpan timeout, string description)
+    private static async Task WaitForConditionAsync(ITorrent torrent, Func<ITorrent, bool> condition, TimeSpan timeout, string description, CancellationToken cancellationToken = default)
     {
         var sw = Stopwatch.StartNew();
-        while (!condition(torrent) && sw.Elapsed < timeout)
+        while (!condition(torrent) && sw.Elapsed < timeout && !cancellationToken.IsCancellationRequested)
         {
             if (torrent.LastException != null)
             {

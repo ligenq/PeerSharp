@@ -1,7 +1,4 @@
-using Microsoft.Coyote;
-using Microsoft.Coyote.Specifications;
-using Microsoft.Coyote.SystematicTesting;
-using PeerSharp.Internals.Peers;
+﻿using PeerSharp.Internals.Peers;
 using PeerSharp.Internals;
 using System.Net;
 using System.Net.Sockets;
@@ -9,7 +6,7 @@ using System.Collections.Concurrent;
 
 namespace PeerSharp.Tests.Concurrency;
 
-[Collection("Coyote")]
+[Collection("Concurrency")]
 public class PeerManagerConcurrencyTests
 {
     private readonly ITestOutputHelper _output;
@@ -19,23 +16,8 @@ public class PeerManagerConcurrencyTests
         _output = output;
     }
 
-    private void RunCoyoteTest(Action test, uint iterations = 100)
-    {
-        var config = Configuration.Create()
-            .WithTestingIterations(iterations)
-            .WithMaxSchedulingSteps(1000);
-
-        using var engine = TestingEngine.Create(config, test);
-        engine.Run();
-
-        var report = engine.TestReport;
-        if (report.NumOfFoundBugs > 0)
-        {
-            _output.WriteLine($"Found {report.NumOfFoundBugs} bug(s)!");
-            _output.WriteLine(engine.GetReport());
-            Assert.Fail($"Coyote found {report.NumOfFoundBugs} concurrency bug(s). See test output for details.");
-        }
-    }
+    private void RunConcurrencyStress(Action scenario, uint iterations = 100)
+        => ConcurrencyStress.Run(scenario, iterations, _output);
 
     private class MockPeerCommunication : PeerCommunication
     {
@@ -88,7 +70,7 @@ public class PeerManagerConcurrencyTests
     [Fact]
     public void PeerManager_ConcurrentConnect_SamePeer_OnlyOneConnects()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var torrent = TorrentTestUtility.CreateMinimal();
             var factory = new MockFactory();
@@ -118,7 +100,7 @@ public class PeerManagerConcurrencyTests
     [Fact]
     public void PeerManager_IncomingOutgoingCollision_MaintainsConsistentState()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var torrent = TorrentTestUtility.CreateMinimal();
             var factory = new MockFactory();
@@ -146,7 +128,7 @@ public class PeerManagerConcurrencyTests
 
             Task.WaitAll(tasks.ToArray());
 
-            Specification.Assert(manager.ConnectedCount <= 1,
+            Assert.True(manager.ConnectedCount <= 1,
                 $"Duplicate connections allowed: {manager.ConnectedCount}");
         });
     }
@@ -154,7 +136,7 @@ public class PeerManagerConcurrencyTests
     [Fact]
     public void PeerManager_ConcurrentEndpointRegistration_HasOneOwner()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var torrent = TorrentTestUtility.CreateMinimal();
             var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new MockFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
@@ -172,8 +154,8 @@ public class PeerManagerConcurrencyTests
 
             Task.WaitAll(tasks);
 
-            Specification.Assert(claims == 1, $"Expected exactly one endpoint owner, got {claims}");
-            Specification.Assert(manager.ConnectedEndpointCountForTesting == 1,
+            Assert.True(claims == 1, $"Expected exactly one endpoint owner, got {claims}");
+            Assert.True(manager.ConnectedEndpointCountForTesting == 1,
                 $"Endpoint index must contain exactly one entry, got {manager.ConnectedEndpointCountForTesting}");
         });
     }
@@ -181,7 +163,7 @@ public class PeerManagerConcurrencyTests
     [Fact]
     public void PeerManager_ConcurrentSameAddressRegistration_HasOneOwnerWhenMultipleIpsDisabled()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var torrent = TorrentTestUtility.CreateMinimal();
             torrent.Settings.Connection.AllowMultipleConnectionsPerIp = false;
@@ -200,8 +182,8 @@ public class PeerManagerConcurrencyTests
 
             Task.WaitAll(tasks);
 
-            Specification.Assert(claims == 1, $"Expected exactly one address owner, got {claims}");
-            Specification.Assert(manager.ConnectedEndpointCountForTesting == 1,
+            Assert.True(claims == 1, $"Expected exactly one address owner, got {claims}");
+            Assert.True(manager.ConnectedEndpointCountForTesting == 1,
                 $"Endpoint index must contain exactly one entry, got {manager.ConnectedEndpointCountForTesting}");
         });
     }
@@ -209,7 +191,7 @@ public class PeerManagerConcurrencyTests
     [Fact]
     public void PeerManager_ConcurrentPeerIdRegistration_HasOneOwner()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var torrent = TorrentTestUtility.CreateMinimal();
             var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new MockFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
@@ -228,8 +210,8 @@ public class PeerManagerConcurrencyTests
 
             Task.WaitAll(tasks);
 
-            Specification.Assert(claims == 1, $"Expected exactly one peer-id owner, got {claims}");
-            Specification.Assert(manager.ConnectedPeerIdCountForTesting == 1,
+            Assert.True(claims == 1, $"Expected exactly one peer-id owner, got {claims}");
+            Assert.True(manager.ConnectedPeerIdCountForTesting == 1,
                 $"Peer-id index must contain exactly one entry, got {manager.ConnectedPeerIdCountForTesting}");
         });
     }
@@ -237,7 +219,7 @@ public class PeerManagerConcurrencyTests
     [Fact]
     public void PeerManager_DuplicateEndpointCleanup_CannotEvictOwner()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var torrent = TorrentTestUtility.CreateMinimal();
             var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new MockFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
@@ -252,11 +234,11 @@ public class PeerManagerConcurrencyTests
 
             Task.WaitAll(duplicates.Select(peer => Task.Run(() => manager.UnregisterConnectedEndpointForTesting(peer))).ToArray());
 
-            Specification.Assert(manager.ConnectedEndpointCountForTesting == 1,
+            Assert.True(manager.ConnectedEndpointCountForTesting == 1,
                 "A duplicate endpoint cleanup removed the surviving owner's registration.");
 
             manager.UnregisterConnectedEndpointForTesting(owner);
-            Specification.Assert(manager.ConnectedEndpointCountForTesting == 0,
+            Assert.True(manager.ConnectedEndpointCountForTesting == 0,
                 "The endpoint owner could not release its own registration.");
         });
     }
@@ -264,7 +246,7 @@ public class PeerManagerConcurrencyTests
     [Fact]
     public void PeerManager_DuplicatePeerIdCleanup_CannotEvictOwner()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var torrent = TorrentTestUtility.CreateMinimal();
             var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new MockFactory(), TimeProvider.System, new TorrentTestUtility.MockConnectionGovernor());
@@ -283,11 +265,11 @@ public class PeerManagerConcurrencyTests
 
             Task.WaitAll(duplicates.Select(peer => Task.Run(() => manager.UnregisterConnectedPeerIdForTesting(peer))).ToArray());
 
-            Specification.Assert(manager.ConnectedPeerIdCountForTesting == 1,
+            Assert.True(manager.ConnectedPeerIdCountForTesting == 1,
                 "A duplicate peer-id cleanup removed the surviving owner's registration.");
 
             manager.UnregisterConnectedPeerIdForTesting(owner);
-            Specification.Assert(manager.ConnectedPeerIdCountForTesting == 0,
+            Assert.True(manager.ConnectedPeerIdCountForTesting == 0,
                 "The peer-id owner could not release its own registration.");
         });
     }
@@ -295,7 +277,7 @@ public class PeerManagerConcurrencyTests
     [Fact]
     public void PeerManagerFailureTracker_ConcurrentFailures_EscalatesOnce()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             var tracker = new PeerManagerFailureTracker();
             var results = new ConcurrentBag<PeerManagerFailureTracker.FailureRecord>();
@@ -305,8 +287,8 @@ public class PeerManagerConcurrencyTests
                 .Select(_ => Task.Run(() => results.Add(tracker.Record(now))))
                 .ToArray());
 
-            Specification.Assert(tracker.TotalFailures == 8, $"Expected 8 recorded failures, got {tracker.TotalFailures}");
-            Specification.Assert(results.Count(result => result.ShouldEscalate) == 1,
+            Assert.True(tracker.TotalFailures == 8, $"Expected 8 recorded failures, got {tracker.TotalFailures}");
+            Assert.True(results.Count(result => result.ShouldEscalate) == 1,
                 "Concurrent failures should produce exactly one escalation per rate-limit window.");
         });
     }

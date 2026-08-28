@@ -41,6 +41,11 @@ public sealed record SavedTorrentOptions(
     /// engine defaults need to be stored.
     /// </summary>
     public IReadOnlyList<SavedPeerPreference>? PeerPreferences { get; init; }
+
+    /// <summary>
+    /// Whether the torrent was seeding in BEP 16 super-seed mode.
+    /// </summary>
+    public bool SuperSeeding { get; init; }
 }
 
 /// <summary>

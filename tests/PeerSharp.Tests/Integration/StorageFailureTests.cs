@@ -22,12 +22,16 @@ public class StorageFailureTests
 
     private class MockFailingFiles : IInternalFiles
     {
+        public Task MoveFilesAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         public bool Checking { get; set; }
         public string DownloadPath => "C:\\Mock";
         public bool IsDisposed => false;
 
         public Task DeleteFilesAsync(CancellationToken ct) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
         public Task InitializeAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct) => Task.CompletedTask;
         public Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct) => Task.FromResult(new byte[length]);
         public Task ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct) => Task.CompletedTask;

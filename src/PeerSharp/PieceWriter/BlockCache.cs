@@ -28,6 +28,7 @@ internal class BlockCache : IBlockCache
     private IStorage? _storage;
     private readonly ConcurrentDictionary<long, byte> _readAheadInFlight = new();
     private readonly SemaphoreSlim _readAheadSemaphore = new(2, 2);
+    private long _writeGeneration;
     // 16KB
 
     public BlockCache(int capacityBytes, int readAheadBlocks, bool readAheadEnabled, long totalSize)
@@ -67,11 +68,15 @@ internal class BlockCache : IBlockCache
                 return true;
             }
 
+            long writeGeneration = Volatile.Read(ref _writeGeneration);
+
             // Cache miss - read from storage
             await _storage.ReadAsync(offset, buffer, ct).ConfigureAwait(false);
 
-            // Add to cache
-            AddToCache(offset, buffer.Span);
+            // A write may have completed while storage was serving this miss. The bytes returned to
+            // this overlapping read may legitimately be the old ones, but they must not replace the
+            // writer's newer cache entry and poison later reads.
+            AddToCacheIfUnchanged(offset, buffer.Span, writeGeneration);
 
             TriggerReadAhead(offset + BlockSize, ct);
             return true;
@@ -95,26 +100,32 @@ internal class BlockCache : IBlockCache
         // Write-Through: Write to storage first
         await _storage.WriteAsync(offset, data, ct).ConfigureAwait(false);
 
-        // Populate cache
-        // Data might be large (Piece Size e.g. 4MB). Slice it into blocks.
-        int len = data.Length;
-        int pos = 0;
-        long currentOffset = offset;
+        // Increment before touching the cache. Any miss or prefetch that started before this write
+        // must either observe the increment and decline admission, or admit first and then be
+        // refreshed/invalidated by the cache operations below.
+        Interlocked.Increment(ref _writeGeneration);
 
-        while (pos < len)
+        // Populate the cache, walking the aligned blocks this write touches rather than the write's
+        // own chunks. Every touched block ends up in one of two states and never in between: fully
+        // rewritten by this data and therefore refreshed, or only partly covered and therefore
+        // dropped.
+        //
+        // Dropping the partial ones is the part that matters. Only whole aligned blocks are cached,
+        // so an earlier version simply skipped a partial write here - leaving any block it overlapped
+        // holding pre-write bytes, which the next aligned read served in preference to storage. The
+        // last block of a torrent is partial, and repair and end-game rewrite blocks that have
+        // already been read, so this is reachable and it hands stale data to peers.
+        long end = offset + data.Length;
+        for (long blockOffset = offset / BlockSize * BlockSize; blockOffset < end; blockOffset += BlockSize)
         {
-            int chunkSize = Math.Min(BlockSize, len - pos);
-
-            // Only cache full 16KB blocks to maintain alignment invariant
-            if (chunkSize == BlockSize && currentOffset % BlockSize == 0)
+            if (blockOffset >= offset && blockOffset + BlockSize <= end)
             {
-                AddToCache(currentOffset, data.Slice(pos, chunkSize).Span);
+                AddToCache(blockOffset, data.Slice((int)(blockOffset - offset), BlockSize).Span);
             }
-            // If we strictly enforce 16KB, we skip partials at end of file/piece.
-            // This is acceptable for a block cache.
-
-            pos += chunkSize;
-            currentOffset += chunkSize;
+            else
+            {
+                Invalidate(blockOffset);
+            }
         }
     }
 
@@ -155,8 +166,28 @@ internal class BlockCache : IBlockCache
             TaskScheduler.Default);
     }
 
+    /// <summary>
+    /// Fills the cache ahead of the reader with a single contiguous read.
+    /// </summary>
+    /// <remarks>
+    /// This used to issue one read per block: four separate sixteen-kilobyte reads, awaited one after
+    /// another, each taking the read-ahead semaphore. That is not read-ahead so much as the same work
+    /// moved earlier, and it added the semaphore traffic on top - reading four blocks individually
+    /// costs four disk operations whether they are wanted now or later. Seeding at a gigabyte a second
+    /// means tens of thousands of block reads a second, and a profile put most of PeerSharp's CPU in
+    /// thread-pool parking rather than in the reads, which is what a queue of tiny asynchronous
+    /// operations looks like from the outside.
+    ///
+    /// <para>
+    /// One read covering the whole window costs one operation and one completion however many blocks
+    /// it spans. The window stops at the first block already cached or already being fetched, because
+    /// a single read has to be contiguous, and stopping is right anyway: someone else is bringing the
+    /// rest in.
+    /// </para>
+    /// </remarks>
     private async Task PrefetchAsync(long startOffset, CancellationToken ct)
     {
+        int blocks = 0;
         for (int i = 0; i < _readAheadBlocks; i++)
         {
             long offset = startOffset + (i * BlockSize);
@@ -165,88 +196,137 @@ internal class BlockCache : IBlockCache
                 break;
             }
 
-            if (IsCached(offset))
+            if (IsCached(offset) || !_readAheadInFlight.TryAdd(offset, 0))
             {
-                continue;
+                break;
             }
 
-            if (!_readAheadInFlight.TryAdd(offset, 0))
-            {
-                continue;
-            }
+            blocks++;
+        }
 
+        if (blocks == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await _readAheadSemaphore.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                await _readAheadSemaphore.WaitAsync(ct).ConfigureAwait(false);
+                if (_storage == null)
+                {
+                    return;
+                }
+
+                int length = blocks * BlockSize;
+                byte[] buffer = CachePool.Rent(length);
                 try
                 {
-                    if (_storage == null)
-                    {
-                        return;
-                    }
+                    long writeGeneration = Volatile.Read(ref _writeGeneration);
+                    await _storage.ReadAsync(startOffset, buffer.AsMemory(0, length), ct).ConfigureAwait(false);
 
-                    byte[] buffer = CachePool.Rent(BlockSize);
-                    try
+                    for (int i = 0; i < blocks; i++)
                     {
-                        await _storage.ReadAsync(offset, buffer.AsMemory(0, BlockSize), ct).ConfigureAwait(false);
-                        AddToCache(offset, buffer.AsSpan(0, BlockSize));
-                    }
-                    finally
-                    {
-                        CachePool.Return(buffer);
+                        AddToCacheIfUnchanged(
+                            startOffset + (i * BlockSize),
+                            buffer.AsSpan(i * BlockSize, BlockSize),
+                            writeGeneration);
                     }
                 }
                 finally
                 {
-                    _readAheadSemaphore.Release();
+                    CachePool.Return(buffer);
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
             }
             finally
             {
-                _readAheadInFlight.TryRemove(offset, out _);
+                _readAheadSemaphore.Release();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutdown during a read-ahead. There is nothing to cache and nothing to report; the
+            // finally below still releases the in-flight markers.
+        }
+        finally
+        {
+            for (int i = 0; i < blocks; i++)
+            {
+                _readAheadInFlight.TryRemove(startOffset + (i * BlockSize), out _);
             }
         }
     }
 
     private void AddToCache(long offset, ReadOnlySpan<byte> data)
     {
+        lock (_lock)
+        {
+            AddToCacheLocked(offset, data);
+        }
+    }
+
+    private void AddToCacheIfUnchanged(long offset, ReadOnlySpan<byte> data, long writeGeneration)
+    {
+        lock (_lock)
+        {
+            // Make the generation check and admission indivisible with respect to the writer's
+            // cache refresh. Otherwise a writer can update the cache after this check but before
+            // AddToCache takes the lock, letting the older read overwrite it last.
+            if (writeGeneration == Volatile.Read(ref _writeGeneration))
+            {
+                AddToCacheLocked(offset, data);
+            }
+        }
+    }
+
+    private void AddToCacheLocked(long offset, ReadOnlySpan<byte> data)
+    {
+        if (_blocks.TryGetValue(offset, out var existing))
+        {
+            // Refresh the cached contents: the same offset can be written again with
+            // different data (e.g. a piece that failed verification and was re-downloaded).
+            // Keeping the old block here would serve stale/corrupt data on later reads.
+            data.CopyTo(existing.Data);
+            _lruList.Remove(existing.Node);
+            _lruList.AddLast(existing.Node);
+            return;
+        }
+
         byte[] buffer = CachePool.Rent(BlockSize);
         data.CopyTo(buffer);
 
+        // Evict if needed
+        while (_currentBytes + BlockSize > _capacityBytes && _lruList.Count > 0)
+        {
+            EvictLRU();
+        }
+
+        if (_currentBytes + BlockSize > _capacityBytes)
+        {
+            // Still no room (capacity too small?)
+            CachePool.Return(buffer);
+            return;
+        }
+
+        var node = _lruList.AddLast(offset);
+        _blocks.Add(offset, new CachedBlock(buffer, node));
+        _currentBytes += BlockSize;
+    }
+
+    /// <summary>
+    /// Drops one block, if it is held, so the next read for it goes to storage.
+    /// </summary>
+    private void Invalidate(long offset)
+    {
         lock (_lock)
         {
-            if (_blocks.TryGetValue(offset, out var existing))
+            if (_blocks.Remove(offset, out var block))
             {
-                // Refresh the cached contents: the same offset can be written again with
-                // different data (e.g. a piece that failed verification and was re-downloaded).
-                // Keeping the old block here would serve stale/corrupt data on later reads.
-                data.CopyTo(existing.Data);
-                _lruList.Remove(existing.Node);
-                _lruList.AddLast(existing.Node);
-                CachePool.Return(buffer);
-                return;
+                _lruList.Remove(block.Node);
+                _currentBytes -= BlockSize;
+                CachePool.Return(block.Data);
             }
-
-            // Evict if needed
-            while (_currentBytes + BlockSize > _capacityBytes && _lruList.Count > 0)
-            {
-                EvictLRU();
-            }
-
-            if (_currentBytes + BlockSize > _capacityBytes)
-            {
-                // Still no room (capacity too small?)
-                CachePool.Return(buffer);
-                return;
-            }
-
-            var node = _lruList.AddLast(offset);
-            _blocks.Add(offset, new CachedBlock(buffer, node));
-            _currentBytes += BlockSize;
         }
     }
 

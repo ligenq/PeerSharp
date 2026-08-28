@@ -19,22 +19,22 @@ jobs:
         include:
           - os: ubuntu-latest
             lane: fast
-            filter: FullyQualifiedName!~PeerSharp.Tests.Integration&FullyQualifiedName!~PeerSharp.Tests.Concurrency&FullyQualifiedName!~PeerSharp.Tests.Robustness&FullyQualifiedName!~PeerSharp.Tests.Interop
+            filter: --filter-not-namespace PeerSharp.Tests.Integration --filter-not-namespace PeerSharp.Tests.Integration.Synthetic --filter-not-namespace PeerSharp.Tests.Concurrency --filter-not-namespace PeerSharp.Tests.Robustness --filter-not-namespace PeerSharp.Tests.Interop
           - os: windows-latest
             lane: fast
-            filter: FullyQualifiedName!~PeerSharp.Tests.Integration&FullyQualifiedName!~PeerSharp.Tests.Concurrency&FullyQualifiedName!~PeerSharp.Tests.Robustness&FullyQualifiedName!~PeerSharp.Tests.Interop
+            filter: --filter-not-namespace PeerSharp.Tests.Integration --filter-not-namespace PeerSharp.Tests.Integration.Synthetic --filter-not-namespace PeerSharp.Tests.Concurrency --filter-not-namespace PeerSharp.Tests.Robustness --filter-not-namespace PeerSharp.Tests.Interop
           - os: ubuntu-latest
             lane: integration
-            filter: FullyQualifiedName~PeerSharp.Tests.Integration
+            filter: --filter-namespace PeerSharp.Tests.Integration --filter-namespace PeerSharp.Tests.Integration.Synthetic
           - os: windows-latest
             lane: integration
-            filter: FullyQualifiedName~PeerSharp.Tests.Integration
+            filter: --filter-namespace PeerSharp.Tests.Integration --filter-namespace PeerSharp.Tests.Integration.Synthetic
           - os: ubuntu-latest
             lane: concurrency-robustness
-            filter: FullyQualifiedName~PeerSharp.Tests.Concurrency|FullyQualifiedName~PeerSharp.Tests.Robustness
+            filter: --filter-namespace PeerSharp.Tests.Concurrency --filter-namespace PeerSharp.Tests.Robustness
           - os: windows-latest
             lane: concurrency-robustness
-            filter: FullyQualifiedName~PeerSharp.Tests.Concurrency|FullyQualifiedName~PeerSharp.Tests.Robustness
+            filter: --filter-namespace PeerSharp.Tests.Concurrency --filter-namespace PeerSharp.Tests.Robustness
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -54,12 +54,13 @@ jobs:
 
       - name: Test ${{ matrix.lane }}
         run: >
-          dotnet test tests/PeerSharp.Tests/PeerSharp.Tests.csproj
+          dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj
           --no-build
           --configuration Release
-          --filter "${{ matrix.filter }}"
-          --logger "console;verbosity=minimal"
-          --logger "trx;LogFileName=core-${{ matrix.lane }}-${{ matrix.os }}.trx"
+          --
+          ${{ matrix.filter }}
+          --report-trx
+          --report-trx-filename core-${{ matrix.lane }}-${{ matrix.os }}.trx
           --results-directory TestResults
 
       - name: Upload test results
@@ -120,6 +121,30 @@ jobs:
           dotnet run --project benchmarks/PeerSharp.Benchmarks --configuration Release --no-build
           -- --filter "*" --job Dry
 
+  fuzz-harness-smoke:
+    # PRs do not run a fuzzer indefinitely. They do prove both entry points compile and replay the
+    # committed corpus so harnesses and seeds cannot silently rot between scheduled fuzzing runs.
+    name: Fuzz harnesses (seed replay)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore tests/PeerSharp.Fuzz/PeerSharp.Fuzz.csproj
+
+      - name: Build (warnings as errors)
+        run: dotnet build tests/PeerSharp.Fuzz/PeerSharp.Fuzz.csproj --no-restore --configuration Release -warnaserror
+
+      - name: Replay seed corpus
+        run: dotnet run --project tests/PeerSharp.Fuzz --configuration Release --no-build -- --self-test
+
   webtorrent-tests:
     name: WebTorrent (${{ matrix.os }})
     strategy:
@@ -145,11 +170,12 @@ jobs:
 
       - name: Test
         run: >
-          dotnet test tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj
+          dotnet test --project tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj
           --no-build
           --configuration Release
-          --logger "console;verbosity=minimal"
-          --logger "trx;LogFileName=webtorrent-${{ matrix.os }}.trx"
+          --
+          --report-trx
+          --report-trx-filename webtorrent-${{ matrix.os }}.trx
           --results-directory TestResults
 
       - name: Upload test results

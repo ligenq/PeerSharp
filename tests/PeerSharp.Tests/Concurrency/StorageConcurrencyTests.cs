@@ -1,9 +1,7 @@
-using Microsoft.Coyote;
-using Microsoft.Coyote.SystematicTesting;
-
+﻿
 namespace PeerSharp.Tests.Concurrency;
 
-[Collection("Coyote")]
+[Collection("Concurrency")]
 public class StorageConcurrencyTests
 {
     private readonly ITestOutputHelper _output;
@@ -13,23 +11,8 @@ public class StorageConcurrencyTests
         _output = output;
     }
 
-    private void RunCoyoteTest(Action test, uint iterations = 100)
-    {
-        var config = Configuration.Create()
-            .WithTestingIterations(iterations)
-            .WithMaxSchedulingSteps(1000);
-
-        using var engine = TestingEngine.Create(config, test);
-        engine.Run();
-
-        var report = engine.TestReport;
-        if (report.NumOfFoundBugs > 0)
-        {
-            _output.WriteLine($"Found {report.NumOfFoundBugs} bug(s)!");
-            _output.WriteLine(engine.GetReport());
-            Assert.Fail($"Coyote found {report.NumOfFoundBugs} concurrency bug(s). See test output for details.");
-        }
-    }
+    private void RunConcurrencyStress(Action scenario, uint iterations = 100)
+        => ConcurrencyStress.Run(scenario, iterations, _output);
 
     // Model of Storage file locking logic
     private class StorageLockModel
@@ -82,7 +65,7 @@ public class StorageConcurrencyTests
     [Fact]
     public void Storage_ConcurrentFileAccess_NoDeadlocks()
     {
-        RunCoyoteTest(() =>
+        RunConcurrencyStress(() =>
         {
             const int fileCount = 5;
             var model = new StorageLockModel(fileCount);

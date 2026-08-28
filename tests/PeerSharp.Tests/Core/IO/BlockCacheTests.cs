@@ -4,8 +4,49 @@ namespace PeerSharp.Tests.Core.IO;
 
 public class BlockCacheTests
 {
+    /// <summary>
+    /// Read-ahead has to cost one disk operation, not one per block.
+    /// </summary>
+    /// <remarks>
+    /// It used to issue a separate sixteen-kilobyte read per block, awaited one after another. That
+    /// is the same work moved earlier rather than amortised, and at the rates a seeding torrent
+    /// reaches it turns into tens of thousands of tiny asynchronous operations a second - which a
+    /// profile showed as thread-pool parking rather than as disk time. Making the window one
+    /// contiguous read took upload CPU from 5.2 seconds to 2.8 and raised throughput by a quarter, so
+    /// the count is the thing worth asserting.
+    /// </remarks>
+    [Fact]
+    public async Task ReadAhead_FillsItsWholeWindowWithOneRead()
+    {
+        const int blockSize = 16 * 1024;
+        var storage = new MockStorage(1024 * 1024);
+        var cache = new BlockCache(512 * 1024, readAheadBlocks: 8, readAheadEnabled: true, totalSize: 1024 * 1024);
+        cache.Initialize(storage);
+
+        byte[] buffer = new byte[blockSize];
+        await cache.ReadAsync(0, buffer, TestContext.Current.CancellationToken);
+
+        // The read itself, plus at most one more covering the whole read-ahead window. One read per
+        // block would be nine.
+        await TorrentTestUtility.WaitUntilAsync(() => storage.ReadCount >= 2, because: "read-ahead to run");
+        Assert.True(storage.ReadCount <= 2, $"expected the window in one read, saw {storage.ReadCount} reads");
+
+        // And the window must actually be cached afterwards, or "one read" was achieved by not
+        // reading anything.
+        int before = storage.ReadCount;
+        for (int block = 1; block < 8; block++)
+        {
+            await cache.ReadAsync(block * blockSize, buffer, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(before, storage.ReadCount);
+    }
+
     private class MockStorage : IStorage
     {
+        public Task MoveAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
         public int ReadCount { get; private set; }
         public int WriteCount { get; private set; }
         private readonly byte[] _data;
@@ -38,6 +79,8 @@ public class BlockCacheTests
         }
 
         public void Init(IReadOnlyList<FileSelection>? selection = null) { }
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
+
         public Task InitAsync(IReadOnlyList<FileSelection>? selection = null, CancellationToken ct = default)
         {
             return Task.CompletedTask;

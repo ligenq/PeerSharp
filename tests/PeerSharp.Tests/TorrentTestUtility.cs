@@ -153,6 +153,11 @@ internal static class TorrentTestUtility
 
     internal class MockAlertsManager : IAlertsManager
     {
+        public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
+
+        public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason) { }
+
+        public void ListenPortChangedAlert(int requestedPort, int actualPort, ListenTransport transport) { }
         public void MetadataAlert(AlertId id, ITorrent torrent) { }
         public void MetadataProgressAlert(ITorrent torrent, float progress, int receivedPieces, int totalPieces) { }
         public static void AddAlert(Alert alert) { }
@@ -338,12 +343,17 @@ internal static class TorrentTestUtility
     /// trackers are beside the point, but it means the tracker manager registers nothing at all. Pass
     /// one that returns a tracker when the test is about which trackers a torrent ends up with.
     /// </param>
+    /// <param name="resumeData">
+    /// Applied before the torrent initializes, exactly as the session manager does on startup. Pass
+    /// one to exercise what the torrent accepts or rejects from a resume file.
+    /// </param>
     public static Torrent CreateMinimal(
         TorrentFileMetadata? metadata = null,
         string? downloadPath = null,
         ITrackerFactory? trackerFactory = null,
         TimeProvider? timeProvider = null,
-        IAlertsManager? alerts = null)
+        IAlertsManager? alerts = null,
+        TorrentResumeData? resumeData = null)
     {
         metadata ??= new TorrentFileMetadata();
         if (metadata.Info.PieceSize == 0)
@@ -367,7 +377,8 @@ internal static class TorrentTestUtility
             new MockGeoIpService(),
             new MockFileHandleCache(),
             new MockConnectionGovernor(),
-            timeProvider ?? TimeProvider.System
+            timeProvider ?? TimeProvider.System,
+            resumeData: resumeData
         );
     }
 }

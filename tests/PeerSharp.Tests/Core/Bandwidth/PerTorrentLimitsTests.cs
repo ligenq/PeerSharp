@@ -73,6 +73,11 @@ public class PerTorrentLimitsTests
 
     private sealed class MockAlertsManager : IAlertsManager
     {
+        public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
+
+        public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason) { }
+
+        public void ListenPortChangedAlert(int requestedPort, int actualPort, ListenTransport transport) { }
         public void MetadataAlert(AlertId id, ITorrent torrent) { }
         public void MetadataProgressAlert(ITorrent torrent, float progress, int received, int total) { }
         public static void AddAlert(Alert alert) { }

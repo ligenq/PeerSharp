@@ -1,0 +1,67 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+  AFL_SKIP_CPUFREQ: 1
+  AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES: 1
+  AFL_NO_UI: 1
+
+jobs:
+  sharpfuzz:
+    name: SharpFuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [bencode, peer-message, torrent-metadata, dht-compact]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install AFL++
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes afl++
+
+      - name: Run bounded fuzz session
+        shell: bash
+        run: |
+          set +e
+          timeout --signal=INT --kill-after=30s 10m pwsh tests/PeerSharp.Fuzz/Run-Fuzz.ps1 -Target '${{ matrix.target }}'
+          status=$?
+          if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+            exit "$status"
+          fi
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sharpfuzz-${{ matrix.target }}-findings
+          path: artifacts/fuzz-findings
+          if-no-files-found: ignore
+
+      - name: Fail if AFL++ found a crash
+        shell: bash
+        run: |
+          crash="$(find artifacts/fuzz-findings -type f -path '*/crashes/id:*' -print -quit 2>/dev/null)"
+          if [ -n "$crash" ]; then
+            echo "AFL++ found a crash: $crash"
+            exit 1
+          fi

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Dht;
@@ -27,6 +27,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     // State
     private readonly SemaphoreSlim _stateLock = new(1, 1);
+    private readonly TorrentWebSeeds _webSeeds;
 
     private readonly ITimer _timer;
 
@@ -69,6 +70,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         Services = services;
         _logger = services.LoggerFactory.CreateLogger<Torrent>();
         Configuration = new TorrentConfiguration(this, services.Bandwidth);
+        _webSeeds = new TorrentWebSeeds(this);
         _fileSelectionManager = fileSelectionManager;
         _fileSelectionManager.SetObserver(this);
         TimeAdded = Services.TimeProvider.GetUtcNow();
@@ -94,7 +96,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             }
 
             long finished = (long)Math.Min(FinishedBytes, (ulong)long.MaxValue);
-            return Math.Max(0, InfoFile.Info.FullSize - finished);
+            return Math.Max(0, InfoFile.Info.ContentSize - finished);
         }
     }
 
@@ -155,8 +157,22 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public InfoHash HashV2 => InfoFile.Info.HashV2;
 
-    public bool HasMetadata => (InfoFile.Info.Pieces?.Count > 0 && InfoFile.Info.FullSize > 0)
-                                 || (InfoFile.Info.IsMerkle && InfoFile.Info.FullSize > 0);
+    /// <summary>
+    /// Whether this torrent knows its own layout. False for a magnet whose BEP 9 exchange has not
+    /// finished.
+    /// </summary>
+    /// <remarks>
+    /// The three ways a torrent can describe its pieces, and it needs any one of them. A v1 torrent
+    /// has the SHA-1 <c>pieces</c> string; a BEP 30 torrent has a merkle root; a v2 torrent has
+    /// neither and describes its pieces per file, in the file tree. Asking only the first two meant a
+    /// v2-only torrent was permanently "without metadata" - which no part of the download path
+    /// consulted, so it downloaded and verified perfectly and then could not report itself finished,
+    /// because <see cref="Finished"/> requires this. It sat at a hundred per cent, never announced
+    /// completion, and never let go of the peers that had served it.
+    /// </remarks>
+    public bool HasMetadata => InfoFile.Info.Files.Count > 0
+        || (InfoFile.Info.FullSize > 0
+            && ((InfoFile.Info.Pieces?.Count > 0) || InfoFile.Info.IsMerkle));
 
     public bool HasSameIdentity(ITorrent? other)
     {
@@ -219,11 +235,43 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
+    public int MaxConnections
+    {
+        get => Configuration.MaxConnections;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            Configuration.MaxConnections = value;
+        }
+    }
+
+    public int MaxUploadSlots
+    {
+        get => Configuration.MaxUploadSlots;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            Configuration.MaxUploadSlots = value;
+        }
+    }
+
     public bool QueueAutoStart { get => Configuration.QueueAutoStart; set => Configuration.QueueAutoStart = value; }
     public int QueuePriority { get => Configuration.QueuePriority; set => Configuration.QueuePriority = value; }
     public float? RatioLimit { get => Configuration.RatioLimit; set => Configuration.RatioLimit = value; }
     public TimeSpan? SeedTimeLimit { get => Configuration.SeedTimeLimit; set => Configuration.SeedTimeLimit = value; }
-    public bool SelectionFinished => _fileSelectionManager.IsSelectionFinished;
+    /// <summary>
+    /// Whether everything selected has been downloaded.
+    /// </summary>
+    /// <remarks>
+    /// False until the metadata says what "everything" is. Without it there are no pieces and no file
+    /// selection, so the underlying question answers itself with zero of zero and comes out true - so
+    /// a magnet reported its selection complete the moment it was added. That fired the
+    /// selection-finished callback before the file list existed, stopped the web seeds, and told
+    /// every peer in the BEP 21 handshake that this client wanted nothing, which libtorrent answers
+    /// by hanging up as soon as it has read it. HttpTracker already wrote the pairing out by hand;
+    /// this puts it where the other callers get it too.
+    /// </remarks>
+    public bool SelectionFinished => HasMetadata && _fileSelectionManager.IsSelectionFinished;
     public float SelectionProgress => _fileSelectionManager.CalculateSelectionProgress();
     public Settings Settings { get; }
     public bool Started => Interlocked.CompareExchange(ref _started, 0, 0) == 1;
@@ -265,10 +313,27 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public DateTimeOffset StateTimestamp => new(Interlocked.Read(ref _activityTimeTicks), TimeSpan.Zero);
     public IReadOnlyList<int> StreamableFileIndices => Streaming.StreamableFileIndices;
     public SuperSeedManager SuperSeedManager { get; private set; } = null!;
+
+    public bool SuperSeeding
+    {
+        get => Configuration.SuperSeeding;
+        set
+        {
+            Configuration.SuperSeeding = value;
+
+            // The manager is null until Initialize runs and is replaced when a magnet's metadata
+            // arrives, so the configuration is the authority and this only mirrors it.
+            if (SuperSeedManager is not null)
+            {
+                SuperSeedManager.Enabled = value;
+            }
+        }
+    }
     public DateTimeOffset TimeAdded { get; set; }
-    public long TotalSize => InfoFile.Info.FullSize;
+    public long TotalSize => InfoFile.Info.ContentSize;
     public TrackerManager TrackerManager { get; private set; } = null!;
     public ITrackers Trackers => TrackerManager;
+    public IWebSeeds WebSeeds => _webSeeds;
     public long UploadLimitBytesPerSecond { get => Configuration.UploadLimitBytesPerSecond; set => Configuration.UploadLimitBytesPerSecond = value; }
     public IUtpManager? UtpManager { get => Network.Utp; set => Network.Utp = value; }
 
@@ -353,6 +418,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     internal TorrentServices Services { get; }
     internal StreamingController Streaming { get; private set; } = null!;
     internal List<int>? StreamingPriorityPieces => Streaming?.PriorityPieces;
+
+    /// <summary>
+    /// Lets the owning engine serialize starts with its session pause transition. Torrents created
+    /// directly in unit tests, and transient metadata-fetch torrents, have no session coordinator.
+    /// </summary>
+    internal Func<Torrent, CancellationToken, Task>? SessionStartCoordinator { get; set; }
 
     internal long TotalDownloaded => FileTransferInternal?.Downloader.Downloaded ?? 0;
     internal long TotalUploaded => FileTransferInternal?.Uploader.Uploaded ?? 0;
@@ -517,6 +588,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             AddedTime = TimeAdded.ToUnixTimeSeconds(),
             DownloadPath = FilesInternal?.DownloadPath ?? Settings.Files.DefaultDownloadPath,
             Selection = [.. _fileSelectionManager.GetAllFileSelections()],
+            RenamedFiles = [.. LocalState.RenamedFiles],
             Info =
             {
                 Name = Name,
@@ -736,6 +808,232 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
+    /// <summary>
+    /// The renames, keyed by the internal file index Storage works in. Null when there are none, so
+    /// the common case costs no dictionary.
+    /// </summary>
+    internal IReadOnlyDictionary<int, string>? GetRenamedFileMap()
+    {
+        var renamed = LocalState.RenamedFiles;
+        if (renamed.Count == 0)
+        {
+            return null;
+        }
+
+        var map = new Dictionary<int, string>(renamed.Count);
+        foreach (var entry in renamed)
+        {
+            map[entry.Index] = entry.Path;
+        }
+
+        return map;
+    }
+
+    public IReadOnlyDictionary<int, string> GetRenamedFiles()
+    {
+        var result = new Dictionary<int, string>();
+        foreach (var entry in LocalState.RenamedFiles)
+        {
+            if (InfoFile.Info.TryMapInternalIndexToVisible(entry.Index, out int visibleIndex))
+            {
+                result[visibleIndex] = entry.Path;
+            }
+        }
+
+        return result;
+    }
+
+    public async Task RenameFileAsync(int fileIndex, string newPath, CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(newPath);
+
+        if (!HasMetadata)
+        {
+            throw new InvalidOperationException("Files cannot be renamed before the torrent's metadata is known");
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(fileIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(fileIndex, FileCount);
+
+        string normalized = newPath.Replace('\\', '/').Trim('/');
+        if (normalized.Length == 0 ||
+            Path.IsPathRooted(newPath) ||
+            normalized.Split('/').Any(segment => segment is "." or ".."))
+        {
+            throw new ArgumentException(
+                "A file name must be relative to the torrent's download path and may not walk outside it.",
+                nameof(newPath));
+        }
+
+        int internalIndex = InfoFile.Info.MapVisibleIndexToInternal(fileIndex);
+
+        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _disposal.ThrowIfDisposed(this);
+
+            if (Started)
+            {
+                throw new InvalidOperationException("Torrent must be stopped before renaming a file");
+            }
+
+            // An initialized Storage updates its live path while it carries the data across. An
+            // unopened one has only its construction-time rename snapshot and is rebuilt below.
+            bool rebuildStorage = FilesInternal is PieceWriter.Files files && !files.IsInitialized;
+            if (FilesInternal != null)
+            {
+                await FilesInternal.RenameFileAsync(internalIndex, normalized, cancellationToken).ConfigureAwait(false);
+            }
+
+            var renamed = LocalState.RenamedFiles;
+            int existing = renamed.FindIndex(r => r.Index == internalIndex);
+            if (existing >= 0)
+            {
+                renamed[existing].Path = normalized;
+            }
+            else
+            {
+                renamed.Add(new PieceWriter.TorrentStateData.RenamedFileData
+                {
+                    Index = internalIndex,
+                    Path = normalized
+                });
+            }
+
+            if (rebuildStorage && FilesInternal != null)
+            {
+                // An unopened Storage has no path table to update. Recreate just that case so its
+                // initial rename snapshot includes the state committed above. An initialized Storage
+                // updated its live path in RenameFileAsync and must not be replaced with an unopened
+                // instance, or a following MoveStorageAsync would have no files to move.
+                string downloadPath = FilesInternal.DownloadPath;
+                await FilesInternal.DisposeAsync().ConfigureAwait(false);
+                FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, downloadPath);
+            }
+
+            _logger.LogInformation("File {FileIndex} renamed to {NewPath}", fileIndex, normalized);
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
+    internal bool TryGetPiecePriority(int pieceIndex, out Priority priority)
+    {
+        var overrides = Configuration.PiecePriorities;
+        if (overrides.IsEmpty)
+        {
+            priority = default;
+            return false;
+        }
+
+        return overrides.TryGetValue(pieceIndex, out priority);
+    }
+
+    public void SetPiecePriority(int pieceIndex, Priority priority)
+    {
+        _disposal.ThrowIfDisposed(this);
+
+        if (!HasMetadata)
+        {
+            throw new InvalidOperationException("Piece priorities cannot be set before the torrent's metadata is known");
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(pieceIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(pieceIndex, PieceCount);
+
+        Configuration.PiecePriorities[pieceIndex] = priority;
+    }
+
+    public Priority GetPiecePriority(int pieceIndex)
+    {
+        _disposal.ThrowIfDisposed(this);
+
+        if (!HasMetadata)
+        {
+            throw new InvalidOperationException("Piece priorities cannot be read before the torrent's metadata is known");
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(pieceIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(pieceIndex, PieceCount);
+
+        if (TryGetPiecePriority(pieceIndex, out var overridden))
+        {
+            return overridden;
+        }
+
+        return InfoFile.Info.GetPiecePriority(pieceIndex, GetFileSelectionSnapshot());
+    }
+
+    public void ClearPiecePriorities()
+    {
+        _disposal.ThrowIfDisposed(this);
+        Configuration.PiecePriorities.Clear();
+    }
+
+    public async Task<byte[]> ReadPieceAsync(int pieceIndex, CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+
+        if (!HasMetadata)
+        {
+            throw new InvalidOperationException("Pieces cannot be read before the torrent's metadata is known");
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(pieceIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(pieceIndex, PieceCount);
+
+        if (!Pieces.HasPiece(pieceIndex))
+        {
+            throw new InvalidOperationException(
+                $"Piece {pieceIndex} has not been downloaded and verified yet.");
+        }
+
+        var files = FilesInternal ?? throw new InvalidOperationException(
+            "The torrent's storage is not open. Start the torrent before reading pieces from it.");
+
+        long offset = (long)pieceIndex * InfoFile.Info.PieceSize;
+        int length = (int)InfoFile.Info.GetPieceSize(pieceIndex);
+
+        return await files.ReadAsync(offset, length, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task MoveStorageAsync(string path, CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _disposal.ThrowIfDisposed(this);
+
+            if (Started)
+            {
+                throw new InvalidOperationException("Torrent must be stopped before moving its storage");
+            }
+
+            if (FilesInternal != null)
+            {
+                // Move first, then repoint. The other order would leave the data unreachable if the
+                // move failed, which is the situation this method exists to avoid.
+                await FilesInternal.MoveFilesAsync(path, cancellationToken).ConfigureAwait(false);
+                await FilesInternal.DisposeAsync().ConfigureAwait(false);
+            }
+
+            LocalState.DownloadPath = path;
+            FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, path);
+
+            _logger.LogInformation("Storage moved to: {Path}", path);
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
     public Task SetFilePriorityAsync(int fileIndex, Priority priority, CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
@@ -750,7 +1048,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return _fileSelectionManager.SetFileSelectionAsync(internalIndex, selection, cancellationToken);
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken = default)
+    public Task StartAsync(CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+        return SessionStartCoordinator?.Invoke(this, cancellationToken)
+            ?? StartCoreAsync(cancellationToken);
+    }
+
+    internal async Task StartCoreAsync(CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
 
@@ -821,15 +1126,16 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                     _logger.LogDebug("DHT disabled for private torrent {TorrentName}", Name);
                 }
 
-                if (Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
+                var webSeedUrls = _webSeeds.GetAll();
+                if (Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
                 {
-                    WebSeedManager ??= new WebSeedManager(this, InfoFile.WebSeedUrls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
+                    WebSeedManager ??= new WebSeedManager(this, webSeedUrls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
                     WebSeedManager.Start();
-                    _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", InfoFile.WebSeedUrls.Count);
+                    _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", webSeedUrls.Count);
                 }
-                else if (!Settings.Connection.EnableWebSeeds && InfoFile.WebSeedUrls.Count > 0)
+                else if (!Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
                 {
-                    _logger.LogInformation("Web seeds disabled; ignoring {UrlCount} URLs from torrent metadata", InfoFile.WebSeedUrls.Count);
+                    _logger.LogInformation("Web seeds disabled; ignoring {UrlCount} URLs", webSeedUrls.Count);
                 }
             }
             catch
@@ -1009,20 +1315,147 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return StopInternalAsync(false, cancellationToken);
     }
 
+    /// <summary>
+    /// The highest <see cref="TorrentStateData.Version"/> this build understands. Resume data
+    /// written by a newer version is discarded rather than half-read: the fields we recognise may
+    /// no longer mean what they did, and a bitfield interpreted under the wrong rules is worse than
+    /// no bitfield at all.
+    /// </summary>
+    private const uint SupportedResumeVersion = 1;
+
     internal void ApplyResumeData(TorrentResumeData resumeData)
     {
+        // Identity before anything else. The geometry checks below can only catch resume data from a
+        // torrent shaped differently to this one - two torrents of the same total size and piece size
+        // pass every one of them, and the bitfield would then be believed, advertised and served from
+        // whatever bytes happen to be on disk. An empty hash means "not recorded", which is what
+        // resume data hand-built by a caller looks like.
+        if (ResumeHashConflicts(resumeData.Hash))
+        {
+            _logger.LogWarning(
+                "Discarding resume data for {TorrentName}: it was saved for torrent {SavedHash}. The torrent starts from an empty bitfield instead.",
+                Name,
+                resumeData.Hash);
+            return;
+        }
+
+        TorrentStateData? state;
         try
         {
-            var state = JsonSerializer.Deserialize(resumeData.Data, PeerSharpJsonContext.Default.TorrentStateData);
-            if (state != null)
-            {
-                LocalState = state;
-            }
+            state = JsonSerializer.Deserialize(resumeData.Data, PeerSharpJsonContext.Default.TorrentStateData);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to apply resume data for {TorrentName}", Name);
+            _logger.LogError(ex, "Failed to parse resume data for {TorrentName}", Name);
+            return;
         }
+
+        if (state == null)
+        {
+            return;
+        }
+
+        if (!IsResumeDataUsable(state, out string? rejection))
+        {
+            // Starting from nothing costs a re-download. Adopting a bitfield that does not describe
+            // this torrent costs correctness: the engine would claim pieces it never verified and
+            // then serve them.
+            _logger.LogWarning(
+                "Discarding resume data for {TorrentName}: {Reason}. The torrent starts from an empty bitfield instead.",
+                Name,
+                rejection);
+            return;
+        }
+
+        LocalState = state;
+    }
+
+    /// <summary>
+    /// Whether a saved hash positively names a <em>different</em> torrent.
+    ///
+    /// <para>
+    /// Only a genuine conflict counts. An empty saved hash means the field was not recorded, and a
+    /// torrent with no hash of its own has nothing to compare against - answering "conflict" in
+    /// either case would reject resume data over missing information rather than over disagreement.
+    /// Either hash of a hybrid torrent identifies it, which is the rule
+    /// <see cref="HasSameIdentity"/> already applies: resume data saved before the other form was
+    /// known still describes the same content.
+    /// </para>
+    /// </summary>
+    private bool ResumeHashConflicts(InfoHash savedHash)
+    {
+        if (savedHash.IsEmpty || (Hash.IsEmpty && HashV2.IsEmpty))
+        {
+            return false;
+        }
+
+        bool matches = (!Hash.IsEmpty && Hash == savedHash)
+            || (!HashV2.IsEmpty && HashV2 == savedHash);
+
+        return !matches;
+    }
+
+    /// <summary>
+    /// Checks resume data against the torrent it claims to describe. The fields being compared here
+    /// were written on every save and read by nothing, which is the same as not having them.
+    /// </summary>
+    private bool IsResumeDataUsable(TorrentStateData state, out string? reason)
+    {
+        if (state.Version > SupportedResumeVersion)
+        {
+            reason = $"it was written by a newer version (format {state.Version}, this build understands {SupportedResumeVersion})";
+            return false;
+        }
+
+        // A magnet has no metadata to check against yet. Its resume data is validated when the
+        // metadata arrives and the torrent is rebuilt around it.
+        if (!HasMetadata)
+        {
+            reason = null;
+            return true;
+        }
+
+        var info = InfoFile.Info;
+
+        // Zero means "not recorded" rather than "recorded as zero": resume data from before a field
+        // was written should not be thrown away for lacking it.
+        if (state.Info.PieceSize != 0 && state.Info.PieceSize != info.PieceSize)
+        {
+            reason = $"it was saved for a {state.Info.PieceSize}-byte piece size, this torrent uses {info.PieceSize}";
+            return false;
+        }
+
+        if (state.Info.FullSize != 0 && state.Info.FullSize != info.FullSize)
+        {
+            reason = $"it was saved for {state.Info.FullSize} bytes of content, this torrent has {info.FullSize}";
+            return false;
+        }
+
+        if (state.Pieces.Length > 0)
+        {
+            int expectedPieces = info.PieceSize > 0
+                ? (int)((info.FullSize + info.PieceSize - 1) / info.PieceSize)
+                : 0;
+            int expectedBytes = (expectedPieces + 7) / 8;
+            if (state.Pieces.Length != expectedBytes)
+            {
+                reason = $"its bitfield is {state.Pieces.Length} bytes, but {expectedPieces} pieces need {expectedBytes}";
+                return false;
+            }
+        }
+
+        // A name change on its own cannot make the bitfield wrong, so it is worth saying out loud
+        // without refusing the data over it.
+        if (!string.IsNullOrEmpty(state.Info.Name) && state.Info.Name != info.Name)
+        {
+            _logger.LogInformation(
+                "Resume data for {TorrentName} was saved under the name '{SavedName}'",
+                Name,
+                state.Info.Name);
+        }
+
+        reason = null;
+        return true;
     }
 
     internal void FireErrorEvent(Exception exception)
@@ -1136,14 +1569,41 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         {
             _finishedEventFired = true;
             StartSeedingTimerIfNeeded();
+
+            // BEP 21: tell the peers we already have that we want nothing more. Only the opening
+            // handshake used to carry this, and that is sent while still downloading, so a peer we
+            // finished against was never told and kept a slot open for us indefinitely.
+            FireAndForgetUploadOnlyAnnounce();
+
             FireFinishedEvent(false);
             Alerts.TorrentAlert(AlertId.TorrentFinished, this);
         }
         else if (!_selectionFinishedEventFired && SelectionFinished)
         {
             _selectionFinishedEventFired = true;
+
+            // A partial seed wants nothing too. New connections would learn this from their opening
+            // handshake, but peers already connected while the selection was downloading need the
+            // same refresh as peers present when the whole torrent finishes.
+            FireAndForgetUploadOnlyAnnounce();
+
             FireFinishedEvent(true);
         }
+    }
+
+    private void FireAndForgetUploadOnlyAnnounce()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await PeersInternal.AnnounceUploadOnlyAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not announce upload_only after completion");
+            }
+        });
     }
 
     internal void UpdateSeedingTime(DateTimeOffset now)
@@ -1164,6 +1624,27 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private void ApplyLoadedState()
     {
+        // Second gate, and the one that catches magnets. ApplyResumeData runs before a magnet knows
+        // its geometry, so it has nothing to check the bitfield against and lets it through; this
+        // runs from Initialize, which is also what the metadata rebuild calls once the geometry is
+        // known. Without it, resume data that would have been rejected outright for a .torrent is
+        // silently trusted for the same content fetched by magnet.
+        if (HasMetadata && !IsResumeDataUsable(LocalState, out string? rejection))
+        {
+            _logger.LogWarning(
+                "Discarding resume state for {TorrentName} now that its metadata is known: {Reason}.",
+                Name,
+                rejection);
+
+            // Keep only what makes no claim about piece contents. The download path is where the
+            // files already are, and when the torrent was added is not a statement about them.
+            LocalState = new TorrentStateData
+            {
+                DownloadPath = LocalState.DownloadPath,
+                AddedTime = LocalState.AddedTime
+            };
+        }
+
         if (LocalState.Pieces?.Length > 0)
         {
             Pieces.FromBitfield(LocalState.Pieces);
@@ -1303,20 +1784,31 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     {
         if (Pieces == null || InfoFile.Info.PieceSize == 0)
         {
-            return (ulong)(FileTransferInternal?.GetUnfinishedBytes() ?? 0);
+            return 0;
         }
 
-        ulong completedBytes = (ulong)Pieces.ReceivedCount * InfoFile.Info.PieceSize;
-        if (Pieces.Count > 0 && Pieces.HasPiece(Pieces.Count - 1))
+        long contentSize = InfoFile.Info.ContentSize;
+        ulong completedBytes;
+        if (contentSize != InfoFile.Info.FullSize)
         {
-            long lastPieceSize = InfoFile.Info.FullSize % InfoFile.Info.PieceSize;
-            if (lastPieceSize > 0)
+            completedBytes = (ulong)Math.Max(0, Pieces.ReceivedWeight);
+        }
+        else
+        {
+            completedBytes = (ulong)Pieces.ReceivedCount * InfoFile.Info.PieceSize;
+            if (Pieces.Count > 0 && Pieces.HasPiece(Pieces.Count - 1))
             {
-                completedBytes -= (ulong)(InfoFile.Info.PieceSize - lastPieceSize);
+                long lastPieceSize = InfoFile.Info.FullSize % InfoFile.Info.PieceSize;
+                if (lastPieceSize > 0)
+                {
+                    completedBytes -= (ulong)(InfoFile.Info.PieceSize - lastPieceSize);
+                }
             }
         }
 
-        return completedBytes + (ulong)(FileTransferInternal?.GetUnfinishedBytes() ?? 0);
+        // FinishedBytes is documented as downloaded and verified. Active, unverified blocks belong
+        // in Progress, not in the tracker-facing completed-byte count.
+        return Math.Min(completedBytes, (ulong)Math.Max(0, contentSize));
     }
 
     private void Initialize()
@@ -1336,10 +1828,16 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             piecesCount = (int)((InfoFile.Info.FullSize + InfoFile.Info.PieceSize - 1) / InfoFile.Info.PieceSize);
         }
 
-        Pieces = new PiecesProgress(piecesCount);
+        long contentSize = InfoFile.Info.ContentSize;
+        Pieces = contentSize == InfoFile.Info.FullSize
+            ? new PiecesProgress(piecesCount)
+            : new PiecesProgress(piecesCount, InfoFile.Info.GetPieceContentSize, contentSize);
         FileTransferInternal = new FileTransfer(this, Services.TimeProvider, Services.LoggerFactory);
         _fileSelectionManager.SetBytesProvider(FileTransferInternal);
-        SuperSeedManager = new SuperSeedManager(this, Services.LoggerFactory.CreateLogger<SuperSeedManager>());
+        SuperSeedManager = new SuperSeedManager(this, Services.LoggerFactory.CreateLogger<SuperSeedManager>())
+        {
+            Enabled = Configuration.SuperSeeding
+        };
 
         // BEP 30: Initialize Merkle tree for Merkle hash torrents
         if (InfoFile.Info.IsMerkle && InfoFile.Info.MerkleRootHash != null)
@@ -1462,9 +1960,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                     disposing,
                     throwOnFailure: recoveringFailedStart && !disposing,
                     cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                if (WebSeedManager != null)
+                if (WebSeedManager is { } webSeeds)
                 {
-                    await WebSeedManager.DisposeAsync().ConfigureAwait(false);
+                    // A disposed manager cannot own the next start: restarting it would create a
+                    // worker whose later DisposeAsync is a no-op because its disposal flag is already
+                    // set. Clear it so StartAsync rebuilds from the durable effective URL list.
+                    WebSeedManager = null;
+                    await webSeeds.DisposeAsync().ConfigureAwait(false);
                 }
                 if (FileTransferInternal != null)
                 {

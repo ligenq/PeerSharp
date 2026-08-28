@@ -16,6 +16,25 @@ internal sealed class DhtExternalIpVoteTracker
         _requiredVotes = requiredVotes;
     }
 
+    /// <summary>
+    /// The external address once enough independent sources agree on it, otherwise null.
+    /// </summary>
+    /// <remarks>
+    /// Held back until the votes are in, deliberately. The first report is one stranger's opinion of
+    /// where we are, and callers use this to derive values that decide which peers to keep - so a
+    /// single spoofed report should not move them.
+    /// </remarks>
+    public IPAddress? ConfirmedAddress
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _votes >= _requiredVotes ? _externalIp : null;
+            }
+        }
+    }
+
     public DhtExternalIpVoteResult ProcessReport(ReadOnlySpan<byte> ipBytes)
     {
         return ProcessReport(TryParseReport(ipBytes));

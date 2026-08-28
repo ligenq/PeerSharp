@@ -119,20 +119,42 @@ public class UtMetadataTests
     }
 
     [Fact]
-    public void SendRequest_WithLocalIdOnly_SendsMessageUsingLocalId()
+    public void SendRequest_WithLocalIdOnly_SendsNothing()
     {
-        // Arrange
+        // BEP 10 numbers extensions per receiver: the id in an outgoing extended message is the one
+        // the peer chose for itself. A peer that never advertised ut_metadata has given us no id to
+        // address, and this client's own numbering means nothing on the wire - addressing a message
+        // with it delivers to whatever extension that peer happens to have put at that number.
         var mockPeer = new MockPeerCommunication();
         var utMetadata = new UtMetadata(mockPeer);
         utMetadata.SetLocalMessageId(9);
 
-        // Act
         utMetadata.SendRequest(3);
 
-        // Assert
-        Assert.Single(mockPeer.SentMessages);
-        var msg = mockPeer.SentMessages[0];
-        Assert.Equal(9, msg.Data[0]);
+        Assert.Empty(mockPeer.SentMessages);
+    }
+
+    [Fact]
+    public void SendRequest_SendsExactlyOnce_UnderThePeersId()
+    {
+        // It used to send a second copy under the local id whenever the two differed, as a fallback
+        // "for peers that ignore our extension mapping". PeerSharp offers ut_metadata as 1 and
+        // libtorrent offers it as 2, so every request also arrived at libtorrent's extension 1 as
+        // nonsense - and libtorrent disconnects when none of its extensions claims an extended
+        // message. Two PeerSharp instances agreed on 1, so the duplicate was never sent between them
+        // and nothing here noticed.
+        var mockPeer = new MockPeerCommunication();
+        var utMetadata = new UtMetadata(mockPeer);
+        utMetadata.SetLocalMessageId(1);
+        var handshake = new ExtensionHandshake();
+        handshake.MessageIds["ut_metadata"] = 2;
+        handshake.MetadataSize = 1024;
+        utMetadata.Init(handshake);
+
+        utMetadata.SendRequest(0);
+
+        var msg = Assert.Single(mockPeer.SentMessages);
+        Assert.Equal(2, msg.Data[0]);
     }
 
     [Fact]
@@ -180,6 +202,30 @@ public class UtMetadataTests
 
         // Assert - should not send anything since no message ID
         Assert.Empty(mockPeer.SentMessages);
+    }
+
+    [Fact]
+    public void Init_OmissionPreservesButZeroDisablesTheAdvertisedId()
+    {
+        var mockPeer = new MockPeerCommunication();
+        var utMetadata = new UtMetadata(mockPeer);
+        var enabled = new ExtensionHandshake();
+        enabled.MessageIds[UtMetadata.Name] = 7;
+        utMetadata.Init(enabled);
+
+        // BEP 10 makes subsequent m dictionaries additive: omission means no change.
+        utMetadata.Init(new ExtensionHandshake());
+        utMetadata.SendRequest(0);
+        Assert.Equal(7, Assert.Single(mockPeer.SentMessages).Data[0]);
+
+        // An explicit zero is the change that disables the extension.
+        var disabled = new ExtensionHandshake();
+        disabled.MessageIds[UtMetadata.Name] = 0;
+        utMetadata.Init(disabled);
+        utMetadata.SendRequest(1);
+
+        Assert.Single(mockPeer.SentMessages);
+        Assert.Null(utMetadata.RemoteMessageId);
     }
 
     [Fact]
