@@ -314,15 +314,21 @@ internal static class ProtocolConstants
     public const string ClientId = "PS";
 
     /// <summary>
-    /// Client version for BEP 20 peer ID.
-    /// Format: XXYY where XX = major, YY = minor (e.g., "0100" = 1.0.0)
+    /// Client version for the BEP 20 peer ID and the HTTP user agent.
     /// </summary>
-    public const string ClientVersion = "0100";
+    /// <remarks>
+    /// Format: XXYY, two digits of major and two of minor, so 4.0 is "0400". This is what every peer,
+    /// tracker and web seed sees, and it is the one version string that is not derived from the
+    /// package - it sat at "0100" through three major releases because nothing checked.
+    /// <c>ProtocolVersionTests</c> now compares it against the assembly version, so bumping one
+    /// without the other fails the build's tests rather than shipping.
+    /// </remarks>
+    public const string ClientVersion = "0400";
 
     /// <summary>
     /// Generates a BEP 20 compliant peer ID using Azureus-style format.
-    /// Format: -XX0000-xxxxxxxxxxxx (20 bytes total)
-    /// - First 8 bytes: "-MT0100-" (client identifier and version)
+    /// Format: -XXYYYY-xxxxxxxxxxxx (20 bytes total)
+    /// - First 8 bytes: "-PS0400-" (client identifier and version)
     /// - Last 12 bytes: Random bytes for uniqueness
     /// </summary>
     public static byte[] GeneratePeerId()
@@ -330,7 +336,7 @@ internal static class ProtocolConstants
         byte[] peerId = new byte[20];
 
         // Azureus-style format: -XXYYYY- where XX is client ID, YYYY is version
-        // Example: -PS0100- for PeerSharp version 1.0.0
+        // Example: -PS0400- for PeerSharp 4.0
         peerId[0] = (byte)'-';
         peerId[1] = (byte)ClientId[0];
         peerId[2] = (byte)ClientId[1];

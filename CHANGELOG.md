@@ -3,9 +3,32 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
-## Unreleased
+## 4.0.0 — 2026-08-28
 
 ### Fixed
+
+- **A peer that disabled an extension was still addressed on it.** BEP 10 reserves extension id zero
+  for the handshake and defines an advertised zero as "I do not speak this", but PeerSharp stored the
+  number and used it, so a peer that disabled `ut_metadata` received metadata requests addressed to
+  id zero - which it reads as a handshake. Ids outside a byte were likewise stored and later narrowed,
+  arriving as whatever extension they wrapped to. Both are now rejected when the handshake is read.
+- **The metadata download never forgot a peer that left.** `PeerDisconnected` existed and was called
+  from nowhere, so a departed peer stayed on the active list: requests kept being addressed to a
+  closed connection, and the recovery that restarts exploration only runs when no peers remain never
+  ran. A magnet whose only source disconnected could not resolve from any peer that arrived later.
+- **`SelectionFinished`, `Progress` and `FinishedSelectedBytes` were wrong after a recheck.** They
+  read counters maintained one verified piece at a time, and a recheck fills the piece map directly
+  without telling them, so a torrent holding every piece reported its selection unfinished
+  indefinitely. The counters now rebuild themselves when the piece map has moved behind their back,
+  including when it changes without changing size.
+- **A complete seed never advertised BEP 21 `upload_only`.** It was only ever sent in the opening
+  handshake, which happens while still downloading, so a peer connected before completion was never
+  told the download had stopped. The handshake is re-sent when a torrent finishes, and when a partial
+  seed finishes the files it selected.
+- **Connections that neither side could use were held for two minutes.** Two seeds have nothing to
+  exchange, but nothing asked, so the connection sat until the idle timeout reaped it - and a seed in
+  a busy swarm fills with them, unable to accept the leechers it exists to serve. They are now closed
+  by the periodic health check, following libtorrent's `disconnect_if_redundant`.
 
 - **A v2 download wrote every file after the first to the wrong place.** BEP 52 starts each file on a
   piece boundary, so a v2 torrent's piece space is larger than the sum of its files by that padding.
@@ -129,6 +152,14 @@ written without matching on message strings.
   called `Internals`.
 - **`TorrentException` now derives from `PeerSharpException`** rather than `Exception`. Existing
   `catch (TorrentException)` blocks are unaffected.
+- **A proxy that cannot carry UDP now refuses it rather than sending it directly.** Only SOCKS5 can
+  tunnel UDP. With any other proxy configured for the traffic in question, PeerSharp used to fall
+  through to an ordinary socket, so tracker and peer traffic went through the proxy while the DHT
+  announced the real address - the leak a proxy is bought to prevent. The shared UDP listener and UDP
+  trackers now refuse instead, which **throws at startup** for a configuration that previously ran:
+  an HTTP proxy with DHT or uTP enabled. Use a SOCKS5 proxy, turn off DHT and uTP, or set
+  `ProxySettings.ProxyPeers` to false to send peer traffic directly on purpose. libtorrent refuses
+  the same way, per packet, in `udp_socket::send`.
 
 Deliberately unchanged: `ArgumentException` and its relatives, `InvalidOperationException` for an
 operation attempted in the wrong state, and `OperationCanceledException`. Those say the calling code
