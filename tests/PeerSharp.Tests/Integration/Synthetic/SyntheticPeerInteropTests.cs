@@ -318,29 +318,24 @@ public class SyntheticPeerInteropTests : IDisposable
         // Supplied once, and never again - which is the condition the defect needed.
         engine.OnPeersFound(torrent.Hash, [peer.EndPoint]);
 
-        var first = await peer.WaitForConnectionAsync(0, TimeSpan.FromSeconds(30), cancellationToken);
-
-        Assert.False(
-            first.StartedWithPlaintextHandshake,
-            "In Allow mode a peer we know nothing about should be offered encryption first, so this test is " +
-            "no longer exercising the fallback it was written for.");
-
-        // What matters is that plaintext is offered at all without the peer being supplied again, not
-        // that it is exactly the second socket. This peer refuses every attempt, and MaxFastReconnects
-        // is two, so the engine works through encryption, plaintext and encryption again - and which of
-        // those the listener accepts first is not something a loaded machine guarantees. Asserting the
-        // index failed once in CI and could not be reproduced in seven runs here, including under full
-        // suite load, so the assertion now says what the alternation is for.
-        bool plaintextOffered = await SyntheticPeer.WaitForAsync(
-            () => peer.Connections.Any(static c => c.StartedWithPlaintextHandshake),
+        // Both halves of the alternation, and neither tied to a position. This peer refuses every
+        // attempt, so the engine works through encryption, plaintext and encryption again -
+        // MaxFastReconnects is two - and the claim is that both kinds were offered off one supply of
+        // the address. Which socket the listener happens to accept first is not something a loaded
+        // machine guarantees: asserting index 1 failed in CI once, and asserting index 0 failed again
+        // after that, neither reproducible here in seven runs including under full suite load. An
+        // ordering this test never cared about should not be able to fail it.
+        bool bothOffered = await SyntheticPeer.WaitForAsync(
+            () => peer.Connections.Any(static c => !c.StartedWithPlaintextHandshake)
+                && peer.Connections.Any(static c => c.StartedWithPlaintextHandshake),
             TimeSpan.FromSeconds(30),
             cancellationToken);
 
         Assert.True(
-            plaintextOffered,
-            "The peer was redialled but never offered plaintext, so one that cannot speak MSE is never " +
-            "reached at all. The point of alternating is that a later attempt differs from the first. " +
-            $"Attempts seen: [{Describe(peer)}]");
+            bothOffered,
+            "A peer that hangs up mid-handshake should be offered encryption and, on a later attempt, " +
+            "plaintext - all from one supply of its address. Without both, a peer that cannot speak MSE " +
+            $"is never reached at all. Attempts seen: [{Describe(peer)}]");
     }
 
     /// <summary>Renders what was offered on each dial, for an assertion message worth reading.</summary>
