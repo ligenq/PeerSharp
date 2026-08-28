@@ -25,7 +25,7 @@ PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 - **Protocol Encryption:** MSE (Message Stream Encryption) with configurable enforcement modes.
 - **NAT Traversal:** UPnP, NAT-PMP, and Holepunch (BEP 55) for connectivity behind NATs.
 - **Bandwidth Control:** Per-torrent and global upload/download/disk I/O rate limiting.
-- **Proxy Support:** SOCKS5 and HTTP proxy support with authentication.
+- **Proxy Support:** SOCKS5 and HTTP proxy support with authentication. Only SOCKS5 can carry UDP, so a configured HTTP proxy makes DHT and uTP refuse to start rather than send around it.
 - **IP Blocklist & GeoIP:** Block peers by IP range and label connected peers by country.
 - **One Error Model:** Everything the library reports as its own failure derives from `PeerSharpException`, so a malformed torrent, a refused tracker and an unwritable disk are told apart by type rather than by message.
 - **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.

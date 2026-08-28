@@ -123,3 +123,16 @@ format real clients would ignore.
 - `KeepAliveTests` — pins the ordering between the protocol keepalive interval, the peer idle policy
   and the uTP inactivity timeout, rather than their literal values, so no layer can start giving up
   before the one above it.
+- `SyntheticPeer*Tests` — a peer written for the tests that shares no code with the engine, including
+  its own bencode. It exists because a conformant client cannot test the half of interop that matters
+  most: libtorrent will never assign an extension an awkward id to see whether we route by it, send a
+  bitfield of the wrong length, or hang up mid-handshake on request. Frames are kept as bytes, so the
+  assertions run on what crossed the socket rather than on the engine's reading of it. Three interop
+  defects found against a real libtorrent are pinned here, each confirmed to fail when the fix is
+  removed.
+- `LibtorrentOracleTests` — the same assertions, over the same synthetic peer, with libtorrent in
+  PeerSharp's place. The synthetic peer is an independent opinion but not necessarily a correct one,
+  and holding the engine to an invented standard is the original failure moved up one level. A
+  reference implementation passing them is evidence they describe conformant behaviour; one failing
+  would be a finding about these tests. Opt-in: `PEERSHARP_INTEROP=1` and a `client_test` built by
+  the end-to-end harness.

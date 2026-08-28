@@ -1145,7 +1145,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (Settings.PeerId.All(b => b == 0))
         {
             // BEP 20: Generate peer ID using Azureus-style format
-            // Format: -MT0100-xxxxxxxxxxxx (20 bytes)
+            // Format: -PS0400-xxxxxxxxxxxx (20 bytes)
             var peerId = ProtocolConstants.GeneratePeerId();
             Array.Copy(peerId, Settings.PeerId, 20);
             // NOTE: Client application is responsible for persisting Settings if it wants to keep PeerID
