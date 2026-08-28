@@ -1,4 +1,4 @@
-# PeerSharp versus libtorrent end-to-end benchmarks
+# End-to-end measurements against libtorrent
 
 This harness compares the two engines against the same deterministic peer implementation. It builds
 the exact libtorrent Git checkout, generates one shared torrent and payload, starts one engine at a
@@ -7,6 +7,26 @@ time, and drives both with libtorrent's `connection_tester` over loopback.
 It is deliberately separate from BenchmarkDotNet. Microbenchmarks answer whether one method got
 faster; this harness measures the behavior a client experiences: transfer rate, engine CPU time,
 working set, private bytes and disk I/O over a complete transfer.
+
+## What the numbers in here are, and are not
+
+They are measurements taken on one machine, over loopback, by a harness that is young and has already
+been wrong more than once. Reading them as a verdict on either engine would be a mistake, and the
+mistakes so far are the reason to say so rather than a hypothetical:
+
+- A churn sweep was reported with its units inverted, because `connection_tester`'s own help calls a
+  period a rate. The alarming figure that produced was a stress test two orders of magnitude past any
+  real swarm, and the same run read the other way round at realistic settings.
+- Dual mode's rate was measured over a window that included a connection-lifecycle bug, and still
+  understates throughput by the health-check interval.
+- A completion gate had to be added because trials were being recorded as measurements when the
+  transfer had not finished, and then relaxed twice when it failed runs for reasons that were the
+  tester's rather than either engine's.
+
+Every one of those looked like a result before it was understood. BitTorrent has a lot of interacting
+parts, and this harness keeps finding that its own numbers need a second look, so treat anything here
+as a lead worth investigating rather than a claim worth repeating. Where a figure is quoted elsewhere
+in the repository it is quoted with the conditions it was taken under, and it should stay that way.
 
 ## Why `connection_tester` is shared
 
