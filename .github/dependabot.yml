@@ -1,0 +1,39 @@
+version: 2
+
+updates:
+  - package-ecosystem: nuget
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 8
+    commit-message:
+      prefix: "Update"
+    groups:
+      microsoft-extensions:
+        patterns:
+          - "Microsoft.Extensions.*"
+      testing:
+        patterns:
+          - "xunit*"
+          - "Microsoft.NET.Test.Sdk"
+          - "Microsoft.Testing.Extensions.*"
+          - "Microsoft.Extensions.TimeProvider.Testing"
+          - "coverlet*"
+          - "CsCheck"
+      analyzers:
+        patterns:
+          - "Microsoft.CodeAnalysis.*"
+          - "SonarAnalyzer.*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "Update"
+    groups:
+      actions:
+        patterns:
+          - "*"

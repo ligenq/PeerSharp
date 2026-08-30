@@ -3,7 +3,7 @@ using RtcForge;
 
 namespace PeerSharp.WebTorrent.Peers;
 
-internal sealed class PendingPeer
+internal sealed class PendingPeer : IDisposable
 {
     public PendingPeer(string offerId, IWebRtcConnection connection, IWebRtcDataChannel? channel, bool initiator, TrackerRuntime runtime, DateTimeOffset expiresAt)
     {
@@ -47,5 +47,9 @@ internal sealed class PendingPeer
         }
     }
 
-    public void DisposeLifetime() => _lifetimeCts.Dispose();
+    public void Dispose()
+    {
+        _lifetimeCts.Dispose();
+        GC.SuppressFinalize(this);
+    }
 }

@@ -3100,14 +3100,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // Log every 2 seconds, or immediately on speed drop
         if (isSpeedDrop || (now - _lastSpeedLog).TotalSeconds >= 2)
         {
-            string dlMbps = (totalDownloadSpeed * 8.0 / 1_000_000).ToString("F1");
-            string ulMbps = (totalUploadSpeed * 8.0 / 1_000_000).ToString("F1");
-            string peakMbps = (_peakSpeed * 8.0 / 1_000_000).ToString("F1");
+            string dlMbps = (totalDownloadSpeed * 8.0 / 1_000_000).ToString("F1", CultureInfo.InvariantCulture);
+            string ulMbps = (totalUploadSpeed * 8.0 / 1_000_000).ToString("F1", CultureInfo.InvariantCulture);
+            string peakMbps = (_peakSpeed * 8.0 / 1_000_000).ToString("F1", CultureInfo.InvariantCulture);
 
             if (isSpeedDrop)
             {
-                string lastMbps = (_lastAggregateSpeed * 8.0 / 1_000_000).ToString("F1");
-                string fastestMbps = (fastestSpeed * 8.0 / 1_000_000).ToString("F1");
+                string lastMbps = (_lastAggregateSpeed * 8.0 / 1_000_000).ToString("F1", CultureInfo.InvariantCulture);
+                string fastestMbps = (fastestSpeed * 8.0 / 1_000_000).ToString("F1", CultureInfo.InvariantCulture);
                 _logger.LogDebug("SPEED DROP DETECTED: {LastMbps}Mbps -> {DlMbps}Mbps ({Percent}% of previous), unchoked={Unchoked}, fastPeers={FastPeers}, fastest={FastestPeer}@{FastestMbps}Mbps",
                     lastMbps, dlMbps, totalDownloadSpeed * 100 / _lastAggregateSpeed, unchokedCount, fastPeerCount, fastestPeer?.Name, fastestMbps);
             }

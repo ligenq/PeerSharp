@@ -9,6 +9,6 @@ internal class BNumber : IBNode
 
     public override string ToString()
     {
-        return Value.ToString();
+        return Value.ToString(CultureInfo.InvariantCulture);
     }
 }

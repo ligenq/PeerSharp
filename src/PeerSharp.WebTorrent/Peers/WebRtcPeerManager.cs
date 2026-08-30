@@ -413,7 +413,7 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
         }
         finally
         {
-            pending.DisposeLifetime();
+            pending.Dispose();
         }
     }
 

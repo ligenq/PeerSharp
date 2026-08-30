@@ -28,9 +28,10 @@ public class TrackerManagerTests
         }
 
         public void Announce(InfoHash infoHash, int port) { }
-        public int FindPeers(InfoHash infoHash) {
-    return 0;
-    }
+        public int FindPeers(InfoHash infoHash)
+        {
+            return 0;
+        }
         public void Ping(IPEndPoint ep) { }
         public void ScrapeInfoHash(InfoHash infoHash) { }
         public void SetCallback(IDhtCallback callback) { }

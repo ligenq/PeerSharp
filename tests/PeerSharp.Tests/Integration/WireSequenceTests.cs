@@ -39,10 +39,22 @@ public class WireSequenceTests : IDisposable
     /// <summary>Message ids Transmission's is_message_length_correct accepts; anything else kills the connection.</summary>
     private static readonly Dictionary<byte, string> KnownIds = new()
     {
-        [0] = "choke", [1] = "unchoke", [2] = "interested", [3] = "not-interested",
-        [4] = "have", [5] = "bitfield", [6] = "request", [7] = "piece", [8] = "cancel",
-        [9] = "port", [13] = "suggest", [14] = "have-all", [15] = "have-none",
-        [16] = "reject", [17] = "allowed-fast", [20] = "ltep"
+        [0] = "choke",
+        [1] = "unchoke",
+        [2] = "interested",
+        [3] = "not-interested",
+        [4] = "have",
+        [5] = "bitfield",
+        [6] = "request",
+        [7] = "piece",
+        [8] = "cancel",
+        [9] = "port",
+        [13] = "suggest",
+        [14] = "have-all",
+        [15] = "have-none",
+        [16] = "reject",
+        [17] = "allowed-fast",
+        [20] = "ltep"
     };
 
     [Fact(Timeout = 90000)]

@@ -3,15 +3,21 @@
 # S3267: Loops should be simplified with "LINQ" expressions
 dotnet_diagnostic.S3267.severity = none
 
-# CA1873: "argument may be evaluated even when logging is disabled" - would require wrapping
-# ~60 log calls in IsEnabled guards or migrating to LoggerMessage source generators for a
-# micro-optimization; most flagged args are cheap and on Debug-level paths. Revisit if
-# profiling ever shows logging overhead.
-dotnet_diagnostic.CA1873.severity = none
+# Logging and concrete-type recommendations are useful profiling prompts, but enforcing them across
+# every low-frequency diagnostic path and deliberate abstraction would trade clarity for speculative
+# micro-optimizations. They remain visible in editors without blocking a build.
+dotnet_diagnostic.CA1848.severity = suggestion
+dotnet_diagnostic.CA1873.severity = suggestion
 
 # CA1859: "use concrete types for better performance" - interface-typed fields and returns
 # are deliberate here for dependency injection and testability.
-dotnet_diagnostic.CA1859.severity = none
+dotnet_diagnostic.CA1859.severity = suggestion
+dotnet_diagnostic.CA1863.severity = suggestion
+
+# Explicit zero/default initialization documents lifecycle and configuration state throughout this
+# engine (especially AtomicDisposal fields). Removing it is a cosmetic optimization with no runtime
+# benefit, so keep the diagnostic as editor guidance rather than a merge blocker.
+dotnet_diagnostic.CA1805.severity = suggestion
 
 # IDE0290: the codebase uses classic constructors, not primary constructors.
 csharp_style_prefer_primary_constructors = false
@@ -21,6 +27,11 @@ csharp_style_prefer_primary_constructors = false
 # allowed-fast set (BEP 6), Merkle torrents (BEP 30), and the scrape bloom filter (BEP 33).
 # It never protects sensitive data here; SHA-256 is used where v2 (BEP 52) specifies it.
 dotnet_diagnostic.S4790.severity = none
+
+# CA5350 is the SDK equivalent of S4790. Every SHA-1 operation in this repository implements a
+# BitTorrent protocol primitive (v1 info/piece hashes, DHT, MSE, BEP 6, BEP 30 or BEP 33), not a
+# password, signature, certificate or integrity choice made by this library.
+dotnet_diagnostic.CA5350.severity = none
 
 # xUnit1051: "use TestContext.Current.CancellationToken" - responsiveness-to-cancellation
 # nicety for xUnit v3; not worth the churn across the existing suites.
@@ -41,26 +52,26 @@ dotnet_diagnostic.S5332.severity = none
 
 [*.cs]
 
-# Naming: private static fields - CamelCase, no prefix
-dotnet_naming_rule.private_static_fields_should_be_camel_case.symbols = private_static_fields
-dotnet_naming_rule.private_static_fields_should_be_camel_case.style = camel_case_style
-dotnet_naming_rule.private_static_fields_should_be_camel_case.severity = warning
+# Naming: private static fields - PascalCase, no prefix
+dotnet_naming_rule.private_static_fields_should_be_pascal_case.symbols = private_static_fields
+dotnet_naming_rule.private_static_fields_should_be_pascal_case.style = pascal_case_style
+dotnet_naming_rule.private_static_fields_should_be_pascal_case.severity = warning
 
 dotnet_naming_symbols.private_static_fields.applicable_kinds = field
 dotnet_naming_symbols.private_static_fields.applicable_accessibilities = private
 dotnet_naming_symbols.private_static_fields.required_modifiers = static
 
-# Naming: private const fields - CamelCase, no prefix
-dotnet_naming_rule.private_const_fields_should_be_camel_case.symbols = private_const_fields
-dotnet_naming_rule.private_const_fields_should_be_camel_case.style = camel_case_style
-dotnet_naming_rule.private_const_fields_should_be_camel_case.severity = warning
+# Naming: private const fields - PascalCase, no prefix
+dotnet_naming_rule.private_const_fields_should_be_pascal_case.symbols = private_const_fields
+dotnet_naming_rule.private_const_fields_should_be_pascal_case.style = pascal_case_style
+dotnet_naming_rule.private_const_fields_should_be_pascal_case.severity = warning
 
 dotnet_naming_symbols.private_const_fields.applicable_kinds = field
 dotnet_naming_symbols.private_const_fields.applicable_accessibilities = private
 dotnet_naming_symbols.private_const_fields.required_modifiers = const
 
-# Shared style: CamelCase with no prefix
-dotnet_naming_style.camel_case_style.capitalization = pascal_case
+# Shared style: PascalCase with no prefix
+dotnet_naming_style.pascal_case_style.capitalization = pascal_case
 
 # xUnit1069: a test with a Timeout should observe TestContext.Current.CancellationToken, so the
 # timeout can actually stop the work rather than just failing the verdict while it runs on.
@@ -72,3 +83,78 @@ dotnet_naming_style.camel_case_style.capitalization = pascal_case
 # blanket rewrite of test bodies is how a suite keeps compiling while quietly asserting less. New
 # tests should follow the rule; the backlog is tracked in FUTURE_IMPROVEMENTS.md.
 dotnet_diagnostic.xUnit1069.severity = suggestion
+
+# Tests are executable specifications rather than the shipped library surface. Keep compiler,
+# nullable, security and concurrency diagnostics strict, while leaving API-design, test-fixture
+# lifetime, cancellation plumbing, culture and micro-optimization findings as editor guidance.
+# Production projects remain fully governed by latest-Recommended.
+[tests/**/*.cs]
+dotnet_diagnostic.CA1001.severity = suggestion
+dotnet_diagnostic.CA1068.severity = suggestion
+dotnet_diagnostic.CA1304.severity = suggestion
+dotnet_diagnostic.CA1305.severity = suggestion
+dotnet_diagnostic.CA1310.severity = suggestion
+dotnet_diagnostic.CA1311.severity = suggestion
+dotnet_diagnostic.CA1507.severity = suggestion
+dotnet_diagnostic.CA1707.severity = none
+dotnet_diagnostic.CA1711.severity = suggestion
+dotnet_diagnostic.CA1806.severity = suggestion
+dotnet_diagnostic.CA1816.severity = suggestion
+dotnet_diagnostic.CA1826.severity = suggestion
+dotnet_diagnostic.CA1822.severity = suggestion
+dotnet_diagnostic.CA1832.severity = suggestion
+dotnet_diagnostic.CA1835.severity = suggestion
+dotnet_diagnostic.CA1836.severity = suggestion
+dotnet_diagnostic.CA1848.severity = suggestion
+dotnet_diagnostic.CA1847.severity = suggestion
+dotnet_diagnostic.CA1852.severity = suggestion
+dotnet_diagnostic.CA1859.severity = suggestion
+dotnet_diagnostic.CA1861.severity = suggestion
+dotnet_diagnostic.CA1862.severity = suggestion
+dotnet_diagnostic.CA1863.severity = suggestion
+dotnet_diagnostic.CA1866.severity = suggestion
+dotnet_diagnostic.CA1869.severity = suggestion
+dotnet_diagnostic.CA1873.severity = suggestion
+dotnet_diagnostic.CA1872.severity = suggestion
+dotnet_diagnostic.CA2007.severity = none
+dotnet_diagnostic.CA2016.severity = suggestion
+dotnet_diagnostic.CA2201.severity = suggestion
+
+# Benchmarks, samples and diagnostic tools are executable harnesses, not the shipped library API.
+# Their performance and culture choices are measured or user-facing locally; production protocol
+# and persistence paths remain governed by the strict rules above.
+[benchmarks/**/*.cs]
+dotnet_diagnostic.CA1001.severity = suggestion
+dotnet_diagnostic.CA1305.severity = suggestion
+dotnet_diagnostic.CA1512.severity = suggestion
+dotnet_diagnostic.CA1812.severity = suggestion
+dotnet_diagnostic.CA1822.severity = suggestion
+dotnet_diagnostic.CA1852.severity = suggestion
+dotnet_diagnostic.CA1859.severity = suggestion
+dotnet_diagnostic.CA2007.severity = none
+
+[samples/**/*.cs]
+dotnet_diagnostic.CA1305.severity = suggestion
+dotnet_diagnostic.CA1812.severity = suggestion
+dotnet_diagnostic.CA1822.severity = suggestion
+dotnet_diagnostic.CA1852.severity = suggestion
+dotnet_diagnostic.CA1859.severity = suggestion
+dotnet_diagnostic.CA2007.severity = none
+
+[tools/**/*.cs]
+dotnet_diagnostic.CA1305.severity = suggestion
+dotnet_diagnostic.CA1812.severity = suggestion
+dotnet_diagnostic.CA1822.severity = suggestion
+dotnet_diagnostic.CA1852.severity = suggestion
+dotnet_diagnostic.CA1859.severity = suggestion
+dotnet_diagnostic.CA2007.severity = none
+
+# Renaming this public event is a binary/source breaking change. Its compatibility is now guarded by
+# package validation and the approved public-API snapshot, so retain the 4.x name deliberately.
+[src/PeerSharp/Interfaces/ITorrentEvents.cs]
+dotnet_diagnostic.CA1716.severity = none
+
+# Stop is part of the published 4.x interface. Renaming it would break implementers in every .NET
+# language; package validation and the approved public-API snapshot guard this compatibility choice.
+[src/PeerSharp/Interfaces/IMetadataDownload.cs]
+dotnet_diagnostic.CA1716.severity = none

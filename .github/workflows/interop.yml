@@ -38,12 +38,12 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.400
 
       # transmission-daemon rather than transmission-qt: the harness already special-cases a "daemon"
       # executable name, drives everything over RPC and needs no display, so it is the build that runs
@@ -108,17 +108,17 @@ jobs:
           dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj
           --no-build
           --configuration Release
+          --results-directory TestResults
           --
           --filter-namespace PeerSharp.Tests.Interop
           --report-trx
           --report-trx-filename interop-${{ matrix.os }}.trx
-          --results-directory TestResults
 
       # The interop tests log what they measured - rates, unchoke counts, framing failures - and the
       # numbers are the point. A pass/fail alone would throw away the part worth reading.
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: interop-${{ matrix.os }}-test-results
           path: TestResults/*.trx

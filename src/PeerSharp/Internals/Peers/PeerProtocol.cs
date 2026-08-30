@@ -184,7 +184,7 @@ internal static class PeerProtocol
         var ascii = new System.Text.StringBuilder(take);
         foreach (var b in head)
         {
-            hex.Append(b.ToString("x2")).Append(' ');
+            hex.Append(b.ToString("x2", CultureInfo.InvariantCulture)).Append(' ');
             ascii.Append(b is >= 32 and < 127 ? (char)b : '.');
         }
 
