@@ -1,4 +1,4 @@
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 
 namespace PeerSharp.Internals;
 
@@ -76,10 +76,9 @@ internal sealed class TorrentRegistry
     {
         lock (_lock)
         {
-            // For Contains/TryGet by a single hash, we need to check both potential key mappings
-            // or iterate. Given small number of torrents, we can check by iterating or maintaining 
-            // separate lookups.
-            return _torrents.Any(t => t.Hash == hash || t.HashV2 == hash);
+            // Through Matches rather than comparing the stored pair, which is what TryGet does: a
+            // v2 torrent is reached by a hash it does not store, and an absent hash names nothing.
+            return _torrents.Any(t => Matches(t, hash));
         }
     }
 
@@ -95,7 +94,7 @@ internal sealed class TorrentRegistry
     {
         lock (_lock)
         {
-            torrent = _torrents.FirstOrDefault(t => t.Hash == hash || t.HashV2 == hash);
+            torrent = _torrents.FirstOrDefault(t => Matches(t, hash));
             if (torrent != null)
             {
                 _torrents.Remove(torrent);
@@ -169,18 +168,8 @@ internal sealed class TorrentRegistry
     /// Hybrid torrents were half-affected: reachable by their v1 hash, invisible to a peer that used
     /// the v2 one.
     /// </remarks>
-    private static bool Matches(Torrent torrent, InfoHash hash)
-    {
-        if (torrent.Hash == hash || torrent.HashV2 == hash)
-        {
-            return true;
-        }
-
-        return hash.IsV1
-            && torrent.HashV2.IsV2
-            && !torrent.HashV2.IsEmpty
-            && torrent.HashV2.TruncateToV1() == hash;
-    }
+    private static bool Matches(Torrent torrent, InfoHash hash) =>
+        TorrentIdentity.HasHash(torrent, hash);
 
     private static string GetTorrentKey(Torrent torrent)
     {
