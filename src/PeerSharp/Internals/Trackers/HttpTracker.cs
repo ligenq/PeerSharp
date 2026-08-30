@@ -483,7 +483,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         if (index >= 0)
         {
             string lastPart = baseUrl[(index + 1)..];
-            if (lastPart.StartsWith("announce"))
+            if (lastPart.StartsWith("announce", StringComparison.Ordinal))
             {
                 string scrapeBase = string.Concat(baseUrl.AsSpan(0, index + 1), "scrape", lastPart.AsSpan(8));
                 if (!scrapeBase.Contains('?'))
@@ -541,17 +541,17 @@ internal class HttpTracker : TrackerBase, IDisposable
         AppendParam("info_hash", UrlEncoding.Encode(Torrent.InfoFile.Info.GetTrackerInfoHash().Span));
         AppendParam("peer_id", UrlEncoding.Encode(Torrent.Settings.PeerId));
         int listenPort = Torrent.PortListener?.Port ?? Torrent.Settings.Connection.TcpPort;
-        AppendParam("port", listenPort.ToString());
-        AppendParam("uploaded", Torrent.FileTransfer.Uploaded.ToString());
-        AppendParam("downloaded", Torrent.FileTransfer.Downloaded.ToString());
-        AppendParam("left", Torrent.DataLeft.ToString());
+        AppendParam("port", listenPort.ToString(CultureInfo.InvariantCulture));
+        AppendParam("uploaded", Torrent.FileTransfer.Uploaded.ToString(CultureInfo.InvariantCulture));
+        AppendParam("downloaded", Torrent.FileTransfer.Downloaded.ToString(CultureInfo.InvariantCulture));
+        AppendParam("left", Torrent.DataLeft.ToString(CultureInfo.InvariantCulture));
         AppendParam("compact", "1");
         // BEP 7 now discourages ipv4/ipv6 announce parameters: besides allowing address spoofing,
         // embedding a local address here defeats tracker proxies by disclosing the address the proxy
         // was meant to hide. A dual-stack client announces each listening address separately, with
         // the HTTP connection bound to that address; this single announce lets the tracker infer its
         // address from the connection instead.
-        AppendParam("numwant", Torrent.Settings.MaxPeersPerTrackerRequest.ToString());
+        AppendParam("numwant", Torrent.Settings.MaxPeersPerTrackerRequest.ToString(CultureInfo.InvariantCulture));
 
         // BEP 3: quote back whatever this tracker last gave us, so it can tie our announces together.
         // Percent-encoded because the value is opaque and nothing stops it containing reserved
@@ -573,7 +573,7 @@ internal class HttpTracker : TrackerBase, IDisposable
 
         if (effectiveEvent != TrackerEvent.None)
         {
-            AppendParam("event", effectiveEvent.ToString().ToLower());
+            AppendParam("event", effectiveEvent.ToString().ToLowerInvariant());
         }
 
         var baseUrl = Url;

@@ -39,15 +39,15 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.400
 
       - name: Install Stryker
-        run: dotnet tool install --global dotnet-stryker
+        run: dotnet tool install --global dotnet-stryker --version 4.16.0
 
       # Nullable analysis is escalated to errors in this repository, which makes almost half of
       # Stryker's mutants uncompilable and therefore untested. StrykerRun reaches MSBuild as a global
@@ -65,7 +65,7 @@ jobs:
 
       - name: Upload mutation report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: mutation-report
           path: StrykerOutput/**/reports/*.html

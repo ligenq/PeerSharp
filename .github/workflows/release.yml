@@ -23,12 +23,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.400
 
       - name: Read version from Directory.Build.props
         id: version
@@ -68,6 +68,9 @@ jobs:
           dotnet restore PeerSharp.slnx
           dotnet tool restore
 
+      - name: Verify formatting
+        run: dotnet format PeerSharp.slnx --verify-no-changes --no-restore
+
       - name: Build (warnings as errors)
         run: dotnet build PeerSharp.slnx --no-restore --configuration Release -warnaserror
 
@@ -87,7 +90,7 @@ jobs:
         run: ./tools/generate-release-sboms.ps1 -Version '${{ steps.version.outputs.version }}'
 
       - name: Upload release candidates
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: PeerSharp-${{ steps.version.outputs.version }}-release
           path: packages/*
@@ -95,7 +98,7 @@ jobs:
 
       - name: Attest release provenance
         if: ${{ !inputs.dry_run }}
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
             packages/*.nupkg
@@ -104,7 +107,7 @@ jobs:
 
       - name: Attest PeerSharp SBOM
         if: ${{ !inputs.dry_run }}
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
             packages/PeerSharp.${{ steps.version.outputs.version }}.nupkg
@@ -113,7 +116,7 @@ jobs:
 
       - name: Attest PeerSharp.WebTorrent SBOM
         if: ${{ !inputs.dry_run }}
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
             packages/PeerSharp.WebTorrent.${{ steps.version.outputs.version }}.nupkg
@@ -126,7 +129,7 @@ jobs:
       # the temporary key expires.
       - name: NuGet login (OIDC -> temp API key)
         if: ${{ !inputs.dry_run }}
-        uses: NuGet/login@v1
+        uses: NuGet/login@ebc737b6fc418a6ca0073cf116ec8dc156d8b81e # v1
         id: nuget-login
         with:
           user: ligenq # nuget.org profile name (not email)

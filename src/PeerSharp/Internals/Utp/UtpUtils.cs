@@ -32,7 +32,7 @@ internal struct MessageHeader
 
 internal static class Utils
 {
-    private static readonly Stopwatch _sw = Stopwatch.StartNew();
+    private static readonly Stopwatch TimestampClock = Stopwatch.StartNew();
 
     public static int CompareSeq(ushort a, ushort b)
     {
@@ -53,6 +53,6 @@ internal static class Utils
 
     public static uint TimestampMicro()
     {
-        return (uint)(_sw.ElapsedTicks * 1_000_000 / Stopwatch.Frequency);
+        return (uint)(TimestampClock.ElapsedTicks * 1_000_000 / Stopwatch.Frequency);
     }
 }

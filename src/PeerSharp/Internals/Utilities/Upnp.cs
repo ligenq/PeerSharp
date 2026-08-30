@@ -139,7 +139,7 @@ internal static class UpnpDiscovery
                 if (serviceType != null && controlUrl != null &&
                     (serviceType.Contains(":WANIPConnection:") || serviceType.Contains(":WANPPPConnection:")))
                 {
-                    if (!controlUrl.StartsWith("http"))
+                    if (!controlUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
                     {
                         var uri = new Uri(location);
                         if (controlUrl.StartsWith('/'))
@@ -413,14 +413,14 @@ internal class UpnpPortMapping : IPortMapper
         sb.Append("<?xml version=\"1.0\"?>");
         sb.Append("<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">");
         sb.Append("<s:Body>");
-        sb.Append($"<u:AddPortMapping xmlns:u=\"{gateway.ServiceType}\">");
+        sb.Append(CultureInfo.InvariantCulture, $"<u:AddPortMapping xmlns:u=\"{gateway.ServiceType}\">");
         sb.Append("<NewRemoteHost></NewRemoteHost>");
-        sb.Append($"<NewExternalPort>{port}</NewExternalPort>");
-        sb.Append($"<NewProtocol>{protocol}</NewProtocol>");
-        sb.Append($"<NewInternalPort>{port}</NewInternalPort>");
-        sb.Append($"<NewInternalClient>{gateway.LocalAddress}</NewInternalClient>");
+        sb.Append(CultureInfo.InvariantCulture, $"<NewExternalPort>{port}</NewExternalPort>");
+        sb.Append(CultureInfo.InvariantCulture, $"<NewProtocol>{protocol}</NewProtocol>");
+        sb.Append(CultureInfo.InvariantCulture, $"<NewInternalPort>{port}</NewInternalPort>");
+        sb.Append(CultureInfo.InvariantCulture, $"<NewInternalClient>{gateway.LocalAddress}</NewInternalClient>");
         sb.Append("<NewEnabled>1</NewEnabled>");
-        sb.Append($"<NewPortMappingDescription>{description}</NewPortMappingDescription>");
+        sb.Append(CultureInfo.InvariantCulture, $"<NewPortMappingDescription>{description}</NewPortMappingDescription>");
         sb.Append("<NewLeaseDuration>0</NewLeaseDuration>");
         sb.Append("</u:AddPortMapping>");
         sb.Append("</s:Body>");
@@ -467,10 +467,10 @@ internal class UpnpPortMapping : IPortMapper
         sb.Append("<?xml version=\"1.0\"?>");
         sb.Append("<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">");
         sb.Append("<s:Body>");
-        sb.Append($"<u:DeletePortMapping xmlns:u=\"{gateway.ServiceType}\">");
+        sb.Append(CultureInfo.InvariantCulture, $"<u:DeletePortMapping xmlns:u=\"{gateway.ServiceType}\">");
         sb.Append("<NewRemoteHost></NewRemoteHost>");
-        sb.Append($"<NewExternalPort>{port}</NewExternalPort>");
-        sb.Append($"<NewProtocol>{protocol}</NewProtocol>");
+        sb.Append(CultureInfo.InvariantCulture, $"<NewExternalPort>{port}</NewExternalPort>");
+        sb.Append(CultureInfo.InvariantCulture, $"<NewProtocol>{protocol}</NewProtocol>");
         sb.Append("</u:DeletePortMapping>");
         sb.Append("</s:Body>");
         sb.Append("</s:Envelope>");

@@ -629,10 +629,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 // deliberately; the other bootstrap nodes are tried regardless, which is why there are
                 // several. Kept at warning because losing them all leaves the DHT with nowhere to
                 // start, but without the trace.
-                #pragma warning disable S6667
+#pragma warning disable S6667
                 _logger.LogWarning(
                     "Could not resolve DHT bootstrap node {Host}: {Reason}", node.Host, ex.Message);
-                #pragma warning restore S6667
+#pragma warning restore S6667
             }
             catch (Exception ex)
             {

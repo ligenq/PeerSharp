@@ -352,7 +352,7 @@ internal class IpBlocklist
         line = line.Trim();
 
         // Skip comments
-        if (line.StartsWith('#') || line.StartsWith("//"))
+        if (line.StartsWith('#') || line.StartsWith("//", StringComparison.Ordinal))
         {
             return false;
         }

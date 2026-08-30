@@ -421,6 +421,32 @@ DHT probes, and soak runs against a real swarm - are described in
 [tests/README.md](https://github.com/ligenq/PeerSharp/blob/main/tests/README.md), along with how
 to read what they report.
 
+### Development quality gates
+
+The repository pins its .NET SDK, treats compiler and recommended analyzer warnings as errors,
+audits direct and transitive NuGet dependencies during restore, and verifies formatting in CI.
+Pull requests build and test on Linux and Windows, publish Cobertura coverage with an 80% line and
+branch floor for each shipping assembly, validate trimmed output, replay the fuzz corpus, and keep
+every benchmark fixture executable. CodeQL and dependency review cover code and supply-chain
+changes; scheduled workflows run mutation analysis, bounded fuzzing, and real-client
+interoperability.
+
+Shipping packages are validated against the latest stable NuGet release in addition to the
+approved public-API snapshot. Before opening a pull request, run at least:
+
+```powershell
+dotnet restore PeerSharp.slnx
+dotnet format PeerSharp.slnx --verify-no-changes --no-restore
+dotnet build PeerSharp.slnx --configuration Debug --warnaserror
+dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj --configuration Debug
+dotnet test --project tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj --configuration Debug
+dotnet pack src/PeerSharp/PeerSharp.csproj --configuration Release
+dotnet pack src/PeerSharp.WebTorrent/PeerSharp.WebTorrent.csproj --configuration Release
+```
+
+Configure the `main` branch ruleset to require the stable `CI` check, CodeQL and dependency review,
+require code-owner review and resolved conversations, block force pushes, and disallow bypasses.
+
 ## Supported BEPs
 
 PeerSharp aims for high compatibility with the BitTorrent ecosystem:

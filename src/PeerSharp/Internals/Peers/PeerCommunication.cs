@@ -2238,7 +2238,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 if (!PeerChoking)
                 {
                     PeerChoking = true;
-                    string mbps = (DownloadSpeed * 8 / 1_000_000.0).ToString("F2");
+                    string mbps = (DownloadSpeed * 8 / 1_000_000.0).ToString("F2", CultureInfo.InvariantCulture);
                     _logger.LogDebug("Peer {PeerName} CHOKED us (was downloading at {DownloadSpeed}B/s = {Mbps}Mbps)", Name, DownloadSpeed, mbps);
                 }
                 break;

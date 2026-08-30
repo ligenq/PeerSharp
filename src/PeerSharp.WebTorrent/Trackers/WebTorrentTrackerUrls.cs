@@ -58,9 +58,10 @@ internal static class WebTorrentTrackerUrls
 
     public static IReadOnlyList<string> Collect(ITorrent torrent, WebTorrentSessionOptions options)
     {
+        var trackers = torrent.Trackers.GetTrackers();
         return Collect(
-            torrent.Trackers.GetTrackers().FirstOrDefault()?.Url,
-            torrent.Trackers.GetTrackers().Select(t => t.Url),
+            trackers.Count > 0 ? trackers[0].Url : null,
+            trackers.Select(t => t.Url),
             null, // Torrent interface doesn't expose tiers directly in a simple way here
             options.AdditionalTrackers);
     }

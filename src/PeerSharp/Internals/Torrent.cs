@@ -1193,10 +1193,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         TorrentState state = complete ? TorrentState.Stopped : TorrentState.Stopping;
         FireStateChangedEvent(state);
         _logger.LogWarning(
-            complete
-                ? "Torrent {TorrentName} failed to start; rolled back to stopped"
-                : "Torrent {TorrentName} failed to start and its rollback is incomplete",
-            Name);
+            "Torrent {TorrentName} failed to start; rollback {RollbackResult}",
+            Name,
+            complete ? "completed and returned the torrent to stopped" : "is incomplete");
     }
 
     private async Task<bool> TryTeardownAsync(Func<Task> teardown, string what)

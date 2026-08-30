@@ -110,6 +110,7 @@ internal sealed class PrefixedStream : Stream
             await _inner.DisposeAsync().ConfigureAwait(false);
         }
 
+        await base.DisposeAsync().ConfigureAwait(false);
         GC.SuppressFinalize(this);
     }
 }

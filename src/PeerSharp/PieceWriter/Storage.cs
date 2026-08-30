@@ -1114,10 +1114,9 @@ internal sealed class Storage : IStorage
             previousFileIdx = fileIdx;
 
             // Check shutdown before accessing array which might be cleared
-            if (failIfShuttingDown && Volatile.Read(ref _shutdownRequested) == 1)
-            {
-                throw new ObjectDisposedException(nameof(Storage));
-            }
+            ObjectDisposedException.ThrowIf(
+                failIfShuttingDown && Volatile.Read(ref _shutdownRequested) == 1,
+                this);
 
             var lockObj = _fileLocks[fileIdx];
             await lockObj.WaitAsync(ct).ConfigureAwait(false);
