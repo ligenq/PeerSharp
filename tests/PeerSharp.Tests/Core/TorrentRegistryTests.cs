@@ -1,4 +1,4 @@
-using PeerSharp.Internals;
+﻿using PeerSharp.Internals;
 
 namespace PeerSharp.Tests.Core;
 
@@ -14,7 +14,7 @@ public class TorrentRegistryTests
     [Fact]
     public void Add_AddsTorrent_CanBeRetrieved()
     {
-        var torrent = TorrentTestUtility.CreateMinimal();
+        var torrent = CreateV1Torrent();
 
         _registry.Add(torrent);
 
@@ -65,6 +65,24 @@ public class TorrentRegistryTests
         Assert.False(_registry.TryGetForRouting(InfoHash.CreateRandomV2(), out _));
     }
 
+    /// <summary>
+    /// A torrent with a hash it could actually be looked up by.
+    /// </summary>
+    /// <remarks>
+    /// CreateMinimal leaves the info hash at InfoHash.Empty, which is how absence is stored. A
+    /// registry that answers a lookup for the empty hash answers with whichever torrent happens to
+    /// lack a hash of that version, so it no longer does, and a torrent registered without one
+    /// cannot be found by one.
+    /// </remarks>
+    private static Torrent CreateV1Torrent()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Hash = InfoHash.CreateRandom();
+        metadata.Info.PieceSize = 16384;
+
+        return TorrentTestUtility.CreateMinimal(metadata);
+    }
+
     private static Torrent CreateV2Torrent(bool withV1Hash = false)
     {
         var metadata = new TorrentFileMetadata();
@@ -94,7 +112,7 @@ public class TorrentRegistryTests
     [Fact]
     public void Remove_ExistingTorrent_ReturnsTrueAndRemoves()
     {
-        var torrent = TorrentTestUtility.CreateMinimal();
+        var torrent = CreateV1Torrent();
         _registry.Add(torrent);
 
         bool removed = _registry.Remove(torrent.Hash, out var removedTorrent);

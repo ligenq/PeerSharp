@@ -1,4 +1,4 @@
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Diagnostics.CodeAnalysis;
 
 namespace PeerSharp.Core;
 
@@ -168,6 +168,25 @@ public readonly struct InfoHash : IEquatable<InfoHash>
     public static bool operator ==(InfoHash left, InfoHash right) => left.Equals(right);
 
     /// <summary>
+    /// Whether this hash and <paramref name="other"/> name the same torrent.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not the same question as <c>==</c>, and deliberately a method rather than an operator. An
+    /// absent hash is stored as <see cref="Empty"/> or <see cref="EmptyV2"/>, which are ordinary
+    /// values and equal to themselves, so <c>==</c> says every torrent that lacks a v2 hash has the
+    /// same v2 hash as every other. That is true of the bytes and false of the torrents.
+    /// </para>
+    /// <para>
+    /// <c>==</c> stays as it is: it is byte equality on a type documented for use as a dictionary
+    /// key, and a value type whose equality is not reflexive breaks every hash table it is put in.
+    /// This asks the other question - is this evidence of identity - and answers no when either side
+    /// is absent.
+    /// </para>
+    /// </remarks>
+    public bool Matches(InfoHash other) => !IsEmpty && !other.IsEmpty && Equals(other);
+
+    /// <summary>
     /// Tries to parse a hex string into an InfoHash.
     /// </summary>
     /// <param name="hex">The hex string to parse.</param>
@@ -185,6 +204,14 @@ public readonly struct InfoHash : IEquatable<InfoHash>
         {
             var bytes = Convert.FromHexString(hex);
             if (bytes.Length != V1Length && bytes.Length != V2Length)
+            {
+                return false;
+            }
+
+            // All zeros is how absence is stored, not a torrent anybody has. Refusing it here keeps
+            // it from arriving as a lookup key from a magnet link, a peer, or a directory name and
+            // matching whichever torrent happens to lack a hash of that version.
+            if (Array.TrueForAll(bytes, b => b == 0))
             {
                 return false;
             }
