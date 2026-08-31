@@ -228,46 +228,46 @@ internal class UtpStream : Stream
         if (_state == UtpState.SynRecv)
         {
 
-                if (_timeoutCount >= MaxSynRetries)
-                {
-                    // Debug, not warning: a peer that does not complete the handshake is the expected
-                    // majority outcome on a public swarm, not something wrong with this end.
-                    _logger.LogDebug("uTP {Remote}: SYN-RECV timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
-                    CloseInternal(false, new TimeoutException("SYN-RECV timeout"));
-                    return;
-                }
+            if (_timeoutCount >= MaxSynRetries)
+            {
+                // Debug, not warning: a peer that does not complete the handshake is the expected
+                // majority outcome on a public swarm, not something wrong with this end.
+                _logger.LogDebug("uTP {Remote}: SYN-RECV timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
+                CloseInternal(false, new TimeoutException("SYN-RECV timeout"));
+                return;
+            }
 
-                SendPacket(MessageType.ST_STATE, null);
-                _timeoutCount++;
-                _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << _timeoutCount)));
+            SendPacket(MessageType.ST_STATE, null);
+            _timeoutCount++;
+            _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << _timeoutCount)));
 
         }
         else
         {
 
-                if (_timeoutCount >= MaxSynRetries)
-                {
-                    // Debug, not warning: see the SYN-RECV case above. The caller reports this too, so
-                    // at warning level one unreachable peer produced two lines and a stack trace.
-                    _logger.LogDebug("uTP {Remote}: SYN timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
+            if (_timeoutCount >= MaxSynRetries)
+            {
+                // Debug, not warning: see the SYN-RECV case above. The caller reports this too, so
+                // at warning level one unreachable peer produced two lines and a stack trace.
+                _logger.LogDebug("uTP {Remote}: SYN timeout after {Count} retries", RemoteEndPoint, _timeoutCount);
 
-                    // Reported as a result, not thrown. Most addresses a swarm hands out sit behind a
-                    // NAT that never answers a SYN, so this is the ordinary outcome of dialling a
-                    // stranger - and throwing it cost four first-chance exceptions per dead peer:
-                    // one here, one crossing each await on the way out, and one more when the faulted
-                    // close completed the pipe. Closing without an error keeps the pipe clean.
-                    _connectTcs?.TrySetResult(false);
-                    CloseInternal(false);
-                    return;
-                }
+                // Reported as a result, not thrown. Most addresses a swarm hands out sit behind a
+                // NAT that never answers a SYN, so this is the ordinary outcome of dialling a
+                // stranger - and throwing it cost four first-chance exceptions per dead peer:
+                // one here, one crossing each await on the way out, and one more when the faulted
+                // close completed the pipe. Closing without an error keeps the pipe clean.
+                _connectTcs?.TrySetResult(false);
+                CloseInternal(false);
+                return;
+            }
 
-                // Resend existing SYN packet (don't create new one to avoid duplicate entries)
-                if (_sentPackets.TryGetValue(_oldestUnackedSeq, out var synPkt))
-                {
-                    ResendPacket(synPkt);
-                }
-                _timeoutCount++;
-                _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << _timeoutCount)));
+            // Resend existing SYN packet (don't create new one to avoid duplicate entries)
+            if (_sentPackets.TryGetValue(_oldestUnackedSeq, out var synPkt))
+            {
+                ResendPacket(synPkt);
+            }
+            _timeoutCount++;
+            _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << _timeoutCount)));
 
         }
     }
@@ -357,7 +357,8 @@ internal class UtpStream : Stream
                     _timeoutCount++;
                     // Exponential backoff per libutp, cap at 30s
                     _nextTimeout = now.AddMilliseconds(Math.Min(30000, _packetTimeout * (1 << Math.Min(_timeoutCount, 4))));
-                }               else if (_state == UtpState.Closing && _sentPackets.Count == 0)
+                }
+                else if (_state == UtpState.Closing && _sentPackets.Count == 0)
                 {
                     CheckIfClosed();
                 }

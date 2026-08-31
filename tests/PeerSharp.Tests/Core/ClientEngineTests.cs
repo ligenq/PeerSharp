@@ -1,4 +1,4 @@
-using PeerSharp.Internals;
+﻿using PeerSharp.Internals;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Utp;
@@ -73,6 +73,8 @@ public class ClientEngineTests
 
         var info = new TorrentFileMetadata();
         info.Info.Name = "test";
+        // A real torrent file always has one, and a torrent is now only findable by a hash it has.
+        info.Info.Hash = InfoHash.CreateRandom();
         info.Info.PieceSize = 16384;
         info.Info.FullSize = 1000;
         info.Info.Pieces.Add(new byte[20]);

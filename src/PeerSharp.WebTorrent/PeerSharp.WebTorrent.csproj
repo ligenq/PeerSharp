@@ -26,6 +26,8 @@
 		<IsTrimmable>true</IsTrimmable>
 		<RootNamespace>PeerSharp.WebTorrent</RootNamespace>
 		<AssemblyName>PeerSharp.WebTorrent</AssemblyName>
+		<EnablePackageValidation>true</EnablePackageValidation>
+		<PackageValidationBaselineVersion>4.0.0</PackageValidationBaselineVersion>
 	</PropertyGroup>
 
 	<ItemGroup>

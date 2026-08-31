@@ -200,7 +200,7 @@ internal class LsdManager : ILsdManager
         }
 
         // Basic verification
-        if (!message.StartsWith("BT-SEARCH"))
+        if (!message.StartsWith("BT-SEARCH", StringComparison.Ordinal))
         {
             return;
         }
@@ -248,10 +248,10 @@ internal class LsdManager : ILsdManager
     {
         var sb = new StringBuilder();
         sb.Append("BT-SEARCH * HTTP/1.1\r\n");
-        sb.Append($"Host: {hostIp}:{LsdPort}\r\n");
-        sb.Append($"Port: {_settings.Connection.TcpPort}\r\n");
-        sb.Append($"Infohash: {infoHash.ToHexString()}\r\n");
-        sb.Append($"cookie: {_cookie}\r\n");
+        sb.Append(CultureInfo.InvariantCulture, $"Host: {hostIp}:{LsdPort}\r\n");
+        sb.Append(CultureInfo.InvariantCulture, $"Port: {_settings.Connection.TcpPort}\r\n");
+        sb.Append(CultureInfo.InvariantCulture, $"Infohash: {infoHash.ToHexString()}\r\n");
+        sb.Append(CultureInfo.InvariantCulture, $"cookie: {_cookie}\r\n");
         sb.Append("\r\n\r\n");
         return sb.ToString();
     }

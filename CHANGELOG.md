@@ -3,6 +3,39 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
+## Unreleased
+
+### Fixed
+
+- **An absent info hash matched whichever torrent also lacked one.** A torrent carries a v1 and a v2
+  hash and almost never has both: the missing one is stored as `InfoHash.Empty` or
+  `InfoHash.EmptyV2`, which are ordinary all-zero values and equal to themselves. `TorrentRegistry`
+  compared the stored pair directly in `Contains` and `Remove` - `t.Hash == hash || t.HashV2 == hash`
+  - so a lookup for the empty hash answered with the first torrent that had no hash of that version,
+  and `Remove` removed it. `TryFromHex` accepted forty zeros, so that hash could arrive from a magnet
+  link, a peer, or a session directory name. Those two methods also predated `TryGet`'s handling of
+  the BEP 52 truncated form, so they could not find a v2 torrent by the hash the world refers to it
+  by. All four lookups now ask the same question.
+
+### Added
+
+- **`InfoHash.Matches`**, which asks whether two hashes are evidence of identity rather than whether
+  their bytes are equal: an absent hash matches nothing, itself included. `==` is unchanged - it is
+  byte equality on a type documented for use as a dictionary key, and a value type whose equality is
+  not reflexive breaks every hash table it is put in.
+- **`TorrentIdentity.HasHash`**, the public form of the question the registry asks internally: does
+  this hash name this torrent, in any of the forms the world refers to it by, including the truncated
+  v2 hash from BEP 52. Consumers resolving a torrent from a user-supplied hash were writing this
+  themselves, and getting it wrong the same way. For two torrents rather than a torrent and a hash,
+  `ITorrent.HasSameIdentity` remains the place to ask.
+
+### Changed
+
+- **`InfoHash.TryFromHex` now refuses an all-zero hash.** It is how absence is stored rather than a
+  torrent anyone has, and accepting it let absence arrive from outside and be used as a lookup key.
+- **`ITorrent.HasSameIdentity` now reports a torrent as itself** even before it has a hash worth
+  comparing.
+
 ## 4.0.0 — 2026-08-28
 
 ### Fixed

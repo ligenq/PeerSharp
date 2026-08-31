@@ -204,9 +204,10 @@ public class HandshakeMessageOrderTests : IDisposable
         public System.Net.IPAddress? ExternalIp => null;
 
         public void Announce(InfoHash infoHash, int port) { }
-        public int FindPeers(InfoHash infoHash) {
-    return 0;
-    }
+        public int FindPeers(InfoHash infoHash)
+        {
+            return 0;
+        }
         public void Ping(IPEndPoint ep) { }
         public void ReportExternalIp(IPAddress address) { }
         public void ScrapeInfoHash(InfoHash infoHash) { }

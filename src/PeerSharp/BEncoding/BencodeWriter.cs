@@ -83,7 +83,7 @@ internal static class BencodeWriter
     private static void WriteAsciiInt(int value, IBufferWriter<byte> writer)
     {
         Span<byte> buffer = writer.GetSpan(11); // Max int32 is 10 digits + sign
-        if (value.TryFormat(buffer, out int written))
+        if (value.TryFormat(buffer, out int written, provider: CultureInfo.InvariantCulture))
         {
             writer.Advance(written);
         }
@@ -92,7 +92,7 @@ internal static class BencodeWriter
     private static void WriteAsciiLong(long value, IBufferWriter<byte> writer)
     {
         Span<byte> buffer = writer.GetSpan(20); // Max int64 is 19 digits + sign
-        if (value.TryFormat(buffer, out int written))
+        if (value.TryFormat(buffer, out int written, provider: CultureInfo.InvariantCulture))
         {
             writer.Advance(written);
         }

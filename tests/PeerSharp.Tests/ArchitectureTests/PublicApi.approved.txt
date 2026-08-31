@@ -300,6 +300,7 @@ struct PeerSharp.Core.InfoHash
     Boolean IsEmpty { get; }
     Boolean IsV1 { get; }
     Boolean IsV2 { get; }
+    Boolean Matches(PeerSharp.Core.InfoHash other)
     Boolean TryFromHex(String hex, out PeerSharp.Core.InfoHash result)
     Byte[] ToArray()
     Int32 GetHashCode()
@@ -635,6 +636,8 @@ enum PeerSharp.Core.TorrentFileVersion
     Hybrid = 3
     V1 = 1
     V2 = 2
+static class PeerSharp.Core.TorrentIdentity
+    Boolean HasHash(PeerSharp.Interfaces.ITorrent torrent, PeerSharp.Core.InfoHash hash)
 class PeerSharp.Core.TorrentPublisherKey
     Boolean CanPublish { get; }
     Int32 ExpandedKeyLength

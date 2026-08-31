@@ -1,0 +1,6 @@
+# Changes to the engine, public API, packaging, and build gates require maintainer review.
+* @ligenq
+/.github/ @ligenq
+/Directory.Build.props @ligenq
+/global.json @ligenq
+/src/ @ligenq

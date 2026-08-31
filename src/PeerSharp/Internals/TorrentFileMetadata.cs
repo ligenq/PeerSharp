@@ -691,10 +691,7 @@ internal class TorrentFileInfo
 
     public int MapVisibleIndexToInternal(int visibleIndex)
     {
-        if (visibleIndex < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(visibleIndex));
-        }
+        ArgumentOutOfRangeException.ThrowIfNegative(visibleIndex);
 
         int current = 0;
         for (int i = 0; i < Files.Count; i++)
