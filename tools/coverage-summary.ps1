@@ -4,8 +4,23 @@ param(
 
     [int]$Top = 30,
 
-    [int]$MinLines = 25
+    [int]$MinLines = 25,
+
+    [ValidateRange(0, 100)]
+    [double]$MinimumLinePercent = 0,
+
+    [ValidateRange(0, 100)]
+    [double]$MinimumBranchPercent = 0
 )
+
+$reportSummaries = foreach ($report in $Reports) {
+    [xml]$xml = Get-Content -LiteralPath $report
+    [pscustomobject]@{
+        Report = $report
+        LinePercent = [math]::Round([double]$xml.coverage.'line-rate' * 100, 2)
+        BranchPercent = [math]::Round([double]$xml.coverage.'branch-rate' * 100, 2)
+    }
+}
 
 $items = foreach ($report in $Reports) {
     [xml]$xml = Get-Content -LiteralPath $report
@@ -24,6 +39,16 @@ $items = foreach ($report in $Reports) {
             LinesMissed = $valid - $covered
         }
     }
+}
+
+Write-Host "Coverage gates"
+$reportSummaries | Format-Table -AutoSize
+
+$failedReports = @($reportSummaries | Where-Object {
+    $_.LinePercent -lt $MinimumLinePercent -or $_.BranchPercent -lt $MinimumBranchPercent
+})
+if ($failedReports.Count -gt 0) {
+    throw "Coverage fell below the required $MinimumLinePercent% line / $MinimumBranchPercent% branch floor: $($failedReports.Report -join ', ')"
 }
 
 Write-Host "Overall"

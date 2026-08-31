@@ -172,7 +172,7 @@ internal class BandwidthManager : IBandwidthManager
         lock (_lock)
         {
             // Double-check: user might have been cleared while we waited for lock
-            bool hasQueued = _pendingRequests.ContainsKey(user) && _pendingRequests[user].Count > 0;
+            bool hasQueued = _pendingRequests.TryGetValue(user, out var pendingQueue) && pendingQueue.Count > 0;
 
             if (!hasQueued)
             {
@@ -198,9 +198,10 @@ internal class BandwidthManager : IBandwidthManager
             }
 
             // Queue the request
-            if (!_pendingRequests.ContainsKey(user))
+            if (!_pendingRequests.TryGetValue(user, out var queue))
             {
-                _pendingRequests[user] = new Queue<BandwidthRequest>();
+                queue = new Queue<BandwidthRequest>();
+                _pendingRequests[user] = queue;
             }
 
             // Mark user as having pending requests (lock-free visibility)
@@ -245,7 +246,7 @@ internal class BandwidthManager : IBandwidthManager
                 });
             }
 
-            _pendingRequests[user].Enqueue(request);
+            queue.Enqueue(request);
 
             // Add to RR queue if not already pending processing
             if (_activeUsers.Add(user))

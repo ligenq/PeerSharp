@@ -188,7 +188,7 @@ internal class NatPmpPortMapping : IPortMapper
             client.Client.SendTimeout = 2000;
             client.Client.ReceiveTimeout = 2000;
 
-            byte opCode = string.Equals(protocol, "UDP", StringComparison.CurrentCultureIgnoreCase) ? (byte)1 : (byte)2;
+            byte opCode = string.Equals(protocol, "UDP", StringComparison.OrdinalIgnoreCase) ? (byte)1 : (byte)2;
 
             // Request Packet:
             // Vers (1) | OP (1) | Reserved (2) | Internal Port (2) | External Port (2) | Lifetime (4)
@@ -225,25 +225,25 @@ internal class NatPmpPortMapping : IPortMapper
         {
             // A gateway that does not answer is the ordinary case, not a fault: most consumer routers
             // speak UPnP and not NAT-PMP. Do not print the identical cancellation trace per gateway.
-            #pragma warning disable S6667
+#pragma warning disable S6667
             logger.LogDebug(
                 "NAT-PMP: no mapping from {Gateway} ({Reason}: {Message})",
                 gateway,
                 ex.GetType().Name,
                 ex.Message);
-            #pragma warning restore S6667
+#pragma warning restore S6667
         }
         catch (SocketException ex)
         {
             // An unreachable/refusing gateway is equally ordinary, but unexpected implementation or
             // configuration failures still fall through to the traced catch below.
-            #pragma warning disable S6667
+#pragma warning disable S6667
             logger.LogDebug(
                 "NAT-PMP: no mapping from {Gateway} ({Reason}: {Message})",
                 gateway,
                 ex.SocketErrorCode,
                 ex.Message);
-            #pragma warning restore S6667
+#pragma warning restore S6667
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -261,7 +261,7 @@ internal class NatPmpPortMapping : IPortMapper
         try
         {
             using var client = new UdpClient();
-            byte opCode = string.Equals(protocol, "UDP", StringComparison.CurrentCultureIgnoreCase) ? (byte)1 : (byte)2;
+            byte opCode = string.Equals(protocol, "UDP", StringComparison.OrdinalIgnoreCase) ? (byte)1 : (byte)2;
 
             // To unmap, send request with lifetime 0
             byte[] request = new byte[12];

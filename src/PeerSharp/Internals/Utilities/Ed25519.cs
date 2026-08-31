@@ -44,7 +44,7 @@ internal static class Ed25519
 
     /// <summary>Order of the base point (RFC 8032 section 5.1).</summary>
     private static readonly BigInteger L =
-        BigInteger.Pow(2, 252) + BigInteger.Parse("27742317777372353535851937790883648493");
+        BigInteger.Pow(2, 252) + BigInteger.Parse("27742317777372353535851937790883648493", CultureInfo.InvariantCulture);
 
     private static readonly Point BasePoint = MakeBasePoint();
 

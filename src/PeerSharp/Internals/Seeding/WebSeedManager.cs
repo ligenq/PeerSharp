@@ -109,7 +109,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     }
 
     private static bool Matches(WebSeedSource source, string url)
-        => source.IsDirectory == url.EndsWith("/", StringComparison.Ordinal)
+        => source.IsDirectory == url.EndsWith('/')
             && source.Url.Equals(url.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The URLs currently in use.</summary>
@@ -670,7 +670,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         public WebSeedSource(string url, bool isMultiFile)
         {
-            IsDirectory = url.EndsWith("/", StringComparison.Ordinal);
+            IsDirectory = url.EndsWith('/');
             Url = url.TrimEnd('/');
             IsMultiFile = isMultiFile;
         }

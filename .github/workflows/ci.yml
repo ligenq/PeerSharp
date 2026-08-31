@@ -11,6 +11,28 @@ env:
   DOTNET_NOLOGO: true
 
 jobs:
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: 10.0.400
+
+      - name: Restore and audit dependencies
+        run: dotnet restore PeerSharp.slnx
+
+      - name: Verify formatting
+        run: dotnet format PeerSharp.slnx --verify-no-changes --no-restore
+
+      - name: Strict Debug build
+        run: dotnet build PeerSharp.slnx --no-restore --configuration Debug --warnaserror
+
   core-tests:
     name: Core ${{ matrix.lane }} (${{ matrix.os }})
     strategy:
@@ -39,12 +61,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.400
 
       - name: Restore
         run: dotnet restore tests/PeerSharp.Tests/PeerSharp.Tests.csproj
@@ -57,15 +79,15 @@ jobs:
           dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj
           --no-build
           --configuration Release
+          --results-directory TestResults
           --
           ${{ matrix.filter }}
           --report-trx
           --report-trx-filename core-${{ matrix.lane }}-${{ matrix.os }}.trx
-          --results-directory TestResults
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: core-${{ matrix.lane }}-${{ matrix.os }}-test-results
           path: TestResults/*.trx
@@ -81,12 +103,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.400
 
       - name: Publish trimmed (trim warnings are errors)
         run: dotnet publish tests/PeerSharp.TrimSmoke/PeerSharp.TrimSmoke.csproj --configuration Release --output trimout
@@ -103,12 +125,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.400
 
       - name: Restore
         run: dotnet restore benchmarks/PeerSharp.Benchmarks/PeerSharp.Benchmarks.csproj
@@ -129,12 +151,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.400
 
       - name: Restore
         run: dotnet restore tests/PeerSharp.Fuzz/PeerSharp.Fuzz.csproj
@@ -155,12 +177,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.400
 
       - name: Restore
         run: dotnet restore tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj
@@ -173,18 +195,68 @@ jobs:
           dotnet test --project tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj
           --no-build
           --configuration Release
+          --results-directory TestResults
           --
           --report-trx
           --report-trx-filename webtorrent-${{ matrix.os }}.trx
-          --results-directory TestResults
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: webtorrent-${{ matrix.os }}-test-results
           path: TestResults/*.trx
           if-no-files-found: ignore
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: 10.0.400
+
+      - name: Restore
+        run: dotnet restore PeerSharp.slnx
+
+      - name: Build
+        run: dotnet build PeerSharp.slnx --no-restore --configuration Release --warnaserror
+
+      - name: Core coverage
+        run: >
+          dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj
+          --no-build --configuration Release --results-directory TestResults --
+          --coverage --coverage-output-format cobertura
+          --coverage-settings coverage.runsettings
+          --coverage-output coverage/core.cobertura.xml
+
+      - name: WebTorrent coverage
+        run: >
+          dotnet test --project tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj
+          --no-build --configuration Release --results-directory TestResults --
+          --coverage --coverage-output-format cobertura
+          --coverage-settings coverage.webtorrent.runsettings
+          --coverage-output coverage/webtorrent.cobertura.xml
+
+      - name: Enforce coverage floor
+        shell: pwsh
+        run: >
+          ./tools/coverage-summary.ps1
+          -Reports TestResults/coverage/core.cobertura.xml,TestResults/coverage/webtorrent.cobertura.xml
+          -MinimumLinePercent 80
+          -MinimumBranchPercent 80
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage
+          path: TestResults/coverage/*.cobertura.xml
+          if-no-files-found: error
 
   ci:
     # Branch protection requires one stable check name. Requiring every matrix expansion directly
@@ -193,29 +265,35 @@ jobs:
     name: CI
     if: ${{ always() }}
     needs:
+      - quality
       - core-tests
       - trim-smoke
       - benchmarks-smoke
       - fuzz-harness-smoke
       - webtorrent-tests
+      - coverage
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Verify required jobs
         env:
+          QUALITY: ${{ needs.quality.result }}
           CORE_TESTS: ${{ needs.core-tests.result }}
           TRIM_SMOKE: ${{ needs.trim-smoke.result }}
           BENCHMARKS_SMOKE: ${{ needs.benchmarks-smoke.result }}
           FUZZ_HARNESS_SMOKE: ${{ needs.fuzz-harness-smoke.result }}
           WEBTORRENT_TESTS: ${{ needs.webtorrent-tests.result }}
+          COVERAGE: ${{ needs.coverage.result }}
         run: |
           failed=0
           for result in \
+            "quality=$QUALITY" \
             "core-tests=$CORE_TESTS" \
             "trim-smoke=$TRIM_SMOKE" \
             "benchmarks-smoke=$BENCHMARKS_SMOKE" \
             "fuzz-harness-smoke=$FUZZ_HARNESS_SMOKE" \
-            "webtorrent-tests=$WEBTORRENT_TESTS"
+            "webtorrent-tests=$WEBTORRENT_TESTS" \
+            "coverage=$COVERAGE"
           do
             echo "$result"
             if [ "${result#*=}" != "success" ]; then

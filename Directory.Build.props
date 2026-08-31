@@ -2,6 +2,17 @@
 
 	<PropertyGroup>
 		<Version>4.0.0</Version>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<AnalysisLevel>latest-Recommended</AnalysisLevel>
+		<EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+		<!-- Restore direct and transitive dependencies against the NuGet advisory database. A
+		     moderate-or-higher advisory is a warning and therefore fails under the zero-warning
+		     policy above. -->
+		<NuGetAudit>true</NuGetAudit>
+		<NuGetAuditMode>all</NuGetAuditMode>
+		<NuGetAuditLevel>moderate</NuGetAuditLevel>
+		<WarningsAsErrors>$(WarningsAsErrors);NU1902;NU1903;NU1904</WarningsAsErrors>
 	</PropertyGroup>
 
 	<!--

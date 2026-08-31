@@ -1635,10 +1635,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                             if (soleSupplier || refuse)
                             {
                                 Logger.LogWarning(
+                                    "Dropping peer {RemoteEndPoint} after hash failures: {Reason}",
+                                    p.RemoteEndPoint,
                                     soleSupplier
-                                        ? "Dropping peer {RemoteEndPoint} - it alone supplied a piece that failed its hash"
-                                        : "Dropping peer {RemoteEndPoint} - it has contributed to several pieces that failed their hash",
-                                    p.RemoteEndPoint);
+                                        ? "it alone supplied a piece that failed its hash"
+                                        : "it contributed to several pieces that failed their hash");
                                 await p.CloseAsync().ConfigureAwait(false);
                             }
                         }

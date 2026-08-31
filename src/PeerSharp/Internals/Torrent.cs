@@ -181,8 +181,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             return false;
         }
 
-        return (!Hash.IsEmpty && !other.Hash.IsEmpty && Hash == other.Hash)
-            || (!HashV2.IsEmpty && !other.HashV2.IsEmpty && HashV2 == other.HashV2);
+        // A torrent is itself even before it has a hash worth comparing.
+        return ReferenceEquals(this, other)
+            || Hash.Matches(other.Hash)
+            || HashV2.Matches(other.HashV2);
     }
 
     public bool HasStreamableFiles => Streaming.HasStreamableFiles;
@@ -1191,10 +1193,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         TorrentState state = complete ? TorrentState.Stopped : TorrentState.Stopping;
         FireStateChangedEvent(state);
         _logger.LogWarning(
-            complete
-                ? "Torrent {TorrentName} failed to start; rolled back to stopped"
-                : "Torrent {TorrentName} failed to start and its rollback is incomplete",
-            Name);
+            "Torrent {TorrentName} failed to start; rollback {RollbackResult}",
+            Name,
+            complete ? "completed and returned the torrent to stopped" : "is incomplete");
     }
 
     private async Task<bool> TryTeardownAsync(Func<Task> teardown, string what)
