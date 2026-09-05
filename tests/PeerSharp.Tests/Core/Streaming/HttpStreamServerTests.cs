@@ -3,7 +3,11 @@ using PeerSharp.Streaming;
 
 namespace PeerSharp.Tests.Core.Streaming;
 
-public class HttpStreamServerTests
+/// <summary>
+/// Renamed from HttpStreamServerTests: every test here drives HttpStreamRequestHandler, and the
+/// server itself - its listener, its URL and its shutdown - is covered separately below.
+/// </summary>
+public class HttpStreamRequestHandlerTests
 {
     [Fact]
     public void Constructor_WithNullLoggerFactory_ThrowsArgumentNullException()
