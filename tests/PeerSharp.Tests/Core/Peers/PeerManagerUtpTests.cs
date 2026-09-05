@@ -89,37 +89,64 @@ public class PeerManagerUtpTests
     }
 
     [Fact]
-    public void BuildTransportPlan_WarmupDisablesUtpForNonHintedPeers()
+    public void BuildTransportPlan_LeadsWithUtpForAPeerNothingIsKnownAbout()
     {
+        // libtorrent assumes every peer speaks uTP and dials it first, because LEDBAT's whole value
+        // is yielding to the user's other traffic and that only happens if the transfer runs over
+        // it. This used to put TCP first for anything PEX had not flagged, which meant uTP was
+        // reached only when TCP failed - and TCP does not fail for a reachable peer.
         var timeProvider = new FakeTimeProvider();
         var (manager, settings) = CreateManager(connection =>
         {
             connection.PreferUtp = true;
             connection.EnableUtpOut = true;
             connection.EnableTcpOut = true;
-            connection.UtpWarmupSeconds = 30;
+            connection.PreferUtpRatioPercent = 70;
         }, timeProvider);
         var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = false };
 
         var plan = GetTransportPlan(manager, settings, history);
 
-        Assert.Equal(new[] { "Tcp" }, plan);
+        Assert.Equal(new[] { "Utp", "Tcp" }, plan);
     }
 
     [Fact]
-    public void BuildTransportPlan_PrefersTcpThenUtpForUnknownAfterWarmup()
+    public void BuildTransportPlan_StillLeadsWithUtpForAKnownUtpPeerAboveTheTargetShare()
     {
+        // The ratio governs how much this client is willing to guess. There is nothing to guess
+        // about a peer that has already answered a uTP dial, so it is not demoted to keep a quota.
         var timeProvider = new FakeTimeProvider();
         var (manager, settings) = CreateManager(connection =>
         {
             connection.PreferUtp = true;
             connection.EnableUtpOut = true;
             connection.EnableTcpOut = true;
-            connection.UtpWarmupSeconds = 10;
+            connection.PreferUtpRatioPercent = 50;
+        }, timeProvider);
+        var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = true };
+
+        AddConnectedUtpPeer(manager, TorrentTestUtility.CreateMinimal(), timeProvider);
+        var plan = GetTransportPlan(manager, settings, history);
+
+        Assert.Equal(new[] { "Utp", "Tcp" }, plan);
+    }
+
+    [Fact]
+    public void BuildTransportPlan_FallsBackToTcpFirstForAGuessOnceTheShareIsMet()
+    {
+        // An unknown peer is where the quota applies: once enough of the swarm is already on uTP,
+        // the next guess costs a capped attempt for no extra courtesy, so TCP leads.
+        var timeProvider = new FakeTimeProvider();
+        var (manager, settings) = CreateManager(connection =>
+        {
+            connection.PreferUtp = true;
+            connection.EnableUtpOut = true;
+            connection.EnableTcpOut = true;
+            connection.PreferUtpRatioPercent = 50;
         }, timeProvider);
         var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = false };
 
-        timeProvider.Advance(TimeSpan.FromSeconds(20));
+        AddConnectedUtpPeer(manager, TorrentTestUtility.CreateMinimal(), timeProvider);
         var plan = GetTransportPlan(manager, settings, history);
 
         Assert.Equal(new[] { "Tcp", "Utp" }, plan);
@@ -128,6 +155,8 @@ public class PeerManagerUtpTests
     [Fact]
     public void BuildTransportPlan_PrefersUtpWhenBelowTargetRatio()
     {
+        // Below the target share, even a guess leads with uTP.
+
         var timeProvider = new FakeTimeProvider();
         var (manager, settings) = CreateManager(connection =>
         {
@@ -135,33 +164,12 @@ public class PeerManagerUtpTests
             connection.EnableUtpOut = true;
             connection.EnableTcpOut = true;
             connection.PreferUtpRatioPercent = 70;
-            connection.UtpWarmupSeconds = 0;
         }, timeProvider);
         var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = true };
 
         var plan = GetTransportPlan(manager, settings, history);
 
         Assert.Equal(new[] { "Utp", "Tcp" }, plan);
-    }
-
-    [Fact]
-    public void BuildTransportPlan_UsesTcpWhenAboveTargetRatio()
-    {
-        var timeProvider = new FakeTimeProvider();
-        var (manager, settings) = CreateManager(connection =>
-        {
-            connection.PreferUtp = true;
-            connection.EnableUtpOut = true;
-            connection.EnableTcpOut = true;
-            connection.PreferUtpRatioPercent = 50;
-            connection.UtpWarmupSeconds = 0;
-        }, timeProvider);
-        var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = true };
-
-        AddConnectedUtpPeer(manager, TorrentTestUtility.CreateMinimal(), timeProvider);
-        var plan = GetTransportPlan(manager, settings, history);
-
-        Assert.Equal(new[] { "Tcp", "Utp" }, plan);
     }
 
     [Fact]
@@ -173,7 +181,6 @@ public class PeerManagerUtpTests
             connection.PreferUtp = true;
             connection.EnableUtpOut = true;
             connection.EnableTcpOut = true;
-            connection.UtpWarmupSeconds = 0;
         }, timeProvider);
         var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = true };
 

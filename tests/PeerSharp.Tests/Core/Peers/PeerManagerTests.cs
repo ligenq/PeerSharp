@@ -689,7 +689,6 @@ public class PeerManagerTests
         settings.EnableTcpOut = false;
         settings.EnableUtpOut = true;
         settings.PreferUtp = true;
-        settings.UtpWarmupSeconds = 0;
 
         // Provide a UtpManager - PeerManager checks for it
         SetUtpManagerStub(ctx.Torrent);

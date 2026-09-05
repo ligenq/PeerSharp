@@ -49,7 +49,6 @@ public sealed class FullSystemTests : IDisposable
             s.Connection.EnableUtpIn = true;
             s.Connection.EnableUtpOut = true;
             s.Connection.PreferUtp = true;
-            s.Connection.UtpWarmupSeconds = 0; // Bypass warmup to allow uTP immediately
             s.Connection.PeerReconnectBaseSeconds = 1;
             s.Connection.PeerReconnectJitterMs = 100;
             s.Dht.Enabled = false;

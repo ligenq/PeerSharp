@@ -90,7 +90,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private long _nextPendingConnectionId;
 
     private readonly Settings _settings;
-    private readonly DateTimeOffset _startTime;
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
     private readonly PeerChoker _choker;
@@ -110,6 +109,16 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     // the main loop writes the penalty window while connection tasks read it concurrently,
     // and a raw 16-byte DateTimeOffset field could tear.
     private long _globalUtpPenaltyUntilUtcTicks = DateTimeOffset.MinValue.UtcTicks;
+
+    /// <summary>
+    /// uTP dials that have failed with none yet succeeding. Leading with uTP is a guess about the
+    /// network, and this is how the guess is withdrawn: on a path that drops UDP the opening dials
+    /// all fail, and holding uTP back for a while costs less than a capped attempt per peer. Reset
+    /// by the first success, because the question is whether uTP works here at all.
+    /// </summary>
+    private int _utpColdStartFailures;
+
+    private int _utpEverSucceeded;
 
     private int _holepunchCount = 0;
 
@@ -150,7 +159,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _geoIp = geoIp;
         _peerFactory = peerFactory;
         _timeProvider = timeProvider;
-        _startTime = _timeProvider.GetUtcNow();
         _choker = new PeerChoker(_torrent, _timeProvider, _logger);
         _peerExchange = new PeerExchangeCoordinator(_torrent, _knownPeersCache, _logger);
         _peerHealth = new PeerHealthMonitor(_torrent, _logger);
@@ -889,7 +897,19 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // Recorded as learned from the extension protocol, which is exactly what happened.
             if (p.RemoteListenEndPoint is { } listenEndPoint)
             {
-                GetOrAddKnownPeerHistory(listenEndPoint).UpdateSource(PeerSourceKind.Ltep);
+                var listenHistory = GetOrAddKnownPeerHistory(listenEndPoint);
+                listenHistory.UpdateSource(PeerSourceKind.Ltep);
+
+                // A peer that reached us over uTP has proved it speaks uTP, and this is the first
+                // moment that proof can be filed against an address anybody can dial. Until now it
+                // was recorded against the ephemeral source port and thrown away with the
+                // connection, so a peer that demonstrated uTP by calling us was still dialled over
+                // TCP the next time. libtorrent applies the same evidence to the peer record.
+                if (p.UtpStream != null)
+                {
+                    listenHistory.RegisterUtpSuccess(_timeProvider.GetUtcNow());
+                    RecordUtpSuccess();
+                }
             }
 
             _torrent.MetadataDownloadInternal?.PeerConnected(p);
@@ -1755,14 +1775,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         bool utpAvailable = hasUtpManager
             && now.UtcTicks >= Volatile.Read(ref _globalUtpPenaltyUntilUtcTicks)
             && (history?.IsUtpAllowed(now) ?? true);
-        bool inWarmup = (now - _startTime) < TimeSpan.FromSeconds(settings.UtpWarmupSeconds);
-
         return TransportPlanBuilder.Build(new TransportPlanBuilder.Inputs(
             Settings: settings,
             ForceUtp: forceUtp,
             UtpAvailable: utpAvailable,
             UtpHinted: history?.UtpHinted ?? false,
-            InWarmupPeriod: inWarmup,
             CurrentUtpRatioPercent: GetUtpRatioPercent));
     }
 
@@ -2019,6 +2036,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 if (attemptedUtp)
                 {
                     history.RegisterUtpFailure(_timeProvider.GetUtcNow(), _settings.Connection);
+                    RecordUtpColdStartFailure();
                 }
 
                 // A holepunch that failed does not earn another one. The dial a relay asks us to make
@@ -2047,11 +2065,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (attemptedUtp && !usedUtp)
             {
                 history.RegisterUtpFailure(_timeProvider.GetUtcNow(), _settings.Connection);
+                RecordUtpColdStartFailure();
             }
 
             if (usedUtp)
             {
                 history.RegisterUtpSuccess(_timeProvider.GetUtcNow());
+                RecordUtpSuccess();
             }
 
             // Acquire active slot from governor
@@ -2340,6 +2360,55 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             catch (Exception eventException)
             {
                 _logger.LogError(eventException, "Torrent error subscriber failed while escalating peer-manager failures");
+            }
+        }
+    }
+
+    /// <summary>
+    /// One uTP dial worked, so this network passes UDP and the cold-start guard has nothing left to
+    /// decide. Latched rather than counted: the question it answers is asked once.
+    /// </summary>
+    private void RecordUtpSuccess()
+    {
+        Interlocked.Exchange(ref _utpEverSucceeded, 1);
+        Interlocked.Exchange(ref _utpColdStartFailures, 0);
+    }
+
+    /// <summary>
+    /// A uTP dial failed. While none has ever succeeded, enough of these mean the path does not
+    /// carry UDP, and uTP is held back globally rather than costing a capped attempt on every peer.
+    /// </summary>
+    private void RecordUtpColdStartFailure()
+    {
+        int limit = _settings.Connection.UtpColdStartFailureLimit;
+        if (limit <= 0 || Interlocked.CompareExchange(ref _utpEverSucceeded, 0, 0) != 0)
+        {
+            return;
+        }
+
+        if (Interlocked.Increment(ref _utpColdStartFailures) != limit)
+        {
+            // Only the dial that reaches the limit applies the penalty. Past it the penalty is
+            // already in force, and re-applying on every later failure would extend it without end.
+            return;
+        }
+
+        var until = _timeProvider.GetUtcNow().AddSeconds(
+            Math.Max(1, _settings.Connection.UtpPenaltyMaxSeconds));
+
+        _logger.LogInformation(
+            "No uTP connection has succeeded in {Failures} attempts; holding uTP back until {Until}. " +
+            "This is what a path that drops UDP looks like.",
+            limit,
+            until);
+
+        long untilUtcTicks = until.UtcTicks;
+        long current;
+        while ((current = Interlocked.Read(ref _globalUtpPenaltyUntilUtcTicks)) < untilUtcTicks)
+        {
+            if (Interlocked.CompareExchange(ref _globalUtpPenaltyUntilUtcTicks, untilUtcTicks, current) == current)
+            {
+                break;
             }
         }
     }

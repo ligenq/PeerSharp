@@ -471,10 +471,25 @@ public sealed class ConnectionSettings
     public int UtpSlowPenaltySeconds { get; set; } = 90;
 
     /// <summary>
-    /// Startup warmup period (seconds) during which new outgoing connections prefer TCP.
-    /// uTP is allowed during warmup only for peers with a known uTP hint.
+    /// How many uTP dials may fail with none having succeeded before this client stops guessing that
+    /// peers speak uTP. Default is 8; zero or less disables the guard.
     /// </summary>
-    public int UtpWarmupSeconds { get; set; } = 30;
+    /// <remarks>
+    /// <para>
+    /// Replaces a fixed warm-up period that put every peer on TCP for the first thirty seconds of a
+    /// torrent. That covered exactly the wrong window - the tracker's opening batch, whose
+    /// connections are the ones that last - and it answered from a clock rather than from evidence:
+    /// a machine whose UDP works waited anyway, and one whose UDP is blocked carried on regardless
+    /// once the clock ran out.
+    /// </para>
+    /// <para>
+    /// This asks the network instead. Leading with uTP is itself the probe, and on a path that
+    /// drops UDP the first several dials say so; the global penalty then holds uTP back for a while
+    /// rather than paying a capped attempt per peer. One success clears the count, because the
+    /// question is whether uTP works here at all.
+    /// </para>
+    /// </remarks>
+    public int UtpColdStartFailureLimit { get; set; } = 8;
 }
 
 /// <summary>
