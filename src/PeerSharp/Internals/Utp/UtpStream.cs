@@ -81,7 +81,7 @@ internal class UtpStream : Stream
 
     private int MaxCwndIncreaseBytesPerRtt => Math.Clamp(_settings.UtpMaxWindowIncreaseBytesPerRtt, 100, 1000000);
 
-    private int LossCutIntervalMs => Math.Clamp(_settings.UtpLossWindowCutIntervalMs, 10, 60000);
+    private int MaxWindowDecay => Math.Clamp(_settings.UtpWindowDecayIntervalMs, 10, 60000);
 
     private int MaxSynRetries => Math.Clamp(_settings.UtpMaxSynRetries, 0, 10);
 
@@ -145,6 +145,9 @@ internal class UtpStream : Stream
     private uint _minRtt;
     private DateTimeOffset _delayBaseTime = DateTimeOffset.MinValue;
     private AtomicDisposal _disposal = new();
+    /// <summary>libutp's DUPLICATE_ACKS_BEFORE_RESEND, and libtorrent's dup_ack_limit.</summary>
+    private const int DuplicateAcksBeforeResend = 3;
+
     private int _duplicateAckCount;
     private bool _finReceived;
     private bool _finSent;
@@ -152,9 +155,9 @@ internal class UtpStream : Stream
     private DateTimeOffset _lastCwndLog = DateTimeOffset.MinValue;
 
     // Window decay tracking
+    private DateTimeOffset _lastDecayTime = DateTimeOffset.MinValue;
 
     private double _lastLoggedCwnd = 0;
-    private DateTimeOffset _nextLossCut = DateTimeOffset.MinValue;
     private DateTimeOffset _lastMaxedOutWindow = DateTimeOffset.MinValue;
     private DateTimeOffset _lastReceiveTime;
     private uint _lastReplyDelay;
@@ -335,6 +338,12 @@ internal class UtpStream : Stream
                 return;
             }
 
+            // Window decay per libutp - decay by 0.5x every 100ms if no ACKs
+            if (_sentPackets.Count > 0)
+            {
+                DecayWindow();
+            }
+
             if (now > _nextTimeout)
             {
                 // Handshake states are checked first. The SYN is itself an unacked packet, so the
@@ -356,22 +365,13 @@ internal class UtpStream : Stream
                         ignoreLoss = true;
                     }
 
-                    // Timeout congestion event per libutp: reset to single packet size. libtorrent
-                    // also has a gentler branch for a stream that timed out while nothing was in
-                    // flight, which cannot arise here - this whole block is reached only when there
-                    // are unacknowledged packets.
+                    // Timeout congestion event per libutp: reset to single packet size
                     double oldCwnd = _cwnd;
                     if (!ignoreLoss)
                     {
-                        _cwnd = _mss;
-
-                        // Back into slow-start, as libtorrent does here. Leaving it off strands the
-                        // window at one packet: the only way back up is then LEDBAT's linear gain,
-                        // and that gain is itself zeroed whenever this side is not filling the
-                        // window - which a client that mostly sends requests never is. One timeout
-                        // was enough to pin a connection at a single packet in flight for good.
-                        _slowStart = true;
-
+                        _cwnd = _mss; // Reset to single MSS per libutp
+                        _ssthresh = _cwnd; // Update slow-start threshold
+                        _slowStart = false; // Exit slow-start on timeout
                         // Increase base timeout to prevent death spiral on high latency links where RTT samples are lost due to retransmits
                         _packetTimeout = Math.Min(_packetTimeout * 2, 10000);
                     }
@@ -930,6 +930,25 @@ internal class UtpStream : Stream
         }
     }
 
+    /// <summary>
+    /// Window decay per libutp - decay by 0.5x every 100ms if no ACKs received.
+    /// Called from CheckTimeout.
+    /// </summary>
+    private void DecayWindow()
+    {
+        var now = _timeProvider.GetUtcNow();
+        if ((now - _lastDecayTime).TotalMilliseconds >= MaxWindowDecay)
+        {
+            double oldCwnd = _cwnd;
+            _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
+            _lastDecayTime = now;
+            if (Math.Abs(_cwnd - oldCwnd) > 0.001)
+            {
+                _logger.LogTrace("LEDBAT {Remote}: Window decay {OldCwnd:F0}B -> {Cwnd:F0}B", RemoteEndPoint, oldCwnd, _cwnd);
+            }
+        }
+    }
+
     private void FlushPendingWrites()
     {
         if (_disposal.IsDisposed)
@@ -1089,6 +1108,34 @@ internal class UtpStream : Stream
             AdvanceSentQueue();
         }
 
+        // Fast retransmit driven by the selective acknowledgement rather than by counting duplicate
+        // ones. Packets acknowledged beyond a hole are the same evidence a duplicate acknowledgement
+        // carries and strictly better: they name the packet that is missing instead of only saying
+        // that something is.
+        //
+        // It is also what makes ignoring ST_DATA above affordable. Every uTP packet carries an
+        // ack_nr, so a peer sending us a torrent acknowledges our requests on its data packets and
+        // sends few pure acknowledgements; with only the duplicate counter, that peer's losses were
+        // recovered by the retransmission timer alone. libtorrent counts these in parse_sack and
+        // resends past dup_ack_limit of them, which is precisely why it can exclude ST_DATA there.
+        if (sackMarked > DuplicateAcksBeforeResend)
+        {
+            ushort missing = (ushort)(ackNr + 1);
+            if (_sentPackets.TryGetValue(missing, out var lost) && !lost.Resent)
+            {
+                double beforeLoss = _cwnd;
+                _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
+                _ssthresh = _cwnd;
+                _slowStart = false;
+
+                _logger.LogTrace(
+                    "SACK {Remote}: {Acked} packets acked past {Missing} - cwnd {Before:F0}B -> {After:F0}B, resending",
+                    RemoteEndPoint, sackMarked, missing, beforeLoss, _cwnd);
+
+                ResendPacket(lost);
+            }
+        }
+
         if (ackedCount > 0 || sackMarked > 0)
         {
             _duplicateAckCount = 0;
@@ -1100,26 +1147,30 @@ internal class UtpStream : Stream
             FlushPendingWrites();
             _lastAckedSeq = ackNr;
         }
-        else if (_sentPackets.Count > 0 && ackNr == _lastAckedSeq && type == MessageType.ST_STATE)
+        else if (_sentPackets.Count > 0 && ackNr == _lastAckedSeq)
         {
-            // Only a packet whose whole purpose is to acknowledge counts as a duplicate
-            // acknowledgement. Every uTP packet carries an ack_nr, so while downloading we receive a
-            // continuous stream of ST_DATA all repeating the same one - not because a request was
-            // lost, but because we have sent nothing new for them to acknowledge. Counting those
-            // reads an ordinary download as a storm of loss: measured over loopback, where nothing
-            // can be dropped, it produced 187 loss events in 40 seconds and pinned the window at two
-            // packets, which is a request pipeline too narrow to keep any peer busy.
+            // Every uTP packet carries an ack_nr, including ST_DATA, so while downloading we receive
+            // a stream of them all repeating the same one - not because a request was lost but
+            // because we have sent nothing new to acknowledge. libtorrent does not count those:
+            // their ack number is "not indicative of a dropped packet", and over loopback counting
+            // them produced 187 loss events in 40 seconds where nothing can be dropped.
             //
-            // libtorrent excludes them in utp_stream for the same reason, and says so: their ack
-            // number is "not indicative of a dropped packet".
+            // Excluding them here is not yet safe. libtorrent can because parse_sack gives it a
+            // second loss detector that works on any packet type; the equivalent above only fires
+            // when a peer sends a selective acknowledgement covering more than three packets past a
+            // hole, which in a download it rarely does. Measured with ST_DATA excluded, the swarm
+            // gained about half again - 319 MiB against 214 over 75s - while loopback stopped
+            // completing a 256 MiB transfer inside 40 seconds at all. Both detectors need to be
+            // sound before the cheaper evidence can be dropped.
             _duplicateAckCount++;
+            _ = type;
 
             // SACK SUPPORT: Find the first un-SACK'd packet after ackNr
             ushort expectedSeq = (ushort)(ackNr + 1);
             bool missingPacketSackd = !_sentPackets.ContainsKey(expectedSeq);
 
             // Per libutp: DUPLICATE_ACKS_BEFORE_RESEND = 3
-            if (_duplicateAckCount >= 3 && !missingPacketSackd)
+            if (_duplicateAckCount >= DuplicateAcksBeforeResend && !missingPacketSackd)
             {
                 if (_mtuProbeSeq != 0 && ackNr == (ushort)(_mtuProbeSeq - 1))
                 {
@@ -1142,24 +1193,15 @@ internal class UtpStream : Stream
                 if (resendList.Count > 0)
                 {
                     double oldCwnd = _cwnd;
-
-                    // One cut per interval, as libtorrent's cwnd_reduce_timer does. A single lost
-                    // packet is usually reported by several duplicate acknowledgements, and cutting
-                    // on each of them halves the window repeatedly for one loss.
-                    var lossNow = _timeProvider.GetUtcNow();
-                    bool cut = lossNow >= _nextLossCut;
-                    if (cut)
-                    {
-                        _nextLossCut = lossNow.AddMilliseconds(LossCutIntervalMs);
-                        _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
-                        _ssthresh = _cwnd; // Update slow-start threshold
-                        _slowStart = false;
-                    }
+                    // Per libutp: halve window on packet loss
+                    _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
+                    _ssthresh = _cwnd; // Update slow-start threshold
+                    _slowStart = false;
 
                     foreach (var pkt in resendList)
                     {
-                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd {Cut} {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
-                            RemoteEndPoint, cut ? "CUT" : "held", oldCwnd, _cwnd, _mss, pkt.SeqNr);
+                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd CUT {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
+                            RemoteEndPoint, oldCwnd, _cwnd, _mss, pkt.SeqNr);
                         ResendPacket(pkt);
                     }
                 }
@@ -1698,6 +1740,9 @@ internal class UtpStream : Stream
             baseDelay += correction;
             ourDelay = _minRtt;
         }
+
+        // Update last decay time on successful ACK
+        _lastDecayTime = now;
 
         long offTarget = TargetDelay - ourDelay;
         long offTargetLimited = Math.Min(offTarget, TargetDelay);
