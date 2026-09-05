@@ -73,7 +73,8 @@ var settings = new Settings
         // Incoming uTP stays on: refusing it would change what the swarm offers as well as what
         // this client dials, and the question is about the dialling policy.
         EnableUtpOut = !options.NoUtp,
-        PreferUtp = !options.NoUtp
+        PreferUtp = !options.NoUtp,
+        EnableTcpOut = !options.NoTcp
     },
     Dht = { Enabled = !options.NoDht },
     Queue =

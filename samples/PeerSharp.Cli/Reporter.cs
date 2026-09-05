@@ -1,6 +1,7 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Text;
+using PeerSharp.Core;
 using PeerSharp.Interfaces;
 
 namespace PeerSharp.Cli;
@@ -150,9 +151,10 @@ internal sealed class Reporter(IClientEngine engine, IReadOnlyList<ITorrent> tor
         long utpDown = 0;
         long tcpDown = 0;
 
-        foreach (var torrent in torrents)
+        var peers = torrents.SelectMany(t => t.Peers.GetConnectedPeers()).ToList();
+
         {
-            foreach (var peer in torrent.Peers.GetConnectedPeers())
+            foreach (var peer in peers)
             {
                 if (peer.IsUtp)
                 {
@@ -187,6 +189,33 @@ internal sealed class Reporter(IClientEngine engine, IReadOnlyList<ITorrent> tor
         Console.WriteLine(
             $"          transport utp={utpPeers} tcp={tcpPeers} ({utpPeers * 100 / totalPeers}% uTP by peers, " +
             $"{byBytes} by bytes) encrypted={encrypted}");
+
+        ReportTransportSide("utp", peers.Where(p => p.IsUtp).ToList());
+        ReportTransportSide("tcp", peers.Where(p => !p.IsUtp).ToList());
+    }
+
+    /// <summary>
+    /// Why one transport is carrying less than the other. A connection that moves nothing is either
+    /// being choked, or was never asked, or is asked and answers slowly - three different faults with
+    /// the same appearance in the byte share above.
+    /// </summary>
+    private static void ReportTransportSide(string label, List<PeerInfo> side)
+    {
+        if (side.Count == 0)
+        {
+            return;
+        }
+
+        int choked = side.Count(p => p.PeerChoking);
+        int interested = side.Count(p => p.AmInterested);
+        int announced = side.Count(p => p.HasReportedPieces);
+        int idle = side.Count(p => p.Downloaded == 0);
+        var rtts = side.Where(p => p.RttMs > 0).Select(p => p.RttMs).Order().ToList();
+        string rtt = rtts.Count > 0 ? $"{rtts[rtts.Count / 2]}ms" : "n/a";
+
+        Console.WriteLine(
+            $"            {label,-3} choked={choked}/{side.Count} weWant={interested} " +
+            $"toldUsPieces={announced} zeroBytes={idle} medianRtt={rtt}");
     }
 
     /// <summary>
