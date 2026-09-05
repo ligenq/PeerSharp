@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
@@ -66,7 +66,7 @@ internal class UtpStream : Stream
 
     private int MaxCwndIncreaseBytesPerRtt => Math.Clamp(_settings.UtpMaxWindowIncreaseBytesPerRtt, 100, 1000000);
 
-    private int MaxWindowDecay => Math.Clamp(_settings.UtpWindowDecayIntervalMs, 10, 60000);
+    private int LossCutIntervalMs => Math.Clamp(_settings.UtpLossWindowCutIntervalMs, 10, 60000);
 
     private int MaxSynRetries => Math.Clamp(_settings.UtpMaxSynRetries, 0, 10);
 
@@ -137,9 +137,9 @@ internal class UtpStream : Stream
     private DateTimeOffset _lastCwndLog = DateTimeOffset.MinValue;
 
     // Window decay tracking
-    private DateTimeOffset _lastDecayTime = DateTimeOffset.MinValue;
 
     private double _lastLoggedCwnd = 0;
+    private DateTimeOffset _nextLossCut = DateTimeOffset.MinValue;
     private DateTimeOffset _lastMaxedOutWindow = DateTimeOffset.MinValue;
     private DateTimeOffset _lastReceiveTime;
     private uint _lastReplyDelay;
@@ -320,12 +320,6 @@ internal class UtpStream : Stream
                 return;
             }
 
-            // Window decay per libutp - decay by 0.5x every 100ms if no ACKs
-            if (_sentPackets.Count > 0)
-            {
-                DecayWindow();
-            }
-
             if (now > _nextTimeout)
             {
                 // Handshake states are checked first. The SYN is itself an unacked packet, so the
@@ -347,13 +341,22 @@ internal class UtpStream : Stream
                         ignoreLoss = true;
                     }
 
-                    // Timeout congestion event per libutp: reset to single packet size
+                    // Timeout congestion event per libutp: reset to single packet size. libtorrent
+                    // also has a gentler branch for a stream that timed out while nothing was in
+                    // flight, which cannot arise here - this whole block is reached only when there
+                    // are unacknowledged packets.
                     double oldCwnd = _cwnd;
                     if (!ignoreLoss)
                     {
-                        _cwnd = _mss; // Reset to single MSS per libutp
-                        _ssthresh = _cwnd; // Update slow-start threshold
-                        _slowStart = false; // Exit slow-start on timeout
+                        _cwnd = _mss;
+
+                        // Back into slow-start, as libtorrent does here. Leaving it off strands the
+                        // window at one packet: the only way back up is then LEDBAT's linear gain,
+                        // and that gain is itself zeroed whenever this side is not filling the
+                        // window - which a client that mostly sends requests never is. One timeout
+                        // was enough to pin a connection at a single packet in flight for good.
+                        _slowStart = true;
+
                         // Increase base timeout to prevent death spiral on high latency links where RTT samples are lost due to retransmits
                         _packetTimeout = Math.Min(_packetTimeout * 2, 10000);
                     }
@@ -912,25 +915,6 @@ internal class UtpStream : Stream
         }
     }
 
-    /// <summary>
-    /// Window decay per libutp - decay by 0.5x every 100ms if no ACKs received.
-    /// Called from CheckTimeout.
-    /// </summary>
-    private void DecayWindow()
-    {
-        var now = _timeProvider.GetUtcNow();
-        if ((now - _lastDecayTime).TotalMilliseconds >= MaxWindowDecay)
-        {
-            double oldCwnd = _cwnd;
-            _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
-            _lastDecayTime = now;
-            if (Math.Abs(_cwnd - oldCwnd) > 0.001)
-            {
-                _logger.LogTrace("LEDBAT {Remote}: Window decay {OldCwnd:F0}B -> {Cwnd:F0}B", RemoteEndPoint, oldCwnd, _cwnd);
-            }
-        }
-    }
-
     private void FlushPendingWrites()
     {
         if (_disposal.IsDisposed)
@@ -1130,15 +1114,24 @@ internal class UtpStream : Stream
                 if (resendList.Count > 0)
                 {
                     double oldCwnd = _cwnd;
-                    // Per libutp: halve window on packet loss
-                    _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
-                    _ssthresh = _cwnd; // Update slow-start threshold
-                    _slowStart = false;
+
+                    // One cut per interval, as libtorrent's cwnd_reduce_timer does. A single lost
+                    // packet is usually reported by several duplicate acknowledgements, and cutting
+                    // on each of them halves the window repeatedly for one loss.
+                    var lossNow = _timeProvider.GetUtcNow();
+                    bool cut = lossNow >= _nextLossCut;
+                    if (cut)
+                    {
+                        _nextLossCut = lossNow.AddMilliseconds(LossCutIntervalMs);
+                        _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
+                        _ssthresh = _cwnd; // Update slow-start threshold
+                        _slowStart = false;
+                    }
 
                     foreach (var pkt in resendList)
                     {
-                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd CUT {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
-                            RemoteEndPoint, oldCwnd, _cwnd, _mss, pkt.SeqNr);
+                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd {Cut} {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
+                            RemoteEndPoint, cut ? "CUT" : "held", oldCwnd, _cwnd, _mss, pkt.SeqNr);
                         ResendPacket(pkt);
                     }
                 }
@@ -1669,9 +1662,6 @@ internal class UtpStream : Stream
             baseDelay += correction;
             ourDelay = _minRtt;
         }
-
-        // Update last decay time on successful ACK
-        _lastDecayTime = now;
 
         long offTarget = TargetDelay - ourDelay;
         long offTargetLimited = Math.Min(offTarget, TargetDelay);
