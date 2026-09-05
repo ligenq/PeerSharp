@@ -422,6 +422,45 @@ public sealed class ConnectionSettings
     public int UtpPenaltyMaxSeconds { get; set; } = 600;
 
     /// <summary>
+    /// LEDBAT's target one-way queuing delay, in microseconds. Default is 100,000 (100 ms), the value
+    /// in BEP 29 and libutp; clamped to 1,000 - 1,000,000. Read while the connection runs.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole point of uTP: the controller grows its window while measured queuing delay
+    /// is under the target and shrinks it above, so uTP backs off before TCP does and leaves the link
+    /// to interactive traffic. Raising it makes uTP more aggressive and less yielding - a LAN or a
+    /// dedicated line may want that, and a shared home connection is the case the default is chosen
+    /// for. Lowering it yields sooner, at the cost of throughput.
+    /// </remarks>
+    public int UtpTargetDelayMicroseconds { get; set; } = 100000;
+
+    /// <summary>
+    /// The most the congestion window may grow in one round trip, in bytes. Default is 3,000, as in
+    /// libutp; clamped to 100 - 1,000,000. Read while the connection runs.
+    /// </summary>
+    /// <remarks>
+    /// LEDBAT's gain. It bounds how fast the window opens when the path looks idle, which is what
+    /// keeps a delay-based controller from overshooting into the very queue it is measuring.
+    /// </remarks>
+    public int UtpMaxWindowIncreaseBytesPerRtt { get; set; } = 3000;
+
+    /// <summary>
+    /// How often the congestion window halves while no acknowledgement arrives, in milliseconds.
+    /// Default is 100, as in libutp; clamped to 10 - 60,000. Read while the connection runs.
+    /// </summary>
+    public int UtpWindowDecayIntervalMs { get; set; } = 100;
+
+    /// <summary>
+    /// How many times a uTP handshake is retried before the connection is abandoned. Default is 2;
+    /// clamped to 0 - 10. Read while the connection runs.
+    /// </summary>
+    /// <remarks>
+    /// Most addresses a swarm hands out sit behind a NAT that never answers, so this is a budget
+    /// spent mostly on peers that will never reply. Each retry doubles the wait before the next.
+    /// </remarks>
+    public int UtpMaxSynRetries { get; set; } = 2;
+
+    /// <summary>
     /// Cooldown (seconds) between uTP slow penalties for the same peer.
     /// </summary>
     public int UtpSlowPenaltyCooldownSeconds { get; set; } = 60;
@@ -727,6 +766,7 @@ public sealed class TransferSettings
 {
     private readonly List<IConcurrencyLimitListener> _concurrencyListeners = [];
     private readonly Lock _concurrencyListenerLock = new();
+    private long _activePieceByteBudget = 32L * 1024 * 1024;
     private int _maxConcurrentPieceHashing = 8;
     private int _maxConcurrentPieceWrites = 8;
     private long _maxDownloadSpeed;
@@ -786,6 +826,83 @@ public sealed class TransferSettings
             NotifyConcurrencyLimitsChanged();
         }
     }
+
+    /// <summary>
+    /// Bytes of piece data allowed to be in progress at once, which is what sets how many pieces the
+    /// picker keeps open. Default is 32 MiB, clamped to 1 MiB - 4 GiB.
+    /// </summary>
+    /// <remarks>
+    /// A fixed piece count cannot serve both ends of the range it has to cover. Thirty-two pieces is
+    /// 8 MiB of exposure on a 256 KiB-piece torrent and 512 MiB on a 16 MiB-piece one - the first
+    /// too few to keep a fast swarm busy, the second more unverified data in flight than most callers
+    /// would choose. A byte budget divided by the piece size gives the same exposure either way.
+    /// </remarks>
+    public long ActivePieceByteBudget
+    {
+        get => _activePieceByteBudget;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _activePieceByteBudget = value;
+        }
+    }
+
+    /// <summary>
+    /// Hard ceiling on pieces open at once, whatever the byte budget works out to. Default is 256,
+    /// clamped to <see cref="MinActivePieces"/> - 4096.
+    /// </summary>
+    public int MaxActivePieces { get; set; } = 256;
+
+    /// <summary>
+    /// Floor on pieces open at once. Default is 8, clamped to 1 - 4096. A torrent with pieces larger
+    /// than the whole budget still gets this many, or endgame has nothing to work with.
+    /// </summary>
+    public int MinActivePieces { get; set; } = 8;
+
+    /// <summary>
+    /// Pieces of headroom kept open per unchoked peer, so capacity tracks the demand actually
+    /// present rather than the budget alone. Default is 2, clamped to 1 - 64.
+    /// </summary>
+    public int ActivePiecesPerPeer { get; set; } = 2;
+
+    /// <summary>
+    /// Multiplier on a peer's smoothed round trip for the soft block timeout - the point at which the
+    /// block is offered to another peer while the original request stands. Default is 6, clamped to
+    /// 1 - 100.
+    /// </summary>
+    public int BlockTimeoutRttMultiplier { get; set; } = 6;
+
+    /// <summary>
+    /// Multiplier on a peer's smoothed round trip for the hard block timeout - the point at which the
+    /// request is abandoned and the peer takes a strike. Default is 10, clamped to 1 - 100.
+    /// </summary>
+    public int BlockHardTimeoutRttMultiplier { get; set; } = 10;
+
+    /// <summary>
+    /// Multiplier on the observed variance of a peer's response times, added to the round-trip term
+    /// of both block timeouts. Default is 4 (RFC 6298's <c>K</c>), clamped to 0 - 32; zero restores
+    /// the older mean-only behaviour.
+    /// </summary>
+    /// <remarks>
+    /// A peer whose replies average 200 ms but range from 50 ms to 2 s is not the same peer as one
+    /// that answers in a steady 200 ms, and a multiple of the mean alone cannot tell them apart: the
+    /// bound is either too tight for the jittery peer, which then collects timeouts it did not earn,
+    /// or too loose for the steady one, which is given seconds to answer a request it would have
+    /// dropped. This is the same term libtorrent adds in <c>peer_connection.cpp</c>.
+    /// </remarks>
+    public int BlockTimeoutVarianceMultiplier { get; set; } = 4;
+
+    /// <summary>Lower bound on the soft block timeout, in milliseconds. Default 3000, clamped 100 - 600000.</summary>
+    public int MinBlockTimeoutMs { get; set; } = 3000;
+
+    /// <summary>Upper bound on the soft block timeout, in milliseconds. Default 15000, clamped to at least <see cref="MinBlockTimeoutMs"/>.</summary>
+    public int MaxBlockTimeoutMs { get; set; } = 15000;
+
+    /// <summary>Lower bound on the hard block timeout, in milliseconds. Default 5000, clamped 100 - 600000.</summary>
+    public int MinBlockHardTimeoutMs { get; set; } = 5000;
+
+    /// <summary>Upper bound on the hard block timeout, in milliseconds. Default 30000, clamped to at least <see cref="MinBlockHardTimeoutMs"/>.</summary>
+    public int MaxBlockHardTimeoutMs { get; set; } = 30000;
 
     /// <summary>
     /// Maximum outstanding requests per peer to cap pipeline growth. Read on each scheduling pass,
@@ -933,6 +1050,60 @@ public sealed class TransferSettings
 }
 
 /// <summary>
+/// What the alert queue does when it reaches <see cref="AlertSettings.MaxQueueSize"/>.
+/// </summary>
+/// <remarks>
+/// Either way the capacity is a real limit. Alerts the engine treats as critical - a torrent added,
+/// removed, finished, errored, or its metadata resolved - are evicted last, but they are not exempt:
+/// a queue that could be exceeded by critical alerts is not bounded at all, and the case that fills
+/// it is exactly the case where a consumer has stopped reading.
+/// </remarks>
+public enum AlertOverflowPolicy
+{
+    /// <summary>
+    /// Discard the oldest droppable alert to make room for the new one. Favours recency, which is
+    /// what a consumer watching live state usually wants.
+    /// </summary>
+    DropOldest,
+
+    /// <summary>
+    /// Refuse the new alert and keep the backlog. Favours the earliest record of what happened, which
+    /// is what a consumer auditing a sequence usually wants.
+    /// </summary>
+    DropNewest
+}
+
+/// <summary>
+/// Settings for the engine's alert queue.
+/// </summary>
+public sealed class AlertSettings
+{
+    private int _maxQueueSize = 10000;
+
+    /// <summary>
+    /// Most alerts held for a consumer that has not read them yet. Default is 10,000; values below
+    /// one are rejected. Read on each post, so lowering it takes effect on the next overflow.
+    /// </summary>
+    /// <remarks>
+    /// Each queued alert holds a reference to whatever it describes, a torrent included, so the queue
+    /// is the one place a consumer that stops calling
+    /// <see cref="IAlerts.GetAlertsAsync"/> can cost the engine unbounded memory.
+    /// </remarks>
+    public int MaxQueueSize
+    {
+        get => Volatile.Read(ref _maxQueueSize);
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            Volatile.Write(ref _maxQueueSize, value);
+        }
+    }
+
+    /// <summary>Which alert gives way when the queue is full. Default is <see cref="AlertOverflowPolicy.DropOldest"/>.</summary>
+    public AlertOverflowPolicy OverflowPolicy { get; set; } = AlertOverflowPolicy.DropOldest;
+}
+
+/// <summary>
 /// Configuration settings for the BitTorrent client.
 /// </summary>
 /// <remarks>
@@ -953,6 +1124,9 @@ public sealed class TransferSettings
 /// </remarks>
 public sealed class Settings
 {
+    /// <summary>Settings for the engine's alert queue.</summary>
+    public AlertSettings Alerts { get; } = new();
+
     /// <summary>Settings for peer-to-peer network connections.</summary>
     public ConnectionSettings Connection { get; } = new();
 

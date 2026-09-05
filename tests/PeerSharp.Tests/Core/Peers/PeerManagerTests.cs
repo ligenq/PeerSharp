@@ -1743,6 +1743,8 @@ public class PeerManagerTests
 
     private sealed class RecordingAlertsManager : IAlertsManager
     {
+        public long DroppedAlertCount => 0;
+
         public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
 
         public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason)

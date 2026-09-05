@@ -53,6 +53,16 @@ namespace PeerSharp.Interfaces;
 public interface IAlerts
 {
     /// <summary>
+    /// How many alerts have been discarded because the queue was full, since the engine started.
+    /// </summary>
+    /// <remarks>
+    /// A non-zero value means the consumer is not reading fast enough for
+    /// <see cref="PeerSharp.Config.AlertSettings.MaxQueueSize"/>, and that the alert stream has gaps.
+    /// The same information arrives in-band as an <see cref="AlertsDroppedAlert"/>.
+    /// </remarks>
+    long DroppedAlertCount { get; }
+
+    /// <summary>
     /// Asynchronously streams alerts as they become available.
     /// </summary>
     /// <param name="pollingInterval">

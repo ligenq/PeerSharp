@@ -52,17 +52,23 @@ internal class UtpStream : Stream
     // Extension type 1 = SACK per BEP-29
     private const byte ExtensionSack = 1;
 
-    private const int MaxCwndIncreaseBytesPerRtt = 3000;
     private const uint MaxRemoteWndSize = 4 * 1024 * 1024;
 
-    // 4MB safety limit
-    private const int MaxSynRetries = 2;
-
     private const int MaxUdpMtu = 1500;
-    private const int MaxWindowDecay = 100;
     private const int MinUdpMtu = 576;
     private const int MtuSearchGranularity = 16;
-    private const int TargetDelay = 100000;
+
+    // The LEDBAT knobs below come from settings rather than constants, so a caller on a link the
+    // defaults were not chosen for can say so. Each is read where it is used, and each is clamped
+    // here rather than trusted: these values steer a congestion controller, and a nonsensical one
+    // does not produce a nonsensical number, it produces a connection that will not yield.
+    private int TargetDelay => Math.Clamp(_settings.UtpTargetDelayMicroseconds, 1000, 1000000);
+
+    private int MaxCwndIncreaseBytesPerRtt => Math.Clamp(_settings.UtpMaxWindowIncreaseBytesPerRtt, 100, 1000000);
+
+    private int MaxWindowDecay => Math.Clamp(_settings.UtpWindowDecayIntervalMs, 10, 60000);
+
+    private int MaxSynRetries => Math.Clamp(_settings.UtpMaxSynRetries, 0, 10);
 
     // MTU discovery (libutp-style probing)
     private const int UtpHeaderSize = 20;
@@ -78,6 +84,7 @@ internal class UtpStream : Stream
     private readonly Lock _lock = new();
     private readonly ILogger<UtpStream> _logger;
     private readonly IUtpManager _manager;
+    private readonly ConnectionSettings _settings;
 
     private readonly Pipe _pipe = new();
 
@@ -184,7 +191,24 @@ internal class UtpStream : Stream
     }
 
     public UtpStream(IUtpManager manager, IPEndPoint remote, ushort idRecv, ushort idSend, TimeProvider timeProvider, ILoggerFactory loggerFactory)
+        : this(manager, remote, idRecv, idSend, timeProvider, loggerFactory, new ConnectionSettings())
     {
+    }
+
+    /// <summary>
+    /// Creates a uTP stream. The connection settings are read for the congestion knobs on every use
+    /// rather than captured, so a change reaches connections that are already open.
+    /// </summary>
+    public UtpStream(
+        IUtpManager manager,
+        IPEndPoint remote,
+        ushort idRecv,
+        ushort idSend,
+        TimeProvider timeProvider,
+        ILoggerFactory loggerFactory,
+        ConnectionSettings settings)
+    {
+        _settings = settings;
         _manager = manager;
         RemoteEndPoint = remote;
         ConnectionIdRecv = idRecv;

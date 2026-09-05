@@ -91,7 +91,7 @@ public class RequestSchedulerTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, maxActivePieces: 1);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, maxActivePieces: () => 1);
         var requestTracker = new BlockRequestTracker();
 
         var scheduler = new RequestScheduler(new RequestSchedulerOptions
@@ -217,7 +217,7 @@ public class RequestSchedulerTests
         var pickerContext = new SchedulerPiecePickerContext { PieceCount = pieceCount };
         torrent.Settings.Transfer.MaxRequestsPerPeer = maxRequestsPerPeer;
         var piecePicker = new PiecePicker(pickerContext, TimeProvider.System, new Random(0));
-        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, maxActivePieces);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, () => maxActivePieces);
         pickerContext.PieceStateManager = pieceStateManager;
         var requestTracker = new BlockRequestTracker();
 

@@ -9,11 +9,16 @@ internal sealed class PieceStateManager : IDisposable
     private readonly ConcurrentDictionary<int, PieceState> _activePieces = new();
     private readonly PiecePicker _piecePicker;
     private readonly ILogger<PieceStateManager> _logger;
-    private readonly int _maxActivePieces;
+    private readonly Func<int> _maxActivePieces;
     private int _activePiecesCount;
     private AtomicDisposal _disposal = new();
 
-    public PieceStateManager(PiecePicker piecePicker, ILogger<PieceStateManager> logger, int maxActivePieces)
+    /// <summary>
+    /// Creates a state manager whose capacity is asked for each time rather than captured, because it
+    /// is derived from the torrent's piece size, the demand present in the swarm and a byte budget -
+    /// all of which change while the torrent runs.
+    /// </summary>
+    public PieceStateManager(PiecePicker piecePicker, ILogger<PieceStateManager> logger, Func<int> maxActivePieces)
     {
         _piecePicker = piecePicker;
         _logger = logger;
@@ -37,7 +42,7 @@ internal sealed class PieceStateManager : IDisposable
 
     public int Count => Interlocked.CompareExchange(ref _activePiecesCount, 0, 0);
 
-    public int MaxActivePieces => _maxActivePieces;
+    public int MaxActivePieces => _maxActivePieces();
 
     public bool TryAddPiece(PieceState state)
     {
@@ -120,7 +125,7 @@ internal sealed class PieceStateManager : IDisposable
 
     public void PruneStalePieces()
     {
-        if (Count < _maxActivePieces)
+        if (Count < MaxActivePieces)
         {
             return;
         }

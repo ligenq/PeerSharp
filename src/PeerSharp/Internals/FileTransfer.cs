@@ -383,10 +383,13 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     // Use centralized constant for block size
     private const int BlockSize = ProtocolConstants.BlockSize;
 
-    private const int HardTimeoutRttMultiplier = 10;
-    private const int MaxActivePieces = 32;
     private const int MaxBackgroundTaskRestarts = 3;
-    private const int MaxHardTimeoutMs = 30000;
+
+    /// <summary>Bounds the configured piece-count settings, so a bad value cannot ask for millions.</summary>
+    private const int ActivePieceCountLimit = 4096;
+
+    /// <summary>Bounds every configured block timeout. Ten minutes is far past anything useful.</summary>
+    private const int BlockTimeoutLimitMs = 600000;
 
     // Semaphore to limit concurrent overflow piece processing (when queue is full)
     // Prevents unbounded Task.Run spawning that could exhaust thread pool
@@ -410,16 +413,12 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// </summary>
     private const long MaxSavedPieceBytes = 16L * 1024 * 1024;
 
-    private const int MaxSoftTimeoutMs = 15000;
+    // ADAPTIVE TIMEOUTS: sized from each peer's own smoothed round trip and the variance around it,
+    // within configured bounds. The soft timeout offers a block to a second peer; the hard one gives
+    // up on the request.
 
-    // ADAPTIVE TIMEOUTS: Based on peer RTT to handle high-latency connections
-    // Hard timeout: Used to give up on a request and retry
-    private const int MinHardTimeoutMs = 5000;
 
-    // Soft timeout: Used to trigger duplicate requests to faster peers
-    private const int MinSoftTimeoutMs = 3000;
 
-    private const int SoftTimeoutRttMultiplier = 6;
     private readonly ILogger<FileTransfer> Logger;
 
     // Track background tasks for proper disposal
@@ -492,7 +491,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         Logger = loggerFactory.CreateLogger<FileTransfer>();
         _piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), _timeProvider, Random.Shared, loggerFactory);
         var pieceStateLogger = loggerFactory.CreateLogger<PieceStateManager>();
-        _pieceStateManager = new PieceStateManager(_piecePicker, pieceStateLogger, MaxActivePieces);
+        _pieceStateManager = new PieceStateManager(_piecePicker, pieceStateLogger, CalculateMaxActivePieces);
 
         // Use bounded channels to prevent memory exhaustion under load
         _incomingBlocks = Channel.CreateBounded<(PeerCommunication, Block)>(new BoundedChannelOptions(256)
@@ -1233,7 +1232,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             }
 
             Logger.LogTrace("Transfer status: peers={PeerCount}, unchoked={Unchoked}, peersWithRequests={PeersWithRequests}, pendingRequests={Pending}, activePieces={ActivePieces}/{MaxActive}, blockIndex={BlockIndex}, oldestReq={OldestReq}ms, endGame={EndGame}",
-                peerCount, unchokedPeers, peersWithRequests, totalPendingRequests, _pieceStateManager.Count, MaxActivePieces, _requestTracker.BlockRequestIndexCount, oldestRequestAgeMs, EndGameMode);
+                peerCount, unchokedPeers, peersWithRequests, totalPendingRequests, _pieceStateManager.Count, _pieceStateManager.MaxActivePieces, _requestTracker.BlockRequestIndexCount, oldestRequestAgeMs, EndGameMode);
         }
 
         _requestTimeoutManager.ProcessTimeouts(now, EndGameMode);
@@ -1348,35 +1347,112 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     }
 
     /// <summary>
-    /// Calculates adaptive hard timeout based on peer's smoothed RTT.
-    /// Returns timeout in milliseconds, clamped to [MinHardTimeoutMs, MaxHardTimeoutMs].
+    /// How many pieces may be open at once, from the piece size, the demand in the swarm and a byte
+    /// budget. Asked on every use, so it tracks peers arriving and leaving and a budget changed at
+    /// runtime.
+    ///
+    /// <para>
+    /// This was a flat 32 for every torrent, which is not one policy but two different ones wearing
+    /// the same number: 8 MiB of half-finished data at a 256 KiB piece size, and 512 MiB at the
+    /// 16 MiB size BEP 52 permits. Dividing a byte budget by the piece size makes the exposure the
+    /// same either way, which is the quantity a caller can reason about.
+    /// </para>
+    ///
+    /// <para>
+    /// The budget is an upper bound, not a target. Opening pieces no peer can serve only scatters
+    /// requests across more partial pieces, so demand - the peers currently willing to send to us -
+    /// caps it too, and the floor keeps enough open for endgame to have somewhere to go.
+    /// </para>
     /// </summary>
-    private static int GetAdaptiveHardTimeout(PeerCommunication peer)
+    private int CalculateMaxActivePieces()
     {
-        int rtt = peer.SmoothedRttMs;
-        if (rtt <= 0)
+        var transfer = _torrent.Settings.Transfer;
+        int ceiling = Math.Clamp(transfer.MaxActivePieces, 1, ActivePieceCountLimit);
+        int floor = Math.Clamp(transfer.MinActivePieces, 1, ceiling);
+
+        long pieceSize = _torrent.InfoFile.Info.PieceSize;
+        if (pieceSize <= 0)
         {
-            return MinHardTimeoutMs; // No RTT data yet, use minimum
+            return floor;
         }
 
-        int adaptiveTimeout = rtt * HardTimeoutRttMultiplier;
-        return Math.Clamp(adaptiveTimeout, MinHardTimeoutMs, MaxHardTimeoutMs);
+        long byBudget = Math.Max(1, transfer.ActivePieceByteBudget / pieceSize);
+
+        // Peers that are not choking us are the ones a newly opened piece could actually make
+        // progress on. Choked and idle peers are counted by neither.
+        int willingPeers = 0;
+        foreach (var peer in _torrent.PeersInternal.GetConnectedPeersInternal())
+        {
+            if (!peer.PeerChoking)
+            {
+                willingPeers++;
+            }
+        }
+
+        long byDemand = (long)willingPeers * Math.Clamp(transfer.ActivePiecesPerPeer, 1, 64);
+
+        return (int)Math.Clamp(Math.Min(byBudget, byDemand), floor, ceiling);
     }
 
     /// <summary>
-    /// Calculates adaptive soft timeout based on peer's smoothed RTT.
-    /// Returns timeout in milliseconds, clamped to [MinSoftTimeoutMs, MaxSoftTimeoutMs].
+    /// The point at which a block request is abandoned and the peer takes a strike.
     /// </summary>
-    private static int GetAdaptiveSoftTimeout(PeerCommunication peer)
+    private int GetAdaptiveHardTimeout(PeerCommunication peer)
     {
+        var transfer = _torrent.Settings.Transfer;
+        return BlockTimeout(
+            peer,
+            transfer.BlockHardTimeoutRttMultiplier,
+            transfer.MinBlockHardTimeoutMs,
+            transfer.MaxBlockHardTimeoutMs,
+            transfer.BlockTimeoutVarianceMultiplier);
+    }
+
+    /// <summary>
+    /// The point at which a block is also offered to a faster peer, while the original request stands.
+    /// </summary>
+    private int GetAdaptiveSoftTimeout(PeerCommunication peer)
+    {
+        var transfer = _torrent.Settings.Transfer;
+        return BlockTimeout(
+            peer,
+            transfer.BlockTimeoutRttMultiplier,
+            transfer.MinBlockTimeoutMs,
+            transfer.MaxBlockTimeoutMs,
+            transfer.BlockTimeoutVarianceMultiplier);
+    }
+
+    /// <summary>
+    /// <c>multiplier * SRTT + varianceMultiplier * RTTVAR</c>, bounded by the configured floor and
+    /// ceiling.
+    ///
+    /// <para>
+    /// The variance term is what a multiple of the mean alone cannot express. Two peers averaging
+    /// 200 ms are not equally likely to answer within a second if one is steady and the other ranges
+    /// from 50 ms to 2 s, and treating them alike means either timing out the jittery peer on
+    /// requests it would have served or waiting seconds on the steady one for a request it has
+    /// already dropped. libtorrent adds the same deviation term for the same reason.
+    /// </para>
+    /// </summary>
+    private static int BlockTimeout(
+        PeerCommunication peer,
+        int rttMultiplier,
+        int configuredMinMs,
+        int configuredMaxMs,
+        int varianceMultiplier)
+    {
+        int minMs = Math.Clamp(configuredMinMs, 100, BlockTimeoutLimitMs);
+        int maxMs = Math.Clamp(configuredMaxMs, minMs, BlockTimeoutLimitMs);
+
         int rtt = peer.SmoothedRttMs;
         if (rtt <= 0)
         {
-            return MinSoftTimeoutMs; // No RTT data yet, use minimum
+            return minMs; // No RTT data yet, use the floor
         }
 
-        int adaptiveTimeout = rtt * SoftTimeoutRttMultiplier;
-        return Math.Clamp(adaptiveTimeout, MinSoftTimeoutMs, MaxSoftTimeoutMs);
+        long timeout = (long)rtt * Math.Clamp(rttMultiplier, 1, 100)
+            + (long)peer.RttVarianceMs * Math.Clamp(varianceMultiplier, 0, 32);
+        return (int)Math.Clamp(timeout, minMs, maxMs);
     }
 
     private async Task CancelBlockRequestAsync(int pieceIndex, int offset, PeerCommunication source)

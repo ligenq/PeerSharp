@@ -21,6 +21,9 @@ internal sealed class NullAlertsManager : IAlertsManager
     {
     }
 
+    /// <summary>Always zero: nothing is ever queued here, so nothing can be dropped.</summary>
+    public long DroppedAlertCount => 0;
+
     public async IAsyncEnumerable<Alert> GetAlertsAsync(
         TimeSpan? pollingInterval = null,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
