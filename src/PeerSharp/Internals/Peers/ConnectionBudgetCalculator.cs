@@ -1,4 +1,4 @@
-namespace PeerSharp.Internals.Peers;
+﻿namespace PeerSharp.Internals.Peers;
 
 /// <summary>
 /// Shares one connection attempt's timeout budget across the transports it may try.
@@ -35,6 +35,28 @@ internal static class ConnectionBudgetCalculator
     public static int Remaining(int remainingMs, int usedMs, int minimumMs)
     {
         return Math.Max(minimumMs, remainingMs - usedMs);
+    }
+
+    /// <summary>
+    /// The cap for a uTP attempt, which depends on whether this peer is known to speak uTP or is
+    /// only assumed to.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every peer is assumed to support uTP until something says otherwise, and on a public swarm
+    /// that assumption is wrong about three times in four. The full budget is the right one for a
+    /// peer that answers; charging it to every peer that does not is what makes leading with uTP
+    /// expensive, because the fallback cannot start until it has been spent.
+    /// </para>
+    /// <para>
+    /// The speculative cap can only shorten the attempt, never lengthen it: a value above the proven
+    /// budget would otherwise give a peer nothing is known about more time than one that has already
+    /// answered.
+    /// </para>
+    /// </remarks>
+    public static int UtpCap(bool utpProven, int provenCapMs, int speculativeCapMs)
+    {
+        return utpProven ? provenCapMs : Math.Min(provenCapMs, speculativeCapMs);
     }
 
     /// <summary>

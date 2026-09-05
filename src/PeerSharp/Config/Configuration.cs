@@ -411,6 +411,25 @@ public sealed class ConnectionSettings
     public int UtpFallbackTimeoutMs { get; set; } = 3000;
 
     /// <summary>
+    /// How long a uTP attempt may take when nothing is known about whether the peer speaks it, in
+    /// milliseconds. Default is 1,000.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every peer is assumed to support uTP until something says otherwise, which is what gets LEDBAT
+    /// used at all. On a public swarm that assumption is wrong about three times in four, and each
+    /// wrong guess is charged in full to the connection budget before TCP is even tried.
+    /// </para>
+    /// <para>
+    /// Measured against the Debian swarm, half the successful uTP connections completed within 88ms
+    /// and 99% within 926ms; exactly one of 139 needed longer than this. <see cref="UtpFallbackTimeoutMs"/>
+    /// still applies once a peer has actually answered over uTP, so the peers this could cut short
+    /// are only ever the ones nothing is known about.
+    /// </para>
+    /// </remarks>
+    public int UtpSpeculativeTimeoutMs { get; set; } = 1000;
+
+    /// <summary>
     /// Base penalty duration (seconds) when uTP fails to connect.
     /// Penalty time backs off exponentially up to UtpPenaltyMaxSeconds.
     /// </summary>
