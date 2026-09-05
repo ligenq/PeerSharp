@@ -43,7 +43,6 @@ public class HolepunchRetryLoopTests
         connection.UtpFallbackTimeoutMs = 500;
         connection.EnableTcpOut = true;
         connection.EnableUtpOut = true;
-        connection.UtpWarmupSeconds = 0;                // Warmup would refuse the forced-uTP plan outright.
 
         // A holepunch dial is forced onto uTP, and a plan that forces a transport the torrent cannot
         // speak comes back empty - so without this the dial under test never happens and the assertion

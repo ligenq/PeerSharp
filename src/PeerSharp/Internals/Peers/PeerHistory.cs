@@ -95,6 +95,19 @@ internal sealed class PeerHistory
     /// <summary>Whether we have a strong hint that this peer supports uTP.</summary>
     public bool UtpHinted { get; set; }
 
+    /// <summary>
+    /// Whether a uTP connection to this peer has actually completed, rather than being guessed at
+    /// from a PEX flag or from this client's willingness to try.
+    /// </summary>
+    /// <remarks>
+    /// Guessing and knowing are different claims and they expire differently. libtorrent keeps the
+    /// same two flags - a speculative <c>supports_utp</c> and a <c>confirmed_supports_utp</c> - and
+    /// only demotes the speculative one when a dial times out, so a peer that has demonstrated uTP
+    /// is not written off by one bad minute on the path. A peer that only speaks uTP would otherwise
+    /// be moved to TCP permanently by a transient failure and never reached again.
+    /// </remarks>
+    public bool UtpConfirmed { get; set; }
+
     /// <summary>Earliest time we should consider using uTP for this peer again.</summary>
     public DateTimeOffset UtpPenaltyUntil { get; set; } = DateTimeOffset.MinValue;
 
@@ -234,7 +247,10 @@ internal sealed class PeerHistory
             UtpPenaltyUntil = penaltyUntil;
         }
 
-        if (UtpFailureCount >= settings.UtpFailureHardLimit)
+        // Only a guess is withdrawn. A peer that has completed a uTP connection keeps the capability
+        // and serves out the backoff above instead, so a transient path problem costs it a pause
+        // rather than the transport it may be the only one it speaks.
+        if (UtpFailureCount >= settings.UtpFailureHardLimit && !UtpConfirmed)
         {
             UtpSupported = false;
         }
@@ -255,7 +271,7 @@ internal sealed class PeerHistory
         }
 
         UtpFailureCount++;
-        if (UtpFailureCount >= settings.UtpFailureHardLimit)
+        if (UtpFailureCount >= settings.UtpFailureHardLimit && !UtpConfirmed)
         {
             UtpSupported = false;
         }
@@ -270,6 +286,7 @@ internal sealed class PeerHistory
         UtpPenaltyUntil = DateTimeOffset.MinValue;
         LastUtpSuccess = now;
         UtpHinted = true;
+        UtpConfirmed = true;
     }
 
     public void UpdateSource(PeerSourceKind source)

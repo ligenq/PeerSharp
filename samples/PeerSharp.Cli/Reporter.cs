@@ -126,6 +126,67 @@ internal sealed class Reporter(IClientEngine engine, IReadOnlyList<ITorrent> tor
             $"          engine torrents={stats.TorrentCount} active={stats.ActiveTorrents} peers={stats.TotalPeers} " +
             $"threads={Process.GetCurrentProcess().Threads.Count} " +
             $"workingSet={Bytes(Environment.WorkingSet)}");
+
+        ReportTransportMix();
+    }
+
+    /// <summary>
+    /// How the connected peers are split between uTP and TCP, and how much of the traffic each is
+    /// carrying.
+    /// </summary>
+    /// <remarks>
+    /// The share is the number this client's transport policy exists to move and the one nothing
+    /// reported. uTP is worth preferring because LEDBAT yields to whatever else is using the uplink,
+    /// but that only helps if the bulk of the transfer actually runs over it - and a client can dial
+    /// uTP first, fall back to TCP on most peers, and look identical from the outside. Bytes as well
+    /// as peers because a handful of uTP connections carrying nothing is not the same result as the
+    /// transfer running on them.
+    /// </remarks>
+    private void ReportTransportMix()
+    {
+        int utpPeers = 0;
+        int tcpPeers = 0;
+        int encrypted = 0;
+        long utpDown = 0;
+        long tcpDown = 0;
+
+        foreach (var torrent in torrents)
+        {
+            foreach (var peer in torrent.Peers.GetConnectedPeers())
+            {
+                if (peer.IsUtp)
+                {
+                    utpPeers++;
+                    utpDown += peer.Downloaded;
+                }
+                else
+                {
+                    tcpPeers++;
+                    tcpDown += peer.Downloaded;
+                }
+
+                if (peer.IsEncrypted)
+                {
+                    encrypted++;
+                }
+            }
+        }
+
+        int totalPeers = utpPeers + tcpPeers;
+        if (totalPeers == 0)
+        {
+            Console.WriteLine("          transport no peers connected");
+            return;
+        }
+
+        long totalDown = utpDown + tcpDown;
+        string byBytes = totalDown > 0
+            ? $"{utpDown * 100 / totalDown}% of {Bytes(totalDown)}"
+            : "no data yet";
+
+        Console.WriteLine(
+            $"          transport utp={utpPeers} tcp={tcpPeers} ({utpPeers * 100 / totalPeers}% uTP by peers, " +
+            $"{byBytes} by bytes) encrypted={encrypted}");
     }
 
     /// <summary>
