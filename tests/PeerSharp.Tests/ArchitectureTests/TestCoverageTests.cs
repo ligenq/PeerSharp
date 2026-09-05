@@ -168,13 +168,6 @@ public sealed class TestCoverageTests
     /// </remarks>
     private static readonly HashSet<string> TypesWithoutATestClass = new(StringComparer.Ordinal)
     {
-        "PeerSharp.Internals.NullAlertsManager",
-        "PeerSharp.Internals.TorrentWebSeeds",
-        "PeerSharp.Internals.Trackers.TrackerBase",
-        "PeerSharp.Internals.Utilities.NatPmpPortMapping",
-        "PeerSharp.Internals.Utilities.UpnpDiscovery",
-        "PeerSharp.Internals.Utilities.UpnpPortMapping",
-        "PeerSharp.Streaming.HttpStreamRequestHandler",
     };
 
     /// <summary>
@@ -204,9 +197,6 @@ public sealed class TestCoverageTests
         "PeerSharp.Internals.Framework.FileSelectionManager.SetFileSelectionAsync",
         "PeerSharp.Internals.MerkleHashRequestSelection`1.Selected",
         "PeerSharp.Internals.MerkleHashRequestSelection`1.Throttled",
-        "PeerSharp.Internals.NullAlertsManager.ConfigAlert",
-        "PeerSharp.Internals.NullAlertsManager.GetAlertsAsync",
-        "PeerSharp.Internals.NullAlertsManager.get_DroppedAlertCount",
         "PeerSharp.Internals.Peers.PeerManager.AnnounceUploadOnlyAsync",
         "PeerSharp.Internals.Peers.PeerPriority.Compare",
         "PeerSharp.Internals.Torrent.SetAllFilesPriorityAsync",
@@ -223,7 +213,6 @@ public sealed class TestCoverageTests
         "PeerSharp.Internals.Torrent.set_DiskWriteLimitBytesPerSecond",
         "PeerSharp.Internals.TorrentConfiguration.set_MaxConnections",
         "PeerSharp.Internals.TorrentConfiguration.set_MaxUploadSlots",
-        "PeerSharp.Internals.Trackers.TrackerBase.get_IsInitialized",
         "PeerSharp.Internals.Utilities.Field25519.SquareRepeatedly",
         "PeerSharp.PiecePicking.TorrentPieceCheckerContext.get_FullSize",
         "PeerSharp.PieceWriter.DiskBandwidthLimiter.AssignBandwidth",
@@ -234,8 +223,6 @@ public sealed class TestCoverageTests
         "PeerSharp.PieceWriter.PathValidator.CreateForTesting",
         "PeerSharp.PieceWriter.Storage.MoveAsync",
         "PeerSharp.PieceWriter.Storage.RenameFileAsync",
-        "PeerSharp.Streaming.HttpStreamServer.Start",
-        "PeerSharp.Streaming.HttpStreamServer.get_Url",
         "PeerSharp.Streaming.StreamingController.OnStreamDisposed",
     };
 

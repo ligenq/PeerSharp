@@ -4,6 +4,71 @@ using System.Net.Sockets;
 
 namespace PeerSharp.Tests.Core.Streaming;
 
+/// <summary>
+/// The server itself: its listener, the URL it advertises, and its shutdown. What it serves is
+/// covered by <see cref="HttpStreamRequestHandlerTests"/>.
+/// </summary>
+public class HttpStreamServerTests
+{
+    [Fact]
+    public void TheUrlIsAvailableBeforeStartSoAPlayerCanBeHandedItImmediately()
+    {
+        // A caller starts the server and hands the URL to a player in the same breath. Requiring
+        // Start first would make that ordering a trap rather than a choice.
+        using var server = new HttpStreamServer(TorrentTestUtility.CreateMinimal(), 0);
+
+        Assert.StartsWith("http://127.0.0.1:", server.Url, StringComparison.Ordinal);
+        Assert.EndsWith("/stream", server.Url, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EachServerBindsItsOwnPortSoTwoCanRunAtOnce()
+    {
+        // Streaming two files from one torrent means two servers, and a fixed port would make the
+        // second one fail on a machine that is already streaming.
+        using var first = new HttpStreamServer(TorrentTestUtility.CreateMinimal(), 0);
+        using var second = new HttpStreamServer(TorrentTestUtility.CreateMinimal(), 0);
+
+        Assert.NotEqual(first.Url, second.Url);
+    }
+
+    [Fact]
+    public async Task StartBindsTheListenerSoTheUrlAnswers()
+    {
+        using var server = new HttpStreamServer(TorrentTestUtility.CreateMinimal(), 0);
+        server.Start();
+
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        using var response = await client.GetAsync(server.Url, TestContext.Current.CancellationToken);
+
+        // What it answers is the handler's business; that it answers at all is the server's.
+        Assert.NotEqual(0, (int)response.StatusCode);
+    }
+
+    [Fact]
+    public void ANullLoggerFactoryIsRefusedRatherThanFailingLater()
+    {
+        Assert.Throws<ArgumentNullException>(() => new HttpStreamServer(TorrentTestUtility.CreateMinimal(), 0, null!));
+    }
+
+    [Fact]
+    public void DisposeStopsTheListenerAndIsRepeatable()
+    {
+        var server = new HttpStreamServer(TorrentTestUtility.CreateMinimal(), 0);
+        server.Start();
+
+        server.Dispose();
+        server.Dispose();
+    }
+
+    [Fact]
+    public void DisposingWithoutStartingIsSafe()
+    {
+        // A caller that decides against streaming after constructing the server still disposes it.
+        new HttpStreamServer(TorrentTestUtility.CreateMinimal(), 0).Dispose();
+    }
+}
+
 public class HttpRangeParserTests
 {
     [Fact]
