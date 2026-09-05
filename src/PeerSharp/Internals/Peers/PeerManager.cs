@@ -1981,10 +1981,21 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 history.FruitlessConnectionCount++;
                 ApplyConnectionBackoff(history);
 
-                // Flip what we offer next time. A peer that refuses both ends up alternating, which
-                // costs nothing extra because the attempt was going to happen anyway; a peer that only
-                // speaks one of them is reached on the following try.
-                history.RegisterHandshakeFailure();
+                // Flip what we offer next time - but only when something was actually offered. A
+                // peer that refuses both ends up alternating, which costs nothing extra because the
+                // attempt was going to happen anyway; a peer that only speaks one of them is reached
+                // on the following try.
+                //
+                // A dial that never opened a socket is not part of that: a refusal, a timeout or a
+                // cancellation is evidence about reachability, which the backoff above already
+                // records, and none about encryption. Flipping on those made the choice alternate
+                // with a peer's packet loss, so a loaded machine could dial the same peer in
+                // plaintext twice running and never offer it MSE at all.
+                if (peer.OfferedAnEncryptionChoice)
+                {
+                    history.RegisterHandshakeFailure();
+                }
+
                 fastReconnectTarget = ClaimFastReconnectAfterEncryptionHangUp(peer, history);
                 fastReconnectEncrypted = history.OfferEncryptionNext;
             }

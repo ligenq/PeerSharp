@@ -318,16 +318,18 @@ public class SyntheticPeerInteropTests : IDisposable
         // Supplied once, and never again - which is the condition the defect needed.
         engine.OnPeersFound(torrent.Hash, [peer.EndPoint]);
 
-        // Both halves of the alternation, and neither tied to a position. This peer refuses every
-        // attempt, so the engine works through encryption, plaintext and encryption again -
-        // MaxFastReconnects is two - and the claim is that both kinds were offered off one supply of
-        // the address. Which socket the listener happens to accept first is not something a loaded
-        // machine guarantees: asserting index 1 failed in CI once, and asserting index 0 failed again
-        // after that, neither reproducible here in seven runs including under full suite load. An
-        // ordering this test never cared about should not be able to fail it.
+        // Both halves of the alternation, and neither tied to a position: which socket the listener
+        // accepts first is not something a loaded machine guarantees, and asserting on an index
+        // failed in CI twice for that reason alone.
+        //
+        // Asked as Opening rather than as a bool. A connection is recorded when it is accepted and
+        // its first byte arrives afterwards, so the old two-state flag answered "is there an
+        // encrypted attempt?" with a socket that had sent nothing yet - which let this pass without
+        // encryption ever being offered, and made the run where it genuinely was not offered look
+        // like a flake.
         bool bothOffered = await SyntheticPeer.WaitForAsync(
-            () => peer.Connections.Any(static c => !c.StartedWithPlaintextHandshake)
-                && peer.Connections.Any(static c => c.StartedWithPlaintextHandshake),
+            () => peer.Connections.Any(static c => c.Opening == HandshakeOpening.Encrypted)
+                && peer.Connections.Any(static c => c.Opening == HandshakeOpening.Plaintext),
             TimeSpan.FromSeconds(30),
             cancellationToken);
 
@@ -341,7 +343,12 @@ public class SyntheticPeerInteropTests : IDisposable
     /// <summary>Renders what was offered on each dial, for an assertion message worth reading.</summary>
     private static string Describe(SyntheticPeer peer) => string.Join(
         ", ",
-        peer.Connections.Select(static c => c.StartedWithPlaintextHandshake ? "plaintext" : "encrypted"));
+        peer.Connections.Select(static c => c.Opening switch
+        {
+            HandshakeOpening.Plaintext => "plaintext",
+            HandshakeOpening.Encrypted => "encrypted",
+            _ => "nothing sent"
+        }));
 
     private ClientEngine CreateEngine(Encryption encryption, TimeSpan? pexInterval = null)
     {
