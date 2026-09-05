@@ -4,6 +4,7 @@ using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Pipelines;
 using System.Net;
+using System.Net.Sockets;
 using System.Threading.Channels;
 
 namespace PeerSharp.Internals.Utp;
@@ -54,8 +55,22 @@ internal class UtpStream : Stream
 
     private const uint MaxRemoteWndSize = 4 * 1024 * 1024;
 
-    private const int MaxUdpMtu = 1500;
-    private const int MinUdpMtu = 576;
+    // Link MTUs. Everything below counts the UDP payload - the uTP header plus its data - so the IP
+    // and UDP headers have to come off these before they mean anything, as libtorrent's utp_stream
+    // does with TORRENT_ETHERNET_MTU - TORRENT_IPV4_HEADER - TORRENT_UDP_HEADER.
+    private const int EthernetMtu = 1500;
+    private const int MinInternetMtu = 576;
+    private const int Ipv4HeaderSize = 20;
+    private const int Ipv6HeaderSize = 40;
+    private const int UdpHeaderSize = 8;
+
+    /// <summary>
+    /// How far below the ceiling to start. libtorrent opens at the ceiling less 68 bytes rather than
+    /// at the ceiling itself, which is room for the PPPoE, tunnel and IPv6 extension headers a path
+    /// may add without saying so. Discovery raises it when the probes get through.
+    /// </summary>
+    private const int MtuConservativeMargin = 8 + 24 + 36;
+
     private const int MtuSearchGranularity = 16;
 
     // The LEDBAT knobs below come from settings rather than constants, so a caller on a link the
@@ -687,7 +702,7 @@ internal class UtpStream : Stream
             _wndSize = Math.Min(header.WndSize, MaxRemoteWndSize);
 
             // Handle ACKs with SACK support
-            HandleAckWithSack(header.AckNr, header.TimestampDifferenceMicroseconds, sackRanges);
+            HandleAckWithSack(header.AckNr, header.TimestampDifferenceMicroseconds, sackRanges, header.Type);
 
             switch (header.Type)
             {
@@ -962,7 +977,11 @@ internal class UtpStream : Stream
     /// SACK allows the sender to know which out-of-order packets arrived,
     /// preventing false packet loss detection on VPNs with reordering.
     /// </summary>
-    private void HandleAckWithSack(ushort ackNr, uint delay, List<(ushort Start, ushort End)>? sackRanges)
+    private void HandleAckWithSack(
+        ushort ackNr,
+        uint delay,
+        List<(ushort Start, ushort End)>? sackRanges,
+        MessageType type)
     {
         int ackedCount = 0;
         int ackedBytes = 0;
@@ -1081,9 +1100,18 @@ internal class UtpStream : Stream
             FlushPendingWrites();
             _lastAckedSeq = ackNr;
         }
-        else if (_sentPackets.Count > 0 && ackNr == _lastAckedSeq)
+        else if (_sentPackets.Count > 0 && ackNr == _lastAckedSeq && type == MessageType.ST_STATE)
         {
-            // Duplicate ACK - but check if the missing packet was SACK'd
+            // Only a packet whose whole purpose is to acknowledge counts as a duplicate
+            // acknowledgement. Every uTP packet carries an ack_nr, so while downloading we receive a
+            // continuous stream of ST_DATA all repeating the same one - not because a request was
+            // lost, but because we have sent nothing new for them to acknowledge. Counting those
+            // reads an ordinary download as a storm of loss: measured over loopback, where nothing
+            // can be dropped, it produced 187 loss events in 40 seconds and pinned the window at two
+            // packets, which is a request pipeline too narrow to keep any peer busy.
+            //
+            // libtorrent excludes them in utp_stream for the same reason, and says so: their ack
+            // number is "not indicative of a dropped packet".
             _duplicateAckCount++;
 
             // SACK SUPPORT: Find the first un-SACK'd packet after ackNr
@@ -1447,11 +1475,19 @@ internal class UtpStream : Stream
 
     private void ResetMtu()
     {
-        _mtuCeiling = MaxUdpMtu;
-        _mtuFloor = MinUdpMtu;
+        // What the headers below this one will take off the wire. Getting this wrong is not a lost
+        // byte or two: a datagram one byte over the link MTU is fragmented, so every full-size
+        // packet becomes two, and losing either loses the whole thing. Plenty of paths drop IP
+        // fragments outright. It does not show up on loopback, whose MTU is 65536.
+        int overhead = (RemoteEndPoint.AddressFamily == AddressFamily.InterNetworkV6
+            ? Ipv6HeaderSize
+            : Ipv4HeaderSize) + UdpHeaderSize;
+
+        _mtuCeiling = EthernetMtu - overhead;
+        _mtuFloor = MinInternetMtu - overhead;
         _mtuDiscoverUntil = _timeProvider.GetUtcNow().AddMinutes(30);
         MtuSearchUpdate();
-        _mtuLast = _mtuCeiling;
+        _mtuLast = Math.Max(_mtuFloor, _mtuCeiling - MtuConservativeMargin);
         UpdateMssFromMtu();
     }
 
