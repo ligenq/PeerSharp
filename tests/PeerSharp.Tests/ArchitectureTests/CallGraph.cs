@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Reflection.Metadata;
@@ -422,10 +423,79 @@ internal sealed class CallGraph
             case HandleKind.TypeDefinition:
                 return TypeName(metadata, (TypeDefinitionHandle)parent);
 
+            case HandleKind.TypeSpecification:
+                // A constructed generic, e.g. Selection<Peer>. Static members of one are invisible
+                // without decoding the signature, and a type this repository declares as generic
+                // would then look untested however many tests called it.
+                return DecodeTypeSpecification(metadata, (TypeSpecificationHandle)parent);
+
             default:
-                // TypeSpecification, which is a constructed generic. Decoding one needs a signature
-                // provider and would only ever name a framework type here.
                 return null;
+        }
+    }
+
+    /// <summary>
+    /// The generic type definition behind a constructed generic - <c>Selection`1</c> for
+    /// <c>Selection&lt;Peer&gt;</c> - which is the name every other part of this graph uses.
+    /// </summary>
+    private static string? DecodeTypeSpecification(MetadataReader metadata, TypeSpecificationHandle handle)
+    {
+        try
+        {
+            return metadata.GetTypeSpecification(handle).DecodeSignature(new TypeNameProvider(metadata), null!);
+        }
+        catch (BadImageFormatException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Decodes a type signature to the name this graph keys on, discarding the parts it does not
+    /// need: type arguments, array and pointer shapes, and modifiers.
+    /// </summary>
+    private sealed class TypeNameProvider(MetadataReader metadata) : ISignatureTypeProvider<string, object?>
+    {
+        public string GetGenericInstantiation(string genericType, ImmutableArray<string> typeArguments) => genericType;
+
+        public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) =>
+            TypeName(reader, handle);
+
+        public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind)
+        {
+            var reference = reader.GetTypeReference(handle);
+            var space = reader.GetString(reference.Namespace);
+            var name = reader.GetString(reference.Name);
+            return string.IsNullOrEmpty(space) ? name : $"{space}.{name}";
+        }
+
+        public string GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind) =>
+            DecodeTypeSpecification(reader, handle) ?? string.Empty;
+
+        public string GetArrayType(string elementType, ArrayShape shape) => elementType;
+        public string GetByReferenceType(string elementType) => elementType;
+        public string GetFunctionPointerType(MethodSignature<string> signature) => string.Empty;
+        public string GetGenericMethodParameter(object? genericContext, int index) => string.Empty;
+        public string GetGenericTypeParameter(object? genericContext, int index) => string.Empty;
+        public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) => unmodifiedType;
+        public string GetPinnedType(string elementType) => elementType;
+        public string GetPointerType(string elementType) => elementType;
+        public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode.ToString();
+        public string GetSZArrayType(string elementType) => elementType;
+
+        private string TypeName(MetadataReader reader, TypeDefinitionHandle handle)
+        {
+            _ = metadata;
+            var definition = reader.GetTypeDefinition(handle);
+            var name = reader.GetString(definition.Name);
+
+            if (definition.IsNested)
+            {
+                return $"{TypeName(reader, definition.GetDeclaringType())}+{name}";
+            }
+
+            var space = reader.GetString(definition.Namespace);
+            return string.IsNullOrEmpty(space) ? name : $"{space}.{name}";
         }
     }
 

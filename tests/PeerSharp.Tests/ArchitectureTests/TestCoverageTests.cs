@@ -31,7 +31,6 @@ public sealed class TestCoverageTests
 
         var missing = ProductionTypes()
             .Where(t => !testTypeNames.Contains(ExpectedTestClassName(t)))
-            .Where(t => !TypesWithoutATestClass.Contains(TypeKey(t)))
             .OrderBy(t => t.FullName, StringComparer.Ordinal)
             .Select(t => $"  {t.FullName} has no {ExpectedTestClassName(t)} ({TestableMembers(t).Count} members needing one)")
             .ToList();
@@ -68,8 +67,7 @@ public sealed class TestCoverageTests
             foreach (var member in TestableMembers(type))
             {
                 if (IsReached(type, member, reached)
-                    || onlyThrows.Contains(CallGraph.Key(TypeKey(type), member))
-                    || MembersNoTestReaches.Contains($"{TypeKey(type)}.{member}"))
+                    || onlyThrows.Contains(CallGraph.Key(TypeKey(type), member)))
                 {
                     continue;
                 }
@@ -85,110 +83,6 @@ public sealed class TestCoverageTests
             $"{missing.Count} public or internal members are never reached by a test:{Environment.NewLine}"
                 + string.Join(Environment.NewLine, missing));
     }
-
-    /// <summary>
-    /// Keeps the debt lists honest: an entry that is no longer a gap has to be deleted.
-    /// </summary>
-    /// <remarks>
-    /// Without this the lists only ever grow, and a rule whose exception list grows is a rule that
-    /// has been switched off slowly. Failing here is the good outcome - something got covered, and
-    /// the line recording that it was not needs to go.
-    /// </remarks>
-    [Fact]
-    public void TheKnownGaps_AreStillGaps()
-    {
-        var testTypeNames = TestAssemblyPaths()
-            .SelectMany(CallGraph.TypeNames)
-            .ToHashSet(StringComparer.Ordinal);
-
-        var graph = new CallGraph();
-        foreach (var path in ProductionAssemblyPaths().Concat(TestAssemblyPaths()))
-        {
-            graph.Add(path);
-        }
-
-        var reached = graph.Reachable(graph.TestEntryPoints);
-        var production = ProductionTypes().ToDictionary(TypeKey, type => type, StringComparer.Ordinal);
-        var stale = new List<string>();
-
-        foreach (var entry in TypesWithoutATestClass)
-        {
-            if (!production.TryGetValue(entry, out var type))
-            {
-                stale.Add($"  {entry} no longer exists or no longer carries logic");
-            }
-            else if (testTypeNames.Contains(ExpectedTestClassName(type)))
-            {
-                stale.Add($"  {entry} now has {ExpectedTestClassName(type)}");
-            }
-        }
-
-        foreach (var entry in MembersNoTestReaches)
-        {
-            int split = entry.LastIndexOf('.');
-            var typeName = entry[..split];
-            var member = entry[(split + 1)..];
-
-            if (!production.TryGetValue(typeName, out var type) || !TestableMembers(type).Contains(member))
-            {
-                stale.Add($"  {entry} no longer exists or no longer needs a test");
-            }
-            else if (IsReached(type, member, reached))
-            {
-                stale.Add($"  {entry} is now reached by a test");
-            }
-        }
-
-        stale.Sort(StringComparer.Ordinal);
-
-        Assert.True(
-            stale.Count == 0,
-            $"{stale.Count} entries in the known-gap lists are no longer gaps. Delete them:"
-                + Environment.NewLine
-                + string.Join(Environment.NewLine, stale));
-    }
-
-    // ------------------------------------------------------------------------- the known gaps --
-
-    /// <summary>
-    /// Types carrying logic that had no test class when these rules were adopted.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Debt, not exclusions. Every entry here is a test somebody still owes; nothing on this list is
-    /// here because there is nothing to test, and nothing should be added to it. It exists because
-    /// the rules were adopted onto a codebase that predates them, and a rule that cannot be turned
-    /// on until the backlog is cleared is a rule that never gets turned on - meanwhile every type
-    /// written from now on is covered from its first commit.
-    /// </para>
-    /// <para>
-    /// <see cref="TheKnownGaps_AreStillGaps"/> makes the list one-way: the moment one of these is
-    /// covered, the entry has to be deleted, so the list can only shrink.
-    /// </para>
-    /// </remarks>
-    private static readonly HashSet<string> TypesWithoutATestClass = new(StringComparer.Ordinal)
-    {
-    };
-
-    /// <summary>
-    /// Members no test reached when these rules were adopted. Debt on the same terms as
-    /// <see cref="TypesWithoutATestClass"/>.
-    /// </summary>
-    private static readonly HashSet<string> MembersNoTestReaches = new(StringComparer.Ordinal)
-    {
-        "PeerSharp.Core.TorrentFile.LoadAsync",
-        "PeerSharp.Core.TorrentFile.get_IsMerkle",
-        "PeerSharp.Internals.AlertsManager.GetAlertsAsync",
-        "PeerSharp.Internals.ClientEngine.DiscoverInfoHashesAsync",
-        "PeerSharp.Internals.Dht.DhtManager.ScrapeInfoHash",
-        "PeerSharp.Internals.FileTransfer.DecrementAvailability",
-        "PeerSharp.Internals.FileTransfer.InvalidateSelection",
-        "PeerSharp.Internals.FileTransfer.PiecesAvailabilityChanged",
-        "PeerSharp.Internals.FileTransfer.RefreshSelection",
-        "PeerSharp.Internals.MerkleHashRequestSelection`1.Selected",
-        "PeerSharp.Internals.MerkleHashRequestSelection`1.Throttled",
-        "PeerSharp.Internals.Peers.PeerManager.AnnounceUploadOnlyAsync",
-    };
 
     /// <summary>
     /// Whether a member is entered by any test, directly or through the interface it is called by.

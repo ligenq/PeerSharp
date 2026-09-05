@@ -62,12 +62,14 @@ public class ClientEngineSurfaceTests
         // crawl to run. An empty stream would read as "the network is quiet" and hide the
         // configuration mistake behind it.
         await using var engine = ClientEngineFactory.Create();
-        using var cts = new CancellationTokenSource();
-        await cts.CancelAsync();
+
+        // Obtained here rather than inside the assertion's lambda: an async iterator does nothing
+        // until it is enumerated, so this shows the refusal comes from enumerating it.
+        var crawl = engine.DiscoverInfoHashesAsync(cancellationToken: TestContext.Current.CancellationToken);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
         {
-            await foreach (var _ in engine.DiscoverInfoHashesAsync(cancellationToken: cts.Token))
+            await foreach (var _ in crawl)
             {
                 break;
             }
