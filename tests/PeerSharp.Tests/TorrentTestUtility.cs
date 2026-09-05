@@ -154,6 +154,8 @@ internal static class TorrentTestUtility
 
     internal class MockAlertsManager : IAlertsManager
     {
+        public long DroppedAlertCount => 0;
+
         public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
 
         public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason) { }

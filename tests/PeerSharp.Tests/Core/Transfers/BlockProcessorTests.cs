@@ -34,7 +34,7 @@ public class BlockProcessorTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, () => 10);
         var requestTracker = new BlockRequestTracker();
         var requestCompletionTracker = new RequestCompletionTracker(requestTracker, TimeProvider.System, (_, _, _) => { });
         var downloader = new TransferStats();
@@ -76,7 +76,7 @@ public class BlockProcessorTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, () => 10);
         var requestTracker = new BlockRequestTracker();
         var requestCompletionTracker = new RequestCompletionTracker(requestTracker, TimeProvider.System, (_, _, _) => { });
         var downloader = new TransferStats();
@@ -121,7 +121,7 @@ public class BlockProcessorTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, () => 10);
 
         // Add active piece to state manager so processor can find it
         var pieceState = new PieceState(0, 1);
@@ -179,7 +179,7 @@ public class BlockProcessorTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, () => 10);
         var pieceState = new PieceState(0, 1);
         pieceStateManager.TryAddPiece(pieceState);
 
@@ -230,7 +230,7 @@ public class BlockProcessorTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, () => 10);
         var pieceState = new PieceState(0, 1);
         pieceStateManager.TryAddPiece(pieceState);
 
@@ -272,7 +272,7 @@ public class BlockProcessorTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, () => 10);
         var pieceState = new PieceState(0, 1);
         pieceStateManager.TryAddPiece(pieceState);
 
@@ -311,7 +311,7 @@ public class BlockProcessorTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, 10);
+        var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, () => 10);
         // Do NOT add piece to state manager
 
         var requestTracker = new BlockRequestTracker();

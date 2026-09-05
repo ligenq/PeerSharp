@@ -308,6 +308,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     // RTT tracking for adaptive request pipelining
     private int _smoothedRttMs = 100;
 
+    // Mean deviation of the round trip, in milliseconds. RFC 6298 calls this RTTVAR and seeds it at
+    // half the first sample; 50 pairs with the 100 ms _smoothedRttMs seed above.
+    private int _rttVarianceMs = 50;
+
     private int _strikes;
     private IReadOnlyList<int>? _suggestedSnapshot;
     private int _totalMessageCount = 0;
@@ -655,6 +659,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public long SmoothedDownloadSpeed => Volatile.Read(ref _smoothedDownloadSpeed);
 
     public int SmoothedRttMs => Interlocked.CompareExchange(ref _smoothedRttMs, 0, 0);
+
+    /// <summary>
+    /// Mean deviation of this peer's response times, in milliseconds - how far a reply typically
+    /// falls from <see cref="SmoothedRttMs"/>. Timeouts add a multiple of this so a peer with a
+    /// steady round trip is held to a tighter bound than one that answers erratically.
+    /// </summary>
+    public int RttVarianceMs => Interlocked.CompareExchange(ref _rttVarianceMs, 0, 0);
 
     public int Strikes
     {
@@ -1350,6 +1361,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // This smooths out jitter while still responding to changes
         int oldRtt = SmoothedRttMs;
         int newRtt = ((oldRtt * 7) + rttMs) / 8;
+
+        // RFC 6298: RTTVAR = 3/4 RTTVAR + 1/4 |SRTT - sample|, using the smoothed value from before
+        // this sample was folded in. Same clamp as the mean, so a single wild sample cannot push a
+        // timeout past what the mean alone would ever allow.
+        int deviation = Math.Abs(oldRtt - rttMs);
+        int newVariance = ((RttVarianceMs * 3) + deviation) / 4;
+        Interlocked.Exchange(ref _rttVarianceMs, Math.Clamp(newVariance, 0, 5000));
+
         Interlocked.Exchange(ref _smoothedRttMs, Math.Max(10, Math.Min(newRtt, 5000))); // Clamp 10ms-5s
 
         // Log significant RTT changes (>50% change). Pipeline depth is deliberately not reported

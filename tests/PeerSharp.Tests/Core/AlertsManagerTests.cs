@@ -70,11 +70,13 @@ public class AlertsManagerTests
         }
 
         var alerts = _alertsManager.PopAlerts();
-        Assert.Equal(10000, alerts.Count);
+        // The batch also carries the notice that one was dropped, which is not itself a queued alert.
+        Assert.Equal(10000, alerts.Count(alert => alert.Id != AlertId.AlertsDropped));
+        Assert.Contains(alerts, alert => alert.Id == AlertId.AlertsDropped);
     }
 
     [Fact]
-    public void MaxAlertQueueSize_DoesNotDropCriticalAlerts()
+    public void MaxAlertQueueSize_DropsANonCriticalAlertBeforeACriticalOne()
     {
         _alertsManager.RegisterAlerts(uint.MaxValue);
         var torrent = TorrentTestUtility.CreateMinimal();
@@ -89,8 +91,8 @@ public class AlertsManagerTests
         _alertsManager.TorrentAlert(AlertId.TorrentRemoved, torrent);
 
         var alerts = _alertsManager.PopAlerts();
-        // Should drop a non-critical one to make room
-        Assert.Equal(10000, alerts.Count);
+        // A non-critical alert gives way so the critical one fits - within the cap, not past it.
+        Assert.Equal(10000, alerts.Count(alert => alert.Id != AlertId.AlertsDropped));
         Assert.Equal(AlertId.TorrentRemoved, alerts[^1].Id);
     }
 

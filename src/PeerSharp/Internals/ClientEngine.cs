@@ -234,7 +234,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         return new ClientEngine(
             settings,
             new BandwidthManager(10, timeProvider, loggerFactory),
-            new AlertsManager(timeProvider),
+            new AlertsManager(timeProvider, settings.Alerts),
             null,
             true,
             timeProvider,
@@ -816,11 +816,12 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         var actualLoggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
 
         var registry = new TorrentRegistry();
+        var actualSettings = settings ?? new Settings();
 
         return new ClientEngine(
-            settings ?? new Settings(),
+            actualSettings,
             bandwidth ?? new BandwidthManager(10, actualTimeProvider, actualLoggerFactory),
-            alerts ?? new AlertsManager(actualTimeProvider),
+            alerts ?? new AlertsManager(actualTimeProvider, actualSettings.Alerts),
             networkManager,
             takeOwnership,
             actualTimeProvider,
@@ -1186,7 +1187,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // Note: socketFactory is now required for UdpListener
             var socketFactory = new UdpSocketFactory();
             var udpListener = new UdpListener(Settings.Connection.UdpPort, socketFactory, Settings, _loggerFactory, _timeProvider);
-            var utpManager = new UtpManager(_timeProvider, _loggerFactory);
+            var utpManager = new UtpManager(_timeProvider, _loggerFactory, Settings.Connection);
 
             var dhtManager = DhtManager.Create(Settings.PeerId, udpListener, Settings, _timeProvider, this, new SystemDnsResolver(), _loggerFactory);
             var portListener = new PortListener(this, _loggerFactory, Settings.Connection.BindAddress);
