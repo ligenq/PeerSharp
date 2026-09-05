@@ -2055,8 +2055,11 @@ public class ArchitectureTests
                 // CancellationToken-based timeouts via ReceiveAsync, not property-based timeouts
                 var networkPatterns = new[]
                 {
-                    ("new HttpClient", "HttpClient", "Timeout"),
-                    ("new TcpClient", "TcpClient", "ReceiveTimeout|SendTimeout|ConnectAsync"),
+                    // The open paren matters: without it the prefix also matches every type whose
+                    // name merely begins this way - HttpClientFactory, HttpClientHandler, and any
+                    // HttpClient-shaped helper - none of which is a client that can carry a timeout.
+                    ("new HttpClient(", "HttpClient", "Timeout"),
+                    ("new TcpClient(", "TcpClient", "ReceiveTimeout|SendTimeout|ConnectAsync"),
                 };
 
                 foreach (var (pattern, clientType, timeoutPattern) in networkPatterns)

@@ -1288,8 +1288,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     /// <summary>
     /// <para>
-    /// THROUGHPUT OPTIMIZATION: Calculate optimal request pipeline depth based on bandwidth-delay product.
-    /// Pipeline = (Speed * RTT) / BlockSize, with min/max bounds.
+    /// Calculate request pipeline depth from measured speed and configured queue time and ceiling.
     /// At startup, uses configured estimates to avoid slow ramp-up.
     /// </para>
     /// </summary>
@@ -1302,7 +1301,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             speedBytesPerSec,
             transferSettings.RequestQueueTimeSeconds,
             transferSettings.EstimatedBandwidthBytesPerSec,
-            transferSettings.InitialPipelineDepth);
+            transferSettings.InitialPipelineDepth,
+            transferSettings.MaxRequestsPerPeer);
     }
 
     public int GetAdaptivePipelineDepth()
@@ -1311,7 +1311,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             GetOptimalPipelineDepth(),
             Strikes,
             SmoothedRttMs,
-            ProtocolConstants.MinPipelineDepth);
+            ProtocolConstants.MinPipelineDepth,
+            _torrent.Settings.Transfer.MaxRequestsPerPeer);
     }
 
     /// <summary>

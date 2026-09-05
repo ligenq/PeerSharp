@@ -56,7 +56,7 @@ public sealed class ConsumerSupportTests
         metadata.Info.Name = "metadata pending";
         metadata.Info.HashV2 = InfoHash.CreateRandomV2();
         await using var torrent = TorrentTestUtility.CreateMinimal(metadata,
-            trackerFactory: new PeerSharp.Internals.Trackers.TrackerFactory(Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance));
+            trackerFactory: new PeerSharp.Internals.Trackers.TrackerFactory(Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance, new PeerSharp.Internals.Network.HttpClientFactory()));
         torrent.Trackers.AddTracker("https://example.invalid/announce");
 
         var link = MagnetLink.FromTorrent(torrent, includeTrackers);

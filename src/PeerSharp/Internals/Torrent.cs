@@ -440,12 +440,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         IGeoIpService geoIpService,
         IFileHandleCache fileHandleCache,
         IConnectionGovernor connectionGovernor,
+        IHttpClientFactory httpClientFactory,
         TimeProvider? timeProvider = null,
         ITorrentEvents? events = null,
         TorrentResumeData? resumeData = null,
         ILoggerFactory? loggerFactory = null)
     {
-        var factories = new TorrentFactories(peerFactory, trackerFactory, loggerFactory ?? NullLoggerFactory.Instance);
+        var factories = new TorrentFactories(peerFactory, trackerFactory, httpClientFactory, loggerFactory ?? NullLoggerFactory.Instance);
         var services = new TorrentServices(bandwidth, alerts, fileHandleCache, connectionGovernor, geoIpService, factories, timeProvider ?? TimeProvider.System);
         var torrent = new Torrent(infoFile, settings, services, fileSelectionManager)
         {

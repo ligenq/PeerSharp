@@ -16,8 +16,8 @@ public class HttpClientFactoryTests
         {
             int port = ((IPEndPoint)listener.LocalEndpoint).Port;
             var accepted = listener.AcceptTcpClientAsync(TestContext.Current.CancellationToken).AsTask();
-            var factory = new HttpClientFactory();
-            using var client = factory.CreateClient(
+            using var factory = new HttpClientFactory();
+            var client = factory.CreateClient(
                 new ProxySettings { Type = ProxyType.None },
                 isTracker: true,
                 IPAddress.Parse("127.0.0.2"));
@@ -55,8 +55,8 @@ public class HttpClientFactoryTests
         {
             int port = ((IPEndPoint)listener.LocalEndpoint).Port;
             var accepted = listener.AcceptTcpClientAsync(TestContext.Current.CancellationToken).AsTask();
-            var factory = new HttpClientFactory();
-            using var client = factory.CreateClient(
+            using var factory = new HttpClientFactory();
+            var client = factory.CreateClient(
                 new ProxySettings { Type = ProxyType.None },
                 isTracker: true,
                 addressFamily: AddressFamily.InterNetwork);
@@ -145,6 +145,106 @@ public class HttpClientFactoryTests
             TestContext.Current.CancellationToken).AsTask());
 
         Assert.Equal(SocketError.HostNotFound, error.SocketErrorCode);
+    }
+
+    [Fact]
+    public void CreateClient_ReusesOnePooledClientPerConfiguration()
+    {
+        using var factory = new HttpClientFactory();
+        var proxy = new ProxySettings { Type = ProxyType.None };
+
+        var first = factory.CreateClient(proxy, isTracker: true);
+        var again = factory.CreateClient(proxy, isTracker: true);
+        var webSeed = factory.CreateClient(proxy, isTracker: false);
+
+        Assert.Same(first, again);
+        Assert.NotSame(first, webSeed);
+    }
+
+    [Fact]
+    public void CreateClient_DoesNotConfuseCredentialsThatShareTheKeySeparator()
+    {
+        // The old key was an interpolated string joined on '|', which the credentials themselves may
+        // contain: "a|b" + "c" and "a" + "b|c" produced the same key, so one set of credentials
+        // silently answered for the other.
+        using var factory = new HttpClientFactory();
+        var proxy = new ProxySettings { Type = ProxyType.Http, Host = "proxy.example.com", Port = 8080 };
+
+        proxy.Username = "a|b";
+        proxy.Password = "c";
+        var first = factory.CreateClient(proxy, isTracker: true);
+
+        proxy.Username = "a";
+        proxy.Password = "b|c";
+        var second = factory.CreateClient(proxy, isTracker: true);
+
+        Assert.NotSame(first, second);
+        var credentials = Assert.IsType<NetworkCredential>(Assert.IsType<WebProxy>(GetHandler(second).Proxy).Credentials);
+        Assert.Equal("a", credentials.UserName);
+        Assert.Equal("b|c", credentials.Password);
+    }
+
+    [Fact]
+    public void CreateClient_UsesTheRequestedPerServerConnectionLimit()
+    {
+        using var factory = new HttpClientFactory();
+        var proxy = new ProxySettings { Type = ProxyType.None };
+
+        var standard = factory.CreateClient(proxy, isTracker: false);
+        var wide = factory.CreateClient(proxy, isTracker: false, maxConnectionsPerServer: 32);
+
+        Assert.NotSame(standard, wide);
+        Assert.Equal(IHttpClientFactory.DefaultMaxConnectionsPerServer, GetHandler(standard).MaxConnectionsPerServer);
+        Assert.Equal(32, GetHandler(wide).MaxConnectionsPerServer);
+    }
+
+    [Fact]
+    public void CreateClient_EvictsTheLeastRecentlyUsedConfiguration_OnceTheCapIsReached()
+    {
+        using var factory = new HttpClientFactory();
+        var proxy = new ProxySettings { Type = ProxyType.Http, Host = "proxy.example.com", Port = 8080 };
+
+        proxy.Username = "first";
+        var first = factory.CreateClient(proxy, isTracker: true);
+
+        // Fill the cache with other configurations, all used more recently than the first.
+        for (int i = 0; i < HttpClientFactory.MaxCachedClients; i++)
+        {
+            proxy.Username = $"user{i}";
+            factory.CreateClient(proxy, isTracker: true);
+        }
+
+        proxy.Username = "first";
+        var afterEviction = factory.CreateClient(proxy, isTracker: true);
+
+        Assert.NotSame(first, afterEviction);
+        // The evicted client is disposed, not merely dropped: its connection pool goes with it.
+        Assert.Throws<ObjectDisposedException>(() => first.Timeout = TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public void Dispose_DisposesEveryClientTheFactoryHandedOut()
+    {
+        var factory = new HttpClientFactory();
+        var client = factory.CreateClient(new ProxySettings { Type = ProxyType.None }, isTracker: true);
+
+        factory.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => client.Timeout = TimeSpan.FromSeconds(5));
+        Assert.Throws<ObjectDisposedException>(() => factory.CreateClient(new ProxySettings { Type = ProxyType.None }, isTracker: true));
+        factory.Dispose(); // idempotent
+    }
+
+    [Fact]
+    public void CreateClient_PoolsAreNotSharedBetweenFactories()
+    {
+        // Each engine owns its own factory, so two of them must not hand out the same client - that
+        // was what made one engine's connection pool and per-server limit answer for another's.
+        using var first = new HttpClientFactory();
+        using var second = new HttpClientFactory();
+        var proxy = new ProxySettings { Type = ProxyType.None };
+
+        Assert.NotSame(first.CreateClient(proxy, isTracker: true), second.CreateClient(proxy, isTracker: true));
     }
 
     [Fact]

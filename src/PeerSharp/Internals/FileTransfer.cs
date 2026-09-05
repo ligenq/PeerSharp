@@ -378,7 +378,7 @@ internal class TransferStats
     }
 }
 
-internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesProvider
+internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesProvider, IConcurrencyLimitListener
 {
     // Use centralized constant for block size
     private const int BlockSize = ProtocolConstants.BlockSize;
@@ -458,8 +458,9 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     private readonly BlockProcessor _blockProcessor;
     private readonly TransferProgressReporter _progressReporter;
     private readonly PieceVerificationWriter _pieceVerificationWriter;
-    private readonly SemaphoreSlim _hashSemaphore;
-    private readonly SemaphoreSlim _writeSemaphore;
+    private readonly AdjustableConcurrencyLimiter _hashSemaphore;
+    private readonly AdjustableConcurrencyLimiter _writeSemaphore;
+    private readonly Lock _concurrencySettingsLock = new();
     private readonly PieceStateManager _pieceStateManager;
     private readonly PeerEvaluationScheduler _peerEvaluationScheduler;
     private readonly UploadQueueManager _uploadQueueManager;
@@ -527,7 +528,6 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             TimeProvider = _timeProvider,
             Logger = requestSchedulerLogger,
             BlockSize = BlockSize,
-            MaxRequestsPerPeer = _torrent.Settings.Transfer.MaxRequestsPerPeer,
             GetSoftTimeoutMs = GetAdaptiveSoftTimeout
         }, _piecePicker);
 
@@ -577,8 +577,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
         int maxHash = Math.Clamp(_torrent.Settings.Transfer.MaxConcurrentPieceHashing, 1, 256);
         int maxWrite = Math.Clamp(_torrent.Settings.Transfer.MaxConcurrentPieceWrites, 1, 128);
-        _hashSemaphore = new SemaphoreSlim(maxHash, maxHash);
-        _writeSemaphore = new SemaphoreSlim(maxWrite, maxWrite);
+        _hashSemaphore = new AdjustableConcurrencyLimiter(maxHash);
+        _writeSemaphore = new AdjustableConcurrencyLimiter(maxWrite);
+        _torrent.Settings.Transfer.AddConcurrencyLimitListener(this);
+        OnConcurrencyLimitsChanged();
 
         var peerSchedulerLogger = loggerFactory.CreateLogger<PeerEvaluationScheduler>();
         _peerEvaluationScheduler = new PeerEvaluationScheduler(
@@ -1284,6 +1286,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         if (_disposal.MarkDisposed())
         {
+            _torrent.Settings.Transfer.RemoveConcurrencyLimitListener(this);
             try
             {
                 await _cts.CancelAsync().ConfigureAwait(false);
@@ -1405,6 +1408,19 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
                 RemoveBlockRequest(pieceIndex, offset, peer);
             }
+        }
+    }
+
+    /// <summary>
+    /// Re-reads the hash and write concurrency limits. Serialized so two concurrent settings writes
+    /// cannot leave the two limiters holding values from different passes.
+    /// </summary>
+    public void OnConcurrencyLimitsChanged()
+    {
+        lock (_concurrencySettingsLock)
+        {
+            _hashSemaphore.SetLimit(Math.Clamp(_torrent.Settings.Transfer.MaxConcurrentPieceHashing, 1, 256));
+            _writeSemaphore.SetLimit(Math.Clamp(_torrent.Settings.Transfer.MaxConcurrentPieceWrites, 1, 128));
         }
     }
 

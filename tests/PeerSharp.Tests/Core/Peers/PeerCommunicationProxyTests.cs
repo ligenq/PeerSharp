@@ -9,7 +9,7 @@ public class PeerCommunicationProxyTests
     {
         var settings = new Settings
         {
-            Proxy = new ProxySettings
+            Proxy =
             {
                 Type = ProxyType.None,
                 ProxyPeers = true,
@@ -26,7 +26,7 @@ public class PeerCommunicationProxyTests
     {
         var settings = new Settings
         {
-            Proxy = new ProxySettings
+            Proxy =
             {
                 Type = ProxyType.Socks5,
                 ProxyPeers = true,
@@ -43,7 +43,7 @@ public class PeerCommunicationProxyTests
     {
         var settings = new Settings
         {
-            Proxy = new ProxySettings
+            Proxy =
             {
                 Type = ProxyType.Http,
                 ProxyPeers = true,
@@ -60,7 +60,7 @@ public class PeerCommunicationProxyTests
     {
         var settings = new Settings
         {
-            Proxy = new ProxySettings
+            Proxy =
             {
                 Type = ProxyType.Http,
                 ProxyPeers = false,
@@ -77,7 +77,7 @@ public class PeerCommunicationProxyTests
     {
         var settings = new Settings
         {
-            Proxy = new ProxySettings
+            Proxy =
             {
                 Type = ProxyType.Http,
                 ProxyPeers = true,

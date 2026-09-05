@@ -3,6 +3,7 @@ using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Peers;
+using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Trackers;
 
 namespace PeerSharp.Internals;
@@ -36,6 +37,8 @@ internal sealed class TorrentServices
     public TorrentFactories Factories { get; }
     public IFileHandleCache FileHandleCache { get; }
     public IGeoIpService GeoIp { get; }
+
+    public IHttpClientFactory HttpClientFactory => Factories.HttpClient;
     public ILoggerFactory LoggerFactory => Factories.LoggerFactory;
     public IPeerCommunicationFactory PeerFactory => Factories.Peer;
     public TimeProvider TimeProvider { get; }

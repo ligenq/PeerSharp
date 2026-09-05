@@ -8,16 +8,41 @@ namespace PeerSharp.Internals.Peers;
 /// <summary>Builds and broadcasts BEP 11 peer-exchange updates.</summary>
 internal sealed class PeerExchangeCoordinator
 {
-    private static readonly Random Random = new();
     private readonly ConcurrentDictionary<IPEndPoint, PeerHistory> _knownPeers;
     private readonly ILogger _logger;
+    private readonly Random _random;
     private readonly Torrent _torrent;
 
+    /// <summary>
+    /// Creates a coordinator that draws its shuffle from <see cref="System.Random.Shared"/>.
+    /// </summary>
+    /// <remarks>
+    /// This used to be one <c>new Random()</c> shared by every torrent in the process and called
+    /// without a lock. <see cref="System.Random"/> instance methods are not thread safe, and each
+    /// torrent broadcasts peer exchange from its own loop, so two of them landing in the shuffle
+    /// together could leave the generator's internal state torn - it returns zeros from then on,
+    /// which quietly turns the shuffle into no shuffle at all. <c>Random.Shared</c> is thread safe
+    /// by contract and needs no synchronization here.
+    /// </remarks>
     public PeerExchangeCoordinator(Torrent torrent, ConcurrentDictionary<IPEndPoint, PeerHistory> knownPeers, ILogger logger)
+        : this(torrent, knownPeers, logger, Random.Shared)
+    {
+    }
+
+    /// <summary>
+    /// Creates a coordinator with an explicit random source, for tests that need the shuffle to be
+    /// reproducible. The instance must not be shared across threads unless it is thread safe.
+    /// </summary>
+    public PeerExchangeCoordinator(
+        Torrent torrent,
+        ConcurrentDictionary<IPEndPoint, PeerHistory> knownPeers,
+        ILogger logger,
+        Random random)
     {
         _torrent = torrent;
         _knownPeers = knownPeers;
         _logger = logger;
+        _random = random;
     }
 
     public static void ApplyFlags(PeerHistory history, byte flags)
@@ -93,7 +118,7 @@ internal sealed class PeerExchangeCoordinator
         int takeCount = Math.Min(50, knownCandidates.Count);
         for (int i = 0; i < takeCount; i++)
         {
-            int j = i + Random.Next(knownCandidates.Count - i);
+            int j = i + _random.Next(knownCandidates.Count - i);
             (knownCandidates[i], knownCandidates[j]) = (knownCandidates[j], knownCandidates[i]);
         }
 

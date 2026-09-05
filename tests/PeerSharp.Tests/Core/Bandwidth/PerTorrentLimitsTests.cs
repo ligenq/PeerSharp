@@ -5,6 +5,7 @@ using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Trackers;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Core.Bandwidth;
 
@@ -286,6 +287,7 @@ public class PerTorrentLimitsTests
             new TorrentTestUtility.MockGeoIpService(),
             new MockFileHandleCache(),
             new MockConnectionGovernor(),
+            new HttpClientFactory(),
             TimeProvider.System);
     }
 }

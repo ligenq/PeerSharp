@@ -32,7 +32,7 @@ internal static class PipelineDepthCalculator
     public const int MinPipeline = 2;
 
     /// <summary>
-    /// The ceiling, matching libtorrent's <c>max_out_request_queue</c> default. Outstanding requests
+    /// The default ceiling, matching libtorrent's <c>max_out_request_queue</c> default. Outstanding requests
     /// cost a small record each on this side; the data itself is buffered by the sender.
     /// </summary>
     public const int MaxPipeline = 500;
@@ -50,50 +50,54 @@ internal static class PipelineDepthCalculator
         int speedBytesPerSec,
         int queueTimeSeconds,
         int estimatedBandwidthBytesPerSec,
-        int initialPipelineDepth)
+        int initialPipelineDepth,
+        int maxPipelineDepth = MaxPipeline)
     {
         int queueTime = queueTimeSeconds > 0 ? queueTimeSeconds : DefaultQueueTimeSeconds;
+        int ceiling = Math.Max(1, maxPipelineDepth);
 
         if (speedBytesPerSec > 0)
         {
-            return QueueTimeDepth(speedBytesPerSec, queueTime);
+            return QueueTimeDepth(speedBytesPerSec, queueTime, ceiling);
         }
 
         // Nothing has arrived yet. Start from the configured estimate rather than the floor, so the
         // first seconds of a transfer are not spent ramping up from two blocks in flight.
         if (estimatedBandwidthBytesPerSec > 0)
         {
-            return QueueTimeDepth(estimatedBandwidthBytesPerSec, queueTime);
+            return QueueTimeDepth(estimatedBandwidthBytesPerSec, queueTime, ceiling);
         }
 
-        return Math.Clamp(initialPipelineDepth, MinPipeline, MaxPipeline);
+        return Math.Clamp(initialPipelineDepth, Math.Min(MinPipeline, ceiling), ceiling);
     }
 
     /// <summary>
     /// Adapts the depth for observed peer reliability. Each strike removes a tenth of the ceiling,
     /// and a peer whose round trip has collapsed to a crawl gets half.
     /// </summary>
-    public static int Adapt(int optimalDepth, int strikes, int rttMs, int minPipelineDepth)
+    public static int Adapt(int optimalDepth, int strikes, int rttMs, int minPipelineDepth, int maxPipelineDepth = MaxPipeline)
     {
-        int depth = optimalDepth;
+        int ceiling = Math.Max(1, maxPipelineDepth);
+        int floor = Math.Clamp(minPipelineDepth, 1, ceiling);
+        int depth = Math.Clamp(optimalDepth, floor, ceiling);
         if (strikes > 0)
         {
-            depth = Math.Max(minPipelineDepth, depth - (strikes * (MaxPipeline / 10)));
+            depth = (int)Math.Max(floor, depth - (long)strikes * Math.Max(1, ceiling / 10));
         }
 
         // Not the sizing input any more, but still a symptom: a peer this slow to answer will not
         // drain a long queue, and the requests only delay giving up on it.
         if (rttMs >= 800)
         {
-            depth = Math.Max(minPipelineDepth, depth / 2);
+            depth = Math.Max(floor, depth / 2);
         }
 
         return depth;
     }
 
-    private static int QueueTimeDepth(int speedBytesPerSec, int queueTimeSeconds)
+    private static int QueueTimeDepth(int speedBytesPerSec, int queueTimeSeconds, int ceiling)
     {
         long depth = (long)speedBytesPerSec * queueTimeSeconds / BlockSize;
-        return (int)Math.Clamp(depth, MinPipeline, MaxPipeline);
+        return (int)Math.Clamp(depth, Math.Min(MinPipeline, ceiling), ceiling);
     }
 }

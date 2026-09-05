@@ -148,13 +148,13 @@ sealed class PeerSharp.Config.Settings
     Boolean SendUdpTrackerUrlData { get; set; }
     Byte[] PeerId { get; set; }
     Int32 MaxKnownPeersCache { get; set; }
-    PeerSharp.Config.ConnectionSettings Connection { get; set; }
-    PeerSharp.Config.DhtSettings Dht { get; set; }
-    PeerSharp.Config.FilesSettings Files { get; set; }
-    PeerSharp.Config.ProxySettings Proxy { get; set; }
-    PeerSharp.Config.QueueSettings Queue { get; set; }
-    PeerSharp.Config.SessionSettings Session { get; set; }
-    PeerSharp.Config.TransferSettings Transfer { get; set; }
+    PeerSharp.Config.ConnectionSettings Connection { get; }
+    PeerSharp.Config.DhtSettings Dht { get; }
+    PeerSharp.Config.FilesSettings Files { get; }
+    PeerSharp.Config.ProxySettings Proxy { get; }
+    PeerSharp.Config.QueueSettings Queue { get; }
+    PeerSharp.Config.SessionSettings Session { get; }
+    PeerSharp.Config.TransferSettings Transfer { get; }
     UInt32 MaxPeersPerTrackerRequest { get; set; }
 sealed class PeerSharp.Config.TorrentClientOptions
     .ctor()
@@ -177,6 +177,8 @@ sealed class PeerSharp.Config.TransferSettings
     Int32 MetadataRequestRedundancy { get; set; }
     Int32 MetadataRequestTimeoutSeconds { get; set; }
     Int32 RequestQueueTimeSeconds { get; set; }
+    Int32 WebSeedMaxConnections { get; set; }
+    Int32 WebSeedMaxConnectionsPerSource { get; set; }
     Int64 MaxDownloadSpeed { get; set; }
     Int64 MaxUploadSpeed { get; set; }
 struct PeerSharp.Config.UdpProxyCapabilities
