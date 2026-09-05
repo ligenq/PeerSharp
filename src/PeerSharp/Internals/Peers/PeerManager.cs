@@ -1778,9 +1778,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return TransportPlanBuilder.Build(new TransportPlanBuilder.Inputs(
             Settings: settings,
             ForceUtp: forceUtp,
-            UtpAvailable: utpAvailable,
-            UtpHinted: history?.UtpHinted ?? false,
-            CurrentUtpRatioPercent: GetUtpRatioPercent));
+            UtpAvailable: utpAvailable));
     }
 
     private Task CheckPeerHealthAsync() => _peerHealth.CheckAsync(_connectedPeers.Keys, ConnectedCount);
@@ -2432,27 +2430,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 break;
             }
         }
-    }
-
-    private int GetUtpRatioPercent()
-    {
-        int total = 0;
-        int utp = 0;
-        foreach (var kvp in _connectedPeers)
-        {
-            total++;
-            if (kvp.Key.UtpStream != null)
-            {
-                utp++;
-            }
-        }
-
-        if (total == 0)
-        {
-            return 0;
-        }
-
-        return utp * 100 / total;
     }
 
     private bool IsSpeedStable(DateTimeOffset now)

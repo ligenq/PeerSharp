@@ -395,15 +395,6 @@ public class PeerManagerTests
     }
 
     [Fact(Timeout = 30000)]
-    public async Task GetUtpRatioPercent_EmptySwarm_ReturnsZero()
-    {
-        var ctx = CreateContext();
-        int ratio = (int)InvokePrivate(ctx.Manager, "GetUtpRatioPercent")!;
-        Assert.Equal(0, ratio);
-        await CleanupAsync(ctx);
-    }
-
-    [Fact(Timeout = 30000)]
     public async Task IsSpeedStable_NeverEnteredStable_ReturnsFalse()
     {
         var ctx = CreateContext();
