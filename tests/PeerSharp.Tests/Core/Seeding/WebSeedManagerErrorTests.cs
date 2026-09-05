@@ -3,6 +3,7 @@ using PeerSharp.Internals.Seeding;
 using PeerSharp.Internals.Framework;
 using Microsoft.Extensions.Time.Testing;
 using System.Net;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Core.Seeding;
 
@@ -75,6 +76,7 @@ public class WebSeedManagerErrorTests
             new TorrentTestUtility.MockGeoIpService(),
             new TorrentTestUtility.MockFileHandleCache(),
             new TorrentTestUtility.MockConnectionGovernor(),
+            new HttpClientFactory(),
             TimeProvider.System
         );
 

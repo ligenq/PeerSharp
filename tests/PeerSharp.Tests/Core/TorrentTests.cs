@@ -2,6 +2,7 @@ using PeerSharp.Internals;
 using PeerSharp.PieceWriter;
 using Microsoft.Extensions.Time.Testing;
 using System.Security.Cryptography;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Core;
 
@@ -91,6 +92,7 @@ public class TorrentTests
             new TorrentTestUtility.MockGeoIpService(),
             new TorrentTestUtility.MockFileHandleCache(),
             new TorrentTestUtility.MockConnectionGovernor(),
+            new HttpClientFactory(),
             TimeProvider.System);
 
         var selections = torrent.GetAllFileSelections();
@@ -204,6 +206,7 @@ public class TorrentTests
             new TorrentTestUtility.MockGeoIpService(),
             new TorrentTestUtility.MockFileHandleCache(),
             new TorrentTestUtility.MockConnectionGovernor(),
+            new HttpClientFactory(),
             _timeProvider);
 
         try
@@ -369,6 +372,7 @@ public class TorrentTests
             new TorrentTestUtility.MockGeoIpService(),
             handleCache,
             new TorrentTestUtility.MockConnectionGovernor(),
+            new HttpClientFactory(),
             _timeProvider);
 
         try

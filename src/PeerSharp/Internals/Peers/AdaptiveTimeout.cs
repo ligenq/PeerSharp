@@ -19,17 +19,21 @@ internal class AdaptiveTimeout
     // Per-endpoint statistics for more granular adaptation
     private readonly Dictionary<string, EndpointStats> _endpointStats = [];
 
-    private readonly int _initialTimeoutMs;
+    private readonly ConnectionSettings _settings;
 
     // Smoothing factor for RTTVAR (0.25 = 1/4 per RFC 6298)
     private readonly double _k;
 
     private readonly Lock _lock = new();
 
-    private readonly int _maxTimeoutMs;
+    // Read from the settings on every use rather than captured at construction, so raising or
+    // lowering a bound takes effect on a running torrent. Each is a settings dereference plus a
+    // clamp, not a field load - named as properties to say so.
+    private int MinTimeoutMs => Math.Max(1, _settings.MinConnectionTimeoutMs);
 
-    // Configuration
-    private readonly int _minTimeoutMs;
+    private int MaxTimeoutMs => Math.Max(MinTimeoutMs, _settings.MaxConnectionTimeoutMs);
+
+    private int InitialTimeoutMs => ClampTimeout(_settings.InitialConnectionTimeoutMs);
 
     // Multiplier for variance (4 per RFC 6298)
 
@@ -64,10 +68,18 @@ internal class AdaptiveTimeout
     /// Creates an adaptive timeout manager with custom settings.
     /// </summary>
     public AdaptiveTimeout(int minTimeoutMs, int maxTimeoutMs, int initialTimeoutMs, TimeProvider timeProvider)
+        : this(new ConnectionSettings
+        {
+            MinConnectionTimeoutMs = minTimeoutMs,
+            MaxConnectionTimeoutMs = maxTimeoutMs,
+            InitialConnectionTimeoutMs = initialTimeoutMs
+        }, timeProvider)
     {
-        _minTimeoutMs = minTimeoutMs;
-        _maxTimeoutMs = maxTimeoutMs;
-        _initialTimeoutMs = initialTimeoutMs;
+    }
+
+    public AdaptiveTimeout(ConnectionSettings settings, TimeProvider timeProvider)
+    {
+        _settings = settings;
         _timeProvider = timeProvider;
 
         // RFC 6298 recommended values
@@ -75,7 +87,7 @@ internal class AdaptiveTimeout
         _beta = 0.25;   // 1/4
         _k = 4.0;
 
-        _smoothedRtt = initialTimeoutMs; // Initial estimate
+        _smoothedRtt = InitialTimeoutMs; // Initial estimate
         _rttVariance = 0;
     }
 
@@ -90,7 +102,7 @@ internal class AdaptiveTimeout
             {
                 if (!_initialized || _sampleCount < 3)
                 {
-                    return _initialTimeoutMs;
+                    return InitialTimeoutMs;
                 }
 
                 // RTO = SRTT + K * RTTVAR (RFC 6298)
@@ -152,7 +164,7 @@ internal class AdaptiveTimeout
         {
             if (_recentSamples.Count < 5)
             {
-                return _initialTimeoutMs / 2;
+                return InitialTimeoutMs / 2;
             }
 
             // Calculate median
@@ -174,7 +186,7 @@ internal class AdaptiveTimeout
         {
             if (_recentSamples.Count < 10)
             {
-                return _maxTimeoutMs;
+                return MaxTimeoutMs;
             }
 
             // Calculate 95th percentile
@@ -275,7 +287,7 @@ internal class AdaptiveTimeout
             // On timeout, back off the estimates (increase variance)
             // This helps prevent repeated timeouts
             // Use 1.1x instead of 1.5x to avoid rapid explosion of timeout values on dead peers
-            _rttVariance = Math.Min(_rttVariance * 1.1, _maxTimeoutMs / 2.0);
+            _rttVariance = Math.Min(_rttVariance * 1.1, MaxTimeoutMs / 2.0);
 
             if (endpoint != null)
             {
@@ -291,7 +303,7 @@ internal class AdaptiveTimeout
     {
         lock (_lock)
         {
-            _smoothedRtt = _initialTimeoutMs;
+            _smoothedRtt = InitialTimeoutMs;
             _rttVariance = 0;
             _sampleCount = 0;
             _initialized = false;
@@ -309,7 +321,8 @@ internal class AdaptiveTimeout
 
     private int ClampTimeout(int timeout)
     {
-        return Math.Clamp(timeout, _minTimeoutMs, _maxTimeoutMs);
+        int minimum = MinTimeoutMs;
+        return Math.Clamp(timeout, minimum, Math.Max(minimum, _settings.MaxConnectionTimeoutMs));
     }
 
     private void CleanupOldEndpointStats()
@@ -341,8 +354,8 @@ internal class AdaptiveTimeout
 
             stats = new EndpointStats
             {
-                SmoothedRtt = _initialTimeoutMs / 2.0,
-                RttVariance = _initialTimeoutMs / 4.0
+                SmoothedRtt = InitialTimeoutMs / 2.0,
+                RttVariance = InitialTimeoutMs / 4.0
             };
             _endpointStats[key] = stats;
         }
@@ -368,7 +381,7 @@ internal class AdaptiveTimeout
         else
         {
             stats.FailureCount++;
-            stats.RttVariance = Math.Min(stats.RttVariance * 1.5, _maxTimeoutMs / 2.0);
+            stats.RttVariance = Math.Min(stats.RttVariance * 1.5, MaxTimeoutMs / 2.0);
         }
     }
 
@@ -392,8 +405,9 @@ internal class AdaptiveTimeout
         _sampleCount++;
 
         // Clamp to prevent extreme values
-        _smoothedRtt = Math.Clamp(_smoothedRtt, _minTimeoutMs / 2.0, ProtocolConstants.MaxSmoothedRttMs);
-        _rttVariance = Math.Clamp(_rttVariance, 0, _maxTimeoutMs / 2.0);
+        double minimumRtt = MinTimeoutMs / 2.0;
+        _smoothedRtt = Math.Clamp(_smoothedRtt, minimumRtt, Math.Max(minimumRtt, ProtocolConstants.MaxSmoothedRttMs));
+        _rttVariance = Math.Clamp(_rttVariance, 0, MaxTimeoutMs / 2.0);
 
         System.Diagnostics.Debug.WriteLine($"AdaptiveTimeout: UpdateGlobalStats - RTT: {rttMs}ms, Smoothed: {_smoothedRtt:F0}ms, Variance: {_rttVariance:F0}ms, Samples: {_sampleCount}");
     }

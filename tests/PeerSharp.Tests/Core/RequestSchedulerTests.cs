@@ -13,6 +13,58 @@ namespace PeerSharp.Tests.Core;
 public class RequestSchedulerTests
 {
     [Theory]
+    [InlineData(1, 1)]
+    [InlineData(3, 3)]
+    [InlineData(0, 6)]
+    [InlineData(-1, 6)]
+    public async Task Scheduling_RespectsRemoteCapacity(int advertised, int expected)
+    {
+        var fixture = CreateSchedulerFixture(8, 1, 8, 6);
+        typeof(PeerCommunication).GetProperty(nameof(PeerCommunication.RemoteExtensions))!
+            .SetValue(fixture.Peer, new ExtensionHandshake { RequestQueueDepth = advertised });
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, false, () => false);
+
+        Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
+        Assert.Equal(expected, requests.Count);
+    }
+
+    [Fact]
+    public async Task Scheduling_ReReadsLocalAndRemoteLimits_WithoutDiscardingInFlightRequests()
+    {
+        var fixture = CreateSchedulerFixture(16, 1, 16, 6);
+        fixture.Torrent.Settings.Transfer.MaxRequestsPerPeer = 2;
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, false, () => false);
+        Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
+        Assert.Equal(2, requests.Count);
+
+        fixture.Torrent.Settings.Transfer.MaxRequestsPerPeer = 10;
+        var handshake = new ExtensionHandshake { RequestQueueDepth = 4 };
+        typeof(PeerCommunication).GetProperty(nameof(PeerCommunication.RemoteExtensions))!.SetValue(fixture.Peer, handshake);
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, false, () => false);
+        Assert.Equal(4, requests.Count);
+        handshake.RequestQueueDepth = 1;
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, false, () => false);
+        Assert.Equal(4, requests.Count);
+        handshake.RequestQueueDepth = 8;
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, false, () => false);
+        Assert.Equal(8, requests.Count);
+    }
+
+    [Fact]
+    public void Pipeline_CanExceedDefaultCeiling_AndScalesPenaltiesWithConfiguredLimit()
+    {
+        var fixture = CreateSchedulerFixture(1, 1, 1, 1000);
+        fixture.Torrent.Settings.Transfer.MaxRequestsPerPeer = 1000;
+        fixture.Torrent.Settings.Transfer.EstimatedBandwidthBytesPerSec = 100_000_000;
+        Assert.Equal(1000, fixture.Peer.GetAdaptivePipelineDepth());
+        fixture.Peer.IncrementStrikes();
+        Assert.Equal(900, fixture.Peer.GetAdaptivePipelineDepth());
+        fixture.Torrent.Settings.Transfer.MaxRequestsPerPeer = 1;
+        Assert.Equal(1, fixture.Peer.GetAdaptivePipelineDepth());
+    }
+
+    [Theory]
     [InlineData(0, 10, 1, 0)]
     [InlineData(8, 0, 1, 0)]
     [InlineData(8, 10, 1, 8)]
@@ -50,7 +102,6 @@ public class RequestSchedulerTests
             TimeProvider = TimeProvider.System,
             Logger = NullLogger<RequestScheduler>.Instance,
             BlockSize = 16384,
-            MaxRequestsPerPeer = 8,
             GetSoftTimeoutMs = _ => 3000
         }, piecePicker);
 
@@ -164,6 +215,7 @@ public class RequestSchedulerTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var pickerContext = new SchedulerPiecePickerContext { PieceCount = pieceCount };
+        torrent.Settings.Transfer.MaxRequestsPerPeer = maxRequestsPerPeer;
         var piecePicker = new PiecePicker(pickerContext, TimeProvider.System, new Random(0));
         var pieceStateManager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, maxActivePieces);
         pickerContext.PieceStateManager = pieceStateManager;
@@ -177,7 +229,6 @@ public class RequestSchedulerTests
             TimeProvider = TimeProvider.System,
             Logger = NullLogger<RequestScheduler>.Instance,
             BlockSize = blockSize,
-            MaxRequestsPerPeer = maxRequestsPerPeer,
             GetSoftTimeoutMs = _ => 3000
         }, piecePicker);
 

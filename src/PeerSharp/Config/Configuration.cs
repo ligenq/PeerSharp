@@ -1,3 +1,5 @@
+using PeerSharp.Internals.Framework;
+
 namespace PeerSharp.Config;
 
 /// <summary>
@@ -178,6 +180,7 @@ public sealed class ConnectionSettings
     /// <summary>
     /// Maximum number of connection attempts to queue before dropping new requests.
     /// Default is 2000. Increase this if you see "Connection queue full" logs during high activity (e.g. DHT/PEX bursts).
+    /// Applied when the torrent's peer manager is created; changing it does not resize an existing queue.
     /// </summary>
     public int MaxConnectionQueueSize { get; set; } = 2000;
 
@@ -722,6 +725,10 @@ public sealed class SessionSettings
 /// </summary>
 public sealed class TransferSettings
 {
+    private readonly List<IConcurrencyLimitListener> _concurrencyListeners = [];
+    private readonly Lock _concurrencyListenerLock = new();
+    private int _maxConcurrentPieceHashing = 8;
+    private int _maxConcurrentPieceWrites = 8;
     private long _maxDownloadSpeed;
     private long _maxUploadSpeed;
 
@@ -749,18 +756,41 @@ public sealed class TransferSettings
     /// <summary>Initial request pipeline depth for new peer connections.</summary>
     public int InitialPipelineDepth { get; set; } = 16;
 
-    /// <summary>Maximum concurrent piece hash/write operations.</summary>
+    /// <summary>Maximum concurrent web-seed piece downloads per torrent, clamped to 1-64. Read while running; lowering it lets existing requests finish.</summary>
+    public int WebSeedMaxConnections { get; set; } = 2;
+
+    /// <summary>Maximum concurrent piece downloads from one web-seed URL, clamped to 1-64. Also bounded by WebSeedMaxConnections.</summary>
+    public int WebSeedMaxConnectionsPerSource { get; set; } = 2;
+
+    /// <summary>Piece processing worker count and queue capacity, clamped to 4-256. Applied when the torrent's transfer is created.</summary>
     public int MaxConcurrentPieceProcessing { get; set; } = 16;
 
-    /// <summary>Maximum concurrent piece hash verification operations.</summary>
-    public int MaxConcurrentPieceHashing { get; set; } = 8;
+    /// <summary>Maximum concurrent piece hash verification operations (1-256). Changes apply to existing transfers; running work drains normally.</summary>
+    public int MaxConcurrentPieceHashing
+    {
+        get => Volatile.Read(ref _maxConcurrentPieceHashing);
+        set
+        {
+            Volatile.Write(ref _maxConcurrentPieceHashing, value);
+            NotifyConcurrencyLimitsChanged();
+        }
+    }
 
-    /// <summary>Maximum concurrent piece write operations.</summary>
-    public int MaxConcurrentPieceWrites { get; set; } = 8;
+    /// <summary>Maximum concurrent piece write operations (1-128). Changes apply to existing transfers; running work drains normally.</summary>
+    public int MaxConcurrentPieceWrites
+    {
+        get => Volatile.Read(ref _maxConcurrentPieceWrites);
+        set
+        {
+            Volatile.Write(ref _maxConcurrentPieceWrites, value);
+            NotifyConcurrencyLimitsChanged();
+        }
+    }
 
     /// <summary>
-    /// Maximum outstanding requests per peer to cap pipeline growth. Matches libtorrent's
-    /// <c>max_out_request_queue</c>.
+    /// Maximum outstanding requests per peer to cap pipeline growth. Read on each scheduling pass,
+    /// also bounded by the peer's advertised request capacity. Values below one are treated as one.
+    /// Lowering the limit lets in-flight requests drain. Matches libtorrent's <c>max_out_request_queue</c>.
     /// </summary>
     public int MaxRequestsPerPeer { get; set; } = 500;
 
@@ -858,31 +888,79 @@ public sealed class TransferSettings
             _maxUploadSpeed = value;
         }
     }
+
+    /// <summary>
+    /// Registers a component that holds live concurrency limiters. The caller owns the registration
+    /// and must pair it with <see cref="RemoveConcurrencyLimitListener"/> when it is disposed.
+    /// </summary>
+    internal void AddConcurrencyLimitListener(IConcurrencyLimitListener listener)
+    {
+        lock (_concurrencyListenerLock)
+        {
+            _concurrencyListeners.Add(listener);
+        }
+    }
+
+    /// <summary>Deregisters a listener added by <see cref="AddConcurrencyLimitListener"/>.</summary>
+    internal void RemoveConcurrencyLimitListener(IConcurrencyLimitListener listener)
+    {
+        lock (_concurrencyListenerLock)
+        {
+            _concurrencyListeners.Remove(listener);
+        }
+    }
+
+    private void NotifyConcurrencyLimitsChanged()
+    {
+        IConcurrencyLimitListener[] listeners;
+        lock (_concurrencyListenerLock)
+        {
+            if (_concurrencyListeners.Count == 0)
+            {
+                return;
+            }
+
+            listeners = [.. _concurrencyListeners];
+        }
+
+        // Outside the lock: a listener re-reads settings and takes its own locks, and a setter can be
+        // called from any thread. Holding this one across that is how two settings writes deadlock.
+        foreach (var listener in listeners)
+        {
+            listener.OnConcurrencyLimitsChanged();
+        }
+    }
 }
 
 /// <summary>
 /// Configuration settings for the BitTorrent client.
 /// </summary>
 /// <remarks>
-/// <para><b>Thread safety:</b> the engine re-reads these settings from its internal loops at
-/// runtime, so individual property writes take effect without a restart, typically within a
-/// few seconds. Writes of a single property are safe at any time.</para>
+/// <para><b>Runtime changes:</b> scheduling limits such as request depth, connection timeout bounds,
+/// hash/write concurrency and web-seed concurrency apply to existing transfers. Existing work is
+/// allowed to finish when a concurrency limit is lowered. Other settings that create resources
+/// (socket bindings, queue capacities, storage caches, worker counts and session persistence) must
+/// be set before those resources are created; property writes do not recreate them.</para>
 /// <para>There is no atomicity <i>across</i> properties: the engine may briefly observe a mix
 /// of old and new values while several properties are being changed, so related settings
 /// (e.g. a speed limit and its slot count) should be treated as eventually consistent rather
-/// than as one transaction. Replacing whole sub-setting objects (such as
-/// <see cref="Connection"/>) at runtime is not supported; mutate their properties instead.</para>
+/// than as one transaction.</para>
+/// <para>The sub-setting objects (<see cref="Connection"/>, <see cref="Transfer"/> and the rest) are
+/// get-only by design. Running components hold a reference to the instance they were given, so
+/// replacing one would leave them reading the object nobody can see any more - the exact staleness
+/// the live re-reads above exist to avoid. Mutate their properties instead; in an object initializer
+/// that is <c>Connection = { EnableUtpIn = true }</c>.</para>
 /// </remarks>
 public sealed class Settings
 {
     /// <summary>Settings for peer-to-peer network connections.</summary>
-    public ConnectionSettings Connection { get; set; } = new();
+    public ConnectionSettings Connection { get; } = new();
 
     /// <summary>Settings for Distributed Hash Table (DHT).</summary>
-    public DhtSettings Dht { get; set; } = new();
+    public DhtSettings Dht { get; } = new();
 
     /// <summary>Settings for file management and storage.</summary>
-    public FilesSettings Files { get; set; } = new();
+    public FilesSettings Files { get; } = new();
 
     /// <summary>Maximum number of unique known peers to keep in cache.</summary>
     public int MaxKnownPeersCache { get; set; } = 2000;
@@ -913,14 +991,14 @@ public sealed class Settings
     public byte[] PeerId { get; set; } = new byte[20];
 
     /// <summary>Settings for network proxy.</summary>
-    public ProxySettings Proxy { get; set; } = new();
+    public ProxySettings Proxy { get; } = new();
 
     /// <summary>Settings for queue management and auto-stop rules.</summary>
-    public QueueSettings Queue { get; set; } = new();
+    public QueueSettings Queue { get; } = new();
 
     /// <summary>Settings for session persistence (optional, disabled by default).</summary>
-    public SessionSettings Session { get; set; } = new();
+    public SessionSettings Session { get; } = new();
 
     /// <summary>Settings for data transfer.</summary>
-    public TransferSettings Transfer { get; set; } = new();
+    public TransferSettings Transfer { get; } = new();
 }

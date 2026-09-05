@@ -65,7 +65,7 @@ internal class Program
         // Configure engine for WebTorrent-only: disable TCP, uTP, and DHT
         var settings = new Settings
         {
-            Connection = new ConnectionSettings
+            Connection =
             {
                 EnableTcpIn = false,
                 EnableTcpOut = false,
@@ -74,8 +74,8 @@ internal class Program
                 EnableLsd = false,
                 EnableWebSeeds = false
             },
-            Dht = new DhtSettings { Enabled = false },
-            Files = new FilesSettings { DefaultDownloadPath = downloadPath }
+            Dht = { Enabled = false },
+            Files = { DefaultDownloadPath = downloadPath }
         };
 
         var iceServers = options.IceServers.Count > 0

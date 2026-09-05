@@ -1,5 +1,5 @@
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Internals.Trackers;
 
@@ -10,16 +10,13 @@ internal interface ITrackerFactory
 
 internal class TrackerFactory : ITrackerFactory
 {
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILoggerFactory _loggerFactory;
 
-    public TrackerFactory()
-        : this(NullLoggerFactory.Instance)
-    {
-    }
-
-    public TrackerFactory(ILoggerFactory loggerFactory)
+    public TrackerFactory(ILoggerFactory loggerFactory, IHttpClientFactory httpClientFactory)
     {
         _loggerFactory = loggerFactory;
+        _httpClientFactory = httpClientFactory;
     }
 
     public ITracker? CreateTracker(string url, TimeProvider timeProvider)
@@ -27,7 +24,7 @@ internal class TrackerFactory : ITrackerFactory
         if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
             url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
-            return new HttpTracker(_loggerFactory);
+            return new HttpTracker(_loggerFactory, _httpClientFactory);
         }
         else if (url.StartsWith("udp://", StringComparison.OrdinalIgnoreCase))
         {

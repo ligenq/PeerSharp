@@ -9,6 +9,7 @@ using PeerSharp.Internals.Extensions;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Win32.SafeHandles;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests;
 
@@ -377,6 +378,7 @@ internal static class TorrentTestUtility
             new MockGeoIpService(),
             new MockFileHandleCache(),
             new MockConnectionGovernor(),
+            new HttpClientFactory(),
             timeProvider ?? TimeProvider.System,
             resumeData: resumeData
         );

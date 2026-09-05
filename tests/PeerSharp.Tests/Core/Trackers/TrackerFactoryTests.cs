@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging.Abstractions;
+using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Trackers;
 using Microsoft.Extensions.Time.Testing;
 
@@ -13,7 +15,7 @@ public class TrackerFactoryTests
     [InlineData("udp://tracker.com:80/announce", typeof(UdpTracker))]
     public void CreateTracker_ValidUrl_ReturnsCorrectType(string url, Type expectedType)
     {
-        var factory = new TrackerFactory();
+        var factory = new TrackerFactory(NullLoggerFactory.Instance, new HttpClientFactory());
         var tracker = factory.CreateTracker(url, _timeProvider);
 
         Assert.NotNull(tracker);
@@ -23,7 +25,7 @@ public class TrackerFactoryTests
     [Fact]
     public void CreateTracker_InvalidUrl_ReturnsNull()
     {
-        var factory = new TrackerFactory();
+        var factory = new TrackerFactory(NullLoggerFactory.Instance, new HttpClientFactory());
         var tracker = factory.CreateTracker("ftp://invalid.com", _timeProvider);
 
         Assert.Null(tracker);

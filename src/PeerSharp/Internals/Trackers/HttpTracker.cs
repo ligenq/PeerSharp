@@ -18,16 +18,6 @@ internal class HttpTracker : TrackerBase, IDisposable
     private AtomicDisposal _disposal = new();
     private IHttpClient? _testClient;
 
-    public HttpTracker()
-        : this(NullLoggerFactory.Instance, new HttpClientFactory())
-    {
-    }
-
-    public HttpTracker(ILoggerFactory loggerFactory)
-        : this(loggerFactory, new HttpClientFactory())
-    {
-    }
-
     internal HttpTracker(ILoggerFactory loggerFactory, IHttpClientFactory httpClientFactory)
     {
         _httpClientFactory = httpClientFactory;
@@ -196,7 +186,9 @@ internal class HttpTracker : TrackerBase, IDisposable
     {
         if (_disposal.MarkDisposed() && disposing)
         {
-            // No resources to dispose - SharedClient is static and shouldn't be disposed
+            // The HTTP client pool is the engine's, not this tracker's. Trackers come and go with
+            // their torrents; disposing the shared pool here would close connections other torrents
+            // are announcing on.
         }
     }
 

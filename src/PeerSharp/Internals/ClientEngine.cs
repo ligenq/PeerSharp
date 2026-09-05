@@ -23,6 +23,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     private readonly IBandwidthManager _bandwidth;
     private readonly IConnectionGovernor _connectionGovernor;
     private readonly IFileHandleCache _fileHandleCache;
+    private readonly HttpClientFactory _httpClientFactory;
 
     // Dependencies to be injected into Torrents
     private readonly IGeoIpService _geoIp;
@@ -81,12 +82,14 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _sessionManager = sessionManager;
 
         _fileHandleCache = new FileHandleCache(loggerFactory: loggerFactory); // Default 200 handles
+        // One pool for this engine's trackers, web seeds and magnet fetches, disposed with the engine.
+        _httpClientFactory = new HttpClientFactory();
         _connectionGovernor = new ConnectionGovernor(settings);
 
         // Initialize dependencies
         _geoIp = new GeoIpService();
         _peerFactory = new PeerCommunicationFactory(loggerFactory);
-        _trackerFactory = new TrackerFactory(loggerFactory);
+        _trackerFactory = new TrackerFactory(loggerFactory, _httpClientFactory);
 
         // Reads through GetStats, which refuses a disposed engine - hence the guard rather than the
         // call alone. Nothing is measured unless something subscribes to the meter.
@@ -353,6 +356,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             phaseStopwatch.Restart();
             _metrics.Dispose();
             _fileHandleCache.Dispose();
+            _httpClientFactory.Dispose();
 
             // Dispose bandwidth manager
             await _bandwidth.DisposeAsync().ConfigureAwait(false);
@@ -862,7 +866,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         var fsm = new FileSelectionManager(metadata);
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _httpClientFactory, _timeProvider, events, resumeData, _loggerFactory);
 
         if (!transient)
         {
@@ -907,7 +911,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         var fsm = new FileSelectionManager(metadata);
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _httpClientFactory, _timeProvider, events, resumeData, _loggerFactory);
         if (!transient)
         {
             torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
@@ -1859,7 +1863,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             settings = NoProxy;
         }
 
-        return new DefaultHttpClient(new HttpClientFactory().CreateClient(
+        return new DefaultHttpClient(_httpClientFactory.CreateClient(
             settings,
             isTracker: true,
             Settings.Connection.BindAddress));
