@@ -66,6 +66,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             IFileSelectionManager fileSelectionManager)
     {
         InfoFile = infoFile;
+        SessionHash = !infoFile.Info.Hash.IsEmpty || infoFile.Info.HashV2.IsEmpty
+            ? infoFile.Info.Hash
+            : infoFile.Info.HashV2;
         Settings = settings;
         Services = services;
         _logger = services.LoggerFactory.CreateLogger<Torrent>();
@@ -157,6 +160,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public InfoHash HashV2 => InfoFile.Info.HashV2;
 
+    // Keep the original storage key when a magnet learns its other hash. Restore supplies
+    // the saved key before starting the torrent, so later saves and deletion use the same path.
+    internal InfoHash SessionHash { get; set; }
+
     /// <summary>
     /// Whether this torrent knows its own layout. False for a magnet whose BEP 9 exchange has not
     /// finished.
@@ -176,15 +183,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public bool HasSameIdentity(ITorrent? other)
     {
-        if (other == null)
-        {
-            return false;
-        }
-
-        // A torrent is itself even before it has a hash worth comparing.
-        return ReferenceEquals(this, other)
-            || Hash.Matches(other.Hash)
-            || HashV2.Matches(other.HashV2);
+        return TorrentIdentity.SameTorrent(this, other);
     }
 
     public bool HasStreamableFiles => Streaming.HasStreamableFiles;
@@ -606,7 +605,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
         return new TorrentResumeData
         {
-            Hash = Hash,
+            Hash = SessionHash,
             Data = ms.ToArray(),
             Timestamp = Services.TimeProvider.GetUtcNow()
         };
@@ -1508,21 +1507,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         Volatile.Write(ref _lastReportedDownloadSpeed, downloadSpeed);
         Volatile.Write(ref _lastReportedUploadSpeed, uploadSpeed);
 
-        long downloaded = FileTransferInternal.Downloader.Downloaded;
-        long uploaded = FileTransferInternal.Uploader.Uploaded;
-        int connectedPeers = PeersInternal?.ConnectedCount ?? 0;
-
-        var stats = new Interfaces.TransferStats
-        {
-            Downloaded = downloaded,
-            Uploaded = uploaded,
-            DownloadSpeed = downloadSpeed,
-            UploadSpeed = uploadSpeed,
-            ConnectedPeers = connectedPeers
-        };
-
+        var stats = ((ITorrent)this).GetTransferStats();
         Events?.TransferStats?.Invoke(this, stats);
-        Alerts.TransferStatsAlert(this, downloaded, uploaded, downloadSpeed, uploadSpeed, connectedPeers);
+        Alerts.TransferStatsAlert(this, stats.Downloaded, stats.Uploaded, stats.DownloadSpeed, stats.UploadSpeed, stats.ConnectedPeers);
     }
 
     internal IReadOnlyList<FileSelection> GetFileSelectionSnapshot() => _fileSelectionManager.GetAllFileSelections();

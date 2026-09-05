@@ -44,7 +44,7 @@ internal static class TorrentFileParser
     private static TorrentFileMetadata ParseCore(byte[] data, ILoggerFactory? loggerFactory)
     {
         var logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger(nameof(TorrentFileParser));
-        if (BencodeParser.Parse(data) is not BDict root)
+        if (BencodeParser.Parse(data, requireCanonical: true) is not BDict root)
         {
             throw new FormatException("Invalid torrent file");
         }
@@ -134,6 +134,7 @@ internal static class TorrentFileParser
             throw new FormatException("Missing info dictionary");
         }
 
+        // Strict decoding guarantees re-encoding preserves the original info bytes (BEP 3/52).
         var infoBytes = BencodeWriter.Write(info);
         ParseInfoDictionary(info, metadata, infoBytes, root, logger);
 
@@ -143,7 +144,7 @@ internal static class TorrentFileParser
     private static TorrentFileMetadata ParseInfoBytesCore(byte[] infoBytes, ILoggerFactory? loggerFactory)
     {
         var logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger(nameof(TorrentFileParser));
-        if (BencodeParser.Parse(infoBytes) is not BDict info)
+        if (BencodeParser.Parse(infoBytes, requireCanonical: true) is not BDict info)
         {
             throw new FormatException("Invalid info dictionary");
         }
