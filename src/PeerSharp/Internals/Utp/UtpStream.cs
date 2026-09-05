@@ -149,6 +149,14 @@ internal class UtpStream : Stream
     private const int DuplicateAcksBeforeResend = 3;
 
     private int _duplicateAckCount;
+
+    /// <summary>
+    /// The lowest sequence number a selective acknowledgement may still call lost, as libtorrent's
+    /// <c>m_fast_resend_seq_nr</c>. It moves past each packet resent from a hole, so the same packet
+    /// is not resent again on the next report of the same gap, and past whatever the cumulative
+    /// acknowledgement has covered.
+    /// </summary>
+    private ushort _fastResendSeqNr;
     private bool _finReceived;
     private bool _finSent;
     private ushort _lastAckedSeq;
@@ -1109,37 +1117,31 @@ internal class UtpStream : Stream
         }
 
         // Fast retransmit driven by the selective acknowledgement rather than by counting duplicate
-        // ones. Packets acknowledged beyond a hole are the same evidence a duplicate acknowledgement
-        // carries and strictly better: they name the packet that is missing instead of only saying
-        // that something is.
+        // ones. Packets acknowledged beyond a hole name the packet that is missing, where a
+        // duplicate acknowledgement only says that something is.
         //
-        // It is also what makes ignoring ST_DATA above affordable. Every uTP packet carries an
-        // ack_nr, so a peer sending us a torrent acknowledges our requests on its data packets and
-        // sends few pure acknowledgements; with only the duplicate counter, that peer's losses were
-        // recovered by the retransmission timer alone. libtorrent counts these in parse_sack and
-        // resends past dup_ack_limit of them, which is precisely why it can exclude ST_DATA there.
-        if (sackMarked > DuplicateAcksBeforeResend)
-        {
-            ushort missing = (ushort)(ackNr + 1);
-            if (_sentPackets.TryGetValue(missing, out var lost) && !lost.Resent)
-            {
-                double beforeLoss = _cwnd;
-                _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
-                _ssthresh = _cwnd;
-                _slowStart = false;
-
-                _logger.LogTrace(
-                    "SACK {Remote}: {Acked} packets acked past {Missing} - cwnd {Before:F0}B -> {After:F0}B, resending",
-                    RemoteEndPoint, sackMarked, missing, beforeLoss, _cwnd);
-
-                ResendPacket(lost);
-            }
-        }
+        // This follows libtorrent's parse_sack rather than approximating it, because the
+        // approximation almost never fired. Three things it got wrong: the evidence is how many
+        // sequence numbers the peer says it holds, not how many this side happened to still have
+        // outstanding, so a repeated selective acknowledgement for the same hole counted nothing the
+        // second time; every hole the peer describes is lost, not only the one immediately after the
+        // cumulative acknowledgement; and refusing to resend a packet twice left no recovery when a
+        // retransmission was itself lost. A watermark takes the place of that last check, so a
+        // packet is resent once per hole rather than once ever.
+        FastResendFromSack(ackNr, sackRanges, lastSent);
 
         if (ackedCount > 0 || sackMarked > 0)
         {
             _duplicateAckCount = 0;
             _timeoutCount = 0; // Reset timeout count on successful ACK
+
+            // Keep the fast-resend watermark with the acknowledged point. Left behind it drifts
+            // arbitrarily far back, and these are wrapping 16-bit sequence numbers - a comparison
+            // against a value half the sequence space away answers meaninglessly.
+            if (Utils.CompareSeq(_fastResendSeqNr, ackNr) < 0)
+            {
+                _fastResendSeqNr = ackNr;
+            }
             if (ackedBytes > 0)
             {
                 UpdateCongestionControl(ackedBytes, delay);
@@ -1214,6 +1216,95 @@ internal class UtpStream : Stream
         }
 
         CheckIfClosed();
+    }
+
+    /// <summary>
+    /// Resends the packets a selective acknowledgement shows to be missing, if enough of the ones
+    /// behind them arrived to make that loss rather than reordering.
+    /// </summary>
+    /// <remarks>
+    /// The bitmask starts at <paramref name="ackNr"/> + 2, because + 1 is by definition the packet
+    /// the cumulative acknowledgement stopped at. Holes are counted only up to the highest sequence
+    /// the peer reports holding: past that, an unacknowledged packet is one still in flight rather
+    /// than one that was overtaken, which is libtorrent's pruning of the tail of the resend list.
+    /// </remarks>
+    private void FastResendFromSack(ushort ackNr, List<(ushort Start, ushort End)>? sackRanges, ushort lastSent)
+    {
+        if (sackRanges is not { Count: > 0 })
+        {
+            return;
+        }
+
+        // How much the peer says it holds past the gap. More than the limit means the packets behind
+        // the hole are arriving while it is not, which is loss; a few is a path reordering.
+        int ackedPastHole = 0;
+        ushort highestAcked = ackNr;
+        foreach (var (start, end) in sackRanges)
+        {
+            if (Utils.CompareSeq(start, end) > 0)
+            {
+                continue;
+            }
+
+            ackedPastHole += (ushort)(end - start) + 1;
+            if (Utils.CompareSeq(end, highestAcked) > 0)
+            {
+                highestAcked = end;
+            }
+        }
+
+        if (ackedPastHole <= DuplicateAcksBeforeResend)
+        {
+            return;
+        }
+
+        bool cutWindow = true;
+        for (ushort seq = (ushort)(ackNr + 1);
+            Utils.CompareSeq(seq, highestAcked) < 0 && Utils.CompareSeq(seq, lastSent) <= 0;
+            seq++)
+        {
+            if (Utils.CompareSeq(seq, _fastResendSeqNr) < 0 || IsSelectivelyAcked(seq, sackRanges))
+            {
+                continue;
+            }
+
+            if (!_sentPackets.TryGetValue(seq, out var lost))
+            {
+                continue;
+            }
+
+            if (cutWindow)
+            {
+                // Once for the whole report, however many packets it shows missing: they were lost
+                // to one congestion event and cutting per packet would take the window to the floor
+                // for a single one.
+                double beforeLoss = _cwnd;
+                _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
+                _ssthresh = _cwnd;
+                _slowStart = false;
+                cutWindow = false;
+
+                _logger.LogTrace(
+                    "SACK {Remote}: {Acked} acked past {Seq} - cwnd {Before:F0}B -> {After:F0}B, resending",
+                    RemoteEndPoint, ackedPastHole, seq, beforeLoss, _cwnd);
+            }
+
+            ResendPacket(lost);
+            _fastResendSeqNr = (ushort)(seq + 1);
+        }
+    }
+
+    private static bool IsSelectivelyAcked(ushort seq, List<(ushort Start, ushort End)> sackRanges)
+    {
+        foreach (var (start, end) in sackRanges)
+        {
+            if (Utils.CompareSeq(seq, start) >= 0 && Utils.CompareSeq(seq, end) <= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void HandleData(MessageHeader header, byte[] data, int headerSize)
@@ -1546,6 +1637,10 @@ internal class UtpStream : Stream
         int maxBit = -1;
         Span<byte> bitmask = stackalloc byte[32];
 
+        // libtorrent attaches this to whatever packet is going out whenever it holds out-of-order
+        // data, where this only puts it on a pure acknowledgement. Widening it that way measured
+        // worse - 133.8 MiB against 380.7 over the same swarm run - for a reason not yet found, so
+        // it stays as it is until that is understood rather than because it is right.
         if (type == MessageType.ST_STATE && _reorderBufferSeqs.Count > 0)
         {
             bitmask.Clear();
