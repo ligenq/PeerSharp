@@ -13,6 +13,66 @@ namespace PeerSharp.Core;
 /// </summary>
 public sealed class MagnetLink : IEquatable<MagnetLink>
 {
+    /// <summary>Creates a magnet link from full V1 and/or V2 info hashes.</summary>
+    /// <param name="infoHash">A 20-byte SHA-1 hash, or an empty value if unavailable.</param>
+    /// <param name="infoHashV2">A full 32-byte SHA-256 hash, or an empty value if unavailable.</param>
+    /// <param name="displayName">An optional display name. Query characters are escaped.</param>
+    /// <param name="trackers">Optional tracker URLs. Blank entries and exact duplicates are omitted.</param>
+    /// <returns>A magnet with btih for V1 and btmh with the SHA-256 multihash prefix for V2.</returns>
+    /// <exception cref="ArgumentException">No usable hash was supplied, or a hash has the wrong version.</exception>
+    public static MagnetLink Create(
+        InfoHash infoHash = default,
+        InfoHash infoHashV2 = default,
+        string? displayName = null,
+        IEnumerable<string>? trackers = null)
+    {
+        if (infoHash.Length != 0 && !infoHash.IsV1)
+        {
+            throw new ArgumentException("The V1 info hash must contain 20 bytes.", nameof(infoHash));
+        }
+        if (infoHashV2.Length != 0 && !infoHashV2.IsV2)
+        {
+            throw new ArgumentException("The V2 info hash must contain the full 32 bytes.", nameof(infoHashV2));
+        }
+        if (infoHash.IsEmpty && infoHashV2.IsEmpty)
+        {
+            throw new ArgumentException("At least one non-empty info hash is required.", nameof(infoHash));
+        }
+
+        var parameters = new List<string>();
+        if (!infoHash.IsEmpty) parameters.Add($"xt=urn:btih:{infoHash}");
+        if (!infoHashV2.IsEmpty) parameters.Add($"xt=urn:btmh:1220{infoHashV2}");
+        if (!string.IsNullOrEmpty(displayName)) parameters.Add($"dn={Uri.EscapeDataString(displayName)}");
+        foreach (var tracker in (trackers ?? []).Where(url => !string.IsNullOrWhiteSpace(url)).Distinct(StringComparer.Ordinal))
+        {
+            parameters.Add($"tr={Uri.EscapeDataString(tracker)}");
+        }
+        return Parse("magnet:?" + string.Join('&', parameters));
+    }
+
+    /// <summary>Creates a magnet for a running or stopped torrent, even before metadata is available.</summary>
+    /// <param name="torrent">The torrent whose known hashes and name should be included.</param>
+    /// <param name="includeTrackers">Whether to include the torrent's current tracker URLs. Default is false.</param>
+    /// <exception cref="ArgumentNullException">The torrent is null.</exception>
+    /// <exception cref="ArgumentException">The torrent has no usable hashes.</exception>
+    public static MagnetLink FromTorrent(Interfaces.ITorrent torrent, bool includeTrackers = false)
+    {
+        ArgumentNullException.ThrowIfNull(torrent);
+        return Create(torrent.Hash, torrent.HashV2, torrent.Name,
+            includeTrackers ? torrent.Trackers.GetTrackers().Select(tracker => tracker.Url) : null);
+    }
+
+    /// <summary>Creates a magnet link for a parsed torrent file.</summary>
+    /// <param name="torrentFile">The file whose full hashes and name should be included.</param>
+    /// <param name="includeTrackers">Whether to include tracker URLs. Default is false.</param>
+    /// <exception cref="ArgumentNullException">The torrent file is null.</exception>
+    public static MagnetLink FromTorrentFile(TorrentFile torrentFile, bool includeTrackers = false)
+    {
+        ArgumentNullException.ThrowIfNull(torrentFile);
+        return Create(torrentFile.InfoHash, torrentFile.InfoHashV2, torrentFile.Name,
+            includeTrackers ? torrentFile.Trackers : null);
+    }
+
     private MagnetLink(
             InfoHash infoHash,
             InfoHash infoHashV2,
@@ -296,7 +356,8 @@ public sealed class MagnetLink : IEquatable<MagnetLink>
             var selectOnly = ParseSelectOnlyIndices(query.GetValues("so"));
 
             // Deduplicate trackers and peers
-            var distinctTrackers = trackers.Distinct(StringComparer.OrdinalIgnoreCase).ToList().AsReadOnly();
+            // Tracker paths and passkeys can be case-sensitive. Only identical URLs are duplicates.
+            var distinctTrackers = trackers.Distinct(StringComparer.Ordinal).ToList().AsReadOnly();
             var distinctSources = exactSources.Distinct(StringComparer.OrdinalIgnoreCase).ToList().AsReadOnly();
             var distinctPeers = peers.Distinct().ToList().AsReadOnly();
 

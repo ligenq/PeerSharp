@@ -119,8 +119,34 @@ public class TorrentIdentityTests
         Assert.True(hybrid.HasSameIdentity(v1Only));
     }
 
+    [Fact]
+    public void SameTorrent_ReadsHashesWithoutCallingTheInterfacePredicate()
+    {
+        var hybrid = new FakeTorrent { Hash = V1(0x11), HashV2 = V2(0x22), RejectIdentityCall = true };
+        var v1 = new FakeTorrent { Hash = V1(0x11), RejectIdentityCall = true };
+        var v2 = new FakeTorrent { HashV2 = V2(0x22), RejectIdentityCall = true };
+
+        Assert.True(TorrentIdentity.SameTorrent(hybrid, v1));
+        Assert.True(TorrentIdentity.SameTorrent(v2, hybrid));
+        Assert.False(TorrentIdentity.SameTorrent(v1, v2));
+        Assert.False(TorrentIdentity.SameTorrent(v1, new FakeTorrent { Hash = V1(0x33) }));
+        Assert.False(TorrentIdentity.SameTorrent(v2, new FakeTorrent { HashV2 = V2(0x33) }));
+    }
+
+    [Fact]
+    public void SameTorrent_MissingIdentityMatchesOnlyTheSameInstance()
+    {
+        var missing = new FakeTorrent { RejectIdentityCall = true };
+        Assert.True(TorrentIdentity.SameTorrent(missing, missing));
+        Assert.False(TorrentIdentity.SameTorrent(missing, new FakeTorrent()));
+        Assert.False(TorrentIdentity.SameTorrent(null, missing));
+        Assert.False(TorrentIdentity.SameTorrent(missing, null));
+        Assert.False(TorrentIdentity.SameTorrent(null, null));
+    }
+
     private sealed class FakeTorrent : ITorrent
     {
+        public bool RejectIdentityCall { get; init; }
         public bool SuperSeeding { get; set; }
 
         public int MaxConnections { get; set; }
@@ -144,6 +170,7 @@ public class TorrentIdentityTests
         public void ClearPiecePriorities() { }
         public bool HasSameIdentity(ITorrent? other)
         {
+            if (RejectIdentityCall) throw new InvalidOperationException("The static predicate must inspect hash properties.");
             // The same answer the library gives, asked the same way.
             return other != null
                 && (ReferenceEquals(this, other) || Hash.Matches(other.Hash) || HashV2.Matches(other.HashV2));

@@ -565,6 +565,18 @@ public sealed class FilesSettings
 public sealed class ProxySettings
 {
     /// <summary>
+    /// Reports which UDP features the engine's proxy policy permits, without changing settings.
+    /// </summary>
+    /// <remarks>
+    /// DHT uses a configured proxy. Peer and tracker traffic follow their respective proxy flags.
+    /// A SOCKS5 server must still support UDP association for a permitted connection to succeed.
+    /// </remarks>
+    public UdpProxyCapabilities GetUdpCapabilities() => new(
+        Internals.Network.UdpProxyPolicy.Decide(this, proxyTraffic: true) != Internals.Network.UdpProxyPolicy.Decision.Refuse,
+        Internals.Network.UdpProxyPolicy.Decide(this, ProxyPeers) != Internals.Network.UdpProxyPolicy.Decision.Refuse,
+        Internals.Network.UdpProxyPolicy.Decide(this, ProxyTrackers) != Internals.Network.UdpProxyPolicy.Decision.Refuse);
+
+    /// <summary>
     /// If true, the client will only connect via proxy.
     /// Direct connections will be disabled, and incoming connections might be blocked.
     /// </summary>
