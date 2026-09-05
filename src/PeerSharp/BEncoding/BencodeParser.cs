@@ -37,11 +37,16 @@ internal static class BencodeParser
         return Encoding.Latin1.GetString(span);
     }
 
-    public static IBNode Parse(byte[] data)
+    public static IBNode Parse(byte[] data, bool requireCanonical = false)
     {
         int pos = 0;
         int elementCount = 0;
-        return Parse(data, ref pos, 0, ref elementCount);
+        var node = Parse(data, ref pos, 0, ref elementCount, requireCanonical);
+        if (requireCanonical && pos != data.Length)
+        {
+            throw new FormatException("Trailing data after bencoded value");
+        }
+        return node;
     }
 
     // Parse and return consumed byte count
@@ -49,11 +54,11 @@ internal static class BencodeParser
     {
         int pos = 0;
         int elementCount = 0;
-        var node = Parse(data, ref pos, 0, ref elementCount);
+        var node = Parse(data, ref pos, 0, ref elementCount, requireCanonical: false);
         return (node, pos);
     }
 
-    private static IBNode Parse(byte[] data, ref int pos, int depth, ref int elementCount)
+    private static IBNode Parse(byte[] data, ref int pos, int depth, ref int elementCount, bool requireCanonical)
     {
         // SECURITY: Prevent stack overflow from deeply nested structures
         if (depth > MaxRecursionDepth)
@@ -81,11 +86,11 @@ internal static class BencodeParser
         }
         else if (c == 'l')
         {
-            return ParseList(data, ref pos, depth, ref elementCount);
+            return ParseList(data, ref pos, depth, ref elementCount, requireCanonical);
         }
         else if (c == 'd')
         {
-            return ParseDictionary(data, ref pos, depth, ref elementCount);
+            return ParseDictionary(data, ref pos, depth, ref elementCount, requireCanonical);
         }
         else if (c >= '0' && c <= '9')
         {
@@ -95,10 +100,11 @@ internal static class BencodeParser
         throw new FormatException($"Invalid bencode data (unexpected byte 0x{c:X2})");
     }
 
-    private static BDict ParseDictionary(byte[] data, ref int pos, int depth, ref int elementCount)
+    private static BDict ParseDictionary(byte[] data, ref int pos, int depth, ref int elementCount, bool requireCanonical)
     {
         pos++; // 'd'
         var dict = new BDict();
+        ReadOnlyMemory<byte>? previousKey = null;
         while (pos < data.Length && data[pos] != 'e')
         {
             // SECURITY: Limit items in a single dictionary
@@ -108,10 +114,16 @@ internal static class BencodeParser
             }
 
             var keyNode = ParseString(data, ref pos);
+            if (requireCanonical && previousKey.HasValue
+                && previousKey.Value.Span.SequenceCompareTo(keyNode.Value.Span) >= 0)
+            {
+                throw new FormatException("Dictionary keys must be unique and sorted by raw bytes");
+            }
+            previousKey = keyNode.Value;
             // Use Latin1 encoding for dictionary keys because bencode keys are arbitrary
             // byte strings (not UTF8). Latin1 preserves all byte values 0-255.
             var key = GetDictionaryKey(keyNode.Value.Span);
-            dict.Dict[key] = Parse(data, ref pos, depth + 1, ref elementCount);
+            dict.Dict[key] = Parse(data, ref pos, depth + 1, ref elementCount, requireCanonical);
         }
 
         if (pos >= data.Length)
@@ -210,7 +222,7 @@ internal static class BencodeParser
         return new BNumber(val);
     }
 
-    private static BList ParseList(byte[] data, ref int pos, int depth, ref int elementCount)
+    private static BList ParseList(byte[] data, ref int pos, int depth, ref int elementCount, bool requireCanonical)
     {
         pos++; // 'l'
         var list = new BList();
@@ -222,7 +234,7 @@ internal static class BencodeParser
                 throw new FormatException($"SECURITY: Bencode list exceeds maximum items ({MaxCollectionItems}). Possible attack.");
             }
 
-            list.List.Add(Parse(data, ref pos, depth + 1, ref elementCount));
+            list.List.Add(Parse(data, ref pos, depth + 1, ref elementCount, requireCanonical));
         }
 
         if (pos >= data.Length)

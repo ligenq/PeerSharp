@@ -249,7 +249,9 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <inheritdoc />
     public bool Equals(TorrentFile? other)
     {
-        return other is not null && InfoHash.Equals(other.InfoHash);
+        // A parsed file has its complete hash pair. Compare the pair exactly so equality
+        // remains transitive, unlike matching partially known magnet identities.
+        return other is not null && InfoHash.Equals(other.InfoHash) && InfoHashV2.Equals(other.InfoHashV2);
     }
 
     /// <inheritdoc />
@@ -314,7 +316,7 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// <inheritdoc />
     public override int GetHashCode()
     {
-        return InfoHash.GetHashCode();
+        return HashCode.Combine(InfoHash, InfoHashV2);
     }
 
     /// <inheritdoc />
