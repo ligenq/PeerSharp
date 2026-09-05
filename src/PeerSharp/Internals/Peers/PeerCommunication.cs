@@ -357,6 +357,19 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </remarks>
     public bool HungUpDuringEncryptionHandshake { get; private set; }
 
+    /// <summary>
+    /// Whether the last outgoing attempt got a socket open, and so actually offered the peer an
+    /// encryption choice.
+    /// </summary>
+    /// <remarks>
+    /// A dial that was refused, timed out or was cancelled never put a byte on the wire, so it says
+    /// nothing about what this peer can speak. Without the distinction, the encryption preference
+    /// alternates on unreachability - a peer on a flaky path has the choice randomised by its own
+    /// packet loss, and one that only speaks MSE can be dialled in plaintext repeatedly because
+    /// timeouts kept flipping the flag.
+    /// </remarks>
+    public bool OfferedAnEncryptionChoice { get; private set; }
+
     private enum EncryptionHandshakeResult
     { Success, Failed, PlaintextDetected, ConnectionClosed }
 
@@ -1056,6 +1069,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             }
 
             _connected = 1;
+
+            // From here a handshake is genuinely attempted, so whatever happens next is evidence
+            // about what this peer speaks rather than about whether it can be reached.
+            OfferedAnEncryptionChoice = true;
             _logger.LogDebug("Connected to {Ip}:{Port}", ip, port);
 
             var encryptionSetting = _torrent.Settings.Connection.Encryption;

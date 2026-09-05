@@ -623,6 +623,48 @@ public class PeerManagerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task ADialThatNeverOpenedASocketDoesNotFlipTheEncryptionChoice()
+    {
+        // The preference alternates so a peer that speaks only one of MSE and plaintext is reached
+        // on the following try. A dial that was refused, timed out or was cancelled put nothing on
+        // the wire, so it is evidence about reachability - which the backoff records - and none
+        // about encryption.
+        //
+        // Flipping on those made the choice alternate with a peer's packet loss. Under load this
+        // dialled the same peer in plaintext twice running and never offered it MSE at all, which
+        // is how a peer that only speaks MSE becomes permanently unreachable rather than slow.
+        var factory = new BlockingPeerFactory();
+        var ctx = CreateContext(factory);
+        var known = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.77"), 6881);
+        try
+        {
+            ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+            await ctx.Manager.StartAsync();
+            await TorrentTestUtility.WaitUntilAsync(() => factory.Created.Count == 1);
+
+            Assert.True(known.TryGetValue(endpoint, out var history));
+            Assert.True(history!.OfferEncryptionNext);
+
+            // The dial fails without ever having connected, which is what BlockingPeer models.
+            factory.CompleteAll(false);
+            var tasks = GetPrivateField<ConcurrentDictionary<Task, byte>>(ctx.Manager, "_activeConnectionTasks");
+            await TorrentTestUtility.WaitUntilAsync(() => tasks.IsEmpty);
+
+            // Reachability was recorded; the encryption choice was left alone.
+            Assert.True(history.FruitlessConnectionCount > 0);
+            Assert.True(
+                history.OfferEncryptionNext,
+                "A dial that never opened a socket offered nothing, so it must not change what is offered next.");
+        }
+        finally
+        {
+            factory.CompleteAll(false);
+            await CleanupAsync(ctx);
+        }
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task ConnectionQueue_ReleasesOwnershipWhenTransportsAreDisabledBeforeDial()
     {
         var ctx = CreateContext();
