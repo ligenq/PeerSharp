@@ -1,4 +1,4 @@
-namespace PeerSharp.Internals.Peers;
+﻿namespace PeerSharp.Internals.Peers;
 
 internal enum TransportPreference
 {
@@ -21,8 +21,16 @@ internal enum TransportPreference
 /// <para>
 /// This used to put TCP first for anything not already flagged by PEX, which meant uTP was reached
 /// only when TCP failed - and TCP does not fail for a reachable peer. The settings said
-/// <see cref="ConnectionSettings.PreferUtp"/> and targeted a 70% uTP share while the plan made both
-/// unreachable for a peer this client had not met before.
+/// <see cref="ConnectionSettings.PreferUtp"/> while the plan made uTP unreachable for a peer this
+/// client had not met before.
+/// </para>
+/// <para>
+/// It then targeted a share of connections instead, which libtorrent has no notion of. Its rule is
+/// only about the peer in hand - use uTP if this peer is believed to support it, TCP otherwise -
+/// and a quota can only overrule that, sending a peer known to speak uTP over TCP because of when
+/// it happened to be dialled. Everything a share was meant to protect against is already answered
+/// closer to the evidence: per-peer demotion when a peer will not take uTP, and
+/// <see cref="ConnectionSettings.UtpColdStartFailureLimit"/> when the path carries no UDP at all.
 /// </para>
 /// <para>
 /// What makes leading with uTP cheap here is the fallback: the plan is tried inside one dial with
@@ -35,14 +43,11 @@ internal static class TransportPlanBuilder
     public readonly record struct Inputs(
         ConnectionSettings Settings,
         bool ForceUtp,
-        bool UtpAvailable,
-        bool UtpHinted,
-        Func<int> CurrentUtpRatioPercent);
+        bool UtpAvailable);
 
     public static IReadOnlyList<TransportPreference> Build(in Inputs inputs)
     {
         ArgumentNullException.ThrowIfNull(inputs.Settings);
-        ArgumentNullException.ThrowIfNull(inputs.CurrentUtpRatioPercent);
 
         var settings = inputs.Settings;
 
@@ -67,36 +72,10 @@ internal static class TransportPlanBuilder
 
         if (utpPreferred)
         {
-            // A peer already known to speak uTP is dialled over it, whatever the current share.
-            // The ratio governs how much this client is willing to guess, and there is nothing left
-            // to guess about a peer that has answered a uTP dial or been flagged by PEX.
-            bool utpFirst = inputs.UtpHinted;
-
-            if (!utpFirst)
+            plan.Add(TransportPreference.Utp);
+            if (tcpAllowed)
             {
-                int target = Math.Clamp(settings.PreferUtpRatioPercent, 0, 100);
-                // Only sample the live uTP ratio in the branch that needs it; the calculation
-                // iterates connected peers, so callers shouldn't pay for it on plans that never
-                // reach the ratio decision.
-                utpFirst = inputs.CurrentUtpRatioPercent() < target;
-            }
-
-            if (utpFirst)
-            {
-                plan.Add(TransportPreference.Utp);
-                if (tcpAllowed)
-                {
-                    plan.Add(TransportPreference.Tcp);
-                }
-            }
-            else
-            {
-                if (tcpAllowed)
-                {
-                    plan.Add(TransportPreference.Tcp);
-                }
-
-                plan.Add(TransportPreference.Utp);
+                plan.Add(TransportPreference.Tcp);
             }
 
             return plan;

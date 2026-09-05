@@ -247,15 +247,10 @@ public sealed class ConnectionSettings
     /// Prefer uTP over TCP when both are available. Default is true.
     /// This helps maintain internet responsiveness for other applications during high-speed downloads.
     /// Note: preference is advisory; the client may start with TCP for unknown peers or fall back to TCP if uTP stalls.
-    /// Use <see cref="PreferUtpRatioPercent"/> and <see cref="UtpFallbackTimeoutMs"/> to tune the behavior.
+    /// Use <see cref="UtpSpeculativeTimeoutMs"/> and <see cref="UtpFallbackTimeoutMs"/> to tune the behavior.
     /// </summary>
     public bool PreferUtp { get; set; } = true;
 
-    /// <summary>
-    /// Target percentage of outgoing connections that should use uTP when PreferUtp is enabled.
-    /// Default is 70 (meaning ~70% uTP / 30% TCP for stability).
-    /// </summary>
-    public int PreferUtpRatioPercent { get; set; } = 70;
 
     /// <summary>
     /// Enables TCP_NODELAY (Nagle off) for peer connections. Default is true.

@@ -55,7 +55,6 @@ sealed class PeerSharp.Config.ConnectionSettings
     Int32 PeerReconnectBaseSeconds { get; set; }
     Int32 PeerReconnectJitterMs { get; set; }
     Int32 PeerReconnectMaxSeconds { get; set; }
-    Int32 PreferUtpRatioPercent { get; set; }
     Int32 RechokeIntervalSeconds { get; set; }
     Int32 SlowPeerGraceSeconds { get; set; }
     Int32 SlowPeerMinConnectedPeers { get; set; }
