@@ -1,5 +1,6 @@
 using System.Reflection;
 using PeerSharp.Internals;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.ArchitectureTests;
 
@@ -49,14 +50,27 @@ public class ProtocolVersionTests
     }
 
     [Fact]
-    public void TheUserAgentCarriesTheSameVersion()
+    public void TheUserAgentTheFactoryBuildsCarriesTheSameVersion()
     {
         // The tracker sees this string as well as the peer id, and a disagreement between the two
         // would be worse than either being stale: it makes the client look like two clients.
-        Assert.Contains(
-            ProtocolConstants.ClientVersion,
+        //
+        // Read off a real client rather than rebuilt here. The previous version of this test
+        // interpolated the constant into a string and then asserted that string contained the
+        // constant, which is true of any value and could not fail.
+        //
+        // Reading the real header is also the only check available. Peerfluence proves the same
+        // thing by following the compiled IL to the shared constant, but that works because its
+        // version is a property; ClientVersion is a const, which the compiler inlines, so there is
+        // no call left to find and a second hard-coded copy is indistinguishable in the IL. What
+        // catches one is this comparison, the moment the shared constant is bumped and the copy is
+        // not.
+        using var factory = new HttpClientFactory();
+        var client = factory.CreateClient(new ProxySettings { Type = ProxyType.None }, isTracker: true);
+
+        Assert.Equal(
             $"PeerSharp/{ProtocolConstants.ClientVersion}",
-            StringComparison.Ordinal);
+            client.DefaultRequestHeaders.UserAgent.ToString());
     }
 
     /// <summary>
