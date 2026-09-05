@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Framework;
@@ -1927,9 +1927,16 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // trying, so the choice alternates across attempts and is remembered on the peer rather than
             // retried inside one attempt - see PeerHistory.OfferEncryptionNext.
             bool offerEncryption = true;
+
+            // Whether uTP is known to work with this peer or merely assumed. Every peer starts
+            // assumed - see PeerHistory.UtpSupported - and the assumption is right about a quarter
+            // of the time on the open internet, so what it costs when it is wrong decides what
+            // leading with uTP costs overall.
+            bool utpProven = false;
             if (endpoint is not null && _knownPeersCache.TryGetValue(endpoint, out var knownHistory))
             {
                 offerEncryption = knownHistory.OfferEncryptionNext;
+                utpProven = knownHistory.UtpHinted || knownHistory.UtpConfirmed;
             }
 
             bool success = false;
@@ -1940,16 +1947,30 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 timeoutMs,
                 _settings.Connection.UtpFallbackTimeoutMs,
                 _settings.Connection.MinConnectionTimeoutMs);
+            int speculativeUtpTimeoutMs = ConnectionBudgetCalculator.FallbackCap(
+                timeoutMs,
+                _settings.Connection.UtpSpeculativeTimeoutMs,
+                _settings.Connection.MinConnectionTimeoutMs);
 
             for (int attempt = 0; attempt < transportPlan.Count; attempt++)
             {
                 var transport = transportPlan[attempt];
 
                 bool hasFallback = attempt < transportPlan.Count - 1;
-                int attemptTimeoutMs = ConnectionBudgetCalculator.ForAttempt(
-                    remainingTimeoutMs, hasFallback, fallbackTimeoutMs);
-
                 bool attemptUtp = transport == TransportPreference.Utp;
+
+                // A guess at uTP is time-boxed harder than a dial to a peer known to speak it. The
+                // full budget is libtorrent's utp_connect_timeout, and it is the right number for a
+                // peer that answers - but libtorrent never spends it and then dials TCP as well, so
+                // here it is charged to every peer that turns out not to speak uTP before the
+                // fallback even starts. Measured over a public swarm, half of one percent of the
+                // uTP connections that succeeded took longer than this shorter budget, against
+                // three quarters of all dials paying the difference for nothing.
+                int capMs = attemptUtp
+                    ? ConnectionBudgetCalculator.UtpCap(utpProven, fallbackTimeoutMs, speculativeUtpTimeoutMs)
+                    : fallbackTimeoutMs;
+                int attemptTimeoutMs = ConnectionBudgetCalculator.ForAttempt(
+                    remainingTimeoutMs, hasFallback, capMs);
                 success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, cancellationToken)
                     .WaitAsync(cancellationToken).ConfigureAwait(false);
 
