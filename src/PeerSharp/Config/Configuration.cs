@@ -1,4 +1,4 @@
-﻿using PeerSharp.Internals.Framework;
+using PeerSharp.Internals.Framework;
 
 namespace PeerSharp.Config;
 
@@ -459,16 +459,10 @@ public sealed class ConnectionSettings
     public int UtpMaxWindowIncreaseBytesPerRtt { get; set; } = 3000;
 
     /// <summary>
-    /// The shortest interval between two loss-driven cuts of the congestion window, in milliseconds.
-    /// Default is 100, matching libtorrent's <c>cwnd_reduce_timer</c>; clamped to 10 - 60,000. Read
-    /// while the connection runs.
+    /// How often the congestion window halves while no acknowledgement arrives, in milliseconds.
+    /// Default is 100, as in libutp; clamped to 10 - 60,000. Read while the connection runs.
     /// </summary>
-    /// <remarks>
-    /// One lost packet is normally reported by several duplicate acknowledgements. Without an
-    /// interval the window is halved once per report rather than once per loss, which takes it to
-    /// the floor on the first burst.
-    /// </remarks>
-    public int UtpLossWindowCutIntervalMs { get; set; } = 100;
+    public int UtpWindowDecayIntervalMs { get; set; } = 100;
 
     /// <summary>
     /// How many times a uTP handshake is retried before the connection is abandoned. Default is 2;
