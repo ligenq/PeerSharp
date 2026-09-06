@@ -663,7 +663,7 @@ internal class UtpStream : Stream
 
             lock (_lock)
             {
-                int chunk = Math.Min(buffer.Length - sent, GetPayloadMss(0));
+                int chunk = Math.Min(buffer.Length - sent, GetDataPayloadMss());
                 SendPacket(MessageType.ST_DATA, buffer.Slice(sent, chunk));
                 sent += chunk;
             }
@@ -997,6 +997,13 @@ internal class UtpStream : Stream
         int mtu = _mtuLast > 0 ? _mtuLast : _mtuCeiling;
         int payload = mtu - UtpHeaderSize - extensionLen;
         return Math.Max(1, payload);
+    }
+
+    private int GetDataPayloadMss()
+    {
+        Span<byte> bitmask = stackalloc byte[32];
+        int maskLength = WriteSackMask(bitmask);
+        return GetPayloadMss(maskLength > 0 ? maskLength + 2 : 0);
     }
 
     /// <summary>
@@ -1586,6 +1593,23 @@ internal class UtpStream : Stream
         pkt.Resent = true;
         pkt.SendTime = _timeProvider.GetUtcNow();
 
+        // SACK bits are relative to ack_nr. Reusing them with a newer ACK can acknowledge
+        // packets we never received, causing the peer to discard its retransmission copies.
+        if (pkt.Buffer[1] == ExtensionSack)
+        {
+            int maskLength = pkt.Buffer[21];
+            // Keep the original capacity so the retry cannot grow past the path MTU.
+            if (WriteSackMask(pkt.Buffer.AsSpan(22, maskLength)) == 0)
+            {
+                int extensionLength = maskLength + 2;
+                pkt.Buffer[1] = pkt.Buffer[20];
+                pkt.Buffer.AsSpan(20 + extensionLength, pkt.Length - 20 - extensionLength)
+                    .CopyTo(pkt.Buffer.AsSpan(20));
+                pkt.Length -= extensionLength;
+                _sentBytesUnacked -= extensionLength;
+            }
+        }
+
         // Update ACK NR and Timestamp in-place
         UtpManager.WriteUInt16BigEndian(pkt.Buffer, 18, _ackNr);
         UtpManager.WriteUInt32BigEndian(pkt.Buffer, 4, Utils.TimestampMicro());
@@ -1624,6 +1648,27 @@ internal class UtpStream : Stream
         UpdateMssFromMtu();
     }
 
+    /// <summary>Writes a SACK mask relative to the current cumulative acknowledgement.</summary>
+    private int WriteSackMask(Span<byte> bitmask)
+    {
+        bitmask.Clear();
+        int highestByte = -1;
+        foreach (ushort seq in _reorderBufferSeqs)
+        {
+            int offset = (seq - _ackNr - 2) & 0xFFFF;
+            if (offset < bitmask.Length * 8)
+            {
+                int byteIndex = offset / 8;
+                bitmask[byteIndex] |= (byte)(1 << (offset % 8));
+                highestByte = Math.Max(highestByte, byteIndex);
+            }
+        }
+
+        // BEP 29 requires at least four bytes, in multiples of four. highestByte is
+        // already a byte index; dividing it by eight again truncates the report.
+        return highestByte >= 0 ? (highestByte + 4) & ~3 : 0;
+    }
+
     private void SendPacket(MessageType type, ReadOnlyMemory<byte> payload = default)
     {
         // Don't send packets on closed connections (except FIN during closing)
@@ -1632,38 +1677,10 @@ internal class UtpStream : Stream
             return;
         }
 
-        // SACK SUPPORT: Calculate SACK extension if needed
-        int extensionLen = 0;
-        int maxBit = -1;
+        // Include the current report on DATA and FIN as well as pure acknowledgements.
         Span<byte> bitmask = stackalloc byte[32];
-
-        // libtorrent attaches this to whatever packet is going out whenever it holds out-of-order
-        // data, where this only puts it on a pure acknowledgement. Widening it that way measured
-        // worse - 133.8 MiB against 380.7 over the same swarm run - for a reason not yet found, so
-        // it stays as it is until that is understood rather than because it is right.
-        if (type == MessageType.ST_STATE && _reorderBufferSeqs.Count > 0)
-        {
-            bitmask.Clear();
-            foreach (var seq in _reorderBufferSeqs)
-            {
-                int offset = (seq - _ackNr - 2) & 0xFFFF; // Wrap-around safe
-                if (offset < 256)
-                {
-                    int byteIndex = offset / 8;
-                    int bitIndex = offset % 8;
-                    bitmask[byteIndex] |= (byte)(1 << bitIndex);
-                    if (byteIndex > maxBit)
-                    {
-                        maxBit = byteIndex;
-                    }
-                }
-            }
-
-            if (maxBit >= 0)
-            {
-                extensionLen = 2 + (maxBit / 8) + 1;
-            }
-        }
+        int maskLength = WriteSackMask(bitmask);
+        int extensionLen = maskLength > 0 ? maskLength + 2 : 0;
 
         int payloadLen = payload.Length;
         int maxPayload = GetPayloadMss(extensionLen);
