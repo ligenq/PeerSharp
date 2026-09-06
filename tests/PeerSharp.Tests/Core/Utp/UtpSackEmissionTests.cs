@@ -273,7 +273,8 @@ public class UtpSackEmissionTests
         {
             Stream.ProcessPacketWithSack(new MessageHeader
             {
-                TypeVer = 0x31, AckNr = (ushort)(Stream.SeqNr - 1)
+                TypeVer = 0x31,
+                AckNr = (ushort)(Stream.SeqNr - 1)
             }, [], 0, null, null, _remote);
             await Stream.DisposeAsync();
             await _manager.DisposeAsync();
