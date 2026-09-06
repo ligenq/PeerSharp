@@ -378,8 +378,18 @@ internal class UtpStream : Stream
                     if (!ignoreLoss)
                     {
                         _cwnd = _mss; // Reset to single MSS per libutp
-                        _ssthresh = _cwnd; // Update slow-start threshold
-                        _slowStart = false; // Exit slow-start on timeout
+
+                        // Back into slow-start, as libtorrent's utp_stream does here, and without
+                        // moving ssthresh down to meet the window. The two together were what
+                        // stranded a connection: the threshold was set to the one packet the window
+                        // had just been cut to, so even re-entering slow-start would leave it again
+                        // on the first acknowledgement, and the only remaining growth was LEDBAT's
+                        // linear gain - which is itself zeroed whenever this side is not filling the
+                        // window. One timeout then held the window at a single packet for good.
+                        // libtorrent leaves ssthresh to be set by a loss event, which is the thing
+                        // that knows where the path actually saturated.
+                        _slowStart = true;
+
                         // Increase base timeout to prevent death spiral on high latency links where RTT samples are lost due to retransmits
                         _packetTimeout = Math.Min(_packetTimeout * 2, 10000);
                     }
@@ -1080,40 +1090,27 @@ internal class UtpStream : Stream
         // Cap ackNr to lastSent to prevent walking into the future
         ushort effectiveAckNr = Utils.CompareSeq(ackNr, lastSent) > 0 ? lastSent : ackNr;
 
-        // Only iterate if it's moving forward from oldest unacked
-        int maxIterations = Math.Min(_sentPackets.Count + 1, 65536);
-        int iterations = 0;
-
-        if (Utils.CompareSeq(effectiveAckNr, _oldestUnackedSeq) >= 0)
+        // Walk send order rather than bounding sequence distance by the remaining packet
+        // count. SACK can remove a long middle run while leaving an acknowledged tail.
+        while (_sentSeqQueue.TryPeek(out ushort seq) && Utils.CompareSeq(seq, effectiveAckNr) <= 0)
         {
-            for (ushort seq = _oldestUnackedSeq; Utils.CompareSeq(seq, effectiveAckNr) <= 0 && iterations < maxIterations; seq++)
+            _sentSeqQueue.Dequeue();
+            if (_sentPackets.Remove(seq, out var pkt))
             {
-                iterations++;
-
-                if (_sentPackets.Remove(seq, out var pkt))
+                if (!pkt.Resent && !pkt.RttSampled && rttSamples < MaxRttSamplesPerAck)
                 {
-                    // Sample RTT if not already sampled by SACK and not resent
-                    if (!pkt.Resent && !pkt.RttSampled && rttSamples < MaxRttSamplesPerAck)
+                    double packetRttMs = (now - pkt.SendTime).TotalMilliseconds;
+                    if (packetRttMs > 0 && packetRttMs < 60000)
                     {
-                        double packetRttMs = (now - pkt.SendTime).TotalMilliseconds;
-                        if (packetRttMs > 0 && packetRttMs < 60000)
-                        {
-                            UpdateRtt((int)packetRttMs);
-                            rttSamples++;
-                        }
+                        UpdateRtt((int)packetRttMs);
+                        rttSamples++;
                     }
-
-                    ReleaseSentPacket(pkt);
-                    ackedCount++;
-                    ackedBytes += pkt.Length;
-                    HandleMtuProbeAck(seq, pkt.Length);
                 }
 
-                // Safety: break if we wrapped around back to effectiveAckNr
-                if (seq == effectiveAckNr)
-                {
-                    break;
-                }
+                ReleaseSentPacket(pkt);
+                ackedCount++;
+                ackedBytes += pkt.Length;
+                HandleMtuProbeAck(seq, pkt.Length);
             }
         }
 
@@ -1156,23 +1153,12 @@ internal class UtpStream : Stream
             FlushPendingWrites();
             _lastAckedSeq = ackNr;
         }
-        else if (_sentPackets.Count > 0 && ackNr == _lastAckedSeq)
+        else if (type == MessageType.ST_STATE && _sentPackets.Count > 0 && ackNr == _lastAckedSeq)
         {
-            // Every uTP packet carries an ack_nr, including ST_DATA, so while downloading we receive
-            // a stream of them all repeating the same one - not because a request was lost but
-            // because we have sent nothing new to acknowledge. libtorrent does not count those:
-            // their ack number is "not indicative of a dropped packet", and over loopback counting
-            // them produced 187 loss events in 40 seconds where nothing can be dropped.
-            //
-            // Excluding them here is not yet safe. libtorrent can because parse_sack gives it a
-            // second loss detector that works on any packet type; the equivalent above only fires
-            // when a peer sends a selective acknowledgement covering more than three packets past a
-            // hole, which in a download it rarely does. Measured with ST_DATA excluded, the swarm
-            // gained about half again - 319 MiB against 214 over 75s - while loopback stopped
-            // completing a 256 MiB transfer inside 40 seconds at all. Both detectors need to be
-            // sound before the cheaper evidence can be dropped.
+            // DATA repeats ack_nr during a download even when no request was lost.
+            // Only pure acknowledgements supply duplicate-ACK evidence; SACK above
+            // still detects holes on every packet type.
             _duplicateAckCount++;
-            _ = type;
 
             // SACK SUPPORT: Find the first un-SACK'd packet after ackNr
             ushort expectedSeq = (ushort)(ackNr + 1);
@@ -1426,8 +1412,9 @@ internal class UtpStream : Stream
 
         // Mirror libutp's ACK validation window to reject spoofed packets.
         ushort lastSent = (ushort)(_seqNr - 1);
-        int allowedWindow = Math.Max(_sentPackets.Count + 3, 3);
-        ushort oldestAllowed = (ushort)(lastSent - allowedWindow);
+        // Selective ACKs leave holes in the send buffer. Its population is not the
+        // sequence span: accepting a SACK must not invalidate the next report of that hole.
+        ushort oldestAllowed = (ushort)(_oldestUnackedSeq - 4);
 
         if (Utils.CompareSeq(lastSent, ackNr) < 0)
         {
@@ -1745,6 +1732,9 @@ internal class UtpStream : Stream
             if (_sentPackets.Count == 1)
             {
                 _oldestUnackedSeq = _seqNr;
+                // Start the watermark in this flight's sequence space. Zero may be
+                // ahead of a random initial sequence by the wrapping comparison.
+                _fastResendSeqNr = _seqNr;
             }
             _sentSeqQueue.Enqueue(_seqNr);
             _sentBytesUnacked += totalLen;
