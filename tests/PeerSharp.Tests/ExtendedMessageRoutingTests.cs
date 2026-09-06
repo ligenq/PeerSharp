@@ -6,6 +6,8 @@ using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Trackers;
 using PeerSharp.Messages;
+using PeerSharp.Internals.Network;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace PeerSharp.Tests;
 
@@ -17,7 +19,7 @@ public sealed class ExtendedMessageRoutingTests
         using var tempDir = new TempDirectory();
         var settings = new Settings
         {
-            Files = new FilesSettings { DefaultDownloadPath = tempDir.Path }
+            Files = { DefaultDownloadPath = tempDir.Path }
         };
 
         var metadata = new TorrentFileMetadata
@@ -40,7 +42,7 @@ public sealed class ExtendedMessageRoutingTests
         var alerts = new AlertsManager(TimeProvider.System);
         var fileSelectionManager = new FileSelectionManager(metadata);
         var peerFactory = new PeerCommunicationFactory();
-        var trackerFactory = new TrackerFactory();
+        var trackerFactory = new TrackerFactory(NullLoggerFactory.Instance, new HttpClientFactory());
         var geoIp = new GeoIpService();
         var fileHandleCache = new FileHandleCache();
         var connectionGovernor = new ConnectionGovernor(settings);
@@ -56,6 +58,7 @@ public sealed class ExtendedMessageRoutingTests
             geoIp,
             fileHandleCache,
             connectionGovernor,
+            new HttpClientFactory(),
             TimeProvider.System);
 
         var listener = new TestPeerListener();

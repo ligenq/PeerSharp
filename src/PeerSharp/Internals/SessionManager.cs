@@ -190,7 +190,7 @@ internal sealed class SessionManager : IAsyncDisposable
 
     public async Task SaveTorrentEntryAsync(Torrent torrent, byte[]? torrentFileData = null, string? magnetLink = null, CancellationToken cancellationToken = default)
     {
-        var gate = GetSaveGate(torrent.Hash);
+        var gate = GetSaveGate(torrent.SessionHash);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -221,8 +221,8 @@ internal sealed class SessionManager : IAsyncDisposable
         // Get stored raw data or magnet link
         lock (_lock)
         {
-            torrentFileData ??= _torrentRawData.GetValueOrDefault(torrent.Hash);
-            magnetLink ??= _magnetLinks.GetValueOrDefault(torrent.Hash);
+            torrentFileData ??= _torrentRawData.GetValueOrDefault(torrent.SessionHash);
+            magnetLink ??= _magnetLinks.GetValueOrDefault(torrent.SessionHash);
         }
 
         // The bitfield about to be written is a claim that those pieces are on the disk, so the
@@ -249,7 +249,7 @@ internal sealed class SessionManager : IAsyncDisposable
         }
 
         var entry = new SavedTorrentEntry(
-            torrent.Hash,
+            torrent.SessionHash,
             torrentFileData,
             magnetLink,
             resumeData,

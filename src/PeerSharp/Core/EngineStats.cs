@@ -5,8 +5,8 @@ namespace PeerSharp.Core;
 /// </summary>
 /// <param name="DownloadSpeed">The current aggregate download speed in bytes per second.</param>
 /// <param name="UploadSpeed">The current aggregate upload speed in bytes per second.</param>
-/// <param name="TotalDownloaded">The total bytes downloaded in the current session.</param>
-/// <param name="TotalUploaded">The total bytes uploaded in the current session.</param>
+/// <param name="TotalDownloaded">The downloaded byte totals of torrents currently registered.</param>
+/// <param name="TotalUploaded">The uploaded byte totals of torrents currently registered.</param>
 /// <param name="TorrentCount">The number of torrents currently being managed.</param>
 /// <param name="ActiveTorrents">The number of torrents that are currently active.</param>
 /// <param name="TotalPeers">The total number of connected peers across all torrents.</param>
@@ -17,5 +17,18 @@ public sealed record EngineStats(
     long TotalUploaded = 0,
     int TorrentCount = 0,
     int ActiveTorrents = 0,
-    int TotalPeers = 0);
+    int TotalPeers = 0)
+{
+    /// <summary>
+    /// Downloaded bytes accounted to this engine, including torrents since removed. Like the
+    /// diagnostic meter, includes restored torrent counters and resets with a new engine instance.
+    /// </summary>
+    public long LifetimeDownloaded { get; init; }
+
+    /// <summary>
+    /// Uploaded bytes accounted to this engine, including torrents since removed. Like the
+    /// diagnostic meter, includes restored torrent counters and resets with a new engine instance.
+    /// </summary>
+    public long LifetimeUploaded { get; init; }
+}
 

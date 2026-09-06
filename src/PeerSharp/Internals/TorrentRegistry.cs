@@ -10,7 +10,6 @@ internal sealed class TorrentRegistry
 {
     private readonly Lock _lock = new();
     private readonly List<Torrent> _torrents = [];
-    private readonly Dictionary<string, Torrent> _torrentsByHash = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Torrents the engine added on its own behalf - a metadata fetch - rather than the caller's.
@@ -39,14 +38,15 @@ internal sealed class TorrentRegistry
     {
         lock (_lock)
         {
-            var hashKey = GetTorrentKey(torrent);
-            if (_torrentsByHash.TryGetValue(hashKey, out var existing))
+            // Hashes can be learned after registration. Use the current identities, as
+            // lookup does, instead of an index that becomes stale when metadata arrives.
+            var existing = _torrents.FirstOrDefault(t => t.HasSameIdentity(torrent));
+            if (existing != null)
             {
                 throw new TorrentAlreadyExistsException(existing);
             }
 
             _torrents.Add(torrent);
-            _torrentsByHash[hashKey] = torrent;
         }
     }
 
@@ -98,7 +98,6 @@ internal sealed class TorrentRegistry
             if (torrent != null)
             {
                 _torrents.Remove(torrent);
-                _torrentsByHash.Remove(GetTorrentKey(torrent));
                 return true;
             }
             return false;
@@ -117,7 +116,6 @@ internal sealed class TorrentRegistry
             }
 
             _torrents.RemoveAt(index);
-            _torrentsByHash.Remove(GetTorrentKey(torrent));
             return true;
         }
     }
@@ -170,9 +168,4 @@ internal sealed class TorrentRegistry
     /// </remarks>
     private static bool Matches(Torrent torrent, InfoHash hash) =>
         TorrentIdentity.HasHash(torrent, hash);
-
-    private static string GetTorrentKey(Torrent torrent)
-    {
-        return $"{torrent.Hash.ToHexStringUpper()}_{torrent.HashV2.ToHexStringUpper()}";
-    }
 }

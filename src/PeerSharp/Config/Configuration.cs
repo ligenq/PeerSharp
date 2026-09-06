@@ -1,3 +1,5 @@
+﻿using PeerSharp.Internals.Framework;
+
 namespace PeerSharp.Config;
 
 /// <summary>
@@ -178,6 +180,7 @@ public sealed class ConnectionSettings
     /// <summary>
     /// Maximum number of connection attempts to queue before dropping new requests.
     /// Default is 2000. Increase this if you see "Connection queue full" logs during high activity (e.g. DHT/PEX bursts).
+    /// Applied when the torrent's peer manager is created; changing it does not resize an existing queue.
     /// </summary>
     public int MaxConnectionQueueSize { get; set; } = 2000;
 
@@ -244,15 +247,10 @@ public sealed class ConnectionSettings
     /// Prefer uTP over TCP when both are available. Default is true.
     /// This helps maintain internet responsiveness for other applications during high-speed downloads.
     /// Note: preference is advisory; the client may start with TCP for unknown peers or fall back to TCP if uTP stalls.
-    /// Use <see cref="PreferUtpRatioPercent"/> and <see cref="UtpFallbackTimeoutMs"/> to tune the behavior.
+    /// Use <see cref="UtpSpeculativeTimeoutMs"/> and <see cref="UtpFallbackTimeoutMs"/> to tune the behavior.
     /// </summary>
     public bool PreferUtp { get; set; } = true;
 
-    /// <summary>
-    /// Target percentage of outgoing connections that should use uTP when PreferUtp is enabled.
-    /// Default is 70 (meaning ~70% uTP / 30% TCP for stability).
-    /// </summary>
-    public int PreferUtpRatioPercent { get; set; } = 70;
 
     /// <summary>
     /// Enables TCP_NODELAY (Nagle off) for peer connections. Default is true.
@@ -408,6 +406,25 @@ public sealed class ConnectionSettings
     public int UtpFallbackTimeoutMs { get; set; } = 3000;
 
     /// <summary>
+    /// How long a uTP attempt may take when nothing is known about whether the peer speaks it, in
+    /// milliseconds. Default is 1,000.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every peer is assumed to support uTP until something says otherwise, which is what gets LEDBAT
+    /// used at all. On a public swarm that assumption is wrong about three times in four, and each
+    /// wrong guess is charged in full to the connection budget before TCP is even tried.
+    /// </para>
+    /// <para>
+    /// Measured against the Debian swarm, half the successful uTP connections completed within 88ms
+    /// and 99% within 926ms; exactly one of 139 needed longer than this. <see cref="UtpFallbackTimeoutMs"/>
+    /// still applies once a peer has actually answered over uTP, so the peers this could cut short
+    /// are only ever the ones nothing is known about.
+    /// </para>
+    /// </remarks>
+    public int UtpSpeculativeTimeoutMs { get; set; } = 1000;
+
+    /// <summary>
     /// Base penalty duration (seconds) when uTP fails to connect.
     /// Penalty time backs off exponentially up to UtpPenaltyMaxSeconds.
     /// </summary>
@@ -417,6 +434,51 @@ public sealed class ConnectionSettings
     /// Maximum penalty duration (seconds) when uTP repeatedly fails.
     /// </summary>
     public int UtpPenaltyMaxSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// LEDBAT's target one-way queuing delay, in microseconds. Default is 100,000 (100 ms), the value
+    /// in BEP 29 and libutp; clamped to 1,000 - 1,000,000. Read while the connection runs.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole point of uTP: the controller grows its window while measured queuing delay
+    /// is under the target and shrinks it above, so uTP backs off before TCP does and leaves the link
+    /// to interactive traffic. Raising it makes uTP more aggressive and less yielding - a LAN or a
+    /// dedicated line may want that, and a shared home connection is the case the default is chosen
+    /// for. Lowering it yields sooner, at the cost of throughput.
+    /// </remarks>
+    public int UtpTargetDelayMicroseconds { get; set; } = 100000;
+
+    /// <summary>
+    /// The most the congestion window may grow in one round trip, in bytes. Default is 3,000, as in
+    /// libutp; clamped to 100 - 1,000,000. Read while the connection runs.
+    /// </summary>
+    /// <remarks>
+    /// LEDBAT's gain. It bounds how fast the window opens when the path looks idle, which is what
+    /// keeps a delay-based controller from overshooting into the very queue it is measuring.
+    /// </remarks>
+    public int UtpMaxWindowIncreaseBytesPerRtt { get; set; } = 3000;
+
+    /// <summary>
+    /// The shortest interval between two loss-driven cuts of the congestion window, in milliseconds.
+    /// Default is 100, matching libtorrent's <c>cwnd_reduce_timer</c>; clamped to 10 - 60,000. Read
+    /// while the connection runs.
+    /// </summary>
+    /// <remarks>
+    /// Loss arrives in bursts - one overflowing queue drops a whole window, and every packet in it
+    /// is reported separately. Without an interval the window is halved once per report rather than
+    /// once per congestion event.
+    /// </remarks>
+    public int UtpLossWindowCutIntervalMs { get; set; } = 100;
+
+    /// <summary>
+    /// How many times a uTP handshake is retried before the connection is abandoned. Default is 2;
+    /// clamped to 0 - 10. Read while the connection runs.
+    /// </summary>
+    /// <remarks>
+    /// Most addresses a swarm hands out sit behind a NAT that never answers, so this is a budget
+    /// spent mostly on peers that will never reply. Each retry doubles the wait before the next.
+    /// </remarks>
+    public int UtpMaxSynRetries { get; set; } = 2;
 
     /// <summary>
     /// Cooldown (seconds) between uTP slow penalties for the same peer.
@@ -429,10 +491,25 @@ public sealed class ConnectionSettings
     public int UtpSlowPenaltySeconds { get; set; } = 90;
 
     /// <summary>
-    /// Startup warmup period (seconds) during which new outgoing connections prefer TCP.
-    /// uTP is allowed during warmup only for peers with a known uTP hint.
+    /// How many uTP dials may fail with none having succeeded before this client stops guessing that
+    /// peers speak uTP. Default is 8; zero or less disables the guard.
     /// </summary>
-    public int UtpWarmupSeconds { get; set; } = 30;
+    /// <remarks>
+    /// <para>
+    /// Replaces a fixed warm-up period that put every peer on TCP for the first thirty seconds of a
+    /// torrent. That covered exactly the wrong window - the tracker's opening batch, whose
+    /// connections are the ones that last - and it answered from a clock rather than from evidence:
+    /// a machine whose UDP works waited anyway, and one whose UDP is blocked carried on regardless
+    /// once the clock ran out.
+    /// </para>
+    /// <para>
+    /// This asks the network instead. Leading with uTP is itself the probe, and on a path that
+    /// drops UDP the first several dials say so; the global penalty then holds uTP back for a while
+    /// rather than paying a capped attempt per peer. One success clears the count, because the
+    /// question is whether uTP works here at all.
+    /// </para>
+    /// </remarks>
+    public int UtpColdStartFailureLimit { get; set; } = 8;
 }
 
 /// <summary>
@@ -564,6 +641,18 @@ public sealed class FilesSettings
 /// </summary>
 public sealed class ProxySettings
 {
+    /// <summary>
+    /// Reports which UDP features the engine's proxy policy permits, without changing settings.
+    /// </summary>
+    /// <remarks>
+    /// DHT uses a configured proxy. Peer and tracker traffic follow their respective proxy flags.
+    /// A SOCKS5 server must still support UDP association for a permitted connection to succeed.
+    /// </remarks>
+    public UdpProxyCapabilities GetUdpCapabilities() => new(
+        Internals.Network.UdpProxyPolicy.Decide(this, proxyTraffic: true) != Internals.Network.UdpProxyPolicy.Decision.Refuse,
+        Internals.Network.UdpProxyPolicy.Decide(this, ProxyPeers) != Internals.Network.UdpProxyPolicy.Decision.Refuse,
+        Internals.Network.UdpProxyPolicy.Decide(this, ProxyTrackers) != Internals.Network.UdpProxyPolicy.Decision.Refuse);
+
     /// <summary>
     /// If true, the client will only connect via proxy.
     /// Direct connections will be disabled, and incoming connections might be blocked.
@@ -710,6 +799,11 @@ public sealed class SessionSettings
 /// </summary>
 public sealed class TransferSettings
 {
+    private readonly List<IConcurrencyLimitListener> _concurrencyListeners = [];
+    private readonly Lock _concurrencyListenerLock = new();
+    private long _activePieceByteBudget = 32L * 1024 * 1024;
+    private int _maxConcurrentPieceHashing = 8;
+    private int _maxConcurrentPieceWrites = 8;
     private long _maxDownloadSpeed;
     private long _maxUploadSpeed;
 
@@ -737,18 +831,118 @@ public sealed class TransferSettings
     /// <summary>Initial request pipeline depth for new peer connections.</summary>
     public int InitialPipelineDepth { get; set; } = 16;
 
-    /// <summary>Maximum concurrent piece hash/write operations.</summary>
+    /// <summary>Maximum concurrent web-seed piece downloads per torrent, clamped to 1-64. Read while running; lowering it lets existing requests finish.</summary>
+    public int WebSeedMaxConnections { get; set; } = 2;
+
+    /// <summary>Maximum concurrent piece downloads from one web-seed URL, clamped to 1-64. Also bounded by WebSeedMaxConnections.</summary>
+    public int WebSeedMaxConnectionsPerSource { get; set; } = 2;
+
+    /// <summary>Piece processing worker count and queue capacity, clamped to 4-256. Applied when the torrent's transfer is created.</summary>
     public int MaxConcurrentPieceProcessing { get; set; } = 16;
 
-    /// <summary>Maximum concurrent piece hash verification operations.</summary>
-    public int MaxConcurrentPieceHashing { get; set; } = 8;
+    /// <summary>Maximum concurrent piece hash verification operations (1-256). Changes apply to existing transfers; running work drains normally.</summary>
+    public int MaxConcurrentPieceHashing
+    {
+        get => Volatile.Read(ref _maxConcurrentPieceHashing);
+        set
+        {
+            Volatile.Write(ref _maxConcurrentPieceHashing, value);
+            NotifyConcurrencyLimitsChanged();
+        }
+    }
 
-    /// <summary>Maximum concurrent piece write operations.</summary>
-    public int MaxConcurrentPieceWrites { get; set; } = 8;
+    /// <summary>Maximum concurrent piece write operations (1-128). Changes apply to existing transfers; running work drains normally.</summary>
+    public int MaxConcurrentPieceWrites
+    {
+        get => Volatile.Read(ref _maxConcurrentPieceWrites);
+        set
+        {
+            Volatile.Write(ref _maxConcurrentPieceWrites, value);
+            NotifyConcurrencyLimitsChanged();
+        }
+    }
 
     /// <summary>
-    /// Maximum outstanding requests per peer to cap pipeline growth. Matches libtorrent's
-    /// <c>max_out_request_queue</c>.
+    /// Bytes of piece data allowed to be in progress at once, which is what sets how many pieces the
+    /// picker keeps open. Default is 32 MiB, clamped to 1 MiB - 4 GiB.
+    /// </summary>
+    /// <remarks>
+    /// A fixed piece count cannot serve both ends of the range it has to cover. Thirty-two pieces is
+    /// 8 MiB of exposure on a 256 KiB-piece torrent and 512 MiB on a 16 MiB-piece one - the first
+    /// too few to keep a fast swarm busy, the second more unverified data in flight than most callers
+    /// would choose. A byte budget divided by the piece size gives the same exposure either way.
+    /// </remarks>
+    public long ActivePieceByteBudget
+    {
+        get => _activePieceByteBudget;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _activePieceByteBudget = value;
+        }
+    }
+
+    /// <summary>
+    /// Hard ceiling on pieces open at once, whatever the byte budget works out to. Default is 256,
+    /// clamped to <see cref="MinActivePieces"/> - 4096.
+    /// </summary>
+    public int MaxActivePieces { get; set; } = 256;
+
+    /// <summary>
+    /// Floor on pieces open at once. Default is 8, clamped to 1 - 4096. A torrent with pieces larger
+    /// than the whole budget still gets this many, or endgame has nothing to work with.
+    /// </summary>
+    public int MinActivePieces { get; set; } = 8;
+
+    /// <summary>
+    /// Pieces of headroom kept open per unchoked peer, so capacity tracks the demand actually
+    /// present rather than the budget alone. Default is 2, clamped to 1 - 64.
+    /// </summary>
+    public int ActivePiecesPerPeer { get; set; } = 2;
+
+    /// <summary>
+    /// Multiplier on a peer's smoothed round trip for the soft block timeout - the point at which the
+    /// block is offered to another peer while the original request stands. Default is 6, clamped to
+    /// 1 - 100.
+    /// </summary>
+    public int BlockTimeoutRttMultiplier { get; set; } = 6;
+
+    /// <summary>
+    /// Multiplier on a peer's smoothed round trip for the hard block timeout - the point at which the
+    /// request is abandoned and the peer takes a strike. Default is 10, clamped to 1 - 100.
+    /// </summary>
+    public int BlockHardTimeoutRttMultiplier { get; set; } = 10;
+
+    /// <summary>
+    /// Multiplier on the observed variance of a peer's response times, added to the round-trip term
+    /// of both block timeouts. Default is 4 (RFC 6298's <c>K</c>), clamped to 0 - 32; zero restores
+    /// the older mean-only behaviour.
+    /// </summary>
+    /// <remarks>
+    /// A peer whose replies average 200 ms but range from 50 ms to 2 s is not the same peer as one
+    /// that answers in a steady 200 ms, and a multiple of the mean alone cannot tell them apart: the
+    /// bound is either too tight for the jittery peer, which then collects timeouts it did not earn,
+    /// or too loose for the steady one, which is given seconds to answer a request it would have
+    /// dropped. This is the same term libtorrent adds in <c>peer_connection.cpp</c>.
+    /// </remarks>
+    public int BlockTimeoutVarianceMultiplier { get; set; } = 4;
+
+    /// <summary>Lower bound on the soft block timeout, in milliseconds. Default 3000, clamped 100 - 600000.</summary>
+    public int MinBlockTimeoutMs { get; set; } = 3000;
+
+    /// <summary>Upper bound on the soft block timeout, in milliseconds. Default 15000, clamped to at least <see cref="MinBlockTimeoutMs"/>.</summary>
+    public int MaxBlockTimeoutMs { get; set; } = 15000;
+
+    /// <summary>Lower bound on the hard block timeout, in milliseconds. Default 5000, clamped 100 - 600000.</summary>
+    public int MinBlockHardTimeoutMs { get; set; } = 5000;
+
+    /// <summary>Upper bound on the hard block timeout, in milliseconds. Default 30000, clamped to at least <see cref="MinBlockHardTimeoutMs"/>.</summary>
+    public int MaxBlockHardTimeoutMs { get; set; } = 30000;
+
+    /// <summary>
+    /// Maximum outstanding requests per peer to cap pipeline growth. Read on each scheduling pass,
+    /// also bounded by the peer's advertised request capacity. Values below one are treated as one.
+    /// Lowering the limit lets in-flight requests drain. Matches libtorrent's <c>max_out_request_queue</c>.
     /// </summary>
     public int MaxRequestsPerPeer { get; set; } = 500;
 
@@ -846,31 +1040,136 @@ public sealed class TransferSettings
             _maxUploadSpeed = value;
         }
     }
+
+    /// <summary>
+    /// Registers a component that holds live concurrency limiters. The caller owns the registration
+    /// and must pair it with <see cref="RemoveConcurrencyLimitListener"/> when it is disposed.
+    /// </summary>
+    internal void AddConcurrencyLimitListener(IConcurrencyLimitListener listener)
+    {
+        lock (_concurrencyListenerLock)
+        {
+            _concurrencyListeners.Add(listener);
+        }
+    }
+
+    /// <summary>Deregisters a listener added by <see cref="AddConcurrencyLimitListener"/>.</summary>
+    internal void RemoveConcurrencyLimitListener(IConcurrencyLimitListener listener)
+    {
+        lock (_concurrencyListenerLock)
+        {
+            _concurrencyListeners.Remove(listener);
+        }
+    }
+
+    private void NotifyConcurrencyLimitsChanged()
+    {
+        IConcurrencyLimitListener[] listeners;
+        lock (_concurrencyListenerLock)
+        {
+            if (_concurrencyListeners.Count == 0)
+            {
+                return;
+            }
+
+            listeners = [.. _concurrencyListeners];
+        }
+
+        // Outside the lock: a listener re-reads settings and takes its own locks, and a setter can be
+        // called from any thread. Holding this one across that is how two settings writes deadlock.
+        foreach (var listener in listeners)
+        {
+            listener.OnConcurrencyLimitsChanged();
+        }
+    }
+}
+
+/// <summary>
+/// What the alert queue does when it reaches <see cref="AlertSettings.MaxQueueSize"/>.
+/// </summary>
+/// <remarks>
+/// Either way the capacity is a real limit. Alerts the engine treats as critical - a torrent added,
+/// removed, finished, errored, or its metadata resolved - are evicted last, but they are not exempt:
+/// a queue that could be exceeded by critical alerts is not bounded at all, and the case that fills
+/// it is exactly the case where a consumer has stopped reading.
+/// </remarks>
+public enum AlertOverflowPolicy
+{
+    /// <summary>
+    /// Discard the oldest droppable alert to make room for the new one. Favours recency, which is
+    /// what a consumer watching live state usually wants.
+    /// </summary>
+    DropOldest,
+
+    /// <summary>
+    /// Refuse the new alert and keep the backlog. Favours the earliest record of what happened, which
+    /// is what a consumer auditing a sequence usually wants.
+    /// </summary>
+    DropNewest
+}
+
+/// <summary>
+/// Settings for the engine's alert queue.
+/// </summary>
+public sealed class AlertSettings
+{
+    private int _maxQueueSize = 10000;
+
+    /// <summary>
+    /// Most alerts held for a consumer that has not read them yet. Default is 10,000; values below
+    /// one are rejected. Read on each post, so lowering it takes effect on the next overflow.
+    /// </summary>
+    /// <remarks>
+    /// Each queued alert holds a reference to whatever it describes, a torrent included, so the queue
+    /// is the one place a consumer that stops calling
+    /// <see cref="IAlerts.GetAlertsAsync"/> can cost the engine unbounded memory.
+    /// </remarks>
+    public int MaxQueueSize
+    {
+        get => Volatile.Read(ref _maxQueueSize);
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            Volatile.Write(ref _maxQueueSize, value);
+        }
+    }
+
+    /// <summary>Which alert gives way when the queue is full. Default is <see cref="AlertOverflowPolicy.DropOldest"/>.</summary>
+    public AlertOverflowPolicy OverflowPolicy { get; set; } = AlertOverflowPolicy.DropOldest;
 }
 
 /// <summary>
 /// Configuration settings for the BitTorrent client.
 /// </summary>
 /// <remarks>
-/// <para><b>Thread safety:</b> the engine re-reads these settings from its internal loops at
-/// runtime, so individual property writes take effect without a restart, typically within a
-/// few seconds. Writes of a single property are safe at any time.</para>
+/// <para><b>Runtime changes:</b> scheduling limits such as request depth, connection timeout bounds,
+/// hash/write concurrency and web-seed concurrency apply to existing transfers. Existing work is
+/// allowed to finish when a concurrency limit is lowered. Other settings that create resources
+/// (socket bindings, queue capacities, storage caches, worker counts and session persistence) must
+/// be set before those resources are created; property writes do not recreate them.</para>
 /// <para>There is no atomicity <i>across</i> properties: the engine may briefly observe a mix
 /// of old and new values while several properties are being changed, so related settings
 /// (e.g. a speed limit and its slot count) should be treated as eventually consistent rather
-/// than as one transaction. Replacing whole sub-setting objects (such as
-/// <see cref="Connection"/>) at runtime is not supported; mutate their properties instead.</para>
+/// than as one transaction.</para>
+/// <para>The sub-setting objects (<see cref="Connection"/>, <see cref="Transfer"/> and the rest) are
+/// get-only by design. Running components hold a reference to the instance they were given, so
+/// replacing one would leave them reading the object nobody can see any more - the exact staleness
+/// the live re-reads above exist to avoid. Mutate their properties instead; in an object initializer
+/// that is <c>Connection = { EnableUtpIn = true }</c>.</para>
 /// </remarks>
 public sealed class Settings
 {
+    /// <summary>Settings for the engine's alert queue.</summary>
+    public AlertSettings Alerts { get; } = new();
+
     /// <summary>Settings for peer-to-peer network connections.</summary>
-    public ConnectionSettings Connection { get; set; } = new();
+    public ConnectionSettings Connection { get; } = new();
 
     /// <summary>Settings for Distributed Hash Table (DHT).</summary>
-    public DhtSettings Dht { get; set; } = new();
+    public DhtSettings Dht { get; } = new();
 
     /// <summary>Settings for file management and storage.</summary>
-    public FilesSettings Files { get; set; } = new();
+    public FilesSettings Files { get; } = new();
 
     /// <summary>Maximum number of unique known peers to keep in cache.</summary>
     public int MaxKnownPeersCache { get; set; } = 2000;
@@ -901,14 +1200,14 @@ public sealed class Settings
     public byte[] PeerId { get; set; } = new byte[20];
 
     /// <summary>Settings for network proxy.</summary>
-    public ProxySettings Proxy { get; set; } = new();
+    public ProxySettings Proxy { get; } = new();
 
     /// <summary>Settings for queue management and auto-stop rules.</summary>
-    public QueueSettings Queue { get; set; } = new();
+    public QueueSettings Queue { get; } = new();
 
     /// <summary>Settings for session persistence (optional, disabled by default).</summary>
-    public SessionSettings Session { get; set; } = new();
+    public SessionSettings Session { get; } = new();
 
     /// <summary>Settings for data transfer.</summary>
-    public TransferSettings Transfer { get; set; } = new();
+    public TransferSettings Transfer { get; } = new();
 }

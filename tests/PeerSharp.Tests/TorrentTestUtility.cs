@@ -9,6 +9,7 @@ using PeerSharp.Internals.Extensions;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Win32.SafeHandles;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests;
 
@@ -153,6 +154,8 @@ internal static class TorrentTestUtility
 
     internal class MockAlertsManager : IAlertsManager
     {
+        public long DroppedAlertCount => 0;
+
         public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
 
         public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason) { }
@@ -377,6 +380,7 @@ internal static class TorrentTestUtility
             new MockGeoIpService(),
             new MockFileHandleCache(),
             new MockConnectionGovernor(),
+            new HttpClientFactory(),
             timeProvider ?? TimeProvider.System,
             resumeData: resumeData
         );

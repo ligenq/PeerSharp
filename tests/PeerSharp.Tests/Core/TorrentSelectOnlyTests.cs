@@ -1,5 +1,6 @@
 using PeerSharp.Internals;
 using PeerSharp.Internals.Framework;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Core;
 
@@ -164,6 +165,7 @@ public class TorrentSelectOnlyTests
             new TorrentTestUtility.MockGeoIpService(),
             new TorrentTestUtility.MockFileHandleCache(),
             new TorrentTestUtility.MockConnectionGovernor(),
+            new HttpClientFactory(),
             TimeProvider.System);
     }
 }

@@ -12,6 +12,9 @@
 
 PeerSharp is a high-performance, modern BitTorrent engine for .NET 10+.
 
+See [Application integration APIs](CONSUMER_API.md) for torrent identity, magnet creation,
+polling statistics, and proxy capability reporting.
+
 ## Key Features
 
 - **Full BEP Support:** Implements 35 BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).

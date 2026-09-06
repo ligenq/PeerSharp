@@ -3,7 +3,7 @@ using PeerSharp.Interfaces;
 namespace PeerSharp.Core;
 
 /// <summary>
-/// Decides whether a hash names a given torrent.
+/// Compares torrent identities and resolves their hashes.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -22,12 +22,24 @@ namespace PeerSharp.Core;
 /// dictionary it is a key in. So this is a predicate, and says so in its name.
 /// </para>
 /// <para>
-/// For two torrents rather than a torrent and a hash, ask
-/// <see cref="ITorrent.HasSameIdentity(ITorrent?)"/>, which has always been the place for it.
+/// <see cref="SameTorrent"/> inspects hash properties directly, including on application test doubles.
+/// <see cref="ITorrent.HasSameIdentity(ITorrent?)"/> delegates to it for engine-owned torrents.
 /// </para>
 /// </remarks>
 public static class TorrentIdentity
 {
+    /// <summary>
+    /// Whether two torrents share a non-empty V1 or V2 hash, or are the same non-null instance.
+    /// </summary>
+    /// <remarks>
+    /// Returns false if either argument is null. Reads the hash properties without invoking
+    /// <see cref="ITorrent.HasSameIdentity(ITorrent?)"/>. This matches partially known identities;
+    /// it is not transitive and must not be used as equality for dictionary keys.
+    /// </remarks>
+    public static bool SameTorrent(ITorrent? left, ITorrent? right) =>
+        left is not null && right is not null
+        && (ReferenceEquals(left, right) || left.Hash.Matches(right.Hash) || left.HashV2.Matches(right.HashV2));
+
     /// <summary>
     /// Whether <paramref name="hash"/> names <paramref name="torrent"/>, in any of the forms the
     /// world refers to it by.

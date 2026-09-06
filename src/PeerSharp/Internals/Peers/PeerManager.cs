@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Framework;
@@ -49,7 +49,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     // Periodic task intervals
     private const int MainLoopIntervalMs = 1000;
 
-    private const int PendingConnectionTimeoutMs = 10000;
     /// <summary>
     /// Floor for how often peer exchange runs. The configured interval is honoured above this; the
     /// tick loop cannot notice anything finer than a second.
@@ -88,9 +87,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     // Value is timestamp (Environment.TickCount64) when connection was initiated
     private readonly ConcurrentDictionary<IPEndPoint, long> _pendingConnections = new();
+    private long _nextPendingConnectionId;
 
     private readonly Settings _settings;
-    private readonly DateTimeOffset _startTime;
     private readonly TimeProvider _timeProvider;
     private readonly Torrent _torrent;
     private readonly PeerChoker _choker;
@@ -110,6 +109,16 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     // the main loop writes the penalty window while connection tasks read it concurrently,
     // and a raw 16-byte DateTimeOffset field could tear.
     private long _globalUtpPenaltyUntilUtcTicks = DateTimeOffset.MinValue.UtcTicks;
+
+    /// <summary>
+    /// uTP dials that have failed with none yet succeeding. Leading with uTP is a guess about the
+    /// network, and this is how the guess is withdrawn: on a path that drops UDP the opening dials
+    /// all fail, and holding uTP back for a while costs less than a capped attempt per peer. Reset
+    /// by the first success, because the question is whether uTP works here at all.
+    /// </summary>
+    private int _utpColdStartFailures;
+
+    private int _utpEverSucceeded;
 
     private int _holepunchCount = 0;
 
@@ -150,18 +159,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _geoIp = geoIp;
         _peerFactory = peerFactory;
         _timeProvider = timeProvider;
-        _startTime = _timeProvider.GetUtcNow();
         _choker = new PeerChoker(_torrent, _timeProvider, _logger);
         _peerExchange = new PeerExchangeCoordinator(_torrent, _knownPeersCache, _logger);
         _peerHealth = new PeerHealthMonitor(_torrent, _logger);
 
         // Initialize adaptive timeout based on settings
         var connSettings = _settings.Connection;
-        AdaptiveTimeout = new AdaptiveTimeout(
-            minTimeoutMs: connSettings.MinConnectionTimeoutMs,
-            maxTimeoutMs: connSettings.MaxConnectionTimeoutMs,
-            initialTimeoutMs: connSettings.InitialConnectionTimeoutMs,
-            timeProvider: _timeProvider);
+        AdaptiveTimeout = new AdaptiveTimeout(connSettings, _timeProvider);
 
         // Initialize connection throttling with Wait mode to prevent silent data loss
         _connectionQueue = Channel.CreateBounded<ConnectionRequest>(new BoundedChannelOptions(Math.Max(100, connSettings.MaxConnectionQueueSize))
@@ -177,7 +181,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// </summary>
     public AdaptiveTimeout AdaptiveTimeout { get; }
 
-    private readonly record struct ConnectionRequest(string Ip, int Port, bool ForceUtp);
+    private readonly record struct ConnectionRequest(string Ip, int Port, bool ForceUtp, long Id = 0);
     public int ConnectedCount => _connectedPeersCount;
 
     /// <inheritdoc />
@@ -310,6 +314,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (peer.UtpStream != null)
             {
                 history.RegisterUtpSuccess(_timeProvider.GetUtcNow());
+                RecordUtpSuccess();
             }
         }
 
@@ -814,7 +819,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        if (!_pendingConnections.TryAdd(endpoint, Environment.TickCount64))
+        var request = new ConnectionRequest(ip, port, forceUtp, Interlocked.Increment(ref _nextPendingConnectionId));
+        if (!_pendingConnections.TryAdd(endpoint, request.Id))
         {
             // Already pending
             return;
@@ -824,9 +830,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         history.LastAttempt = now;
 
         // Queue the connection request
-        if (!_connectionQueue.Writer.TryWrite(new ConnectionRequest(ip, port, forceUtp)))
+        if (!_connectionQueue.Writer.TryWrite(request))
         {
-            _pendingConnections.TryRemove(endpoint, out _);
+            ReleasePendingConnection(request);
             ReportConnectionQueueOverflow();
         }
     }
@@ -892,7 +898,19 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // Recorded as learned from the extension protocol, which is exactly what happened.
             if (p.RemoteListenEndPoint is { } listenEndPoint)
             {
-                GetOrAddKnownPeerHistory(listenEndPoint).UpdateSource(PeerSourceKind.Ltep);
+                var listenHistory = GetOrAddKnownPeerHistory(listenEndPoint);
+                listenHistory.UpdateSource(PeerSourceKind.Ltep);
+
+                // A peer that reached us over uTP has proved it speaks uTP, and this is the first
+                // moment that proof can be filed against an address anybody can dial. Until now it
+                // was recorded against the ephemeral source port and thrown away with the
+                // connection, so a peer that demonstrated uTP by calling us was still dialled over
+                // TCP the next time. libtorrent applies the same evidence to the peer record.
+                if (p.UtpStream != null)
+                {
+                    listenHistory.RegisterUtpSuccess(_timeProvider.GetUtcNow());
+                    RecordUtpSuccess();
+                }
             }
 
             _torrent.MetadataDownloadInternal?.PeerConnected(p);
@@ -1758,15 +1776,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         bool utpAvailable = hasUtpManager
             && now.UtcTicks >= Volatile.Read(ref _globalUtpPenaltyUntilUtcTicks)
             && (history?.IsUtpAllowed(now) ?? true);
-        bool inWarmup = (now - _startTime) < TimeSpan.FromSeconds(settings.UtpWarmupSeconds);
-
         return TransportPlanBuilder.Build(new TransportPlanBuilder.Inputs(
             Settings: settings,
             ForceUtp: forceUtp,
-            UtpAvailable: utpAvailable,
-            UtpHinted: history?.UtpHinted ?? false,
-            InWarmupPeriod: inWarmup,
-            CurrentUtpRatioPercent: GetUtpRatioPercent));
+            UtpAvailable: utpAvailable));
     }
 
     private Task CheckPeerHealthAsync() => _peerHealth.CheckAsync(_connectedPeers.Keys, ConnectedCount);
@@ -1803,17 +1816,28 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // uploads were still in flight. The periodic sweep costs at most five seconds of one
         // connection slot, against the two minutes this replaced, and leaves the uploads alone.
     }
-    private void CleanupPendingConnections()
+    private void ReleasePendingConnection(ConnectionRequest request)
     {
-        long now = Environment.TickCount64;
-        foreach (var kvp in _pendingConnections)
+        var endpoint = TryResolvePendingKey(request);
+        if (endpoint == null)
         {
-            // Check if connection attempt has timed out (older than 10 seconds)
-            if (now - kvp.Value > PendingConnectionTimeoutMs)
-            {
-                _pendingConnections.TryRemove(kvp.Key, out _);
-            }
+            return;
         }
+
+        // Completion from an earlier run must never release a newer attempt's ownership.
+        _pendingConnections.TryRemove(new KeyValuePair<IPEndPoint, long>(endpoint, request.Id));
+    }
+
+    /// <summary>
+    /// The <see cref="_pendingConnections"/> key for a request, or null if its address will not parse.
+    /// ConnectTo normalizes the address before it stores the entry, so normalizing again here is a
+    /// no-op that keeps the two sites from drifting apart.
+    /// </summary>
+    private static IPEndPoint? TryResolvePendingKey(ConnectionRequest request)
+    {
+        return IPAddress.TryParse(request.Ip, out var address)
+            ? NetworkUtils.NormalizeEndPoint(new IPEndPoint(address, request.Port))
+            : null;
     }
 
     /// <summary>
@@ -1863,9 +1887,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// another rendezvous when it fails, or a peer that is simply unreachable is retried forever.
     /// </para>
     /// </summary>
-    private async Task ConnectAndHandleAsync(PeerCommunication peer, string ip, int port, IReadOnlyList<TransportPreference> transportPlan, bool useGovernor, bool isHolepunch)
+    private async Task ConnectAndHandleAsync(PeerCommunication peer, string ip, int port, IReadOnlyList<TransportPreference> transportPlan, bool useGovernor, bool isHolepunch, ConnectionRequest? pendingRequest, CancellationToken cancellationToken)
     {
         IPEndPoint? endpoint = null;
+        bool pendingSlotHeld = useGovernor;
 
         // Set when this attempt earns a prompt retry with the other encryption choice; acted on in
         // the finally, once every guard this attempt holds has been released.
@@ -1901,18 +1926,31 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // trying, so the choice alternates across attempts and is remembered on the peer rather than
             // retried inside one attempt - see PeerHistory.OfferEncryptionNext.
             bool offerEncryption = true;
+
+            // Whether uTP is known to work with this peer or merely assumed. Every peer starts
+            // assumed - see PeerHistory.UtpSupported - and the assumption is right about a quarter
+            // of the time on the open internet, so what it costs when it is wrong decides what
+            // leading with uTP costs overall.
+            bool utpProven = false;
             if (endpoint is not null && _knownPeersCache.TryGetValue(endpoint, out var knownHistory))
             {
                 offerEncryption = knownHistory.OfferEncryptionNext;
+                utpProven = knownHistory.UtpHinted || knownHistory.UtpConfirmed;
             }
 
             bool success = false;
-            bool usedUtp = false;
             bool attemptedUtp = false;
+            bool utpTransportEstablished = false;
+            bool offeredEncryptionChoice = false;
+            PeerCommunication? encryptionHangupPeer = null;
             int remainingTimeoutMs = timeoutMs;
             int fallbackTimeoutMs = ConnectionBudgetCalculator.FallbackCap(
                 timeoutMs,
                 _settings.Connection.UtpFallbackTimeoutMs,
+                _settings.Connection.MinConnectionTimeoutMs);
+            int speculativeUtpTimeoutMs = ConnectionBudgetCalculator.FallbackCap(
+                timeoutMs,
+                _settings.Connection.UtpSpeculativeTimeoutMs,
                 _settings.Connection.MinConnectionTimeoutMs);
 
             for (int attempt = 0; attempt < transportPlan.Count; attempt++)
@@ -1920,25 +1958,48 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 var transport = transportPlan[attempt];
 
                 bool hasFallback = attempt < transportPlan.Count - 1;
-                int attemptTimeoutMs = ConnectionBudgetCalculator.ForAttempt(
-                    remainingTimeoutMs, hasFallback, fallbackTimeoutMs);
-
                 bool attemptUtp = transport == TransportPreference.Utp;
-                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, CancellationToken.None).ConfigureAwait(false);
 
-                if (success)
-                {
-                    usedUtp = peer.UtpStream != null;
-                    break;
-                }
+                // A guess at uTP is time-boxed harder than a dial to a peer known to speak it. The
+                // full budget is libtorrent's utp_connect_timeout, and it is the right number for a
+                // peer that answers - but libtorrent never spends it and then dials TCP as well, so
+                // here it is charged to every peer that turns out not to speak uTP before the
+                // fallback even starts. Measured over a public swarm, half of one percent of the
+                // uTP connections that succeeded took longer than this shorter budget, against
+                // three quarters of all dials paying the difference for nothing.
+                int capMs = attemptUtp
+                    ? ConnectionBudgetCalculator.UtpCap(utpProven, fallbackTimeoutMs, speculativeUtpTimeoutMs)
+                    : fallbackTimeoutMs;
+                int attemptTimeoutMs = ConnectionBudgetCalculator.ForAttempt(
+                    remainingTimeoutMs, hasFallback, capMs);
+                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, cancellationToken)
+                    .WaitAsync(cancellationToken).ConfigureAwait(false);
 
                 if (attemptUtp)
                 {
                     attemptedUtp = true;
+                    utpTransportEstablished |= peer.UtpTransportEstablished;
+                }
+
+                offeredEncryptionChoice |= peer.OfferedAnEncryptionChoice;
+
+                if (peer.HungUpDuringEncryptionHandshake)
+                {
+                    encryptionHangupPeer = peer;
+                }
+
+                if (success)
+                {
+                    break;
                 }
 
                 remainingTimeoutMs = ConnectionBudgetCalculator.Remaining(
                     remainingTimeoutMs, attemptTimeoutMs, _settings.Connection.MinConnectionTimeoutMs);
+
+                if (hasFallback)
+                {
+                    peer = ReplaceConnectingPeerForFallback(peer);
+                }
             }
 
             // Record connection result for adaptive timeout and history
@@ -1971,11 +2032,22 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 history.FruitlessConnectionCount++;
                 ApplyConnectionBackoff(history);
 
-                // Flip what we offer next time. A peer that refuses both ends up alternating, which
-                // costs nothing extra because the attempt was going to happen anyway; a peer that only
-                // speaks one of them is reached on the following try.
-                history.RegisterHandshakeFailure();
-                fastReconnectTarget = ClaimFastReconnectAfterEncryptionHangUp(peer, history);
+                // Flip what we offer next time - but only when something was actually offered. A
+                // peer that refuses both ends up alternating, which costs nothing extra because the
+                // attempt was going to happen anyway; a peer that only speaks one of them is reached
+                // on the following try.
+                //
+                // A dial that never opened a socket is not part of that: a refusal, a timeout or a
+                // cancellation is evidence about reachability, which the backoff above already
+                // records, and none about encryption. Flipping on those made the choice alternate
+                // with a peer's packet loss, so a loaded machine could dial the same peer in
+                // plaintext twice running and never offer it MSE at all.
+                if (offeredEncryptionChoice)
+                {
+                    history.RegisterHandshakeFailure();
+                }
+
+                fastReconnectTarget = ClaimFastReconnectAfterEncryptionHangUp(encryptionHangupPeer ?? peer, history);
                 fastReconnectEncrypted = history.OfferEncryptionNext;
             }
 
@@ -1989,16 +2061,25 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (useGovernor)
             {
                 _governor.ReleasePendingSlot();
+                pendingSlotHeld = false;
             }
 
+            if (attemptedUtp)
+            {
+                if (utpTransportEstablished)
+                {
+                    history.RegisterUtpSuccess(_timeProvider.GetUtcNow());
+                    RecordUtpSuccess();
+                }
+                else
+                {
+                    history.RegisterUtpFailure(_timeProvider.GetUtcNow(), _settings.Connection);
+                    RecordUtpColdStartFailure();
+                }
+            }
 
             if (!success)
             {
-                if (attemptedUtp)
-                {
-                    history.RegisterUtpFailure(_timeProvider.GetUtcNow(), _settings.Connection);
-                }
-
                 // A holepunch that failed does not earn another one. The dial a relay asks us to make
                 // skips the per-peer backoff by design, so letting its failure request a fresh
                 // rendezvous closes a loop with nothing to stop it: fail, ask, dial, fail. One endpoint
@@ -2021,16 +2102,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // against the ephemeral port it dialled from, which is the one address that is certainly
             // not connectable.
             history.IsConnectable = true;
-
-            if (attemptedUtp && !usedUtp)
-            {
-                history.RegisterUtpFailure(_timeProvider.GetUtcNow(), _settings.Connection);
-            }
-
-            if (usedUtp)
-            {
-                history.RegisterUtpSuccess(_timeProvider.GetUtcNow());
-            }
 
             // Acquire active slot from governor
             if (useGovernor && !_governor.TryAcquireConnectionSlot())
@@ -2084,7 +2155,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         catch (Exception ex)
         {
             // Log any errors in the continuation to prevent silent failures
-            _logger.LogError(ex, "Connection continuation error for {Ip}:{Port}", ip, port);
+            if (ex is OperationCanceledException && cancellationToken.IsCancellationRequested)
+                _logger.LogDebug("Connection attempt canceled for {Ip}:{Port}", ip, port);
+            else
+                _logger.LogError(ex, "Connection continuation error for {Ip}:{Port}", ip, port);
 
             // Cleanup on exception
             if (_connectingPeers.TryRemove(peer, out _))
@@ -2103,21 +2177,23 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     _governor.ReleaseConnectionSlot();
                 }
             }
+            await peer.CloseAsync().ConfigureAwait(false);
         }
         finally
         {
+            if (pendingSlotHeld) _governor.ReleasePendingSlot();
             // The pending entry blocked new dials to this endpoint while we were connecting.
             // On success the endpoint is registered in _connectedEndpoints before we get here,
             // on failure the per-peer backoff (NextConnectAttempt) throttles retries.
-            if (endpoint != null)
+            if (pendingRequest is { } request)
             {
-                _pendingConnections.TryRemove(endpoint, out _);
+                ReleasePendingConnection(request);
             }
 
             // Only now, with the pending guard, the connecting-list entry and the governor slot all
             // given back. The retry is an ordinary dial and goes through the ordinary gates, and this
             // attempt still holding any of them is exactly what those gates exist to turn away.
-            if (fastReconnectTarget is not null)
+            if (fastReconnectTarget is not null && !cancellationToken.IsCancellationRequested)
             {
                 _logger.LogDebug(
                     "Retrying {EndPoint} promptly with encryption={OfferEncryption} after it hung up mid-handshake",
@@ -2130,51 +2206,96 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    private void ConnectToInternal(string ip, int port, bool forceUtp)
+    /// <summary>
+    /// Replaces a failed transport's disposed connection object while preserving the single logical
+    /// pending attempt. PeerCommunication cleanup permanently completes its send queue, so reusing it
+    /// would leave a successful fallback unable to send protocol messages.
+    /// </summary>
+    private PeerCommunication ReplaceConnectingPeerForFallback(PeerCommunication previous)
     {
-        var settings = _settings.Connection;
-        PeerHistory? history = null;
-        if (!forceUtp && IPAddress.TryParse(ip, out var parsed))
+        var replacement = _peerFactory.Create(_torrent, this, _timeProvider);
+        if (ReferenceEquals(replacement, previous))
         {
-            _knownPeersCache.TryGetValue(new IPEndPoint(parsed, port), out history);
+            throw new InvalidOperationException("The peer factory returned the disposed connection for a fallback transport.");
         }
 
-        var transportPlan = BuildTransportPlan(settings, history, forceUtp);
-        if (transportPlan.Count == 0)
+        if (!_connectingPeers.TryRemove(previous, out _))
         {
-            _logger.LogDebug("Cannot connect to {Ip}:{Port} - no allowed connection method (TCP={TcpOut}, uTP={UtpOut})", ip, port, settings.EnableTcpOut, settings.EnableUtpOut);
-            return;
+            throw new InvalidOperationException("The failed transport was no longer registered as connecting.");
         }
 
-        // Acquire global pending slot
-        if (!forceUtp && !_governor.TryAcquirePendingSlot())
+        if (!_connectingPeers.TryAdd(replacement, 0))
         {
-            return;
+            // Reference identity makes this practically unreachable, but keep the observable count
+            // consistent if a custom factory violates that expectation.
+            Interlocked.Decrement(ref _connectingPeersCount);
+            throw new InvalidOperationException("The fallback transport could not be registered as connecting.");
         }
 
-        var peer = _peerFactory.Create(_torrent, this, _timeProvider);
+        return replacement;
+    }
 
-        // Add to connecting list first (pending TCP handshake)
-        if (_connectingPeers.TryAdd(peer, 0))
+    private void ConnectToInternal(string ip, int port, bool forceUtp, ConnectionRequest? pendingRequest = null)
+    {
+        bool handedOff = false;
+        bool pendingSlotHeld = false;
+        try
         {
-            Interlocked.Increment(ref _connectingPeersCount);
-        }
-
-        _logger.LogDebug("Initiating connection to {Ip}:{Port} (plan={Plan}), connecting={Connecting}, connected={Connected}", ip, port, string.Join("->", transportPlan), _connectingPeersCount, _connectedPeersCount);
-
-        // Track the connection task
-        var task = ConnectAndHandleAsync(peer, ip, port, transportPlan, !forceUtp, isHolepunch: forceUtp);
-        _activeConnectionTasks.TryAdd(task, 0);
-
-        _ = task.ContinueWith(t =>
-        {
-            _activeConnectionTasks.TryRemove(t, out _);
-            if (t.IsFaulted && t.Exception != null)
+            var settings = _settings.Connection;
+            PeerHistory? history = null;
+            if (!forceUtp && IPAddress.TryParse(ip, out var parsed))
             {
-                _logger.LogCritical(t.Exception?.GetBaseException(), "CRITICAL: Unhandled exception in peer connection handler for {Ip}:{Port}", ip, port);
-                // Cleanup will be handled by the connection failure path
+                _knownPeersCache.TryGetValue(new IPEndPoint(parsed, port), out history);
             }
-        }, TaskScheduler.Default);
+
+            var transportPlan = BuildTransportPlan(settings, history, forceUtp);
+            if (transportPlan.Count == 0)
+            {
+                _logger.LogDebug("Cannot connect to {Ip}:{Port} - no allowed connection method (TCP={TcpOut}, uTP={UtpOut})", ip, port, settings.EnableTcpOut, settings.EnableUtpOut);
+                return;
+            }
+
+            // Acquire global pending slot
+            if (!forceUtp && !_governor.TryAcquirePendingSlot())
+            {
+                return;
+            }
+            pendingSlotHeld = !forceUtp;
+
+            var peer = _peerFactory.Create(_torrent, this, _timeProvider);
+
+            // Add to connecting list first (pending TCP handshake)
+            if (_connectingPeers.TryAdd(peer, 0))
+            {
+                Interlocked.Increment(ref _connectingPeersCount);
+            }
+
+            _logger.LogDebug("Initiating connection to {Ip}:{Port} (plan={Plan}), connecting={Connecting}, connected={Connected}", ip, port, string.Join("->", transportPlan), _connectingPeersCount, _connectedPeersCount);
+
+            // Track the connection task
+            var task = ConnectAndHandleAsync(peer, ip, port, transportPlan, !forceUtp, isHolepunch: forceUtp,
+                pendingRequest, _mainLoopCts?.Token ?? CancellationToken.None);
+            handedOff = true;
+            _activeConnectionTasks.TryAdd(task, 0);
+
+            _ = task.ContinueWith(t =>
+            {
+                _activeConnectionTasks.TryRemove(t, out _);
+                if (t.IsFaulted && t.Exception != null)
+                {
+                    _logger.LogCritical(t.Exception?.GetBaseException(), "CRITICAL: Unhandled exception in peer connection handler for {Ip}:{Port}", ip, port);
+                    // Cleanup will be handled by the connection failure path
+                }
+            }, TaskScheduler.Default);
+        }
+        finally
+        {
+            if (!handedOff)
+            {
+                if (pendingSlotHeld) _governor.ReleasePendingSlot();
+                if (pendingRequest is { } request) ReleasePendingConnection(request);
+            }
+        }
     }
 
     private async Task SendAllowedFastSetAsync(PeerCommunication peer)
@@ -2301,25 +2422,53 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    private int GetUtpRatioPercent()
+    /// <summary>
+    /// One uTP dial worked, so this network passes UDP and the cold-start guard has nothing left to
+    /// decide. Latched rather than counted: the question it answers is asked once.
+    /// </summary>
+    private void RecordUtpSuccess()
     {
-        int total = 0;
-        int utp = 0;
-        foreach (var kvp in _connectedPeers)
+        Interlocked.Exchange(ref _utpEverSucceeded, 1);
+        Interlocked.Exchange(ref _utpColdStartFailures, 0);
+    }
+
+    /// <summary>
+    /// A uTP dial failed. While none has ever succeeded, enough of these mean the path does not
+    /// carry UDP, and uTP is held back globally rather than costing a capped attempt on every peer.
+    /// </summary>
+    private void RecordUtpColdStartFailure()
+    {
+        int limit = _settings.Connection.UtpColdStartFailureLimit;
+        if (limit <= 0 || Interlocked.CompareExchange(ref _utpEverSucceeded, 0, 0) != 0)
         {
-            total++;
-            if (kvp.Key.UtpStream != null)
+            return;
+        }
+
+        if (Interlocked.Increment(ref _utpColdStartFailures) != limit)
+        {
+            // Only the dial that reaches the limit applies the penalty. Past it the penalty is
+            // already in force, and re-applying on every later failure would extend it without end.
+            return;
+        }
+
+        var until = _timeProvider.GetUtcNow().AddSeconds(
+            Math.Max(1, _settings.Connection.UtpPenaltyMaxSeconds));
+
+        _logger.LogInformation(
+            "No uTP connection has succeeded in {Failures} attempts; holding uTP back until {Until}. " +
+            "This is what a path that drops UDP looks like.",
+            limit,
+            until);
+
+        long untilUtcTicks = until.UtcTicks;
+        long current;
+        while ((current = Interlocked.Read(ref _globalUtpPenaltyUntilUtcTicks)) < untilUtcTicks)
+        {
+            if (Interlocked.CompareExchange(ref _globalUtpPenaltyUntilUtcTicks, untilUtcTicks, current) == current)
             {
-                utp++;
+                break;
             }
         }
-
-        if (total == 0)
-        {
-            return 0;
-        }
-
-        return utp * 100 / total;
     }
 
     private bool IsSpeedStable(DateTimeOffset now)
@@ -2484,12 +2633,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                         _torrent.FireErrorEvent(new TorrentException("UnchokePeers error.", _torrent.Hash, ex));
                     }
 
-                    try { CleanupPendingConnections(); }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "CleanupPendingConnections error");
-                        Defect.ReportIfDefect(ex, "CleanupPendingConnections error", _logger);
-                    }
                 }
 
                 // BroadcastPex - every 60 seconds
@@ -2529,20 +2672,29 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 // while it waits: other requests connect, or the torrent finishes. The single reader is
                 // the point at which the local half-open limit can be enforced without a race between
                 // queued requests.
-                if (CanStartQueuedConnection(request, out var endpoint))
+                // The whole decision is guarded, not just the dial. This request owns the endpoint's
+                // pending entry, and the only thing that can hand that ownership back is code running
+                // here: anything thrown on the way to ConnectToInternal would otherwise leave the
+                // entry behind, blocking every later dial to that endpoint for the torrent's life.
+                try
                 {
-                    // Fire-and-forget: the actual TCP handshake happens asynchronously.
-                    ConnectToInternal(request.Ip, request.Port, request.ForceUtp);
+                    if (CanStartQueuedConnection(request))
+                    {
+                        // Fire-and-forget: the actual TCP handshake happens asynchronously.
+                        // ConnectToInternal now owns the release, on every path it can take.
+                        ConnectToInternal(request.Ip, request.Port, request.ForceUtp, request);
+                    }
+                    else
+                    {
+                        // A rejected queued request no longer owns a pending attempt.
+                        ReleasePendingConnection(request);
+                    }
                 }
-                else if (endpoint != null)
+                catch (Exception ex)
                 {
-                    // It never became a connection attempt, so do not leave the queue-time duplicate
-                    // guard behind until the periodic stale-entry cleanup runs.
-                    _pendingConnections.TryRemove(endpoint, out _);
+                    _logger.LogError(ex, "Failed to start queued connection to {Ip}:{Port}", request.Ip, request.Port);
+                    ReleasePendingConnection(request);
                 }
-
-                // Pending connections are cleaned up periodically in MainLoopAsync
-                // No Task.Run per connection - much more efficient
 
                 // Refresh rate limit from settings
                 cps = Math.Max(1, _settings.Connection.ConnectionsPerSecond);
@@ -2566,24 +2718,25 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _logger.LogError(ex, "Connection queue processor error");
             _torrent.FireErrorEvent(new TorrentException("Connection queue processor error.", _torrent.Hash, ex));
         }
+        finally
+        {
+            // Abandoned queue entries cannot survive shutdown and block a later run.
+            while (_connectionQueue.Reader.TryRead(out var request)) ReleasePendingConnection(request);
+        }
     }
 
     /// <summary>
     /// Revalidates a normal queued dial immediately before it becomes a half-open connection.
     /// Holepunch requests do not use the queue and deliberately bypass these limits.
     /// </summary>
-    private bool CanStartQueuedConnection(ConnectionRequest request, out IPEndPoint? endpoint)
+    private bool CanStartQueuedConnection(ConnectionRequest request)
     {
-        endpoint = null;
         if (request.ForceUtp)
         {
             return true;
         }
 
-        if (IPAddress.TryParse(request.Ip, out var address))
-        {
-            endpoint = NetworkUtils.NormalizeEndPoint(new IPEndPoint(address, request.Port));
-        }
+        var endpoint = TryResolvePendingKey(request);
 
         int currentConnections = Interlocked.CompareExchange(ref _connectedPeersCount, 0, 0);
         if (currentConnections >= MaxPeersForThisTorrent)
@@ -2598,6 +2751,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
 
         if (endpoint == null)
+        {
+            return false;
+        }
+
+        if (!_pendingConnections.TryGetValue(endpoint, out long owner) || owner != request.Id)
         {
             return false;
         }

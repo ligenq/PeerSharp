@@ -54,6 +54,23 @@ public interface ITorrent
     long UploadSpeed => 0;
 
     /// <summary>
+    /// Captures transfer totals, the latest sampled rates, and the connected peer count on demand.
+    /// </summary>
+    /// <remarks>
+    /// Does not require event handlers or an alert subscription. Totals and peer counts are read
+    /// when called; rates use the engine's latest sample. Individual counters can advance during
+    /// the read, so this is a monitoring snapshot rather than an atomic transaction.
+    /// </remarks>
+    TransferStats GetTransferStats() => new()
+    {
+        Downloaded = FileTransfer.Downloaded,
+        Uploaded = FileTransfer.Uploaded,
+        DownloadSpeed = DownloadSpeed,
+        UploadSpeed = UploadSpeed,
+        ConnectedPeers = Peers.ConnectedCount
+    };
+
+    /// <summary>
     /// Gets or sets the download strategy for piece selection.
     /// </summary>
     DownloadStrategy DownloadStrategy { get; set; }

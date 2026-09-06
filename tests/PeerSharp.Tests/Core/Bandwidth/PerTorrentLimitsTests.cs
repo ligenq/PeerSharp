@@ -5,6 +5,7 @@ using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Trackers;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Core.Bandwidth;
 
@@ -73,6 +74,8 @@ public class PerTorrentLimitsTests
 
     private sealed class MockAlertsManager : IAlertsManager
     {
+        public long DroppedAlertCount => 0;
+
         public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
 
         public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason) { }
@@ -286,6 +289,7 @@ public class PerTorrentLimitsTests
             new TorrentTestUtility.MockGeoIpService(),
             new MockFileHandleCache(),
             new MockConnectionGovernor(),
+            new HttpClientFactory(),
             TimeProvider.System);
     }
 }

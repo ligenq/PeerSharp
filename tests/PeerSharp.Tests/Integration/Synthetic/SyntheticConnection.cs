@@ -81,10 +81,22 @@ internal sealed class SyntheticConnection(int ordinal)
     public int Ordinal { get; } = ordinal;
 
     /// <summary>
-    /// Whether this attempt opened with a plaintext BitTorrent handshake rather than the MSE key
-    /// exchange. This is read from the first byte on the socket, so it is what was actually offered.
+    /// What this attempt opened with, or null while nothing has arrived on the socket yet.
     /// </summary>
-    public bool StartedWithPlaintextHandshake { get; private set; }
+    /// <remarks>
+    /// Three states rather than two, because a connection is recorded when it is accepted and the
+    /// first byte arrives afterwards. A bool defaulting to false said "not plaintext", which reads
+    /// as "encrypted" - so a socket that had been accepted and had sent nothing counted as an
+    /// encrypted attempt, and a test asking whether encryption was ever offered could be answered
+    /// by a connection that had offered nothing at all.
+    /// </remarks>
+    public HandshakeOpening? Opening { get; private set; }
+
+    /// <summary>
+    /// Whether this attempt opened with a plaintext BitTorrent handshake rather than the MSE key
+    /// exchange. False while nothing has arrived; ask <see cref="Opening"/> to tell those apart.
+    /// </summary>
+    public bool StartedWithPlaintextHandshake => Opening == HandshakeOpening.Plaintext;
 
     /// <summary>The eight reserved bytes from their handshake, when there was one.</summary>
     public byte[]? Reserved { get; private set; }
@@ -140,7 +152,8 @@ internal sealed class SyntheticConnection(int ordinal)
     /// <summary>Completes once our handshake has gone out and this connection can be written to.</summary>
     public Task Ready => _ready.Task;
 
-    internal void RecordOpening(bool plaintext) => StartedWithPlaintextHandshake = plaintext;
+    internal void RecordOpening(bool plaintext) =>
+        Opening = plaintext ? HandshakeOpening.Plaintext : HandshakeOpening.Encrypted;
 
     internal void AttachStream(System.Net.Sockets.NetworkStream stream) => _stream = stream;
 
@@ -265,4 +278,14 @@ internal sealed class SyntheticConnection(int ordinal)
 
         return text.ToString();
     }
+}
+
+/// <summary>What a dial put on the wire first, once anything has.</summary>
+internal enum HandshakeOpening
+{
+    /// <summary>A BitTorrent handshake, which opens with the protocol string's length.</summary>
+    Plaintext,
+
+    /// <summary>An MSE key exchange, which opens with a Diffie-Hellman public key.</summary>
+    Encrypted
 }

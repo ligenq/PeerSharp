@@ -308,6 +308,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     // RTT tracking for adaptive request pipelining
     private int _smoothedRttMs = 100;
 
+    // Mean deviation of the round trip, in milliseconds. RFC 6298 calls this RTTVAR and seeds it at
+    // half the first sample; 50 pairs with the 100 ms _smoothedRttMs seed above.
+    private int _rttVarianceMs = 50;
+
     private int _strikes;
     private IReadOnlyList<int>? _suggestedSnapshot;
     private int _totalMessageCount = 0;
@@ -352,6 +356,26 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// to the ordinary backoff.
     /// </remarks>
     public bool HungUpDuringEncryptionHandshake { get; private set; }
+
+    /// <summary>
+    /// Whether the last outgoing attempt got a socket open, and so actually offered the peer an
+    /// encryption choice.
+    /// </summary>
+    /// <remarks>
+    /// A dial that was refused, timed out or was cancelled never put a byte on the wire, so it says
+    /// nothing about what this peer can speak. Without the distinction, the encryption preference
+    /// alternates on unreachability - a peer on a flaky path has the choice randomised by its own
+    /// packet loss, and one that only speaks MSE can be dialled in plaintext repeatedly because
+    /// timeouts kept flipping the flag.
+    /// </remarks>
+    public bool OfferedAnEncryptionChoice { get; private set; }
+
+    /// <summary>
+    /// Whether the uTP handshake completed during this outgoing attempt. This remains true after
+    /// cleanup so the caller can distinguish a transport failure from a later BitTorrent or
+    /// encryption-handshake failure.
+    /// </summary>
+    internal bool UtpTransportEstablished { get; set; }
 
     private enum EncryptionHandshakeResult
     { Success, Failed, PlaintextDetected, ConnectionClosed }
@@ -656,6 +680,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     public int SmoothedRttMs => Interlocked.CompareExchange(ref _smoothedRttMs, 0, 0);
 
+    /// <summary>
+    /// Mean deviation of this peer's response times, in milliseconds - how far a reply typically
+    /// falls from <see cref="SmoothedRttMs"/>. Timeouts add a multiple of this so a peer with a
+    /// steady round trip is held to a tighter bound than one that answers erratically.
+    /// </summary>
+    public int RttVarianceMs => Interlocked.CompareExchange(ref _rttVarianceMs, 0, 0);
+
     public int Strikes
     {
         get => _strikes;
@@ -912,6 +943,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         _logger.LogDebug("Connecting to {Ip}:{Port} (uTP: {UseUtp}, encryption: {Encryption}, timeout: {Timeout}ms)", ip, port, useUtp, offerEncryption, timeoutMs);
         IsOutgoing = true;
+        UtpTransportEstablished = false;
 
         // Record start time for adaptive timeout tracking
         _connectionStartTicks = Stopwatch.GetTimestamp();
@@ -955,6 +987,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         return false;
                     }
 
+                    UtpTransportEstablished = true;
                     _logger.LogDebug("uTP connection to {Endpoint} successful", endpoint);
                 }
             }
@@ -1045,6 +1078,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             }
 
             _connected = 1;
+
+            // From here a handshake is genuinely attempted, so whatever happens next is evidence
+            // about what this peer speaks rather than about whether it can be reached.
+            OfferedAnEncryptionChoice = true;
             _logger.LogDebug("Connected to {Ip}:{Port}", ip, port);
 
             var encryptionSetting = _torrent.Settings.Connection.Encryption;
@@ -1288,8 +1325,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     /// <summary>
     /// <para>
-    /// THROUGHPUT OPTIMIZATION: Calculate optimal request pipeline depth based on bandwidth-delay product.
-    /// Pipeline = (Speed * RTT) / BlockSize, with min/max bounds.
+    /// Calculate request pipeline depth from measured speed and configured queue time and ceiling.
     /// At startup, uses configured estimates to avoid slow ramp-up.
     /// </para>
     /// </summary>
@@ -1302,7 +1338,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             speedBytesPerSec,
             transferSettings.RequestQueueTimeSeconds,
             transferSettings.EstimatedBandwidthBytesPerSec,
-            transferSettings.InitialPipelineDepth);
+            transferSettings.InitialPipelineDepth,
+            transferSettings.MaxRequestsPerPeer);
     }
 
     public int GetAdaptivePipelineDepth()
@@ -1311,7 +1348,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             GetOptimalPipelineDepth(),
             Strikes,
             SmoothedRttMs,
-            ProtocolConstants.MinPipelineDepth);
+            ProtocolConstants.MinPipelineDepth,
+            _torrent.Settings.Transfer.MaxRequestsPerPeer);
     }
 
     /// <summary>
@@ -1349,6 +1387,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // This smooths out jitter while still responding to changes
         int oldRtt = SmoothedRttMs;
         int newRtt = ((oldRtt * 7) + rttMs) / 8;
+
+        // RFC 6298: RTTVAR = 3/4 RTTVAR + 1/4 |SRTT - sample|, using the smoothed value from before
+        // this sample was folded in. Same clamp as the mean, so a single wild sample cannot push a
+        // timeout past what the mean alone would ever allow.
+        int deviation = Math.Abs(oldRtt - rttMs);
+        int newVariance = ((RttVarianceMs * 3) + deviation) / 4;
+        Interlocked.Exchange(ref _rttVarianceMs, Math.Clamp(newVariance, 0, 5000));
+
         Interlocked.Exchange(ref _smoothedRttMs, Math.Max(10, Math.Min(newRtt, 5000))); // Clamp 10ms-5s
 
         // Log significant RTT changes (>50% change). Pipeline depth is deliberately not reported

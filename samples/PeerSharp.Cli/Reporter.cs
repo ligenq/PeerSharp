@@ -1,6 +1,7 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Text;
+using PeerSharp.Core;
 using PeerSharp.Interfaces;
 
 namespace PeerSharp.Cli;
@@ -126,6 +127,95 @@ internal sealed class Reporter(IClientEngine engine, IReadOnlyList<ITorrent> tor
             $"          engine torrents={stats.TorrentCount} active={stats.ActiveTorrents} peers={stats.TotalPeers} " +
             $"threads={Process.GetCurrentProcess().Threads.Count} " +
             $"workingSet={Bytes(Environment.WorkingSet)}");
+
+        ReportTransportMix();
+    }
+
+    /// <summary>
+    /// How the connected peers are split between uTP and TCP, and how much of the traffic each is
+    /// carrying.
+    /// </summary>
+    /// <remarks>
+    /// The share is the number this client's transport policy exists to move and the one nothing
+    /// reported. uTP is worth preferring because LEDBAT yields to whatever else is using the uplink,
+    /// but that only helps if the bulk of the transfer actually runs over it - and a client can dial
+    /// uTP first, fall back to TCP on most peers, and look identical from the outside. Bytes as well
+    /// as peers because a handful of uTP connections carrying nothing is not the same result as the
+    /// transfer running on them.
+    /// </remarks>
+    private void ReportTransportMix()
+    {
+        int utpPeers = 0;
+        int tcpPeers = 0;
+        int encrypted = 0;
+        long utpDown = 0;
+        long tcpDown = 0;
+
+        var peers = torrents.SelectMany(t => t.Peers.GetConnectedPeers()).ToList();
+
+        {
+            foreach (var peer in peers)
+            {
+                if (peer.IsUtp)
+                {
+                    utpPeers++;
+                    utpDown += peer.Downloaded;
+                }
+                else
+                {
+                    tcpPeers++;
+                    tcpDown += peer.Downloaded;
+                }
+
+                if (peer.IsEncrypted)
+                {
+                    encrypted++;
+                }
+            }
+        }
+
+        int totalPeers = utpPeers + tcpPeers;
+        if (totalPeers == 0)
+        {
+            Console.WriteLine("          transport no peers connected");
+            return;
+        }
+
+        long totalDown = utpDown + tcpDown;
+        string byBytes = totalDown > 0
+            ? $"{utpDown * 100 / totalDown}% of {Bytes(totalDown)}"
+            : "no data yet";
+
+        Console.WriteLine(
+            $"          transport utp={utpPeers} tcp={tcpPeers} ({utpPeers * 100 / totalPeers}% uTP by peers, " +
+            $"{byBytes} by bytes) encrypted={encrypted}");
+
+        ReportTransportSide("utp", peers.Where(p => p.IsUtp).ToList());
+        ReportTransportSide("tcp", peers.Where(p => !p.IsUtp).ToList());
+    }
+
+    /// <summary>
+    /// Why one transport is carrying less than the other. A connection that moves nothing is either
+    /// being choked, or was never asked, or is asked and answers slowly - three different faults with
+    /// the same appearance in the byte share above.
+    /// </summary>
+    private static void ReportTransportSide(string label, List<PeerInfo> side)
+    {
+        if (side.Count == 0)
+        {
+            return;
+        }
+
+        int choked = side.Count(p => p.PeerChoking);
+        int interested = side.Count(p => p.AmInterested);
+        int announced = side.Count(p => p.HasReportedPieces);
+        int idle = side.Count(p => p.Downloaded == 0);
+        var rtts = side.Where(p => p.RttMs > 0).Select(p => p.RttMs).Order().ToList();
+        string rtt = rtts.Count > 0 ? $"{rtts[rtts.Count / 2]}ms" : "n/a";
+
+        Console.WriteLine(
+            $"            {label,-3} choked={choked}/{side.Count} weWant={interested} " +
+            $"toldUsPieces={announced} zeroBytes={idle} medianRtt={rtt}");
     }
 
     /// <summary>

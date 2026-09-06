@@ -16,6 +16,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
     private readonly ILoggerFactory _loggerFactory;
     private readonly ConcurrentDictionary<UtpSocketKey, UtpStream> _streamsByRecvId = new();
     private readonly ConcurrentDictionary<UtpSocketKey, UtpStream> _streamsBySendId = new();
+    private readonly ConnectionSettings _settings;
     private readonly TimeProvider _timeProvider;
     private AtomicDisposal _disposal = new();
     private bool _running;
@@ -27,9 +28,19 @@ internal class UtpManager : IUdpReceiver, IUtpManager
     }
 
     public UtpManager(TimeProvider timeProvider, ILoggerFactory loggerFactory)
+        : this(timeProvider, loggerFactory, new ConnectionSettings())
+    {
+    }
+
+    /// <summary>
+    /// Creates a manager whose streams read their congestion knobs from these settings. The instance
+    /// is handed to each stream rather than snapshotted, so a change reaches open connections.
+    /// </summary>
+    public UtpManager(TimeProvider timeProvider, ILoggerFactory loggerFactory, ConnectionSettings settings)
     {
         _loggerFactory = loggerFactory;
         _timeProvider = timeProvider;
+        _settings = settings;
         _logger = _loggerFactory.CreateLogger<UtpManager>();
     }
 
@@ -89,7 +100,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
                 continue;
             }
 
-            var stream = new UtpStream(this, remote, id, sendId, _timeProvider, _loggerFactory);
+            var stream = new UtpStream(this, remote, id, sendId, _timeProvider, _loggerFactory, _settings);
             if (AddStream(remote, id, sendId, stream))
             {
                 return stream;
@@ -146,7 +157,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
             ushort sendId = header.ConnectionId;
             ushort recvId = (ushort)(header.ConnectionId + 1);
 
-            var newStream = new UtpStream(this, remote, recvId, sendId, _timeProvider, _loggerFactory);
+            var newStream = new UtpStream(this, remote, recvId, sendId, _timeProvider, _loggerFactory, _settings);
             if (AddStream(remote, recvId, sendId, newStream))
             {
                 newStream.ProcessPacketWithSack(header, data, headerSize, sackRanges, extensionBits, remote);
@@ -299,7 +310,8 @@ internal class UtpManager : IUdpReceiver, IUtpManager
             switch (extension)
             {
                 case ExtensionSack:
-                    // Per BEP-29: SACK is a bitmask, each byte = 8 packets, valid range 1-32 bytes
+                    // Each byte represents eight packets. Accept short masks for compatibility;
+                    // our emitter pads to the four-byte multiples specified by BEP 29.
                     if (len > 0 && len <= 32)
                     {
                         var newRanges = UtpSackParser.Parse(data, headerSize + 2, len, header.AckNr);

@@ -15,7 +15,6 @@ namespace PeerSharp.Internals.Seeding;
 /// </summary>
 internal sealed class WebSeedManager : IAsyncDisposable
 {
-    private const int MaxConcurrentDownloads = 2;
     private const int MaxRetries = 3;
     private const int RetryDelayMs = 5000;
     private const int StreamBufferSize = 8192;
@@ -23,7 +22,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     // Configuration
     private const int WorkerIntervalMs = 1000;
 
-    private readonly IHttpClientFactory _httpClientFactory = new HttpClientFactory();
+
     private readonly Lock _lock = new();
     private readonly ILogger<WebSeedManager> _logger;
     private readonly List<WebSeedSource> _sources = [];
@@ -138,7 +137,9 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         lock (_lock)
         {
-            int available = _sources.Count(s => s.IsAvailable(_timeProvider));
+            int perSourceLimit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource, 1,
+                Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnections, 1, 64));
+            int available = _sources.Count(s => s.IsAvailable(_timeProvider, perSourceLimit));
             int active = _sources.Sum(s => s.ActiveDownloads);
             return (_sources.Count, available, active);
         }
@@ -278,7 +279,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         return null!;
     }
 
-    internal List<int> GetNeededPieces()
+    internal List<int> GetNeededPieces(int maxPieces = 10, ICollection<int>? inFlightPieces = null)
     {
         var result = new List<int>();
         var selection = _torrent.GetFileSelectionSnapshot();
@@ -286,6 +287,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
         for (int i = 0; i < _torrent.Pieces.Count; i++)
         {
+            if (inFlightPieces?.Contains(i) == true) continue;
             // Skip if we already have this piece
             if (_torrent.Pieces.HasPiece(i))
             {
@@ -307,7 +309,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
             result.Add(i);
 
             // Limit the number of pieces to process per iteration
-            if (result.Count >= 10)
+            if (result.Count >= maxPieces)
             {
                 break;
             }
@@ -521,19 +523,21 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 
-    private WebSeedSource? GetAvailableSource()
+    private WebSeedSource? GetAvailableSource(int perSourceLimit)
     {
         lock (_lock)
         {
-            foreach (var source in _sources)
+            var source = _sources.Where(source => source.IsAvailable(_timeProvider, perSourceLimit))
+                .MinBy(source => source.ActiveDownloads);
+            if (source != null)
             {
-                if (source.IsAvailable(_timeProvider))
-                {
-                    return source;
-                }
+                // Reserved here, under the same lock that chose it, so two fills cannot both take the
+                // last slot on a source. Released in DownloadAndReleaseAsync's finally.
+                source.ActiveDownloads++;
             }
+
+            return source;
         }
-        return null;
     }
 
     private IHttpClient GetClient()
@@ -548,16 +552,30 @@ internal sealed class WebSeedManager : IAsyncDisposable
         {
             // Direct connection if proxying peers is disabled
             var directSettings = new ProxySettings { Type = ProxyType.None };
-            return new DefaultHttpClient(_httpClientFactory.CreateClient(
+            return new DefaultHttpClient(_torrent.Services.HttpClientFactory.CreateClient(
                 directSettings,
                 false,
-                _torrent.Settings.Connection.BindAddress));
+                _torrent.Settings.Connection.BindAddress,
+                maxConnectionsPerServer: PerServerConnectionLimit()));
         }
 
-        return new DefaultHttpClient(_httpClientFactory.CreateClient(
+        return new DefaultHttpClient(_torrent.Services.HttpClientFactory.CreateClient(
             settings,
             false,
-            _torrent.Settings.Connection.BindAddress));
+            _torrent.Settings.Connection.BindAddress,
+            maxConnectionsPerServer: PerServerConnectionLimit()));
+    }
+
+    /// <summary>
+    /// How many HTTP connections one origin may hold open. Derived from the configured per-source
+    /// concurrency, because the handler's own cap silently queues anything above it: raising
+    /// WebSeedMaxConnectionsPerSource past a fixed limit would buy no extra parallelism at all.
+    /// </summary>
+    private int PerServerConnectionLimit()
+    {
+        int limit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnections, 1, 64);
+        int perSource = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource, 1, limit);
+        return Math.Max(IHttpClientFactory.DefaultMaxConnectionsPerServer, perSource);
     }
 
     private void RecordFailure(WebSeedSource source)
@@ -580,85 +598,69 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
     private async Task WorkerLoopAsync(CancellationToken ct)
     {
-        // Wait for initial file check to complete before starting downloads
-        await Task.Delay(TimeSpan.FromMilliseconds(3000), _timeProvider, ct).ConfigureAwait(false);
-
-        while (!ct.IsCancellationRequested)
+        var active = new Dictionary<int, Task>();
+        try
         {
-            try
+            while (!ct.IsCancellationRequested)
             {
-                // Check if download is complete or we have no pieces to download
-                if (_torrent.Finished || _torrent.SelectionFinished)
+                foreach (int piece in active.Where(pair => pair.Value.IsCompleted).Select(pair => pair.Key).ToArray())
                 {
-                    await Task.Delay(TimeSpan.FromMilliseconds(WorkerIntervalMs * 5), _timeProvider, ct).ConfigureAwait(false);
-                    continue;
+                    await active[piece].ConfigureAwait(false);
+                    active.Remove(piece);
                 }
 
-                // Find pieces that need downloading
-                var neededPieces = GetNeededPieces();
-                if (neededPieces.Count == 0)
+                int limit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnections, 1, 64);
+                int sourceLimit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource, 1, limit);
+                if (CanStartMoreDownloads() && active.Count < limit)
                 {
-                    await Task.Delay(TimeSpan.FromMilliseconds(WorkerIntervalMs), _timeProvider, ct).ConfigureAwait(false);
-                    continue;
-                }
-
-                // Try to download from available sources
-                var tasks = new List<Task>();
-                foreach (var piece in neededPieces)
-                {
-                    if (ct.IsCancellationRequested)
+                    foreach (int piece in GetNeededPieces(limit - active.Count, active.Keys))
                     {
-                        break;
-                    }
-
-                    var source = GetAvailableSource();
-                    if (source == null)
-                    {
-                        break;
-                    }
-
-                    lock (_lock)
-                    {
-                        source.IsActive = true;
-                        source.ActiveDownloads++;
-                    }
-
-                    var task = DownloadPieceAsync(source, piece, ct)
-                        .ContinueWith(t =>
-                        {
-                            lock (_lock)
-                            {
-                                source.ActiveDownloads--;
-                                if (source.ActiveDownloads <= 0)
-                                {
-                                    source.IsActive = false;
-                                }
-                            }
-                        }, TaskScheduler.Default);
-
-                    tasks.Add(task);
-
-                    if (tasks.Count >= MaxConcurrentDownloads)
-                    {
-                        break;
+                        ct.ThrowIfCancellationRequested();
+                        var source = GetAvailableSource(sourceLimit);
+                        if (source == null) break;
+                        active.Add(piece, DownloadAndReleaseAsync(source, piece, ct));
                     }
                 }
 
-                if (tasks.Count > 0)
-                {
-                    await Task.WhenAll(tasks).ConfigureAwait(false);
-                }
-
-                await Task.Delay(TimeSpan.FromMilliseconds(WorkerIntervalMs), _timeProvider, ct).ConfigureAwait(false);
+                // Completion replenishes a slot immediately. The timer is only for idle work,
+                // retries and live settings/source changes while all HTTP requests are blocked.
+                using var pollCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                Task poll = Task.Delay(TimeSpan.FromMilliseconds(WorkerIntervalMs), _timeProvider, pollCts.Token);
+                await Task.WhenAny(active.Values.Append(poll)).ConfigureAwait(false);
+                await pollCts.CancelAsync().ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Shutdown still drains the requests below so source reservations are released.
+        }
+        finally
+        {
+            await Task.WhenAll(active.Values).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Whether there is any point starting another piece. The hash check is in the list because
+    /// <see cref="GetNeededPieces"/> reads <c>HasPiece</c>, which reports false for every piece until
+    /// the check has written its results - so dialling during a check re-fetches over HTTP whatever
+    /// a resumed torrent already has on disk.
+    /// </summary>
+    private bool CanStartMoreDownloads()
+    {
+        return !_torrent.Finished
+            && !_torrent.SelectionFinished
+            && _torrent.FilesInternal?.Checking != true;
+    }
+
+    private async Task DownloadAndReleaseAsync(WebSeedSource source, int piece, CancellationToken ct)
+    {
+        try { await DownloadPieceAsync(source, piece, ct).ConfigureAwait(false); }
+        finally
+        {
+            lock (_lock)
             {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "WebSeed worker error");
-                await Task.Delay(TimeSpan.FromMilliseconds(WorkerIntervalMs * 2), _timeProvider, ct).ConfigureAwait(false);
+                source.ActiveDownloads--;
             }
         }
     }
@@ -677,22 +679,37 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
         public int ActiveDownloads { get; set; }
         public int FailureCount { get; set; }
-        public bool IsActive { get; set; }
         public bool IsDirectory { get; }
         public bool IsMultiFile { get; }
         public DateTimeOffset LastFailure { get; set; }
         public DateTimeOffset LastSuccess { get; set; }
         public string Url { get; }
 
-        public bool IsAvailable(TimeProvider timeProvider)
+        public bool IsAvailable(TimeProvider timeProvider, int maxDownloads = 1)
         {
-            // Milliseconds, as the name says. This read them as seconds, which turned the intended
-            // fifteen second wait before retrying a seed that has failed its three times into four
-            // hours and ten minutes - long enough that, for any torrent that finishes in an afternoon,
-            // a web seed which failed once was never tried again.
-            return !IsActive &&
-            (FailureCount < MaxRetries ||
-             timeProvider.GetUtcNow() - LastFailure > TimeSpan.FromMilliseconds(RetryDelayMs * FailureCount));
+            if (ActiveDownloads >= maxDownloads)
+            {
+                return false;
+            }
+
+            if (FailureCount == 0)
+            {
+                return true;
+            }
+
+            // Below MaxRetries the wait is one poll interval, not none. The batch-and-sleep loop this
+            // replaced slept between batches, so the early retries were spaced whether the policy said
+            // so or not; without that sleep, a source failing instantly would be redialled instantly.
+            //
+            // Past MaxRetries the wait grows with the failure count. Milliseconds, as the name says:
+            // this read them as seconds, which turned the intended fifteen second wait before retrying
+            // a seed that has failed its three times into four hours and ten minutes - long enough
+            // that, for any torrent that finishes in an afternoon, a web seed which failed once was
+            // never tried again.
+            double waitMs = FailureCount < MaxRetries
+                ? WorkerIntervalMs
+                : (double)RetryDelayMs * FailureCount;
+            return timeProvider.GetUtcNow() - LastFailure > TimeSpan.FromMilliseconds(waitMs);
         }
     }
 }
