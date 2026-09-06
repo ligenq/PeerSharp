@@ -73,6 +73,7 @@ sealed class PeerSharp.Config.ConnectionSettings
     Int32 UtpDegradeMinDownloadSpeedBytesPerSec { get; set; }
     Int32 UtpFailureHardLimit { get; set; }
     Int32 UtpFallbackTimeoutMs { get; set; }
+    Int32 UtpLossWindowCutIntervalMs { get; set; }
     Int32 UtpMaxSynRetries { get; set; }
     Int32 UtpMaxWindowIncreaseBytesPerRtt { get; set; }
     Int32 UtpPenaltyBaseSeconds { get; set; }
@@ -81,7 +82,6 @@ sealed class PeerSharp.Config.ConnectionSettings
     Int32 UtpSlowPenaltySeconds { get; set; }
     Int32 UtpSpeculativeTimeoutMs { get; set; }
     Int32 UtpTargetDelayMicroseconds { get; set; }
-    Int32 UtpWindowDecayIntervalMs { get; set; }
     Net.IPAddress BindAddress { get; set; }
     PeerSharp.Config.Encryption Encryption { get; set; }
     TimeSpan PexInterval { get; set; }

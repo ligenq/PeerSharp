@@ -81,7 +81,7 @@ internal class UtpStream : Stream
 
     private int MaxCwndIncreaseBytesPerRtt => Math.Clamp(_settings.UtpMaxWindowIncreaseBytesPerRtt, 100, 1000000);
 
-    private int MaxWindowDecay => Math.Clamp(_settings.UtpWindowDecayIntervalMs, 10, 60000);
+    private int LossCutIntervalMs => Math.Clamp(_settings.UtpLossWindowCutIntervalMs, 10, 60000);
 
     private int MaxSynRetries => Math.Clamp(_settings.UtpMaxSynRetries, 0, 10);
 
@@ -157,13 +157,21 @@ internal class UtpStream : Stream
     /// acknowledgement has covered.
     /// </summary>
     private ushort _fastResendSeqNr;
+
+    /// <summary>
+    /// The newest sequence number sent when the window was last cut, as libtorrent's
+    /// <c>m_loss_seq_nr</c>. Only a packet sent after that can cause the next cut, so one flight
+    /// costs one cut however many of its packets are reported lost.
+    /// </summary>
+    private ushort _lossSeqNr;
+
+    private DateTimeOffset _nextLossCut = DateTimeOffset.MinValue;
     private bool _finReceived;
     private bool _finSent;
     private ushort _lastAckedSeq;
     private DateTimeOffset _lastCwndLog = DateTimeOffset.MinValue;
 
     // Window decay tracking
-    private DateTimeOffset _lastDecayTime = DateTimeOffset.MinValue;
 
     private double _lastLoggedCwnd = 0;
     private DateTimeOffset _lastMaxedOutWindow = DateTimeOffset.MinValue;
@@ -344,12 +352,6 @@ internal class UtpStream : Stream
                     ProtocolConstants.UtpInactivityTimeoutMs);
                 CloseInternal(false, new TimeoutException("Inactivity timeout"));
                 return;
-            }
-
-            // Window decay per libutp - decay by 0.5x every 100ms if no ACKs
-            if (_sentPackets.Count > 0)
-            {
-                DecayWindow();
             }
 
             if (now > _nextTimeout)
@@ -949,22 +951,42 @@ internal class UtpStream : Stream
     }
 
     /// <summary>
-    /// Window decay per libutp - decay by 0.5x every 100ms if no ACKs received.
-    /// Called from CheckTimeout.
+    /// Halves the window for a lost packet, if this loss is a new congestion event rather than more
+    /// news about one already paid for. Returns whether the window was actually cut.
     /// </summary>
-    private void DecayWindow()
+    /// <remarks>
+    /// Loss arrives in bursts: one full window can be dropped by a single queue overflowing, and
+    /// every packet in it is reported separately. libtorrent guards the cut twice over and this
+    /// follows both, because either alone leaves a hole. A packet sent at or before the last cut
+    /// cannot cause another, which charges one flight once however many of its packets were lost;
+    /// and no two cuts fall within <c>cwnd_reduce_timer</c> of each other, which covers loss spread
+    /// across flights. Without them a single congestion event halved the window once per report and
+    /// took it to the floor.
+    /// </remarks>
+    private bool ExperiencedLoss(ushort seqNr)
     {
-        var now = _timeProvider.GetUtcNow();
-        if ((now - _lastDecayTime).TotalMilliseconds >= MaxWindowDecay)
+        if (Utils.CompareSeq(seqNr, (ushort)(_lossSeqNr + 1)) < 0)
         {
-            double oldCwnd = _cwnd;
-            _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
-            _lastDecayTime = now;
-            if (Math.Abs(_cwnd - oldCwnd) > 0.001)
-            {
-                _logger.LogTrace("LEDBAT {Remote}: Window decay {OldCwnd:F0}B -> {Cwnd:F0}B", RemoteEndPoint, oldCwnd, _cwnd);
-            }
+            return false;
         }
+
+        var now = _timeProvider.GetUtcNow();
+        if (now < _nextLossCut)
+        {
+            return false;
+        }
+
+        _nextLossCut = now.AddMilliseconds(LossCutIntervalMs);
+        _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
+
+        // Everything now in flight predates this cut, so none of it can charge another.
+        _lossSeqNr = _seqNr;
+
+        // The threshold is set to the window after reducing it, so the next slow-start ends before
+        // overshooting where the path was last seen to saturate.
+        _ssthresh = _cwnd;
+        _slowStart = false;
+        return true;
     }
 
     private void FlushPendingWrites()
@@ -1188,15 +1210,12 @@ internal class UtpStream : Stream
                 if (resendList.Count > 0)
                 {
                     double oldCwnd = _cwnd;
-                    // Per libutp: halve window on packet loss
-                    _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
-                    _ssthresh = _cwnd; // Update slow-start threshold
-                    _slowStart = false;
+                    bool cut = ExperiencedLoss(resendList[0].SeqNr);
 
                     foreach (var pkt in resendList)
                     {
-                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd CUT {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
-                            RemoteEndPoint, oldCwnd, _cwnd, _mss, pkt.SeqNr);
+                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd {Cut} {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
+                            RemoteEndPoint, cut ? "CUT" : "held", oldCwnd, _cwnd, _mss, pkt.SeqNr);
                         ResendPacket(pkt);
                     }
                 }
@@ -1269,17 +1288,15 @@ internal class UtpStream : Stream
             if (cutWindow)
             {
                 // Once for the whole report, however many packets it shows missing: they were lost
-                // to one congestion event and cutting per packet would take the window to the floor
-                // for a single one.
+                // to one congestion event, and ExperiencedLoss decides whether that event has
+                // already been paid for.
                 double beforeLoss = _cwnd;
-                _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
-                _ssthresh = _cwnd;
-                _slowStart = false;
                 cutWindow = false;
+                bool cut = ExperiencedLoss(seq);
 
                 _logger.LogTrace(
-                    "SACK {Remote}: {Acked} acked past {Seq} - cwnd {Before:F0}B -> {After:F0}B, resending",
-                    RemoteEndPoint, ackedPastHole, seq, beforeLoss, _cwnd);
+                    "SACK {Remote}: {Acked} acked past {Seq} - cwnd {Cut} {Before:F0}B -> {After:F0}B, resending",
+                    RemoteEndPoint, ackedPastHole, seq, cut ? "CUT" : "held", beforeLoss, _cwnd);
             }
 
             ResendPacket(lost);
@@ -1842,9 +1859,6 @@ internal class UtpStream : Stream
             baseDelay += correction;
             ourDelay = _minRtt;
         }
-
-        // Update last decay time on successful ACK
-        _lastDecayTime = now;
 
         long offTarget = TargetDelay - ourDelay;
         long offTargetLimited = Math.Min(offTarget, TargetDelay);
