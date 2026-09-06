@@ -271,6 +271,58 @@ public class UtpColdStartGuardTests
         }
     }
 
+    [Fact]
+    public async Task FallbackTransportUsesAFreshPeerCommunication()
+    {
+        var clock = new FakeTimeProvider();
+        var ctx = CreateFallbackManager(clock, coldStartLimit: 8, markUtpEstablished: false);
+        try
+        {
+            await ctx.Manager.StartAsync();
+            ctx.Manager.ConnectTo("127.0.0.1", 6881);
+
+            await TorrentTestUtility.WaitUntilAsync(
+                () => ctx.Manager.ConnectedCount == 1,
+                because: "the TCP fallback to connect");
+
+            var peers = ctx.Factory.Created.ToArray();
+            Assert.Equal(2, peers.Length);
+            Assert.NotSame(peers[0], peers[1]);
+            Assert.Equal([true], peers[0].Transports);
+            Assert.Equal([false], peers[1].Transports);
+        }
+        finally
+        {
+            await ctx.Manager.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task AUtpTransportThatReachedThePeerRetiresTheColdStartGuardEvenIfTheTorrentHandshakeFails()
+    {
+        var clock = new FakeTimeProvider();
+        var ctx = CreateFallbackManager(clock, coldStartLimit: 1, markUtpEstablished: true);
+        try
+        {
+            await ctx.Manager.StartAsync();
+            ctx.Manager.ConnectTo("127.0.0.1", 6881);
+
+            await TorrentTestUtility.WaitUntilAsync(
+                () => ctx.Manager.ConnectedCount == 1,
+                because: "the TCP fallback to connect");
+
+            var anotherPeer = new PeerHistory
+            {
+                EndPoint = new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 6882)
+            };
+            Assert.Equal(["Utp", "Tcp"], Plan(ctx.Manager, ctx.Torrent.Settings.Connection, anotherPeer));
+        }
+        finally
+        {
+            await ctx.Manager.DisposeAsync();
+        }
+    }
+
     private static (PeerManager Manager, Internals.Torrent Torrent) CreatePeerManager(
         FakeTimeProvider clock, int coldStartLimit)
     {
@@ -287,6 +339,28 @@ public class UtpColdStartGuardTests
             new TorrentTestUtility.MockConnectionGovernor());
 
         return (manager, torrent);
+    }
+
+    private static (PeerManager Manager, Internals.Torrent Torrent, ScriptedFallbackFactory Factory)
+        CreateFallbackManager(FakeTimeProvider clock, int coldStartLimit, bool markUtpEstablished)
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Connection.UtpColdStartFailureLimit = coldStartLimit;
+        torrent.Settings.Connection.PreferUtp = true;
+        torrent.Settings.Connection.EnableUtpOut = true;
+        torrent.Settings.Connection.EnableTcpOut = true;
+        torrent.Settings.Connection.EnableAdaptiveTimeouts = false;
+        torrent.UtpManager = new StubUtpManager();
+
+        var factory = new ScriptedFallbackFactory(markUtpEstablished);
+        var manager = new PeerManager(
+            torrent,
+            new TorrentTestUtility.MockGeoIpService(),
+            factory,
+            clock,
+            new TorrentTestUtility.MockConnectionGovernor());
+
+        return (manager, torrent, factory);
     }
 
     private static void RecordColdStartFailure(PeerManager manager) =>
@@ -318,5 +392,64 @@ public class UtpColdStartGuardTests
         public Task SendAsync(ReadOnlyMemory<byte> packet, System.Net.IPEndPoint remote, CancellationToken ct) => Task.CompletedTask;
         public void Start(Internals.Network.IUdpListener listener) { }
         public void Stop() { }
+    }
+
+    private sealed class ScriptedFallbackFactory(bool markUtpEstablished) : IPeerCommunicationFactory
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<ScriptedFallbackPeer> Created { get; } = new();
+
+        public PeerCommunication Create(
+            Internals.Torrent torrent,
+            IPeerListener listener,
+            TimeProvider timeProvider)
+        {
+            var peer = new ScriptedFallbackPeer(torrent, listener, timeProvider, markUtpEstablished);
+            Created.Enqueue(peer);
+            return peer;
+        }
+
+        public PeerCommunication Create(
+            Internals.Torrent torrent,
+            IPeerListener listener,
+            TimeProvider timeProvider,
+            Stream stream,
+            System.Net.IPEndPoint? endpoint = null) => throw new NotSupportedException();
+
+        public PeerCommunication Create(
+            Internals.Torrent torrent,
+            IPeerListener listener,
+            TimeProvider timeProvider,
+            System.Net.Sockets.TcpClient client) => throw new NotSupportedException();
+    }
+
+    private sealed class ScriptedFallbackPeer(
+        Internals.Torrent torrent,
+        IPeerListener listener,
+        TimeProvider timeProvider,
+        bool markUtpEstablished) : PeerCommunication(torrent, listener, timeProvider)
+    {
+        public List<bool> Transports { get; } = [];
+
+        public override Task<bool> ConnectAsync(
+            string ip,
+            int port,
+            bool useUtp,
+            int timeoutMs,
+            bool offerEncryption = true,
+            CancellationToken ct = default)
+        {
+            Transports.Add(useUtp);
+            IsOutgoing = true;
+            RemoteEndPoint = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(ip), port);
+
+            if (useUtp)
+            {
+                UtpTransportEstablished = markUtpEstablished;
+                return Task.FromResult(false);
+            }
+
+            Connected = 1;
+            return Task.FromResult(true);
+        }
     }
 }

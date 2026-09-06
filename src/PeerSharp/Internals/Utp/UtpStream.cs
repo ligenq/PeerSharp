@@ -253,6 +253,7 @@ internal class UtpStream : Stream
         // This avoids creating new Random() instances which can have poor entropy
         // when created in quick succession
         _seqNr = (ushort)Random.Shared.Next(0, 65535);
+        _lossSeqNr = (ushort)(_seqNr - 1);
         _nextTimeout = _timeProvider.GetUtcNow().AddSeconds(3);
         _lastSendTime = _timeProvider.GetUtcNow();
         _lastReceiveTime = _timeProvider.GetUtcNow();
@@ -980,7 +981,7 @@ internal class UtpStream : Stream
         _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
 
         // Everything now in flight predates this cut, so none of it can charge another.
-        _lossSeqNr = _seqNr;
+        _lossSeqNr = (ushort)(_seqNr - 1);
 
         // The threshold is set to the window after reducing it, so the next slow-start ends before
         // overshooting where the path was last seen to saturate.

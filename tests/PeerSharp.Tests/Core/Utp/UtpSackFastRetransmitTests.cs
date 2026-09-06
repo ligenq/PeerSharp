@@ -52,6 +52,32 @@ public class UtpSackFastRetransmitTests
     }
 
     [Fact]
+    public void LossWatermarkStartsImmediatelyBeforeTheRandomInitialSequence()
+    {
+        var stream = CreateStream(new FakeTimeProvider());
+
+        Assert.Equal((ushort)(stream.SeqNr - 1), (ushort)Get(stream, "_lossSeqNr")!);
+    }
+
+    [Fact]
+    public void FirstPacketSentAfterALossMayStartTheNextCongestionEvent()
+    {
+        var clock = new FakeTimeProvider();
+        var stream = CreateStream(clock);
+        Set(stream, "_seqNr", (ushort)100);
+        Set(stream, "_lossSeqNr", (ushort)89);
+        Set(stream, "_cwnd", 60000d);
+
+        Assert.True(ExperienceLoss(stream, 90));
+        Assert.Equal((ushort)99, (ushort)Get(stream, "_lossSeqNr")!);
+
+        clock.Advance(TimeSpan.FromMilliseconds(101));
+
+        Assert.True(ExperienceLoss(stream, 100));
+        Assert.Equal(15000d, (double)Get(stream, "_cwnd")!, 0);
+    }
+
+    [Fact]
     public void ASmallNumberOfPacketsPastTheHoleIsNotYetLoss()
     {
         // Reordering looks like this too, and libtorrent waits for more than dup_ack_limit of them
@@ -114,6 +140,8 @@ public class UtpSackFastRetransmitTests
 
         // Past the highest outstanding sequence, so the handler treats them all as really sent.
         Set(stream, "_seqNr", (ushort)(firstSeq + count));
+        Set(stream, "_lossSeqNr", (ushort)(firstSeq - 1));
+        Set(stream, "_fastResendSeqNr", firstSeq);
         Set(stream, "_state", UtpState.Connected);
         return bySeq;
     }
@@ -125,6 +153,11 @@ public class UtpSackFastRetransmitTests
 
     private static bool Resent(object packet) =>
         (bool)packet.GetType().GetProperty("Resent")!.GetValue(packet)!;
+
+    private static bool ExperienceLoss(UtpStream stream, ushort seqNr) =>
+        (bool)typeof(UtpStream)
+            .GetMethod("ExperiencedLoss", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(stream, [seqNr])!;
 
     private static void Set(UtpStream stream, string field, object value) =>
         typeof(UtpStream).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!

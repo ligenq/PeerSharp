@@ -113,6 +113,7 @@ public class UtpAckWindowTests
             Stream = _manager.CreateStream(_remote);
             Set(Stream, "_state", UtpState.Connected);
             Set(Stream, "_seqNr", first);
+            Set(Stream, "_lossSeqNr", (ushort)(first - 1));
             Set(Stream, "_ackNr", (ushort)999);
             Set(Stream, "_lastAckedSeq", (ushort)(first - 1));
             Set(Stream, "_cwnd", 100000d);

@@ -370,6 +370,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </remarks>
     public bool OfferedAnEncryptionChoice { get; private set; }
 
+    /// <summary>
+    /// Whether the uTP handshake completed during this outgoing attempt. This remains true after
+    /// cleanup so the caller can distinguish a transport failure from a later BitTorrent or
+    /// encryption-handshake failure.
+    /// </summary>
+    internal bool UtpTransportEstablished { get; set; }
+
     private enum EncryptionHandshakeResult
     { Success, Failed, PlaintextDetected, ConnectionClosed }
 
@@ -936,6 +943,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         _logger.LogDebug("Connecting to {Ip}:{Port} (uTP: {UseUtp}, encryption: {Encryption}, timeout: {Timeout}ms)", ip, port, useUtp, offerEncryption, timeoutMs);
         IsOutgoing = true;
+        UtpTransportEstablished = false;
 
         // Record start time for adaptive timeout tracking
         _connectionStartTicks = Stopwatch.GetTimestamp();
@@ -979,6 +987,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         return false;
                     }
 
+                    UtpTransportEstablished = true;
                     _logger.LogDebug("uTP connection to {Endpoint} successful", endpoint);
                 }
             }
