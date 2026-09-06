@@ -1,4 +1,4 @@
-using PeerSharp.Internals;
+﻿using PeerSharp.Internals;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 
@@ -25,6 +25,8 @@ public sealed class TestCoverageTests
     [Fact]
     public void EveryTypeWithLogic_HasATestClassNamedAfterIt()
     {
+        SkipUnlessEveryTestAssemblyIsBuilt();
+
         var testTypeNames = TestAssemblyPaths()
             .SelectMany(CallGraph.TypeNames)
             .ToHashSet(StringComparer.Ordinal);
@@ -44,6 +46,8 @@ public sealed class TestCoverageTests
     [Fact]
     public void EveryPublicOrInternalMember_IsReachedByATest()
     {
+        SkipUnlessEveryTestAssemblyIsBuilt();
+
         var graph = new CallGraph();
         foreach (var path in ProductionAssemblyPaths().Concat(TestAssemblyPaths()))
         {
@@ -234,13 +238,69 @@ public sealed class TestCoverageTests
     {
         yield return typeof(TestCoverageTests).Assembly.Location;
 
-        var webTorrent = FindSiblingTestAssembly("PeerSharp.WebTorrent.Tests");
+        var webTorrent = FindSiblingTestAssembly(WebTorrentTestProject);
         Assert.True(
             webTorrent is not null,
-            "PeerSharp.WebTorrent.Tests.dll was not found. Build the whole solution before running this test: "
+            $"{WebTorrentTestProject}.dll was not found. Build the whole solution before running this test: "
                 + "without it, whatever only those tests cover looks untested.");
 
         yield return webTorrent!;
+    }
+
+    private const string WebTorrentTestProject = "PeerSharp.WebTorrent.Tests";
+
+    /// <summary>
+    /// Skips when this run did not build every test project, because the rule cannot be evaluated
+    /// from a subset - whatever only the missing project covers would be reported as untested.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two reasons the assembly can be absent, and they want opposite answers. A CI lane that builds
+    /// one test project on purpose - the fast matrix lane in ci.yml does exactly that, for speed
+    /// across six cells - has not done anything wrong, and failing there says nothing about the code
+    /// under test. The whole-solution job still runs this rule and still enforces it.
+    /// </para>
+    /// <para>
+    /// The project having been moved or deleted is the opposite: this rule reads its coverage, so it
+    /// needs updating with it, and quietly skipping for ever is how a rule stops being a rule. So the
+    /// project on disk is what tells the two apart, and only the first is skipped.
+    /// </para>
+    /// </remarks>
+    private static void SkipUnlessEveryTestAssemblyIsBuilt()
+    {
+        if (FindSiblingTestAssembly(WebTorrentTestProject) is not null)
+        {
+            return;
+        }
+
+        Assert.True(
+            FindSiblingProject(WebTorrentTestProject) is not null,
+            $"{WebTorrentTestProject} no longer exists. This rule reads what its tests cover and has "
+                + "to be updated with it rather than skipped.");
+
+        Assert.Skip(
+            $"{WebTorrentTestProject}.dll was not built by this run, so whatever only its tests cover "
+                + "would look untested. Build the whole solution to evaluate this rule.");
+    }
+
+    /// <summary>The project file, which exists whether or not this run built it.</summary>
+    private static string? FindSiblingProject(string projectName)
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        var tail = Path.Combine("tests", projectName, projectName + ".csproj");
+
+        while (directory is not null)
+        {
+            var candidate = Path.Combine(directory.FullName, tail);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            directory = directory.Parent;
+        }
+
+        return null;
     }
 
     private static string? FindSiblingTestAssembly(string projectName)
