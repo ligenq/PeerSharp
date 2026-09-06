@@ -22,13 +22,13 @@ public class UtpCongestionSettingsTests
 
         Assert.Equal(100000, settings.UtpTargetDelayMicroseconds);
         Assert.Equal(3000, settings.UtpMaxWindowIncreaseBytesPerRtt);
-        Assert.Equal(100, settings.UtpWindowDecayIntervalMs);
+        Assert.Equal(100, settings.UtpLossWindowCutIntervalMs);
         Assert.Equal(2, settings.UtpMaxSynRetries);
 
         var stream = CreateStream(settings);
         Assert.Equal(100000, Knob(stream, "TargetDelay"));
         Assert.Equal(3000, Knob(stream, "MaxCwndIncreaseBytesPerRtt"));
-        Assert.Equal(100, Knob(stream, "MaxWindowDecay"));
+        Assert.Equal(100, Knob(stream, "LossCutIntervalMs"));
         Assert.Equal(2, Knob(stream, "MaxSynRetries"));
     }
 
@@ -40,12 +40,12 @@ public class UtpCongestionSettingsTests
 
         settings.UtpTargetDelayMicroseconds = 50000;
         settings.UtpMaxWindowIncreaseBytesPerRtt = 8000;
-        settings.UtpWindowDecayIntervalMs = 250;
+        settings.UtpLossWindowCutIntervalMs = 250;
         settings.UtpMaxSynRetries = 5;
 
         Assert.Equal(50000, Knob(stream, "TargetDelay"));
         Assert.Equal(8000, Knob(stream, "MaxCwndIncreaseBytesPerRtt"));
-        Assert.Equal(250, Knob(stream, "MaxWindowDecay"));
+        Assert.Equal(250, Knob(stream, "LossCutIntervalMs"));
         Assert.Equal(5, Knob(stream, "MaxSynRetries"));
     }
 
@@ -54,8 +54,8 @@ public class UtpCongestionSettingsTests
     [InlineData("UtpTargetDelayMicroseconds", int.MaxValue, "TargetDelay", 1000000)]
     [InlineData("UtpMaxWindowIncreaseBytesPerRtt", -5, "MaxCwndIncreaseBytesPerRtt", 100)]
     [InlineData("UtpMaxWindowIncreaseBytesPerRtt", int.MaxValue, "MaxCwndIncreaseBytesPerRtt", 1000000)]
-    [InlineData("UtpWindowDecayIntervalMs", 0, "MaxWindowDecay", 10)]
-    [InlineData("UtpWindowDecayIntervalMs", int.MaxValue, "MaxWindowDecay", 60000)]
+    [InlineData("UtpLossWindowCutIntervalMs", 0, "LossCutIntervalMs", 10)]
+    [InlineData("UtpLossWindowCutIntervalMs", int.MaxValue, "LossCutIntervalMs", 60000)]
     [InlineData("UtpMaxSynRetries", -1, "MaxSynRetries", 0)]
     [InlineData("UtpMaxSynRetries", 1000, "MaxSynRetries", 10)]
     public void Knobs_AreClampedToAUsableRange(string setting, int value, string knob, int expected)
