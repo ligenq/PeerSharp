@@ -314,6 +314,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             if (peer.UtpStream != null)
             {
                 history.RegisterUtpSuccess(_timeProvider.GetUtcNow());
+                RecordUtpSuccess();
             }
         }
 
@@ -1938,8 +1939,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             }
 
             bool success = false;
-            bool usedUtp = false;
             bool attemptedUtp = false;
+            bool utpTransportEstablished = false;
+            bool offeredEncryptionChoice = false;
+            PeerCommunication? encryptionHangupPeer = null;
             int remainingTimeoutMs = timeoutMs;
             int fallbackTimeoutMs = ConnectionBudgetCalculator.FallbackCap(
                 timeoutMs,
@@ -1972,19 +1975,31 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, cancellationToken)
                     .WaitAsync(cancellationToken).ConfigureAwait(false);
 
-                if (success)
-                {
-                    usedUtp = peer.UtpStream != null;
-                    break;
-                }
-
                 if (attemptUtp)
                 {
                     attemptedUtp = true;
+                    utpTransportEstablished |= peer.UtpTransportEstablished;
+                }
+
+                offeredEncryptionChoice |= peer.OfferedAnEncryptionChoice;
+
+                if (peer.HungUpDuringEncryptionHandshake)
+                {
+                    encryptionHangupPeer = peer;
+                }
+
+                if (success)
+                {
+                    break;
                 }
 
                 remainingTimeoutMs = ConnectionBudgetCalculator.Remaining(
                     remainingTimeoutMs, attemptTimeoutMs, _settings.Connection.MinConnectionTimeoutMs);
+
+                if (hasFallback)
+                {
+                    peer = ReplaceConnectingPeerForFallback(peer);
+                }
             }
 
             // Record connection result for adaptive timeout and history
@@ -2027,12 +2042,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 // records, and none about encryption. Flipping on those made the choice alternate
                 // with a peer's packet loss, so a loaded machine could dial the same peer in
                 // plaintext twice running and never offer it MSE at all.
-                if (peer.OfferedAnEncryptionChoice)
+                if (offeredEncryptionChoice)
                 {
                     history.RegisterHandshakeFailure();
                 }
 
-                fastReconnectTarget = ClaimFastReconnectAfterEncryptionHangUp(peer, history);
+                fastReconnectTarget = ClaimFastReconnectAfterEncryptionHangUp(encryptionHangupPeer ?? peer, history);
                 fastReconnectEncrypted = history.OfferEncryptionNext;
             }
 
@@ -2049,15 +2064,22 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 pendingSlotHeld = false;
             }
 
-
-            if (!success)
+            if (attemptedUtp)
             {
-                if (attemptedUtp)
+                if (utpTransportEstablished)
+                {
+                    history.RegisterUtpSuccess(_timeProvider.GetUtcNow());
+                    RecordUtpSuccess();
+                }
+                else
                 {
                     history.RegisterUtpFailure(_timeProvider.GetUtcNow(), _settings.Connection);
                     RecordUtpColdStartFailure();
                 }
+            }
 
+            if (!success)
+            {
                 // A holepunch that failed does not earn another one. The dial a relay asks us to make
                 // skips the per-peer backoff by design, so letting its failure request a fresh
                 // rendezvous closes a loop with nothing to stop it: fail, ask, dial, fail. One endpoint
@@ -2080,18 +2102,6 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // against the ephemeral port it dialled from, which is the one address that is certainly
             // not connectable.
             history.IsConnectable = true;
-
-            if (attemptedUtp && !usedUtp)
-            {
-                history.RegisterUtpFailure(_timeProvider.GetUtcNow(), _settings.Connection);
-                RecordUtpColdStartFailure();
-            }
-
-            if (usedUtp)
-            {
-                history.RegisterUtpSuccess(_timeProvider.GetUtcNow());
-                RecordUtpSuccess();
-            }
 
             // Acquire active slot from governor
             if (useGovernor && !_governor.TryAcquireConnectionSlot())
@@ -2194,6 +2204,35 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 catch (Exception ex) { _logger.LogDebug(ex, "Failed to queue the prompt retry"); }
             }
         }
+    }
+
+    /// <summary>
+    /// Replaces a failed transport's disposed connection object while preserving the single logical
+    /// pending attempt. PeerCommunication cleanup permanently completes its send queue, so reusing it
+    /// would leave a successful fallback unable to send protocol messages.
+    /// </summary>
+    private PeerCommunication ReplaceConnectingPeerForFallback(PeerCommunication previous)
+    {
+        var replacement = _peerFactory.Create(_torrent, this, _timeProvider);
+        if (ReferenceEquals(replacement, previous))
+        {
+            throw new InvalidOperationException("The peer factory returned the disposed connection for a fallback transport.");
+        }
+
+        if (!_connectingPeers.TryRemove(previous, out _))
+        {
+            throw new InvalidOperationException("The failed transport was no longer registered as connecting.");
+        }
+
+        if (!_connectingPeers.TryAdd(replacement, 0))
+        {
+            // Reference identity makes this practically unreachable, but keep the observable count
+            // consistent if a custom factory violates that expectation.
+            Interlocked.Decrement(ref _connectingPeersCount);
+            throw new InvalidOperationException("The fallback transport could not be registered as connecting.");
+        }
+
+        return replacement;
     }
 
     private void ConnectToInternal(string ip, int port, bool forceUtp, ConnectionRequest? pendingRequest = null)
