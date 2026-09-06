@@ -22,7 +22,6 @@ internal sealed class RequestScheduler
     private readonly Torrent _torrent;
     private readonly IBlockRequestStrategy _standardStrategy;
     private readonly IBlockRequestStrategy _endGameStrategy;
-    private readonly int _maxRequestsPerPeer;
 
     public RequestScheduler(RequestSchedulerOptions options, PiecePicker piecePicker)
     {
@@ -35,7 +34,6 @@ internal sealed class RequestScheduler
         _timeProvider = options.TimeProvider;
         _logger = options.Logger;
         _blockSize = options.BlockSize;
-        _maxRequestsPerPeer = Math.Max(1, options.MaxRequestsPerPeer);
         _standardStrategy = new StandardBlockRequestStrategy(_requestTracker, _timeProvider, options.GetSoftTimeoutMs, _blockSize);
         _endGameStrategy = new EndGameBlockRequestStrategy(_requestTracker, _blockSize);
     }
@@ -61,10 +59,10 @@ internal sealed class RequestScheduler
             }
         }
 
-        int maxRequests = peer.GetAdaptivePipelineDepth();
-        if (maxRequests > _maxRequestsPerPeer)
+        int maxRequests = Math.Min(peer.GetAdaptivePipelineDepth(), Math.Max(1, _torrent.Settings.Transfer.MaxRequestsPerPeer));
+        if (peer.RemoteExtensions?.RequestQueueDepth is > 0 and var remoteCapacity)
         {
-            maxRequests = _maxRequestsPerPeer;
+            maxRequests = Math.Min(maxRequests, remoteCapacity);
         }
         int pending = 0;
         if (_requestTracker.TryGetPeerRequests(peer, out var existingReqs))
@@ -287,6 +285,5 @@ internal sealed class RequestSchedulerOptions
     public required TimeProvider TimeProvider { get; init; }
     public required ILogger<RequestScheduler> Logger { get; init; }
     public required int BlockSize { get; init; }
-    public required int MaxRequestsPerPeer { get; init; }
     public required Func<PeerCommunication, int> GetSoftTimeoutMs { get; init; }
 }

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Cli;
 using PeerSharp.Config;
 using PeerSharp.Clients;
@@ -69,7 +69,12 @@ var settings = new Settings
         TcpPort = options.Port ?? new ConnectionSettings().TcpPort,
         UdpPort = options.Port ?? new ConnectionSettings().UdpPort,
         UpnpPortMapping = options.PortMap,
-        NatPmpPortMapping = options.PortMap
+        NatPmpPortMapping = options.PortMap,
+        // Incoming uTP stays on: refusing it would change what the swarm offers as well as what
+        // this client dials, and the question is about the dialling policy.
+        EnableUtpOut = !options.NoUtp,
+        PreferUtp = !options.NoUtp,
+        EnableTcpOut = !options.NoTcp
     },
     Dht = { Enabled = !options.NoDht },
     Queue =

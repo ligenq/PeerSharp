@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Time.Testing;
+﻿using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Network;
@@ -57,12 +57,16 @@ public class PeerManagerUtpTests
         public Task PortReceivedAsync(IPeerCommunication peer, ushort dhtPort) => Task.CompletedTask;
     }
 
-    private static PeerManager CreateManager(ConnectionSettings settings, FakeTimeProvider timeProvider)
+    // Settings.Connection is get-only, so the torrent's own instance is configured in place and
+    // handed back for the assertions that pass it to BuildTransportPlan.
+    private static (PeerManager Manager, ConnectionSettings Settings) CreateManager(
+        Action<ConnectionSettings> configure, FakeTimeProvider timeProvider)
     {
         var torrent = TorrentTestUtility.CreateMinimal();
-        torrent.Settings.Connection = settings;
+        configure(torrent.Settings.Connection);
         torrent.UtpManager = new FakeUtpManager();
-        return new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new FakePeerCommunicationFactory(), timeProvider, new TorrentTestUtility.MockConnectionGovernor());
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new FakePeerCommunicationFactory(), timeProvider, new TorrentTestUtility.MockConnectionGovernor());
+        return (manager, torrent.Settings.Connection);
     }
 
     private static List<string> GetTransportPlan(PeerManager manager, ConnectionSettings settings, PeerHistory? history)
@@ -85,58 +89,20 @@ public class PeerManagerUtpTests
     }
 
     [Fact]
-    public void BuildTransportPlan_WarmupDisablesUtpForNonHintedPeers()
+    public void BuildTransportPlan_LeadsWithUtpForAPeerNothingIsKnownAbout()
     {
+        // libtorrent assumes every peer speaks uTP and dials it first, because LEDBAT's whole value
+        // is yielding to the user's other traffic and that only happens if the transfer runs over
+        // it. This used to put TCP first for anything PEX had not flagged, which meant uTP was
+        // reached only when TCP failed - and TCP does not fail for a reachable peer.
         var timeProvider = new FakeTimeProvider();
-        var settings = new ConnectionSettings
+        var (manager, settings) = CreateManager(connection =>
         {
-            PreferUtp = true,
-            EnableUtpOut = true,
-            EnableTcpOut = true,
-            UtpWarmupSeconds = 30
-        };
-        var manager = CreateManager(settings, timeProvider);
+            connection.PreferUtp = true;
+            connection.EnableUtpOut = true;
+            connection.EnableTcpOut = true;
+        }, timeProvider);
         var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = false };
-
-        var plan = GetTransportPlan(manager, settings, history);
-
-        Assert.Equal(new[] { "Tcp" }, plan);
-    }
-
-    [Fact]
-    public void BuildTransportPlan_PrefersTcpThenUtpForUnknownAfterWarmup()
-    {
-        var timeProvider = new FakeTimeProvider();
-        var settings = new ConnectionSettings
-        {
-            PreferUtp = true,
-            EnableUtpOut = true,
-            EnableTcpOut = true,
-            UtpWarmupSeconds = 10
-        };
-        var manager = CreateManager(settings, timeProvider);
-        var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = false };
-
-        timeProvider.Advance(TimeSpan.FromSeconds(20));
-        var plan = GetTransportPlan(manager, settings, history);
-
-        Assert.Equal(new[] { "Tcp", "Utp" }, plan);
-    }
-
-    [Fact]
-    public void BuildTransportPlan_PrefersUtpWhenBelowTargetRatio()
-    {
-        var timeProvider = new FakeTimeProvider();
-        var settings = new ConnectionSettings
-        {
-            PreferUtp = true,
-            EnableUtpOut = true,
-            EnableTcpOut = true,
-            PreferUtpRatioPercent = 70,
-            UtpWarmupSeconds = 0
-        };
-        var manager = CreateManager(settings, timeProvider);
-        var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = true };
 
         var plan = GetTransportPlan(manager, settings, history);
 
@@ -144,38 +110,36 @@ public class PeerManagerUtpTests
     }
 
     [Fact]
-    public void BuildTransportPlan_UsesTcpWhenAboveTargetRatio()
+    public void BuildTransportPlan_LeadsWithUtpForAKnownUtpPeerWhateverElseIsConnected()
     {
+        // There used to be a share target that would push this peer to TCP once enough of the swarm
+        // was already on uTP. Nothing about this peer changed when that happened, which is why the
+        // target has gone: a peer that has answered a uTP dial is dialled over uTP.
         var timeProvider = new FakeTimeProvider();
-        var settings = new ConnectionSettings
+        var (manager, settings) = CreateManager(connection =>
         {
-            PreferUtp = true,
-            EnableUtpOut = true,
-            EnableTcpOut = true,
-            PreferUtpRatioPercent = 50,
-            UtpWarmupSeconds = 0
-        };
-        var manager = CreateManager(settings, timeProvider);
+            connection.PreferUtp = true;
+            connection.EnableUtpOut = true;
+            connection.EnableTcpOut = true;
+        }, timeProvider);
         var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = true };
 
         AddConnectedUtpPeer(manager, TorrentTestUtility.CreateMinimal(), timeProvider);
         var plan = GetTransportPlan(manager, settings, history);
 
-        Assert.Equal(new[] { "Tcp", "Utp" }, plan);
+        Assert.Equal(new[] { "Utp", "Tcp" }, plan);
     }
 
     [Fact]
     public void BuildTransportPlan_DisablesUtpDuringGlobalPenalty()
     {
         var timeProvider = new FakeTimeProvider();
-        var settings = new ConnectionSettings
+        var (manager, settings) = CreateManager(connection =>
         {
-            PreferUtp = true,
-            EnableUtpOut = true,
-            EnableTcpOut = true,
-            UtpWarmupSeconds = 0
-        };
-        var manager = CreateManager(settings, timeProvider);
+            connection.PreferUtp = true;
+            connection.EnableUtpOut = true;
+            connection.EnableTcpOut = true;
+        }, timeProvider);
         var history = new PeerHistory { EndPoint = new IPEndPoint(IPAddress.Loopback, 6881), UtpHinted = true };
 
         manager.SetGlobalUtpPenaltyForTesting(timeProvider.GetUtcNow().AddMinutes(1));
@@ -257,7 +221,7 @@ public class PeerManagerUtpTests
     {
         var timeProvider = new FakeTimeProvider();
         var torrent = TorrentTestUtility.CreateMinimal();
-        torrent.Settings.Connection = new ConnectionSettings { EnableUtpIn = true };
+        torrent.Settings.Connection.EnableUtpIn = true;
         torrent.UtpManager = new FakeUtpManager();
         var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), new FakePeerCommunicationFactory(), timeProvider, new TorrentTestUtility.MockConnectionGovernor());
 

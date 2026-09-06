@@ -56,6 +56,10 @@ public class HttpTrackerTests
         }
     }
 
+    // Every one of these trackers announces through SetTestClient, so the pool is never asked for a
+    // client; it is here because a tracker no longer builds one of its own.
+    private static HttpTracker CreateTracker() => new(NullLoggerFactory.Instance, new HttpClientFactory());
+
     private sealed class FamilyHttpClientFactory(
         Func<AddressFamily?, HttpResponseMessage> responseFactory) : IHttpClientFactory
     {
@@ -65,7 +69,8 @@ public class HttpTrackerTests
             ProxySettings proxy,
             bool isTracker,
             IPAddress? bindAddress = null,
-            AddressFamily? addressFamily = null)
+            AddressFamily? addressFamily = null,
+            int maxConnectionsPerServer = IHttpClientFactory.DefaultMaxConnectionsPerServer)
         {
             RequestedFamilies.Enqueue(addressFamily);
             return new HttpClient(new FamilyHandler(() => responseFactory(addressFamily)));
@@ -204,7 +209,7 @@ public class HttpTrackerTests
     public async Task AnnounceAsync_SuccessfulResponse_ParsesPeers()
     {
         // Arrange
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -230,7 +235,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_DoesNotDiscloseLocalIpAddresses()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
         _mockHttp.ResponseBytes = BencodeWriter.Write(new BDict());
@@ -247,7 +252,7 @@ public class HttpTrackerTests
     {
         _torrent.Settings.Connection.TcpPort = 0;
         _torrent.PortListener = new TestPortListener(23456);
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
         _mockHttp.ResponseBytes = BencodeWriter.Write(new BDict());
@@ -262,7 +267,7 @@ public class HttpTrackerTests
     {
         // BEP 3: a tracker that issues a session token expects to see it again. One that never gets it
         // back has no way to tie our announces together and may treat each as a new session.
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -288,7 +293,7 @@ public class HttpTrackerTests
     public async Task AnnounceAsync_ResponseWithoutTrackerId_DoesNotForgetTheOldOne()
     {
         // A response that simply omits the key is not the tracker withdrawing it.
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -311,7 +316,7 @@ public class HttpTrackerTests
     public async Task AnnounceAsync_WarningMessage_IsSurfacedWithoutFailingTheAnnounce()
     {
         // BEP 3 distinguishes a warning from a failure: the response is valid and its peers usable.
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -332,7 +337,7 @@ public class HttpTrackerTests
     public async Task AnnounceAsync_HttpError_RaisesFailure()
     {
         // Arrange
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
         _mockHttp.Exception = new HttpRequestException("404 Not Found");
@@ -350,7 +355,7 @@ public class HttpTrackerTests
     {
         // Arrange
         _torrent.InfoFile.Info.Hash = InfoHash.CreateRandom();
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -383,7 +388,7 @@ public class HttpTrackerTests
     {
         // A response about some other torrent must not be mistaken for ours
         _torrent.InfoFile.Info.Hash = InfoHash.CreateRandom();
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -408,7 +413,7 @@ public class HttpTrackerTests
     public async Task AnnounceAsync_InvalidResponse_RaisesFailure()
     {
         var callback = new MockCallback();
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, callback);
         tracker.SetTestClient(_mockHttp);
         _mockHttp.ResponseBytes = Encoding.UTF8.GetBytes("not-bencode");
@@ -422,7 +427,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_ResponseOverLimit_RaisesFailure()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
         _mockHttp.ResponseBytes = new byte[(1024 * 1024) + 1];
@@ -437,7 +442,7 @@ public class HttpTrackerTests
     public async Task ScrapeAsync_InvalidResponse_RaisesFailure()
     {
         var callback = new MockCallback();
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, callback);
         tracker.SetTestClient(_mockHttp);
         _mockHttp.ResponseBytes = Encoding.UTF8.GetBytes("invalid");
@@ -452,7 +457,7 @@ public class HttpTrackerTests
     {
         // BEP 3: a tracker may reply with {'failure reason': '...'} and nothing else.
         // This used to be silently parsed as Success=true with 0 peers.
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -470,7 +475,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_Ipv6Peers_ParsesPeers6Field()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -499,7 +504,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_MinInterval_IsParsed()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -518,7 +523,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task ScrapeAsync_FailureReasonResponse_RaisesFailure()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -534,7 +539,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task MultiScrapeAsync_ValidResponse_ParsesAllHashStats()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -567,7 +572,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task MultiScrapeAsync_SkipsUnsupportedV2HashesInRequestUrl()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
         _mockHttp.ResponseBytes = BencodeWriter.Write(new BDict { Dict = { ["files"] = new BDict() } });
@@ -584,7 +589,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task MultiScrapeAsync_EmptyList_DoesNotRaiseResult()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -597,7 +602,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task MultiScrapeAsync_NonAnnounceUrl_DoesNotRaiseResult()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         // URL without "announce" path segment → scrape URL cannot be derived
         tracker.Init("http://tracker.com/peers", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
@@ -611,7 +616,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task MultiScrapeAsync_HttpError_RaisesFailure()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
         _mockHttp.Exception = new HttpRequestException("503 Service Unavailable");
@@ -627,7 +632,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task MultiScrapeAsync_PartialResponse_ReturnsOnlyAvailableStats()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -658,7 +663,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task MultiScrapeAsync_UnknownHashInResponse_IncludedInResults()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -686,7 +691,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task MultiScrapeAsync_FailureReasonResponse_RaisesFailure()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -716,7 +721,7 @@ public class HttpTrackerTests
     /// </summary>
     private async Task<string> CaptureAnnounceUrlAsync(Torrent torrent, TrackerEvent evt)
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -802,7 +807,7 @@ public class HttpTrackerTests
     public async Task AnnounceAsync_ExternalIpV4_IsParsed()
     {
         // BEP 24: 4 raw bytes, no port.
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -820,7 +825,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_ExternalIpV6_IsParsed()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -844,7 +849,7 @@ public class HttpTrackerTests
     {
         // An IPAddress cannot be built from anything but 4 or 16 bytes, so a malformed value has to
         // be dropped rather than thrown - the peer list in the same response is still good.
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -863,7 +868,7 @@ public class HttpTrackerTests
     public async Task AnnounceAsync_FailureWithRetryIn_SurfacesHint()
     {
         // BEP 31: d14:failure reason...8:retry ini30ee
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -885,7 +890,7 @@ public class HttpTrackerTests
     [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_FailureWithRetryNever_SurfacesNeverHint()
     {
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
 
@@ -905,7 +910,7 @@ public class HttpTrackerTests
     {
         // Only the tracker's own failure response carries a hint. A timeout tells us nothing about
         // when it wants us back, and must leave the manager on its own backoff.
-        var tracker = new HttpTracker();
+        var tracker = CreateTracker();
         tracker.Init("http://tracker.com/announce", _torrent, _callback);
         tracker.SetTestClient(_mockHttp);
         _mockHttp.Exception = new HttpRequestException("connection refused");

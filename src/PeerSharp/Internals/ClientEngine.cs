@@ -23,6 +23,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     private readonly IBandwidthManager _bandwidth;
     private readonly IConnectionGovernor _connectionGovernor;
     private readonly IFileHandleCache _fileHandleCache;
+    private readonly HttpClientFactory _httpClientFactory;
 
     // Dependencies to be injected into Torrents
     private readonly IGeoIpService _geoIp;
@@ -76,15 +77,19 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<ClientEngine>();
         _registry = registry;
+        _lifetimeTotals = new LifetimeByteTotals(
+            () => _registry.GetAll().Select(torrent => (torrent.TotalDownloaded, torrent.TotalUploaded)));
         _sessionManager = sessionManager;
 
         _fileHandleCache = new FileHandleCache(loggerFactory: loggerFactory); // Default 200 handles
+        // One pool for this engine's trackers, web seeds and magnet fetches, disposed with the engine.
+        _httpClientFactory = new HttpClientFactory();
         _connectionGovernor = new ConnectionGovernor(settings);
 
         // Initialize dependencies
         _geoIp = new GeoIpService();
         _peerFactory = new PeerCommunicationFactory(loggerFactory);
-        _trackerFactory = new TrackerFactory(loggerFactory);
+        _trackerFactory = new TrackerFactory(loggerFactory, _httpClientFactory);
 
         // Reads through GetStats, which refuses a disposed engine - hence the guard rather than the
         // call alone. Nothing is measured unless something subscribes to the meter.
@@ -107,17 +112,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     // engine doing now" and the wrong one for a counter. These are the counter's figures, and the
     // removal and the read are kept indivisible - see LifetimeByteTotals for why that matters more
     // than the arithmetic does.
-    private LifetimeByteTotals? _lifetimeTotals;
-
-    private LifetimeByteTotals LifetimeTotals =>
-        _lifetimeTotals ??= new LifetimeByteTotals(
-            () => _registry.GetAll().Select(torrent => (torrent.TotalDownloaded, torrent.TotalUploaded)));
+    private readonly LifetimeByteTotals _lifetimeTotals;
 
     /// <summary>
     /// Bytes moved over the engine's whole life, including by torrents that have been removed. Only
     /// ever increases, which is what a counter has to promise.
     /// </summary>
-    internal (long Downloaded, long Uploaded) GetLifetimeTotals() => LifetimeTotals.Read();
+    internal (long Downloaded, long Uploaded) GetLifetimeTotals() => _lifetimeTotals.Read();
 
     /// <summary>
     /// Takes a torrent out of the registry and folds its totals into the engine's lifetime figures,
@@ -125,7 +126,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     /// </summary>
     private bool RemoveAndRetire(Torrent torrent, bool transient = false)
     {
-        return LifetimeTotals.RemoveAndRetire(
+        return _lifetimeTotals.RemoveAndRetire(
             () => transient ? _registry.RemoveTransient(torrent) : _registry.Remove(torrent),
             torrent.TotalDownloaded,
             torrent.TotalUploaded);
@@ -233,7 +234,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         return new ClientEngine(
             settings,
             new BandwidthManager(10, timeProvider, loggerFactory),
-            new AlertsManager(timeProvider),
+            new AlertsManager(timeProvider, settings.Alerts),
             null,
             true,
             timeProvider,
@@ -355,6 +356,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             phaseStopwatch.Restart();
             _metrics.Dispose();
             _fileHandleCache.Dispose();
+            _httpClientFactory.Dispose();
 
             // Dispose bandwidth manager
             await _bandwidth.DisposeAsync().ConfigureAwait(false);
@@ -397,12 +399,15 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             totalUl += t.TotalUploaded;
         }
 
+        var lifetime = GetLifetimeTotals();
         return new EngineStats
         {
             DownloadSpeed = dlSpeed,
             UploadSpeed = ulSpeed,
             TotalDownloaded = totalDl,
             TotalUploaded = totalUl,
+            LifetimeDownloaded = lifetime.Downloaded,
+            LifetimeUploaded = lifetime.Uploaded,
             TorrentCount = total,
             ActiveTorrents = active,
             TotalPeers = peers
@@ -811,11 +816,12 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         var actualLoggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
 
         var registry = new TorrentRegistry();
+        var actualSettings = settings ?? new Settings();
 
         return new ClientEngine(
-            settings ?? new Settings(),
+            actualSettings,
             bandwidth ?? new BandwidthManager(10, actualTimeProvider, actualLoggerFactory),
-            alerts ?? new AlertsManager(actualTimeProvider),
+            alerts ?? new AlertsManager(actualTimeProvider, actualSettings.Alerts),
             networkManager,
             takeOwnership,
             actualTimeProvider,
@@ -861,7 +867,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         var fsm = new FileSelectionManager(metadata);
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _httpClientFactory, _timeProvider, events, resumeData, _loggerFactory);
 
         if (!transient)
         {
@@ -906,7 +912,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         var fsm = new FileSelectionManager(metadata);
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _timeProvider, events, resumeData, _loggerFactory);
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _httpClientFactory, _timeProvider, events, resumeData, _loggerFactory);
         if (!transient)
         {
             torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
@@ -969,7 +975,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 return;
             }
 
-            _sessionManager?.RegisterTorrentData(torrent.Hash, bytes, null);
+            _sessionManager?.RegisterTorrentData(torrent.SessionHash, bytes, null);
             if (Settings.Session.Enabled && _sessionManager != null)
             {
                 await _sessionManager.SaveTorrentEntryAsync(torrent, bytes, null, CancellationToken.None).ConfigureAwait(false);
@@ -1181,7 +1187,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // Note: socketFactory is now required for UdpListener
             var socketFactory = new UdpSocketFactory();
             var udpListener = new UdpListener(Settings.Connection.UdpPort, socketFactory, Settings, _loggerFactory, _timeProvider);
-            var utpManager = new UtpManager(_timeProvider, _loggerFactory);
+            var utpManager = new UtpManager(_timeProvider, _loggerFactory, Settings.Connection);
 
             var dhtManager = DhtManager.Create(Settings.PeerId, udpListener, Settings, _timeProvider, this, new SystemDnsResolver(), _loggerFactory);
             var portListener = new PortListener(this, _loggerFactory, Settings.Connection.BindAddress);
@@ -1386,18 +1392,12 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (entry.TorrentFileData is { Length: > 0 })
         {
             var torrentFile = TorrentFile.Parse(entry.TorrentFileData);
-            torrent = await AddTorrentCoreAsync(torrentFile, options, persistToDisk: false, rebalanceQueue: false, entry.Options?.PeerPreferences, cancellationToken).ConfigureAwait(false);
-
-            // Store raw data for future persistence
-            _sessionManager?.RegisterTorrentData(torrent.Hash, entry.TorrentFileData, null);
+            torrent = await AddTorrentCoreAsync(torrentFile, options, persistToDisk: false, rebalanceQueue: false, entry.Options?.PeerPreferences, entry.Hash, cancellationToken).ConfigureAwait(false);
         }
         else if (!string.IsNullOrEmpty(entry.MagnetLink))
         {
             var magnet = MagnetLink.Parse(entry.MagnetLink);
-            torrent = await AddMagnetCoreAsync(magnet, options, persistToDisk: false, rebalanceQueue: false, transient: false, entry.Options?.PeerPreferences, cancellationToken).ConfigureAwait(false);
-
-            // Store magnet for future persistence
-            _sessionManager?.RegisterTorrentData(torrent.Hash, null, entry.MagnetLink);
+            torrent = await AddMagnetCoreAsync(magnet, options, persistToDisk: false, rebalanceQueue: false, transient: false, entry.Options?.PeerPreferences, entry.Hash, cancellationToken).ConfigureAwait(false);
         }
         else
         {
@@ -1538,7 +1538,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         MagnetLink magnetLink,
         AddTorrentOptions? options = null,
         CancellationToken cancellationToken = default)
-        => AddMagnetCoreAsync(magnetLink, options, persistToDisk: true, rebalanceQueue: true, transient: false, restoredPeerPreferences: null, cancellationToken);
+        => AddMagnetCoreAsync(magnetLink, options, persistToDisk: true, rebalanceQueue: true, transient: false, restoredPeerPreferences: null, restoredSessionHash: null, cancellationToken);
 
     private async Task<ITorrent> AddMagnetCoreAsync(
         MagnetLink magnetLink,
@@ -1547,6 +1547,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         bool rebalanceQueue,
         bool transient,
         IReadOnlyList<SavedPeerPreference>? restoredPeerPreferences,
+        InfoHash? restoredSessionHash,
         CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
@@ -1574,6 +1575,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // still failing the next add of the same hash with TorrentAlreadyExistsException.
         try
         {
+            if (restoredSessionHash is { } sessionHash)
+            {
+                torrent.SessionHash = sessionHash;
+            }
             torrent.PeersInternal.ImportConnectionPreferences(restoredPeerPreferences);
 
             if (magnetLink.Peers.Count > 0)
@@ -1663,7 +1668,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (_sessionManager != null && !transient)
         {
             var magnetString = magnetLink.OriginalString;
-            _sessionManager.RegisterTorrentData(torrent.Hash, torrentBytes, magnetString);
+            _sessionManager.RegisterTorrentData(torrent.SessionHash, torrentBytes, magnetString);
 
             if (persistToDisk)
             {
@@ -1732,6 +1737,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             rebalanceQueue: false,
             transient: true,
             restoredPeerPreferences: null,
+            restoredSessionHash: null,
             cancellationToken).ConfigureAwait(false);
 
         try
@@ -1858,7 +1864,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             settings = NoProxy;
         }
 
-        return new DefaultHttpClient(new HttpClientFactory().CreateClient(
+        return new DefaultHttpClient(_httpClientFactory.CreateClient(
             settings,
             isTracker: true,
             Settings.Connection.BindAddress));
@@ -1868,7 +1874,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         TorrentFile torrentFile,
         AddTorrentOptions? options = null,
         CancellationToken cancellationToken = default)
-        => AddTorrentCoreAsync(torrentFile, options, persistToDisk: true, rebalanceQueue: true, restoredPeerPreferences: null, cancellationToken);
+        => AddTorrentCoreAsync(torrentFile, options, persistToDisk: true, rebalanceQueue: true, restoredPeerPreferences: null, restoredSessionHash: null, cancellationToken);
 
     private async Task<ITorrent> AddTorrentCoreAsync(
         TorrentFile torrentFile,
@@ -1876,6 +1882,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         bool persistToDisk,
         bool rebalanceQueue,
         IReadOnlyList<SavedPeerPreference>? restoredPeerPreferences,
+        InfoHash? restoredSessionHash,
         CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
@@ -1888,6 +1895,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // token from here on has to unregister it again.
         try
         {
+            if (restoredSessionHash is { } sessionHash)
+            {
+                torrent.SessionHash = sessionHash;
+            }
             torrent.PeersInternal.ImportConnectionPreferences(restoredPeerPreferences);
 
             AddOptionPeers(torrent, options);
@@ -1927,7 +1938,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (_sessionManager != null)
         {
             var rawData = torrentFile.RawData.IsEmpty ? null : torrentFile.RawData.ToArray();
-            _sessionManager.RegisterTorrentData(torrent.Hash, rawData, null);
+            _sessionManager.RegisterTorrentData(torrent.SessionHash, rawData, null);
 
             if (persistToDisk)
             {
@@ -2123,7 +2134,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         {
             try
             {
-                await _sessionManager.DeleteAsync(t.Hash, CancellationToken.None).ConfigureAwait(false);
+                await _sessionManager.DeleteAsync(t.SessionHash, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {

@@ -395,15 +395,6 @@ public class PeerManagerTests
     }
 
     [Fact(Timeout = 30000)]
-    public async Task GetUtpRatioPercent_EmptySwarm_ReturnsZero()
-    {
-        var ctx = CreateContext();
-        int ratio = (int)InvokePrivate(ctx.Manager, "GetUtpRatioPercent")!;
-        Assert.Equal(0, ratio);
-        await CleanupAsync(ctx);
-    }
-
-    [Fact(Timeout = 30000)]
     public async Task IsSpeedStable_NeverEnteredStable_ReturnsFalse()
     {
         var ctx = CreateContext();
@@ -573,24 +564,112 @@ public class PeerManagerTests
     }
 
     [Fact(Timeout = 30000)]
-    public async Task CleanupPendingConnections_RemovesExpiredEntries()
+    public async Task AdaptiveTimeout_UsesUpdatedSettingsForExistingHistory()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            var endpoint = new IPEndPoint(IPAddress.Loopback, 1234);
+            for (int i = 0; i < 5; i++) ctx.Manager.AdaptiveTimeout.RecordSuccess(500, endpoint);
+            ctx.Torrent.Settings.Connection.MinConnectionTimeoutMs = 4000;
+            Assert.Equal(4000, ctx.Manager.AdaptiveTimeout.GetTimeoutForEndpoint(endpoint));
+            ctx.Torrent.Settings.Connection.MinConnectionTimeoutMs = 100;
+            ctx.Torrent.Settings.Connection.MaxConnectionTimeoutMs = 200;
+            Assert.Equal(200, ctx.Manager.AdaptiveTimeout.GetTimeoutForEndpoint(endpoint));
+            ctx.Manager.AdaptiveTimeout.Reset();
+            ctx.Torrent.Settings.Connection.MaxConnectionTimeoutMs = 9000;
+            ctx.Torrent.Settings.Connection.InitialConnectionTimeoutMs = 7000;
+            Assert.Equal(7000, ctx.Manager.AdaptiveTimeout.CurrentTimeoutMs);
+        }
+        finally { await CleanupAsync(ctx); }
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task PendingConnection_CompletionCannotRemoveANewerOwner()
+    {
+        var factory = new BlockingPeerFactory();
+        var ctx = CreateContext(factory);
+        var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.90"), 6881);
+        try
+        {
+            ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+            Assert.Contains(endpoint, pending.Keys);
+            ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+            await ctx.Manager.StartAsync();
+            await TorrentTestUtility.WaitUntilAsync(() => factory.Created.Count == 1);
+            Assert.Contains(endpoint, pending.Keys);
+            // Simulate ownership established by a later run while this task was finishing.
+            pending[endpoint] = long.MaxValue;
+            factory.CompleteAll(false);
+            var tasks = GetPrivateField<ConcurrentDictionary<Task, byte>>(ctx.Manager, "_activeConnectionTasks");
+            await TorrentTestUtility.WaitUntilAsync(() => tasks.IsEmpty);
+            Assert.Equal(long.MaxValue, pending[endpoint]);
+        }
+        finally
+        {
+            factory.CompleteAll(false);
+            await CleanupAsync(ctx);
+        }
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ADialThatNeverOpenedASocketDoesNotFlipTheEncryptionChoice()
+    {
+        // The preference alternates so a peer that speaks only one of MSE and plaintext is reached
+        // on the following try. A dial that was refused, timed out or was cancelled put nothing on
+        // the wire, so it is evidence about reachability - which the backoff records - and none
+        // about encryption.
+        //
+        // Flipping on those made the choice alternate with a peer's packet loss. Under load this
+        // dialled the same peer in plaintext twice running and never offered it MSE at all, which
+        // is how a peer that only speaks MSE becomes permanently unreachable rather than slow.
+        var factory = new BlockingPeerFactory();
+        var ctx = CreateContext(factory);
+        var known = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+        var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.77"), 6881);
+        try
+        {
+            ctx.Manager.ConnectTo(endpoint.Address.ToString(), endpoint.Port);
+            await ctx.Manager.StartAsync();
+            await TorrentTestUtility.WaitUntilAsync(() => factory.Created.Count == 1);
+
+            Assert.True(known.TryGetValue(endpoint, out var history));
+            Assert.True(history!.OfferEncryptionNext);
+
+            // The dial fails without ever having connected, which is what BlockingPeer models.
+            factory.CompleteAll(false);
+            var tasks = GetPrivateField<ConcurrentDictionary<Task, byte>>(ctx.Manager, "_activeConnectionTasks");
+            await TorrentTestUtility.WaitUntilAsync(() => tasks.IsEmpty);
+
+            // Reachability was recorded; the encryption choice was left alone.
+            Assert.True(history.FruitlessConnectionCount > 0);
+            Assert.True(
+                history.OfferEncryptionNext,
+                "A dial that never opened a socket offered nothing, so it must not change what is offered next.");
+        }
+        finally
+        {
+            factory.CompleteAll(false);
+            await CleanupAsync(ctx);
+        }
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ConnectionQueue_ReleasesOwnershipWhenTransportsAreDisabledBeforeDial()
     {
         var ctx = CreateContext();
         var pending = GetPrivateField<ConcurrentDictionary<IPEndPoint, long>>(ctx.Manager, "_pendingConnections");
-
-        var ep1 = new IPEndPoint(IPAddress.Parse("10.0.0.1"), 6881);
-        var ep2 = new IPEndPoint(IPAddress.Parse("10.0.0.2"), 6881);
-
-        long now = Environment.TickCount64;
-        pending[ep1] = now - 60_000; // > 10s old, should be removed
-        pending[ep2] = now - 1_000; // recent, kept
-
-        InvokePrivate(ctx.Manager, "CleanupPendingConnections");
-
-        Assert.False(pending.ContainsKey(ep1));
-        Assert.True(pending.ContainsKey(ep2));
-
-        await CleanupAsync(ctx);
+        try
+        {
+            ctx.Manager.ConnectTo("203.0.113.92", 6881);
+            Assert.Single(pending);
+            ctx.Torrent.Settings.Connection.EnableTcpOut = false;
+            ctx.Torrent.Settings.Connection.EnableUtpOut = false;
+            await ctx.Manager.StartAsync();
+            await TorrentTestUtility.WaitUntilAsync(() => pending.IsEmpty);
+        }
+        finally { await CleanupAsync(ctx); }
     }
 
     [Fact(Timeout = 30000)]
@@ -601,7 +680,6 @@ public class PeerManagerTests
         settings.EnableTcpOut = false;
         settings.EnableUtpOut = true;
         settings.PreferUtp = true;
-        settings.UtpWarmupSeconds = 0;
 
         // Provide a UtpManager - PeerManager checks for it
         SetUtpManagerStub(ctx.Torrent);
@@ -1697,6 +1775,8 @@ public class PeerManagerTests
 
     private sealed class RecordingAlertsManager : IAlertsManager
     {
+        public long DroppedAlertCount => 0;
+
         public void PieceHashFailedAlert(ITorrent torrent, int pieceIndex, int failures, System.Net.IPEndPoint? suspectedPeer) { }
 
         public void PeerBlockedAlert(ITorrent torrent, System.Net.IPEndPoint endpoint, PeerBlockReason reason)

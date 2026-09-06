@@ -16,7 +16,7 @@ public class PieceStateManagerTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
 
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var manager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, maxActivePieces: 1);
+        var manager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, maxActivePieces: () => 1);
 
         var stale = new PieceState(0, 1);
         var available = new PieceState(1, 1);
@@ -39,7 +39,7 @@ public class PieceStateManagerTests
         var metadata = new TorrentFileMetadata();
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
         var piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
-        var manager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, maxActivePieces: 10);
+        var manager = new PieceStateManager(piecePicker, NullLogger<PieceStateManager>.Instance, maxActivePieces: () => 10);
 
         var state1 = new PieceState(0, 1);
         var block1 = new PeerSharp.Core.Block(16384);

@@ -91,6 +91,13 @@ public enum AlertId : uint
 
     /// <summary>A listener could not use the configured port and is on a different one.</summary>
     ListenPortChanged = 1u << 24,
+
+    /// <summary>
+    /// Alerts were discarded because the queue was full. Delivered whether or not it was registered:
+    /// a drop only happens to alerts the consumer did ask for, and silently losing them is the thing
+    /// this reports.
+    /// </summary>
+    AlertsDropped = 1u << 25,
 }
 
 /// <summary>
@@ -107,6 +114,25 @@ public abstract record Alert
     /// Gets the timestamp when this alert was generated.
     /// </summary>
     public DateTimeOffset Timestamp { get; init; }
+}
+
+/// <summary>
+/// Alerts were discarded because the queue reached its configured capacity.
+/// </summary>
+/// <remarks>
+/// Delivered at the front of the next batch read from the queue, so it arrives before the alerts
+/// that survived the overflow and cannot itself be dropped by the overflow it is reporting.
+/// </remarks>
+public sealed record AlertsDroppedAlert : Alert
+{
+    /// <summary>How many alerts were discarded since the last time this was reported.</summary>
+    public required long Dropped { get; init; }
+
+    /// <summary>How many alerts have been discarded in total since the engine started.</summary>
+    public required long TotalDropped { get; init; }
+
+    /// <summary>The queue capacity in force when the alerts were discarded.</summary>
+    public required int Capacity { get; init; }
 }
 
 /// <summary>

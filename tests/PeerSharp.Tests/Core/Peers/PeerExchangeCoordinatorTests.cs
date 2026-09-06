@@ -10,6 +10,41 @@ namespace PeerSharp.Tests.Core.Peers;
 public class PeerExchangeCoordinatorTests
 {
     [Fact]
+    public void Broadcast_DrawsItsShuffleFromTheInjectedRandom()
+    {
+        // The coordinator used to share one unsynchronized Random across every torrent in the process.
+        // Taking the source as a dependency is what makes the production default Random.Shared and lets
+        // a test pin the order instead of asserting on whatever the shared generator happens to give.
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var knownPeers = new ConcurrentDictionary<IPEndPoint, PeerHistory>();
+        for (int i = 1; i <= 20; i++)
+        {
+            var endpoint = new IPEndPoint(IPAddress.Parse($"10.0.0.{i}"), 6881);
+            knownPeers[endpoint] = new PeerHistory { EndPoint = endpoint };
+        }
+
+        static List<IPEndPoint> BroadcastWith(Torrent torrent, ConcurrentDictionary<IPEndPoint, PeerHistory> knownPeers, int seed)
+        {
+            var coordinator = new PeerExchangeCoordinator(torrent, knownPeers, NullLogger.Instance, new Random(seed));
+            var recipient = new PexPeer(torrent)
+            {
+                RemoteEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 40002),
+                RemoteListenEndPoint = new IPEndPoint(IPAddress.Parse("2.2.2.2"), 2000)
+            };
+            coordinator.Broadcast([recipient]);
+            return recipient.Pex.Updates.Single().Select(peer => peer.Endpoint).ToList();
+        }
+
+        var first = BroadcastWith(torrent, knownPeers, 1234);
+        var repeat = BroadcastWith(torrent, knownPeers, 1234);
+        var different = BroadcastWith(torrent, knownPeers, 4321);
+
+        Assert.Equal(first, repeat);
+        Assert.NotEqual(first, different);
+        Assert.Equal(first.OrderBy(e => e.ToString()), different.OrderBy(e => e.ToString()));
+    }
+
+    [Fact]
     public void Broadcast_ExcludesEachRecipientFromItsOwnUpdate()
     {
         var torrent = TorrentTestUtility.CreateMinimal();

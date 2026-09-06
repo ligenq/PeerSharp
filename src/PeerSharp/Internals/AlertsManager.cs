@@ -37,21 +37,33 @@ internal interface IAlertsManager : IAlerts
 
 internal class AlertsManager : IAlertsManager
 {
-    private const int MaxAlertQueueSize = 10000;
-
+    private readonly AlertSettings _settings;
     private readonly ConcurrentQueue<Alert> _alerts = new();
 
     private readonly Lock _lock = new();
     private readonly TimeProvider _timeProvider;
     private int _alertCount = 0;
-
-    // Prevent unbounded growth
     private uint _alertsMask = 0;
 
+    // Drops since the last time a consumer was told, and the running total. Reported rather than
+    // merely counted: an alert that vanishes without trace is indistinguishable from one that never
+    // happened, and a consumer acting on the queue cannot tell that it has missed something.
+    private long _droppedSinceReport;
+    private long _droppedTotal;
+
     public AlertsManager(TimeProvider timeProvider)
+        : this(timeProvider, new AlertSettings())
+    {
+    }
+
+    public AlertsManager(TimeProvider timeProvider, AlertSettings settings)
     {
         _timeProvider = timeProvider;
+        _settings = settings;
     }
+
+    /// <inheritdoc />
+    public long DroppedAlertCount => Interlocked.Read(ref _droppedTotal);
 
     private static bool IsCritical(AlertId id)
     {
@@ -215,6 +227,23 @@ internal class AlertsManager : IAlertsManager
     public List<Alert> PopAlerts()
     {
         var result = new List<Alert>();
+
+        // First, so the consumer learns it has a gap before it reads the alerts either side of it.
+        // Built here rather than queued: a notice about a full queue cannot be one more thing that
+        // needs room in it.
+        long dropped = Interlocked.Exchange(ref _droppedSinceReport, 0);
+        if (dropped > 0)
+        {
+            result.Add(new AlertsDroppedAlert
+            {
+                Id = AlertId.AlertsDropped,
+                Dropped = dropped,
+                TotalDropped = Interlocked.Read(ref _droppedTotal),
+                Capacity = _settings.MaxQueueSize,
+                Timestamp = _timeProvider.GetUtcNow()
+            });
+        }
+
         while (_alerts.TryDequeue(out var alert))
         {
             result.Add(alert);
@@ -223,32 +252,82 @@ internal class AlertsManager : IAlertsManager
         return result;
     }
 
+    /// <summary>
+    /// Queues an alert, enforcing <see cref="AlertSettings.MaxQueueSize"/> as a real limit.
+    ///
+    /// <para>
+    /// Criticality decides who gives way, not who is exempt. This used to let a critical alert push
+    /// the queue past its bound whenever the oldest entry was also critical - and the situation that
+    /// fills the queue is a consumer that has stopped reading, so a run of critical alerts had
+    /// nothing bounding it at all. Now a critical alert can still evict a droppable one ahead of it,
+    /// but when everything queued is critical the configured policy settles it and the count holds.
+    /// </para>
+    /// </summary>
     public void PostAlert(Alert alert)
     {
-        if (IsAlertRegistered(alert.Id))
+        if (!IsAlertRegistered(alert.Id))
         {
-            int currentCount = Interlocked.Increment(ref _alertCount);
-            if (currentCount > MaxAlertQueueSize)
+            return;
+        }
+
+        int capacity = Math.Max(1, _settings.MaxQueueSize);
+        int currentCount = Interlocked.Increment(ref _alertCount);
+        if (currentCount > capacity && !TryMakeRoom(alert, capacity))
+        {
+            Interlocked.Decrement(ref _alertCount);
+            RecordDrop();
+            return;
+        }
+
+        _alerts.Enqueue(alert);
+    }
+
+    /// <summary>
+    /// Frees one slot for <paramref name="incoming"/>, or reports that it should be refused instead.
+    /// Returns true when a slot was freed.
+    /// </summary>
+    private bool TryMakeRoom(Alert incoming, int capacity)
+    {
+        // Drains to the capacity in force now, not by one. A capacity lowered while a backlog is
+        // queued would otherwise only ever trade one alert for one, and the queue would sit at its
+        // old size until a consumer happened to read it - which is exactly the consumer this bound
+        // exists to survive.
+        bool madeRoom = false;
+        while (Interlocked.CompareExchange(ref _alertCount, 0, 0) > capacity)
+        {
+            if (!TryEvictOne(incoming))
             {
-                // If queue is full, try to drop the oldest if it's not critical
-                if (_alerts.TryPeek(out var oldest) && !IsCritical(oldest.Id))
-                {
-                    if (_alerts.TryDequeue(out _))
-                    {
-                        Interlocked.Decrement(ref _alertCount);
-                    }
-                }
-                else if (!IsCritical(alert.Id))
-                {
-                    // If we can't drop the oldest (it's critical) and we are not critical, drop the new alert
-                    Interlocked.Decrement(ref _alertCount);
-                    return;
-                }
-                // If we are critical, we allow the queue to grow temporarily (no return)
+                return madeRoom;
             }
 
-            _alerts.Enqueue(alert);
+            madeRoom = true;
         }
+
+        return true;
+    }
+
+    /// <summary>Discards one queued alert, or returns false if none may be discarded.</summary>
+    private bool TryEvictOne(Alert incoming)
+    {
+        // A droppable alert at the head goes first, whatever the policy: nothing is served by
+        // discarding a torrent-finished to keep a progress update that a later one supersedes.
+        if (_alerts.TryPeek(out var oldest)
+            && (!IsCritical(oldest.Id)
+                || (_settings.OverflowPolicy == AlertOverflowPolicy.DropOldest && IsCritical(incoming.Id)))
+            && _alerts.TryDequeue(out _))
+        {
+            Interlocked.Decrement(ref _alertCount);
+            RecordDrop();
+            return true;
+        }
+
+        return false;
+    }
+
+    private void RecordDrop()
+    {
+        Interlocked.Increment(ref _droppedSinceReport);
+        Interlocked.Increment(ref _droppedTotal);
     }
 
     public void ProgressChangedAlert(ITorrent torrent, float progress, float selectionProgress, ulong finishedBytes, ulong totalBytes, int completedPieces, int totalPieces)

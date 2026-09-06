@@ -3,6 +3,7 @@ using PeerSharp.Internals;
 using PeerSharp.Internals.Transfers;
 using PeerSharp.PieceWriter;
 using System.Security.Cryptography;
+using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Core.Transfers;
 
@@ -208,6 +209,7 @@ public class PieceVerificationWriterTests
             new TorrentTestUtility.MockGeoIpService(),
             new ThrowingHandleCache { ToThrow = toThrow },
             new TorrentTestUtility.MockConnectionGovernor(),
+            new HttpClientFactory(),
             TimeProvider.System);
 
         return (torrent, data, path);

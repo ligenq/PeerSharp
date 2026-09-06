@@ -125,6 +125,6 @@ public class PieceStateManagerPropertyTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata);
         var picker = new PiecePicker(new TorrentPiecePickerContext(torrent), TimeProvider.System, Random.Shared);
 
-        return new PieceStateManager(picker, NullLogger<PieceStateManager>.Instance, maxActivePieces: PieceCount);
+        return new PieceStateManager(picker, NullLogger<PieceStateManager>.Instance, maxActivePieces: () => PieceCount);
     }
 }

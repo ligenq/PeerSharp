@@ -1,9 +1,10 @@
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Pipelines;
 using System.Net;
+using System.Net.Sockets;
 using System.Threading.Channels;
 
 namespace PeerSharp.Internals.Utp;
@@ -52,17 +53,37 @@ internal class UtpStream : Stream
     // Extension type 1 = SACK per BEP-29
     private const byte ExtensionSack = 1;
 
-    private const int MaxCwndIncreaseBytesPerRtt = 3000;
     private const uint MaxRemoteWndSize = 4 * 1024 * 1024;
 
-    // 4MB safety limit
-    private const int MaxSynRetries = 2;
+    // Link MTUs. Everything below counts the UDP payload - the uTP header plus its data - so the IP
+    // and UDP headers have to come off these before they mean anything, as libtorrent's utp_stream
+    // does with TORRENT_ETHERNET_MTU - TORRENT_IPV4_HEADER - TORRENT_UDP_HEADER.
+    private const int EthernetMtu = 1500;
+    private const int MinInternetMtu = 576;
+    private const int Ipv4HeaderSize = 20;
+    private const int Ipv6HeaderSize = 40;
+    private const int UdpHeaderSize = 8;
 
-    private const int MaxUdpMtu = 1500;
-    private const int MaxWindowDecay = 100;
-    private const int MinUdpMtu = 576;
+    /// <summary>
+    /// How far below the ceiling to start. libtorrent opens at the ceiling less 68 bytes rather than
+    /// at the ceiling itself, which is room for the PPPoE, tunnel and IPv6 extension headers a path
+    /// may add without saying so. Discovery raises it when the probes get through.
+    /// </summary>
+    private const int MtuConservativeMargin = 8 + 24 + 36;
+
     private const int MtuSearchGranularity = 16;
-    private const int TargetDelay = 100000;
+
+    // The LEDBAT knobs below come from settings rather than constants, so a caller on a link the
+    // defaults were not chosen for can say so. Each is read where it is used, and each is clamped
+    // here rather than trusted: these values steer a congestion controller, and a nonsensical one
+    // does not produce a nonsensical number, it produces a connection that will not yield.
+    private int TargetDelay => Math.Clamp(_settings.UtpTargetDelayMicroseconds, 1000, 1000000);
+
+    private int MaxCwndIncreaseBytesPerRtt => Math.Clamp(_settings.UtpMaxWindowIncreaseBytesPerRtt, 100, 1000000);
+
+    private int LossCutIntervalMs => Math.Clamp(_settings.UtpLossWindowCutIntervalMs, 10, 60000);
+
+    private int MaxSynRetries => Math.Clamp(_settings.UtpMaxSynRetries, 0, 10);
 
     // MTU discovery (libutp-style probing)
     private const int UtpHeaderSize = 20;
@@ -78,6 +99,7 @@ internal class UtpStream : Stream
     private readonly Lock _lock = new();
     private readonly ILogger<UtpStream> _logger;
     private readonly IUtpManager _manager;
+    private readonly ConnectionSettings _settings;
 
     private readonly Pipe _pipe = new();
 
@@ -123,14 +145,33 @@ internal class UtpStream : Stream
     private uint _minRtt;
     private DateTimeOffset _delayBaseTime = DateTimeOffset.MinValue;
     private AtomicDisposal _disposal = new();
+    /// <summary>libutp's DUPLICATE_ACKS_BEFORE_RESEND, and libtorrent's dup_ack_limit.</summary>
+    private const int DuplicateAcksBeforeResend = 3;
+
     private int _duplicateAckCount;
+
+    /// <summary>
+    /// The lowest sequence number a selective acknowledgement may still call lost, as libtorrent's
+    /// <c>m_fast_resend_seq_nr</c>. It moves past each packet resent from a hole, so the same packet
+    /// is not resent again on the next report of the same gap, and past whatever the cumulative
+    /// acknowledgement has covered.
+    /// </summary>
+    private ushort _fastResendSeqNr;
+
+    /// <summary>
+    /// The newest sequence number sent when the window was last cut, as libtorrent's
+    /// <c>m_loss_seq_nr</c>. Only a packet sent after that can cause the next cut, so one flight
+    /// costs one cut however many of its packets are reported lost.
+    /// </summary>
+    private ushort _lossSeqNr;
+
+    private DateTimeOffset _nextLossCut = DateTimeOffset.MinValue;
     private bool _finReceived;
     private bool _finSent;
     private ushort _lastAckedSeq;
     private DateTimeOffset _lastCwndLog = DateTimeOffset.MinValue;
 
     // Window decay tracking
-    private DateTimeOffset _lastDecayTime = DateTimeOffset.MinValue;
 
     private double _lastLoggedCwnd = 0;
     private DateTimeOffset _lastMaxedOutWindow = DateTimeOffset.MinValue;
@@ -184,7 +225,24 @@ internal class UtpStream : Stream
     }
 
     public UtpStream(IUtpManager manager, IPEndPoint remote, ushort idRecv, ushort idSend, TimeProvider timeProvider, ILoggerFactory loggerFactory)
+        : this(manager, remote, idRecv, idSend, timeProvider, loggerFactory, new ConnectionSettings())
     {
+    }
+
+    /// <summary>
+    /// Creates a uTP stream. The connection settings are read for the congestion knobs on every use
+    /// rather than captured, so a change reaches connections that are already open.
+    /// </summary>
+    public UtpStream(
+        IUtpManager manager,
+        IPEndPoint remote,
+        ushort idRecv,
+        ushort idSend,
+        TimeProvider timeProvider,
+        ILoggerFactory loggerFactory,
+        ConnectionSettings settings)
+    {
+        _settings = settings;
         _manager = manager;
         RemoteEndPoint = remote;
         ConnectionIdRecv = idRecv;
@@ -195,6 +253,7 @@ internal class UtpStream : Stream
         // This avoids creating new Random() instances which can have poor entropy
         // when created in quick succession
         _seqNr = (ushort)Random.Shared.Next(0, 65535);
+        _lossSeqNr = (ushort)(_seqNr - 1);
         _nextTimeout = _timeProvider.GetUtcNow().AddSeconds(3);
         _lastSendTime = _timeProvider.GetUtcNow();
         _lastReceiveTime = _timeProvider.GetUtcNow();
@@ -296,12 +355,6 @@ internal class UtpStream : Stream
                 return;
             }
 
-            // Window decay per libutp - decay by 0.5x every 100ms if no ACKs
-            if (_sentPackets.Count > 0)
-            {
-                DecayWindow();
-            }
-
             if (now > _nextTimeout)
             {
                 // Handshake states are checked first. The SYN is itself an unacked packet, so the
@@ -328,8 +381,18 @@ internal class UtpStream : Stream
                     if (!ignoreLoss)
                     {
                         _cwnd = _mss; // Reset to single MSS per libutp
-                        _ssthresh = _cwnd; // Update slow-start threshold
-                        _slowStart = false; // Exit slow-start on timeout
+
+                        // Back into slow-start, as libtorrent's utp_stream does here, and without
+                        // moving ssthresh down to meet the window. The two together were what
+                        // stranded a connection: the threshold was set to the one packet the window
+                        // had just been cut to, so even re-entering slow-start would leave it again
+                        // on the first acknowledgement, and the only remaining growth was LEDBAT's
+                        // linear gain - which is itself zeroed whenever this side is not filling the
+                        // window. One timeout then held the window at a single packet for good.
+                        // libtorrent leaves ssthresh to be set by a loss event, which is the thing
+                        // that knows where the path actually saturated.
+                        _slowStart = true;
+
                         // Increase base timeout to prevent death spiral on high latency links where RTT samples are lost due to retransmits
                         _packetTimeout = Math.Min(_packetTimeout * 2, 10000);
                     }
@@ -613,7 +676,7 @@ internal class UtpStream : Stream
 
             lock (_lock)
             {
-                int chunk = Math.Min(buffer.Length - sent, GetPayloadMss(0));
+                int chunk = Math.Min(buffer.Length - sent, GetDataPayloadMss());
                 SendPacket(MessageType.ST_DATA, buffer.Slice(sent, chunk));
                 sent += chunk;
             }
@@ -660,7 +723,7 @@ internal class UtpStream : Stream
             _wndSize = Math.Min(header.WndSize, MaxRemoteWndSize);
 
             // Handle ACKs with SACK support
-            HandleAckWithSack(header.AckNr, header.TimestampDifferenceMicroseconds, sackRanges);
+            HandleAckWithSack(header.AckNr, header.TimestampDifferenceMicroseconds, sackRanges, header.Type);
 
             switch (header.Type)
             {
@@ -889,22 +952,42 @@ internal class UtpStream : Stream
     }
 
     /// <summary>
-    /// Window decay per libutp - decay by 0.5x every 100ms if no ACKs received.
-    /// Called from CheckTimeout.
+    /// Halves the window for a lost packet, if this loss is a new congestion event rather than more
+    /// news about one already paid for. Returns whether the window was actually cut.
     /// </summary>
-    private void DecayWindow()
+    /// <remarks>
+    /// Loss arrives in bursts: one full window can be dropped by a single queue overflowing, and
+    /// every packet in it is reported separately. libtorrent guards the cut twice over and this
+    /// follows both, because either alone leaves a hole. A packet sent at or before the last cut
+    /// cannot cause another, which charges one flight once however many of its packets were lost;
+    /// and no two cuts fall within <c>cwnd_reduce_timer</c> of each other, which covers loss spread
+    /// across flights. Without them a single congestion event halved the window once per report and
+    /// took it to the floor.
+    /// </remarks>
+    private bool ExperiencedLoss(ushort seqNr)
     {
-        var now = _timeProvider.GetUtcNow();
-        if ((now - _lastDecayTime).TotalMilliseconds >= MaxWindowDecay)
+        if (Utils.CompareSeq(seqNr, (ushort)(_lossSeqNr + 1)) < 0)
         {
-            double oldCwnd = _cwnd;
-            _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
-            _lastDecayTime = now;
-            if (Math.Abs(_cwnd - oldCwnd) > 0.001)
-            {
-                _logger.LogTrace("LEDBAT {Remote}: Window decay {OldCwnd:F0}B -> {Cwnd:F0}B", RemoteEndPoint, oldCwnd, _cwnd);
-            }
+            return false;
         }
+
+        var now = _timeProvider.GetUtcNow();
+        if (now < _nextLossCut)
+        {
+            return false;
+        }
+
+        _nextLossCut = now.AddMilliseconds(LossCutIntervalMs);
+        _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
+
+        // Everything now in flight predates this cut, so none of it can charge another.
+        _lossSeqNr = (ushort)(_seqNr - 1);
+
+        // The threshold is set to the window after reducing it, so the next slow-start ends before
+        // overshooting where the path was last seen to saturate.
+        _ssthresh = _cwnd;
+        _slowStart = false;
+        return true;
     }
 
     private void FlushPendingWrites()
@@ -949,12 +1032,23 @@ internal class UtpStream : Stream
         return Math.Max(1, payload);
     }
 
+    private int GetDataPayloadMss()
+    {
+        Span<byte> bitmask = stackalloc byte[32];
+        int maskLength = WriteSackMask(bitmask);
+        return GetPayloadMss(maskLength > 0 ? maskLength + 2 : 0);
+    }
+
     /// <summary>
     /// SACK SUPPORT: Handle ACK with optional SACK extension data.
     /// SACK allows the sender to know which out-of-order packets arrived,
     /// preventing false packet loss detection on VPNs with reordering.
     /// </summary>
-    private void HandleAckWithSack(ushort ackNr, uint delay, List<(ushort Start, ushort End)>? sackRanges)
+    private void HandleAckWithSack(
+        ushort ackNr,
+        uint delay,
+        List<(ushort Start, ushort End)>? sackRanges,
+        MessageType type)
     {
         int ackedCount = 0;
         int ackedBytes = 0;
@@ -1019,40 +1113,27 @@ internal class UtpStream : Stream
         // Cap ackNr to lastSent to prevent walking into the future
         ushort effectiveAckNr = Utils.CompareSeq(ackNr, lastSent) > 0 ? lastSent : ackNr;
 
-        // Only iterate if it's moving forward from oldest unacked
-        int maxIterations = Math.Min(_sentPackets.Count + 1, 65536);
-        int iterations = 0;
-
-        if (Utils.CompareSeq(effectiveAckNr, _oldestUnackedSeq) >= 0)
+        // Walk send order rather than bounding sequence distance by the remaining packet
+        // count. SACK can remove a long middle run while leaving an acknowledged tail.
+        while (_sentSeqQueue.TryPeek(out ushort seq) && Utils.CompareSeq(seq, effectiveAckNr) <= 0)
         {
-            for (ushort seq = _oldestUnackedSeq; Utils.CompareSeq(seq, effectiveAckNr) <= 0 && iterations < maxIterations; seq++)
+            _sentSeqQueue.Dequeue();
+            if (_sentPackets.Remove(seq, out var pkt))
             {
-                iterations++;
-
-                if (_sentPackets.Remove(seq, out var pkt))
+                if (!pkt.Resent && !pkt.RttSampled && rttSamples < MaxRttSamplesPerAck)
                 {
-                    // Sample RTT if not already sampled by SACK and not resent
-                    if (!pkt.Resent && !pkt.RttSampled && rttSamples < MaxRttSamplesPerAck)
+                    double packetRttMs = (now - pkt.SendTime).TotalMilliseconds;
+                    if (packetRttMs > 0 && packetRttMs < 60000)
                     {
-                        double packetRttMs = (now - pkt.SendTime).TotalMilliseconds;
-                        if (packetRttMs > 0 && packetRttMs < 60000)
-                        {
-                            UpdateRtt((int)packetRttMs);
-                            rttSamples++;
-                        }
+                        UpdateRtt((int)packetRttMs);
+                        rttSamples++;
                     }
-
-                    ReleaseSentPacket(pkt);
-                    ackedCount++;
-                    ackedBytes += pkt.Length;
-                    HandleMtuProbeAck(seq, pkt.Length);
                 }
 
-                // Safety: break if we wrapped around back to effectiveAckNr
-                if (seq == effectiveAckNr)
-                {
-                    break;
-                }
+                ReleaseSentPacket(pkt);
+                ackedCount++;
+                ackedBytes += pkt.Length;
+                HandleMtuProbeAck(seq, pkt.Length);
             }
         }
 
@@ -1062,10 +1143,32 @@ internal class UtpStream : Stream
             AdvanceSentQueue();
         }
 
+        // Fast retransmit driven by the selective acknowledgement rather than by counting duplicate
+        // ones. Packets acknowledged beyond a hole name the packet that is missing, where a
+        // duplicate acknowledgement only says that something is.
+        //
+        // This follows libtorrent's parse_sack rather than approximating it, because the
+        // approximation almost never fired. Three things it got wrong: the evidence is how many
+        // sequence numbers the peer says it holds, not how many this side happened to still have
+        // outstanding, so a repeated selective acknowledgement for the same hole counted nothing the
+        // second time; every hole the peer describes is lost, not only the one immediately after the
+        // cumulative acknowledgement; and refusing to resend a packet twice left no recovery when a
+        // retransmission was itself lost. A watermark takes the place of that last check, so a
+        // packet is resent once per hole rather than once ever.
+        FastResendFromSack(ackNr, sackRanges, lastSent);
+
         if (ackedCount > 0 || sackMarked > 0)
         {
             _duplicateAckCount = 0;
             _timeoutCount = 0; // Reset timeout count on successful ACK
+
+            // Keep the fast-resend watermark with the acknowledged point. Left behind it drifts
+            // arbitrarily far back, and these are wrapping 16-bit sequence numbers - a comparison
+            // against a value half the sequence space away answers meaninglessly.
+            if (Utils.CompareSeq(_fastResendSeqNr, ackNr) < 0)
+            {
+                _fastResendSeqNr = ackNr;
+            }
             if (ackedBytes > 0)
             {
                 UpdateCongestionControl(ackedBytes, delay);
@@ -1073,9 +1176,11 @@ internal class UtpStream : Stream
             FlushPendingWrites();
             _lastAckedSeq = ackNr;
         }
-        else if (_sentPackets.Count > 0 && ackNr == _lastAckedSeq)
+        else if (type == MessageType.ST_STATE && _sentPackets.Count > 0 && ackNr == _lastAckedSeq)
         {
-            // Duplicate ACK - but check if the missing packet was SACK'd
+            // DATA repeats ack_nr during a download even when no request was lost.
+            // Only pure acknowledgements supply duplicate-ACK evidence; SACK above
+            // still detects holes on every packet type.
             _duplicateAckCount++;
 
             // SACK SUPPORT: Find the first un-SACK'd packet after ackNr
@@ -1083,7 +1188,7 @@ internal class UtpStream : Stream
             bool missingPacketSackd = !_sentPackets.ContainsKey(expectedSeq);
 
             // Per libutp: DUPLICATE_ACKS_BEFORE_RESEND = 3
-            if (_duplicateAckCount >= 3 && !missingPacketSackd)
+            if (_duplicateAckCount >= DuplicateAcksBeforeResend && !missingPacketSackd)
             {
                 if (_mtuProbeSeq != 0 && ackNr == (ushort)(_mtuProbeSeq - 1))
                 {
@@ -1106,15 +1211,12 @@ internal class UtpStream : Stream
                 if (resendList.Count > 0)
                 {
                     double oldCwnd = _cwnd;
-                    // Per libutp: halve window on packet loss
-                    _cwnd = Math.Max(_cwnd * 0.5, _mss * 2);
-                    _ssthresh = _cwnd; // Update slow-start threshold
-                    _slowStart = false;
+                    bool cut = ExperiencedLoss(resendList[0].SeqNr);
 
                     foreach (var pkt in resendList)
                     {
-                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd CUT {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
-                            RemoteEndPoint, oldCwnd, _cwnd, _mss, pkt.SeqNr);
+                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd {Cut} {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
+                            RemoteEndPoint, cut ? "CUT" : "held", oldCwnd, _cwnd, _mss, pkt.SeqNr);
                         ResendPacket(pkt);
                     }
                 }
@@ -1127,6 +1229,93 @@ internal class UtpStream : Stream
         }
 
         CheckIfClosed();
+    }
+
+    /// <summary>
+    /// Resends the packets a selective acknowledgement shows to be missing, if enough of the ones
+    /// behind them arrived to make that loss rather than reordering.
+    /// </summary>
+    /// <remarks>
+    /// The bitmask starts at <paramref name="ackNr"/> + 2, because + 1 is by definition the packet
+    /// the cumulative acknowledgement stopped at. Holes are counted only up to the highest sequence
+    /// the peer reports holding: past that, an unacknowledged packet is one still in flight rather
+    /// than one that was overtaken, which is libtorrent's pruning of the tail of the resend list.
+    /// </remarks>
+    private void FastResendFromSack(ushort ackNr, List<(ushort Start, ushort End)>? sackRanges, ushort lastSent)
+    {
+        if (sackRanges is not { Count: > 0 })
+        {
+            return;
+        }
+
+        // How much the peer says it holds past the gap. More than the limit means the packets behind
+        // the hole are arriving while it is not, which is loss; a few is a path reordering.
+        int ackedPastHole = 0;
+        ushort highestAcked = ackNr;
+        foreach (var (start, end) in sackRanges)
+        {
+            if (Utils.CompareSeq(start, end) > 0)
+            {
+                continue;
+            }
+
+            ackedPastHole += (ushort)(end - start) + 1;
+            if (Utils.CompareSeq(end, highestAcked) > 0)
+            {
+                highestAcked = end;
+            }
+        }
+
+        if (ackedPastHole <= DuplicateAcksBeforeResend)
+        {
+            return;
+        }
+
+        bool cutWindow = true;
+        for (ushort seq = (ushort)(ackNr + 1);
+            Utils.CompareSeq(seq, highestAcked) < 0 && Utils.CompareSeq(seq, lastSent) <= 0;
+            seq++)
+        {
+            if (Utils.CompareSeq(seq, _fastResendSeqNr) < 0 || IsSelectivelyAcked(seq, sackRanges))
+            {
+                continue;
+            }
+
+            if (!_sentPackets.TryGetValue(seq, out var lost))
+            {
+                continue;
+            }
+
+            if (cutWindow)
+            {
+                // Once for the whole report, however many packets it shows missing: they were lost
+                // to one congestion event, and ExperiencedLoss decides whether that event has
+                // already been paid for.
+                double beforeLoss = _cwnd;
+                cutWindow = false;
+                bool cut = ExperiencedLoss(seq);
+
+                _logger.LogTrace(
+                    "SACK {Remote}: {Acked} acked past {Seq} - cwnd {Cut} {Before:F0}B -> {After:F0}B, resending",
+                    RemoteEndPoint, ackedPastHole, seq, cut ? "CUT" : "held", beforeLoss, _cwnd);
+            }
+
+            ResendPacket(lost);
+            _fastResendSeqNr = (ushort)(seq + 1);
+        }
+    }
+
+    private static bool IsSelectivelyAcked(ushort seq, List<(ushort Start, ushort End)> sackRanges)
+    {
+        foreach (var (start, end) in sackRanges)
+        {
+            if (Utils.CompareSeq(seq, start) >= 0 && Utils.CompareSeq(seq, end) <= 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void HandleData(MessageHeader header, byte[] data, int headerSize)
@@ -1241,8 +1430,9 @@ internal class UtpStream : Stream
 
         // Mirror libutp's ACK validation window to reject spoofed packets.
         ushort lastSent = (ushort)(_seqNr - 1);
-        int allowedWindow = Math.Max(_sentPackets.Count + 3, 3);
-        ushort oldestAllowed = (ushort)(lastSent - allowedWindow);
+        // Selective ACKs leave holes in the send buffer. Its population is not the
+        // sequence span: accepting a SACK must not invalidate the next report of that hole.
+        ushort oldestAllowed = (ushort)(_oldestUnackedSeq - 4);
 
         if (Utils.CompareSeq(lastSent, ackNr) < 0)
         {
@@ -1408,6 +1598,23 @@ internal class UtpStream : Stream
         pkt.Resent = true;
         pkt.SendTime = _timeProvider.GetUtcNow();
 
+        // SACK bits are relative to ack_nr. Reusing them with a newer ACK can acknowledge
+        // packets we never received, causing the peer to discard its retransmission copies.
+        if (pkt.Buffer[1] == ExtensionSack)
+        {
+            int maskLength = pkt.Buffer[21];
+            // Keep the original capacity so the retry cannot grow past the path MTU.
+            if (WriteSackMask(pkt.Buffer.AsSpan(22, maskLength)) == 0)
+            {
+                int extensionLength = maskLength + 2;
+                pkt.Buffer[1] = pkt.Buffer[20];
+                pkt.Buffer.AsSpan(20 + extensionLength, pkt.Length - 20 - extensionLength)
+                    .CopyTo(pkt.Buffer.AsSpan(20));
+                pkt.Length -= extensionLength;
+                _sentBytesUnacked -= extensionLength;
+            }
+        }
+
         // Update ACK NR and Timestamp in-place
         UtpManager.WriteUInt16BigEndian(pkt.Buffer, 18, _ackNr);
         UtpManager.WriteUInt32BigEndian(pkt.Buffer, 4, Utils.TimestampMicro());
@@ -1430,12 +1637,41 @@ internal class UtpStream : Stream
 
     private void ResetMtu()
     {
-        _mtuCeiling = MaxUdpMtu;
-        _mtuFloor = MinUdpMtu;
+        // What the headers below this one will take off the wire. Getting this wrong is not a lost
+        // byte or two: a datagram one byte over the link MTU is fragmented, so every full-size
+        // packet becomes two, and losing either loses the whole thing. Plenty of paths drop IP
+        // fragments outright. It does not show up on loopback, whose MTU is 65536.
+        int overhead = (RemoteEndPoint.AddressFamily == AddressFamily.InterNetworkV6
+            ? Ipv6HeaderSize
+            : Ipv4HeaderSize) + UdpHeaderSize;
+
+        _mtuCeiling = EthernetMtu - overhead;
+        _mtuFloor = MinInternetMtu - overhead;
         _mtuDiscoverUntil = _timeProvider.GetUtcNow().AddMinutes(30);
         MtuSearchUpdate();
-        _mtuLast = _mtuCeiling;
+        _mtuLast = Math.Max(_mtuFloor, _mtuCeiling - MtuConservativeMargin);
         UpdateMssFromMtu();
+    }
+
+    /// <summary>Writes a SACK mask relative to the current cumulative acknowledgement.</summary>
+    private int WriteSackMask(Span<byte> bitmask)
+    {
+        bitmask.Clear();
+        int highestByte = -1;
+        foreach (ushort seq in _reorderBufferSeqs)
+        {
+            int offset = (seq - _ackNr - 2) & 0xFFFF;
+            if (offset < bitmask.Length * 8)
+            {
+                int byteIndex = offset / 8;
+                bitmask[byteIndex] |= (byte)(1 << (offset % 8));
+                highestByte = Math.Max(highestByte, byteIndex);
+            }
+        }
+
+        // BEP 29 requires at least four bytes, in multiples of four. highestByte is
+        // already a byte index; dividing it by eight again truncates the report.
+        return highestByte >= 0 ? (highestByte + 4) & ~3 : 0;
     }
 
     private void SendPacket(MessageType type, ReadOnlyMemory<byte> payload = default)
@@ -1446,34 +1682,10 @@ internal class UtpStream : Stream
             return;
         }
 
-        // SACK SUPPORT: Calculate SACK extension if needed
-        int extensionLen = 0;
-        int maxBit = -1;
+        // Include the current report on DATA and FIN as well as pure acknowledgements.
         Span<byte> bitmask = stackalloc byte[32];
-
-        if (type == MessageType.ST_STATE && _reorderBufferSeqs.Count > 0)
-        {
-            bitmask.Clear();
-            foreach (var seq in _reorderBufferSeqs)
-            {
-                int offset = (seq - _ackNr - 2) & 0xFFFF; // Wrap-around safe
-                if (offset < 256)
-                {
-                    int byteIndex = offset / 8;
-                    int bitIndex = offset % 8;
-                    bitmask[byteIndex] |= (byte)(1 << bitIndex);
-                    if (byteIndex > maxBit)
-                    {
-                        maxBit = byteIndex;
-                    }
-                }
-            }
-
-            if (maxBit >= 0)
-            {
-                extensionLen = 2 + (maxBit / 8) + 1;
-            }
-        }
+        int maskLength = WriteSackMask(bitmask);
+        int extensionLen = maskLength > 0 ? maskLength + 2 : 0;
 
         int payloadLen = payload.Length;
         int maxPayload = GetPayloadMss(extensionLen);
@@ -1538,6 +1750,9 @@ internal class UtpStream : Stream
             if (_sentPackets.Count == 1)
             {
                 _oldestUnackedSeq = _seqNr;
+                // Start the watermark in this flight's sequence space. Zero may be
+                // ahead of a random initial sequence by the wrapping comparison.
+                _fastResendSeqNr = _seqNr;
             }
             _sentSeqQueue.Enqueue(_seqNr);
             _sentBytesUnacked += totalLen;
@@ -1645,9 +1860,6 @@ internal class UtpStream : Stream
             baseDelay += correction;
             ourDelay = _minRtt;
         }
-
-        // Update last decay time on successful ACK
-        _lastDecayTime = now;
 
         long offTarget = TargetDelay - ourDelay;
         long offTargetLimited = Math.Min(offTarget, TargetDelay);

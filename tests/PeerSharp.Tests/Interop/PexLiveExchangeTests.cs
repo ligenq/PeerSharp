@@ -139,6 +139,13 @@ public sealed class PexLiveExchangeTests : IAsyncLifetime
             {
                 TcpPort = 0,
                 UdpPort = 0,
+
+                // Both ports are ephemeral and therefore different, so the address a peer is
+                // advertised at is its TCP port and nothing is listening on that number over UDP.
+                // uTP dials would spend their capped attempt reaching nobody before falling back,
+                // which is a property of this fixture's port choice rather than anything about peer
+                // exchange - and peer exchange is what is under test.
+                EnableUtpOut = false,
                 EnableLsd = false,
                 UpnpPortMapping = false,
                 NatPmpPortMapping = false,

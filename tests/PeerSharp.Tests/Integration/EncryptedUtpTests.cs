@@ -139,7 +139,6 @@ public class EncryptedUtpTests : IDisposable
 
                 // uTP is held back for a warmup period unless a peer is known to support it. With TCP
                 // disabled that leaves no transport at all, so the dial never happens.
-                UtpWarmupSeconds = 0,
                 UpnpPortMapping = false,
                 NatPmpPortMapping = false,
                 Encryption = encryption

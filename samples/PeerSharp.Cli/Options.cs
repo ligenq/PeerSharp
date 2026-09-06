@@ -1,4 +1,4 @@
-namespace PeerSharp.Cli;
+﻿namespace PeerSharp.Cli;
 
 /// <summary>
 /// What the sample was asked to do. Parsed by hand rather than with a command line library: a sample
@@ -41,6 +41,14 @@ internal sealed record Options
     /// <summary>Run without the DHT, which is what isolates a local measurement from the
     /// public network.</summary>
     public bool NoDht { get; init; }
+
+    /// <summary>Dial nothing but TCP. The library leads with uTP by default, so this is the other
+    /// half of an A/B: run the same torrent twice and the difference is what uTP is worth.</summary>
+    public bool NoUtp { get; init; }
+
+    /// <summary>Dial nothing but uTP. The other half of the A/B, for asking what uTP does on its own
+    /// rather than what it does while TCP peers are competing for the same request budget.</summary>
+    public bool NoTcp { get; init; }
 
     /// <summary>
     /// Ask the router to forward the listening port (UPnP and NAT-PMP), off by default in the library
@@ -119,6 +127,8 @@ internal sealed record Options
         bool lsd = false;
         bool recheck = false;
         bool noDht = false;
+        bool noUtp = false;
+        bool noTcp = false;
         bool metadataOnly = false;
         bool portMap = false;
         string? logPath = null;
@@ -161,6 +171,14 @@ internal sealed record Options
 
                 case "--no-dht":
                     noDht = true;
+                    break;
+
+                case "--no-utp":
+                    noUtp = true;
+                    break;
+
+                case "--no-tcp":
+                    noTcp = true;
                     break;
 
                 case "--metadata-only":
@@ -315,6 +333,8 @@ internal sealed record Options
             LocalDiscovery = lsd,
             Recheck = recheck,
             NoDht = noDht,
+            NoUtp = noUtp,
+            NoTcp = noTcp,
             MetadataOnly = metadataOnly,
             PortMap = portMap,
             LogPath = logPath,
@@ -346,6 +366,8 @@ internal sealed record Options
                   --lsd            discover peers on the local network (BEP 14)
                   --recheck        hash-check existing files first, to seed what is already there
                   --no-dht         disable the DHT, isolating a run from the public network
+                  --no-utp         dial TCP only, for comparing against the default uTP-first policy
+                  --no-tcp         dial uTP only, the other half of that comparison
                   --metadata-only  fetch a magnet's metadata, time it, and stop before downloading
                   --port-map       ask the router to forward the port (UPnP, NAT-PMP), for seeding
                   --log <file>     write the full log here; the console keeps reports and warnings
