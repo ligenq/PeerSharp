@@ -310,7 +310,8 @@ internal class UtpManager : IUdpReceiver, IUtpManager
             switch (extension)
             {
                 case ExtensionSack:
-                    // Per BEP-29: SACK is a bitmask, each byte = 8 packets, valid range 1-32 bytes
+                    // Each byte represents eight packets. Accept short masks for compatibility;
+                    // our emitter pads to the four-byte multiples specified by BEP 29.
                     if (len > 0 && len <= 32)
                     {
                         var newRanges = UtpSackParser.Parse(data, headerSize + 2, len, header.AckNr);
