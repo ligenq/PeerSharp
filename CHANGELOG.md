@@ -5,8 +5,44 @@ history has the reasoning and the measurements behind each one.
 
 ## Unreleased
 
+## 5.0.0 — 2026-09-09
+
+### Breaking changes and migration
+
+- **Settings sub-objects are now get-only.** `Connection`, `Dht`, `Files`, `Proxy`, `Queue`,
+  `Session`, and `Transfer` can no longer be replaced. Components retain references to these
+  objects, so replacing one previously left parts of a running engine reading stale settings.
+  Change `settings.Connection = new ConnectionSettings { MaxConnections = 200 };` to
+  `settings.Connection.MaxConnections = 200;`. Nested object initializers such as
+  `new Settings { Connection = { MaxConnections = 200 } }` remain supported.
+- **`ConnectionSettings.PreferUtpRatioPercent` and `UtpWarmupSeconds` were removed.** Remove
+  assignments to these obsolete transport-share controls. `PreferUtp` still controls transport
+  preference; peer capabilities, fallback and congestion control determine actual transport use.
+- **Custom `IAlerts` implementations must implement `long DroppedAlertCount { get; }`.**
+  Return the cumulative count of dropped alerts, or zero if the implementation never drops any.
+- Upgrade `PeerSharp.WebTorrent` alongside `PeerSharp` to 5.0.0. Both still target .NET 10.
+
 ### Fixed
 
+- **uTP loss recovery no longer retransmits unrelated packets or strands a timed-out flight.**
+  Duplicate ACKs retry only the reported hole; timeout retries are paced by acknowledgement
+  progress. Loss boundaries remain valid across sequence wrap, and a timed-out flight is not
+  charged twice for congestion. Reverse traffic cannot indefinitely postpone a lost request's retry.
+- **SACK emission and MTU sizing are corrected.** DATA and FIN can carry valid selective ACKs,
+  retransmissions rebuild masks against the current cumulative ACK, and writes reserve extension
+  space without exceeding the path MTU. Congestion windows no longer collapse from repeated
+  reports of the same loss or idle-window decay.
+- **Transport fallback gets a usable fresh connection.** An unsuccessful uTP attempt no longer
+  leaves TCP fallback with a completed send queue, and unreachable peers do not change encryption
+  preference as though they had rejected a handshake.
+- **Peer request limits and live settings are honored.** The scheduler respects a peer's advertised
+  `reqq`, configured request ceilings above 500, and updated concurrency and timeout settings.
+  Pending connection attempts retain their ownership until they finish.
+- **Web seeds replenish available download slots without a fixed one-second pause.** Rechecks
+  do not trigger redundant downloads. HTTP 404/410 marks individual files unavailable and retires
+  a source only when it has no files left to serve; transient failures remain retryable.
+- **HTTP client pools are bounded, engine-owned and disposed with the engine**, with structured
+  cache keys that cannot collide through credential separators.
 - **An absent info hash matched whichever torrent also lacked one.** A torrent carries a v1 and a v2
   hash and almost never has both: the missing one is stored as `InfoHash.Empty` or
   `InfoHash.EmptyV2`, which are ordinary all-zero values and equal to themselves. `TorrentRegistry`
@@ -19,6 +55,12 @@ history has the reasoning and the measurements behind each one.
 
 ### Added
 
+- **Application integration helpers:** `TorrentIdentity.SameTorrent`, magnet creation for v1/v2/hybrid
+  torrents, `ITorrent.GetTransferStats()`, engine lifetime transfer totals, and proxy UDP capability
+  reporting. See [Application integration APIs](CONSUMER_API.md).
+- **Configurable transfer and alert policies:** byte-budgeted active pieces, variance-aware request
+  timeouts, uTP congestion settings, web-seed concurrency, and bounded alert queues with overflow
+  policy, drop counters and `AlertsDroppedAlert` notifications.
 - **`InfoHash.Matches`**, which asks whether two hashes are evidence of identity rather than whether
   their bytes are equal: an absent hash matches nothing, itself included. `==` is unchanged - it is
   byte equality on a type documented for use as a dictionary key, and a value type whose equality is
@@ -35,6 +77,15 @@ history has the reasoning and the measurements behind each one.
   torrent anyone has, and accepting it let absence arrive from outside and be used as a lookup key.
 - **`ITorrent.HasSameIdentity` now reports a torrent as itself** even before it has a hash worth
   comparing.
+- **Transport selection prefers uTP and learns peer support**, rather than enforcing a fixed share
+  of uTP connections. TCP remains available as fallback when enabled.
+
+### Performance
+
+- In the documented local 256 MiB loopback comparison, uTP's median transfer time improved from
+  3.11 s to 2.68 s with roughly 8% less CPU time and managed allocation. These are local samples,
+  not a WAN throughput guarantee; TCP remains faster on loopback. The benchmark suite now includes
+  a repeatable, hash-verified `--loopback` comparison command.
 
 ## 4.0.0 — 2026-08-28
 
