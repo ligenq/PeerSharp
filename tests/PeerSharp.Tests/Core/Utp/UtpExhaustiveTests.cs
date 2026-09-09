@@ -123,7 +123,7 @@ public class UtpExhaustiveTests
     }
 
     [Fact(Timeout = 30000)]
-    public async Task TestDuplicateAcks_ResendMultiple()
+    public async Task TestDuplicateAcks_ResendOnlyTheMissingPacket()
     {
         var stream = await ConnectStream();
         byte[] data = new byte[100];
@@ -147,13 +147,9 @@ public class UtpExhaustiveTests
             _listener.SimulateReceive(ack, _remoteParams);
         }
 
-        int resendCount = 0;
-        while (_listener.SentPackets.TryDequeue(out _))
-        {
-            resendCount++;
-        }
-
-        Assert.True(resendCount >= 2, $"Expected multiple resends, got {resendCount}");
+        Assert.True(_listener.SentPackets.TryDequeue(out var resent));
+        Assert.Equal(ParseHeader(pkt2.Data).SeqNr, ParseHeader(resent.Data).SeqNr);
+        Assert.Empty(_listener.SentPackets);
     }
 
     [Fact(Timeout = 30000)]
@@ -506,7 +502,7 @@ public class UtpExhaustiveTests
     }
 
     [Fact(Timeout = 30000)]
-    public async Task TestTimeout_ResendMultiple()
+    public async Task TestTimeout_ProbesWithOnePacket()
     {
         var stream = await ConnectStream();
         byte[] data = new byte[100];
@@ -524,7 +520,7 @@ public class UtpExhaustiveTests
             resendCount++;
         }
 
-        Assert.True(resendCount >= 2, $"Expected multiple resends, got {resendCount}");
+        Assert.Equal(1, resendCount);
     }
 
     [Fact(Timeout = 30000)]
