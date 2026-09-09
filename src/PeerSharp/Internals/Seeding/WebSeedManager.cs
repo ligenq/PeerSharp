@@ -234,10 +234,25 @@ internal sealed class WebSeedManager : IAsyncDisposable
                 ? BuildFileUrl(source.Url, _torrent.InfoFile.Info.Name, file.Path)
                 : BuildFileUrl(source.Url, file.Path);
 
-            var data = await DownloadFileRangeAsync(fileUrl, fileReadStart, bytesToRead, ct).ConfigureAwait(false);
+            // Already known absent from this source, so the piece cannot come from here and the
+            // request would only earn another 404.
+            if (source.MissingFiles.Contains(file.Path))
+            {
+                return null!;
+            }
+
+            var (data, status) = await DownloadFileRangeAsync(fileUrl, fileReadStart, bytesToRead, ct).ConfigureAwait(false);
             if (data == null || data.Length != bytesToRead)
             {
-                _logger.LogWarning("Failed to download file portion: {FilePath}", file.Path);
+                if (data == null && MeansTheResourceIsNotThere(status))
+                {
+                    RecordFileIsNotThere(source, file.Path, status);
+                }
+                else
+                {
+                    _logger.LogWarning("Failed to download file portion: {FilePath}", file.Path);
+                }
+
                 return null!;
             }
 
@@ -272,6 +287,12 @@ internal sealed class WebSeedManager : IAsyncDisposable
         else if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
             _logger.LogWarning("Range not satisfiable for {Url}", source.Url);
+            return null!;
+        }
+
+        if (MeansTheResourceIsNotThere(response.StatusCode))
+        {
+            RecordFileIsNotThere(source, filePath: null, response.StatusCode);
             return null!;
         }
 
@@ -325,7 +346,8 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
 
 
-    private async Task<byte[]?> DownloadFileRangeAsync(string url, long offset, int length, CancellationToken ct)
+    private async Task<(byte[]? Data, HttpStatusCode Status)> DownloadFileRangeAsync(
+        string url, long offset, int length, CancellationToken ct)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new RangeHeaderValue(offset, offset + length - 1);
@@ -335,14 +357,16 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
         if (response.StatusCode == HttpStatusCode.PartialContent)
         {
-            return await ReadExactContentAsync(response.Content, length, ct).ConfigureAwait(false);
+            return (await ReadExactContentAsync(response.Content, length, ct).ConfigureAwait(false), response.StatusCode);
         }
         else if (response.StatusCode == HttpStatusCode.OK)
         {
-            return await ReadRangeFromFullContentAsync(response.Content, offset, length, ct).ConfigureAwait(false);
+            return (await ReadRangeFromFullContentAsync(response.Content, offset, length, ct).ConfigureAwait(false), response.StatusCode);
         }
 
-        return null;
+        // The status is carried back rather than folded into a null so the caller can tell a file
+        // this source does not have from one it could not serve this time.
+        return (null, response.StatusCode);
     }
 
     private static async Task<byte[]?> ReadExactContentAsync(HttpContent content, int length, CancellationToken ct)
@@ -483,7 +507,15 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
             if (data == null || data.Length != actualPieceSize)
             {
-                _logger.LogWarning("Failed to download piece {PieceIndex}: invalid response size", pieceIndex);
+                // A source that has just been retired said what was wrong and said it at a level
+                // that suits it. Repeating it here as a size problem describes the wrong fault, and
+                // for a seed that has none of the torrent it would be the second warning per piece
+                // for as long as pieces were still being tried.
+                if (!source.IsRetired)
+                {
+                    _logger.LogWarning("Failed to download piece {PieceIndex}: invalid response size", pieceIndex);
+                }
+
                 RecordFailure(source);
                 return;
             }
@@ -576,6 +608,73 @@ internal sealed class WebSeedManager : IAsyncDisposable
         int limit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnections, 1, 64);
         int perSource = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource, 1, limit);
         return Math.Max(IHttpClientFactory.DefaultMaxConnectionsPerServer, perSource);
+    }
+
+    /// <summary>
+    /// Whether a status says the resource is not at this URL, as opposed to the server being
+    /// briefly unable to serve it.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately narrow. A 404 or a 410 is HTTP saying there is nothing here, and no number of
+    /// retries changes that; everything else - a 500, a 503, a timeout - is the server having a bad
+    /// minute and keeps the ordinary backoff. 403 and 401 are left out on purpose: a web seed
+    /// behind an authenticating proxy that is misconfigured for a moment would be written off for
+    /// the whole torrent, and the cost of retrying those is only the backoff.
+    /// </remarks>
+    private static bool MeansTheResourceIsNotThere(HttpStatusCode status) =>
+        status is HttpStatusCode.NotFound or HttpStatusCode.Gone;
+
+    /// <summary>
+    /// Records that a source does not hold one of the torrent's files, and retires the source once
+    /// it holds none of them.
+    /// </summary>
+    /// <remarks>
+    /// libtorrent does the same thing per file rather than per server: a non-OK status clears that
+    /// file's bit in the web seed's <c>have_files</c>, and only a seed left holding nothing the
+    /// torrent wants stops being asked. A multi-file torrent whose seed is missing one file can
+    /// still be served the rest by it, which dropping the whole source would throw away.
+    /// </remarks>
+    private void RecordFileIsNotThere(WebSeedSource source, string? filePath, HttpStatusCode status)
+    {
+        bool retiredNow = false;
+
+        lock (_lock)
+        {
+            if (source.IsRetired)
+            {
+                return;
+            }
+
+            if (filePath is null)
+            {
+                source.IsRetired = true;
+            }
+            else
+            {
+                source.MissingFiles.Add(filePath);
+                source.IsRetired = _torrent.InfoFile.Info.Files
+                    .Where(file => !file.IsPadding)
+                    .All(file => source.MissingFiles.Contains(file.Path));
+            }
+
+            retiredNow = source.IsRetired;
+        }
+
+        if (retiredNow)
+        {
+            _logger.LogInformation(
+                "Web seed {Url} does not have this torrent ({StatusCode}); it will not be asked again",
+                source.Url,
+                status);
+        }
+        else
+        {
+            _logger.LogDebug(
+                "Web seed {Url} does not have {FilePath} ({StatusCode}); the rest of the torrent is still offered",
+                source.Url,
+                filePath,
+                status);
+        }
     }
 
     private void RecordFailure(WebSeedSource source)
@@ -679,6 +778,18 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
         public int ActiveDownloads { get; set; }
         public int FailureCount { get; set; }
+
+        /// <summary>
+        /// The files this source has answered for with a status that says the resource is not
+        /// there. Keyed by the torrent's own path for the file, and empty for a single-file
+        /// torrent, where <see cref="IsRetired"/> carries the same news.
+        /// </summary>
+        public HashSet<string> MissingFiles { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Set once this source has nothing left that the torrent wants. Not asked again.
+        /// </summary>
+        public bool IsRetired { get; set; }
         public bool IsDirectory { get; }
         public bool IsMultiFile { get; }
         public DateTimeOffset LastFailure { get; set; }
@@ -687,6 +798,14 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
         public bool IsAvailable(TimeProvider timeProvider, int maxDownloads = 1)
         {
+            // A source that has told us it does not hold what we want is not waiting on a backoff,
+            // it is answered. Retrying it costs a request and a warning per attempt for the length
+            // of the download and cannot ever succeed.
+            if (IsRetired)
+            {
+                return false;
+            }
+
             if (ActiveDownloads >= maxDownloads)
             {
                 return false;

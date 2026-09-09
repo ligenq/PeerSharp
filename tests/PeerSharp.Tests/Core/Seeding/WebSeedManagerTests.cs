@@ -1,4 +1,4 @@
-using PeerSharp.Internals;
+﻿using PeerSharp.Internals;
 using PeerSharp.Internals.Seeding;
 using PeerSharp.Internals.Framework;
 using Microsoft.Extensions.Time.Testing;
@@ -136,6 +136,102 @@ public class WebSeedManagerTests
         var data = await manager.DownloadSingleFilePieceAsync(source, 0, 16, CancellationToken.None);
 
         Assert.Null(data);
+    }
+
+    /// <summary>
+    /// A multi-file seed missing one file still holds the others, so it keeps being asked for them.
+    /// </summary>
+    /// <remarks>
+    /// libtorrent records this per file rather than per server - a non-OK status clears that file's
+    /// bit in the web seed's <c>have_files</c> - and only a seed left holding nothing the torrent
+    /// wants stops being asked. Retiring the whole source on one missing file would throw away
+    /// everything else it could serve.
+    /// </remarks>
+    [Fact]
+    public async Task DownloadMultiFilePieceAsync_OneMissingFileDoesNotRetireTheWholeSource()
+    {
+        var (torrent, handler, manager) = MultiFileSeed(missing: ["a.bin"]);
+        var source = new WebSeedManager.WebSeedSource("http://seed.com", true);
+
+        Assert.Null(await manager.DownloadMultiFilePieceAsync(source, 0, 0, 10, CancellationToken.None));
+
+        Assert.False(source.IsRetired);
+        Assert.Contains("a.bin", source.MissingFiles);
+        Assert.True(source.IsAvailable(_timeProvider));
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DownloadMultiFilePieceAsync_ASourceMissingEveryFileIsRetired()
+    {
+        var (torrent, handler, manager) = MultiFileSeed(missing: ["a.bin", "b.bin"]);
+        var source = new WebSeedManager.WebSeedSource("http://seed.com", true);
+
+        // Piece assembly stops at the first file it cannot get, so a source learns its missing files
+        // one piece at a time. These two start in different files, which is what it takes to hear
+        // about both.
+        Assert.Null(await manager.DownloadMultiFilePieceAsync(source, 0, 0, 6, CancellationToken.None));
+        Assert.False(source.IsRetired);
+
+        Assert.Null(await manager.DownloadMultiFilePieceAsync(source, 1, 6, 6, CancellationToken.None));
+
+        Assert.True(source.IsRetired);
+        Assert.False(source.IsAvailable(_timeProvider));
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DownloadMultiFilePieceAsync_AFileKnownMissingIsNotAskedForAgain()
+    {
+        var (torrent, handler, manager) = MultiFileSeed(missing: ["a.bin"]);
+        var source = new WebSeedManager.WebSeedSource("http://seed.com", true);
+
+        Assert.Null(await manager.DownloadMultiFilePieceAsync(source, 0, 0, 10, CancellationToken.None));
+        int afterFirst = handler.SentRequests.Count;
+
+        Assert.Null(await manager.DownloadMultiFilePieceAsync(source, 0, 0, 10, CancellationToken.None));
+
+        Assert.Equal(afterFirst, handler.SentRequests.Count);
+
+        await torrent.DisposeAsync();
+    }
+
+    /// <summary>A two-file seed that answers 404 for the named files and serves the rest.</summary>
+    private (Torrent Torrent, MockHttpClient Handler, WebSeedManager Manager) MultiFileSeed(string[] missing)
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Name = "multi";
+        metadata.Info.PieceSize = 10;
+        metadata.Info.FullSize = 12;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "a.bin", Size = 6, Offset = 0 });
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "b.bin", Size = 6, Offset = 6 });
+
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        var handler = new MockHttpClient
+        {
+            Handler = request =>
+            {
+                string url = request.RequestUri?.ToString() ?? string.Empty;
+                if (missing.Any(name => url.Contains(name, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return new HttpResponseMessage(HttpStatusCode.NotFound);
+                }
+
+                var range = request.Headers.Range?.Ranges.First();
+                long start = range?.From ?? 0;
+                long end = range?.To ?? -1;
+                return new HttpResponseMessage(HttpStatusCode.PartialContent)
+                {
+                    Content = new ByteArrayContent(new byte[end - start + 1])
+                };
+            }
+        };
+
+        var manager = new WebSeedManager(torrent, ["http://seed.com"], _timeProvider);
+        manager.SetTestClient(handler);
+        return (torrent, handler, manager);
     }
 
     [Fact]
