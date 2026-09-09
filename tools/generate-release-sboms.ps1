@@ -95,6 +95,16 @@ foreach ($definition in $packageDefinitions) {
     # suppressParent="All".
     $roots = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($framework in $assets.project.frameworks.Values) {
+        # Package validation restores this package's older baseline via PackageDownload, not a
+        # runtime dependency. Component Detection scans downloadDependencies independently of
+        # libraries/targets, so pruning those graphs alone still lists the baseline in the SBOM.
+        # Filter only this package's validation download; preserve other downloads for detection.
+        if ($framework.ContainsKey('downloadDependencies')) {
+            $framework.downloadDependencies = @($framework.downloadDependencies | Where-Object {
+                $_.name -ne $packageName
+            })
+        }
+
         foreach ($name in @($framework.dependencies.Keys)) {
             if ($framework.dependencies[$name].suppressParent -eq 'All') {
                 $framework.dependencies.Remove($name) | Out-Null
