@@ -36,6 +36,29 @@ dotnet run -c Release --project benchmarks/PeerSharp.Benchmarks -- --filter '*' 
 
 ## Suites
 
+### TCP/uTP loopback transfer
+
+```bash
+dotnet run -c Release --project benchmarks/PeerSharp.Benchmarks -- --loopback 256 5 both
+```
+
+This separate mode compares two PeerSharp engines in one process, using actual loopback sockets,
+one peer, a 256 KiB piece size, and no encryption or external discovery. Arguments are MiB,
+measured iterations, and `both`, `tcp`, or `utp`. Each transport gets one full-size warmup;
+subsequent runs alternate order. Every download uses a fresh directory and is SHA-256 verified.
+Timing includes connection/BitTorrent setup and download verification by the engine, but excludes
+fixture creation, seed recheck, the final SHA-256 check, and disposal. Completion is polled every
+10 ms. JSON lines include process CPU time (both engines), managed allocations and GC counts.
+
+Run without other benchmarks/builds in parallel and compare distributions, not the fastest run.
+This is a warm-cache, same-machine ceiling, not a WAN or libtorrent interoperability result.
+Payloads and results are retained under the printed `artifacts/transport-loopback` directory;
+the default run uses about 3.25 GiB. A timeout or hash mismatch fails the command.
+
+See [the uTP investigation](UTP-INVESTIGATION.md) for the initial measurements and recovery fixes.
+
+### Microbenchmarks
+
 | Suite | Covers | Why it matters |
 |---|---|---|
 | `StorageBenchmarks` | 16 KiB block read/write, single-file and spanning two files | Called once per block by `BlockCache` — the hottest disk path in the engine |

@@ -121,6 +121,7 @@ internal class UtpStream : Stream
     // SACK SUPPORT: Dictionary for O(1) lookup/removal on selective ACKs
     // Key = SeqNr, allows fast removal when SACK indicates receipt
     private readonly Dictionary<ushort, SentPacket> _sentPackets = [];
+    private readonly Queue<ushort> _timeoutResendQueue = new();
 
     private readonly Queue<ushort> _sentSeqQueue = new();
     private readonly TimeProvider _timeProvider;
@@ -393,6 +394,11 @@ internal class UtpStream : Stream
                         // that knows where the path actually saturated.
                         _slowStart = true;
 
+                        // The whole outstanding flight has already paid for this timeout.
+                        // Later SACK reports must not cut it again and end slow-start.
+                        _lossSeqNr = (ushort)(_seqNr - 1);
+                        _nextLossCut = now.AddMilliseconds(LossCutIntervalMs);
+
                         // Increase base timeout to prevent death spiral on high latency links where RTT samples are lost due to retransmits
                         _packetTimeout = Math.Min(_packetTimeout * 2, 10000);
                     }
@@ -400,22 +406,29 @@ internal class UtpStream : Stream
                     _logger.LogTrace("LEDBAT {Remote}: TIMEOUT - cwnd {OldCwnd:F0}B -> {Cwnd:F0}B, timeoutCount={TimeoutCount}, mss={Mss}, packetTimeout={PacketTimeout}ms",
                         RemoteEndPoint, oldCwnd, _cwnd, _timeoutCount, _mss, _packetTimeout);
 
-                    var resendList = new List<SentPacket>(4);
+                    // Retain all reliability copies, but timed-out packets are no longer
+                    // charged as in-flight. Otherwise the reduced window is full until
+                    // the entire old flight is ACKed, with only four retries per RTO.
+                    _timeoutResendQueue.Clear();
                     foreach (var seq in _sentSeqQueue)
                     {
-                        if (resendList.Count >= 4)
-                        {
-                            break;
-                        }
                         if (_sentPackets.TryGetValue(seq, out var pkt))
                         {
-                            resendList.Add(pkt);
+                            if (!pkt.NeedsResend)
+                            {
+                                _sentBytesUnacked -= pkt.Length;
+                                pkt.NeedsResend = true;
+                            }
+                            _timeoutResendQueue.Enqueue(seq);
                         }
                     }
 
-                    foreach (var pkt in resendList)
+                    // Probe with one packet; subsequent ACKs clock the remaining retries.
+                    if (_timeoutResendQueue.TryDequeue(out ushort probeSeq) &&
+                        _sentPackets.TryGetValue(probeSeq, out var probe))
                     {
-                        ResendPacket(pkt);
+                        ResendPacket(probe);
+                        _fastResendSeqNr = (ushort)(probeSeq + 1);
                     }
                     _timeoutCount++;
                     // Exponential backoff per libutp, cap at 30s
@@ -649,7 +662,7 @@ internal class UtpStream : Stream
                     throw new IOException("Connection closed while writing");
                 }
                 double effectiveWindow = Math.Min(_wndSize, _cwnd);
-                canSend = _sentBytesUnacked < effectiveWindow;
+                canSend = _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
                 if (!canSend)
                 {
                     _lastMaxedOutWindow = _timeProvider.GetUtcNow();
@@ -666,7 +679,7 @@ internal class UtpStream : Stream
                         throw new IOException("Connection closed while writing");
                     }
                     double effectiveWindow = Math.Min(_wndSize, _cwnd);
-                    canSend = _sentBytesUnacked < effectiveWindow;
+                    canSend = _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
                     if (!canSend)
                     {
                         _lastMaxedOutWindow = _timeProvider.GetUtcNow();
@@ -780,8 +793,25 @@ internal class UtpStream : Stream
                 FlushPendingWrites();
             }
 
-            // Update timeout timer
-            _nextTimeout = _timeProvider.GetUtcNow().AddMilliseconds(_packetTimeout);
+            // Active data retransmissions are armed by a send or ACK progress, not
+            // by unrelated incoming requests/duplicate ACKs. Otherwise a live reverse
+            // direction can postpone recovery of a lost packet indefinitely.
+            //
+            // A deliberate departure from libtorrent, which re-arms on every valid packet
+            // it receives - "this is a valid incoming packet, update the timeout timer".
+            // It can afford to because parse_sack gives it a second way to learn a packet
+            // was lost, and it attaches that report to whatever packet is going out. This
+            // only attaches one to a pure acknowledgement, so while downloading - when the
+            // peer sends data and this side sends requests - a lost request has no
+            // recovery but this timer, and every packet the peer sends would push it back.
+            // What is left measures the thing a retransmission timer is for: no progress on
+            // our own outstanding data, which is also how TCP arms its RTO. Widening the
+            // report instead is the fix that removes the need for this, and it measured
+            // worse for reasons not yet understood - see the SACK extension in SendPacket.
+            if (_sentPackets.Count == 0 || _state == UtpState.SynRecv)
+            {
+                _nextTimeout = _timeProvider.GetUtcNow().AddMilliseconds(_packetTimeout);
+            }
         }
     }
 
@@ -998,11 +1028,26 @@ internal class UtpStream : Stream
         }
 
         double effectiveWindow = Math.Min(_wndSize, _cwnd);
+        while (_timeoutResendQueue.TryPeek(out ushort seq))
+        {
+            if (!_sentPackets.TryGetValue(seq, out var packet) || !packet.NeedsResend)
+            {
+                _timeoutResendQueue.Dequeue();
+                continue;
+            }
+            if (_sentBytesUnacked >= effectiveWindow ||
+                (_sentBytesUnacked > 0 && _sentBytesUnacked + packet.Length > effectiveWindow))
+            {
+                break;
+            }
+            _timeoutResendQueue.Dequeue();
+            ResendPacket(packet);
+        }
         bool shouldRelease = false;
 
         try
         {
-            if (_sentBytesUnacked < effectiveWindow && _writeSemaphore.CurrentCount == 0)
+            if (_timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow && _writeSemaphore.CurrentCount == 0)
             {
                 shouldRelease = true;
             }
@@ -1143,6 +1188,14 @@ internal class UtpStream : Stream
             AdvanceSentQueue();
         }
 
+        // ACKed packets cannot report a new loss. Keep the cut boundary in the active
+        // sequence space even during a long loss-free transfer; otherwise a first loss
+        // after 32768 packets compares as older than the stale 16-bit watermark.
+        if (Utils.CompareSeq(_lossSeqNr, effectiveAckNr) < 0)
+        {
+            _lossSeqNr = effectiveAckNr;
+        }
+
         // Fast retransmit driven by the selective acknowledgement rather than by counting duplicate
         // ones. Packets acknowledged beyond a hole name the packet that is missing, where a
         // duplicate acknowledgement only says that something is.
@@ -1161,6 +1214,7 @@ internal class UtpStream : Stream
         {
             _duplicateAckCount = 0;
             _timeoutCount = 0; // Reset timeout count on successful ACK
+            _nextTimeout = now.AddMilliseconds(_packetTimeout);
 
             // Keep the fast-resend watermark with the acknowledged point. Left behind it drifts
             // arbitrarily far back, and these are wrapping 16-bit sequence numbers - a comparison
@@ -1190,35 +1244,25 @@ internal class UtpStream : Stream
             // Per libutp: DUPLICATE_ACKS_BEFORE_RESEND = 3
             if (_duplicateAckCount >= DuplicateAcksBeforeResend && !missingPacketSackd)
             {
-                if (_mtuProbeSeq != 0 && ackNr == (ushort)(_mtuProbeSeq - 1))
+                // A duplicate ACK reports only ack_nr + 1 as missing (BEP 29).
+                // Walking the next four unresent packets on every third duplicate
+                // retransmitted the entire tail, including packets still in flight.
+                // Share SACK's watermark so reports of the same hole cannot do that
+                // again. A lost retransmission is still recovered by the RTO.
+                if (Utils.CompareSeq(expectedSeq, _fastResendSeqNr) >= 0 &&
+                    _sentPackets.TryGetValue(expectedSeq, out var pkt))
                 {
-                    HandleMtuProbeLoss("DUPACK");
-                }
-
-                var resendList = new List<SentPacket>(4);
-                foreach (var seq in _sentSeqQueue)
-                {
-                    if (resendList.Count >= 4)
+                    if (_mtuProbeSeq != 0 && expectedSeq == _mtuProbeSeq)
                     {
-                        break;
+                        HandleMtuProbeLoss("DUPACK");
                     }
-                    if (_sentPackets.TryGetValue(seq, out var pkt) && !pkt.Resent)
-                    {
-                        resendList.Add(pkt);
-                    }
-                }
-
-                if (resendList.Count > 0)
-                {
                     double oldCwnd = _cwnd;
-                    bool cut = ExperiencedLoss(resendList[0].SeqNr);
+                    bool cut = ExperiencedLoss(expectedSeq);
 
-                    foreach (var pkt in resendList)
-                    {
-                        _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd {Cut} {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
-                            RemoteEndPoint, cut ? "CUT" : "held", oldCwnd, _cwnd, _mss, pkt.SeqNr);
-                        ResendPacket(pkt);
-                    }
+                    _logger.LogTrace("LEDBAT {Remote}: PACKET LOSS (3 dup ACKs) - cwnd {Cut} {OldCwnd:F0}B -> {Cwnd:F0}B, mss={Mss}, resending {SeqNr}",
+                        RemoteEndPoint, cut ? "CUT" : "held", oldCwnd, _cwnd, _mss, pkt.SeqNr);
+                    ResendPacket(pkt);
+                    _fastResendSeqNr = (ushort)(expectedSeq + 1);
                 }
                 _duplicateAckCount = 0;
             }
@@ -1568,6 +1612,7 @@ internal class UtpStream : Stream
         }
         _sentPackets.Clear();
         _sentSeqQueue.Clear();
+        _timeoutResendQueue.Clear();
         _sentBytesUnacked = 0;
     }
 
@@ -1586,7 +1631,10 @@ internal class UtpStream : Stream
 
     private void ReleaseSentPacket(SentPacket pkt)
     {
-        _sentBytesUnacked -= pkt.Length;
+        if (!pkt.NeedsResend)
+        {
+            _sentBytesUnacked -= pkt.Length;
+        }
         if (pkt.Pooled)
         {
             _pool.Return(pkt.Buffer);
@@ -1595,6 +1643,11 @@ internal class UtpStream : Stream
 
     private void ResendPacket(SentPacket pkt)
     {
+        if (pkt.NeedsResend)
+        {
+            pkt.NeedsResend = false;
+            _sentBytesUnacked += pkt.Length;
+        }
         pkt.Resent = true;
         pkt.SendTime = _timeProvider.GetUtcNow();
 
@@ -1750,6 +1803,7 @@ internal class UtpStream : Stream
             if (_sentPackets.Count == 1)
             {
                 _oldestUnackedSeq = _seqNr;
+                _nextTimeout = pkt.SendTime.AddMilliseconds(_packetTimeout);
                 // Start the watermark in this flight's sequence space. Zero may be
                 // ahead of a random initial sequence by the wrapping comparison.
                 _fastResendSeqNr = _seqNr;
@@ -2095,6 +2149,7 @@ internal class UtpStream : Stream
         public int Length { get; set; }
         public bool Pooled { get; set; }
         public bool Resent { get; set; }
+        public bool NeedsResend { get; set; }
 
         // Track if RTT was already sampled for this packet to avoid double-sampling
         public bool RttSampled { get; set; }
