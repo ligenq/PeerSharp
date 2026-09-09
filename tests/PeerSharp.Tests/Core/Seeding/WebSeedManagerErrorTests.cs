@@ -1,4 +1,4 @@
-using PeerSharp.Internals;
+﻿using PeerSharp.Internals;
 using PeerSharp.Internals.Seeding;
 using PeerSharp.Internals.Framework;
 using Microsoft.Extensions.Time.Testing;
@@ -99,8 +99,41 @@ public class WebSeedManagerErrorTests
         }
     }
 
+    /// <summary>
+    /// A 404 is not a failure to retry, it is an answer: there is nothing at that URL and no number
+    /// of attempts changes it. Retrying cost a request and a warning per attempt for the length of
+    /// the download - Debian's own torrent advertises a web seed that 404s, so every consumer
+    /// downloading it saw that.
+    /// </summary>
     [Fact]
-    public async Task DownloadPieceAsync_404_RecordsFailureAndRetries()
+    public async Task DownloadPieceAsync_404_RetiresTheSourceInsteadOfRetrying()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var torrent = CreateTorrentWithPieces();
+        var manager = new WebSeedManager(torrent, ["http://seed.com/file.bin"], timeProvider);
+        var mockHttp = new MockHttpClient();
+        manager.SetTestClient(mockHttp);
+
+        mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.NotFound));
+
+        manager.Start();
+        await WaitForRequestCount(mockHttp, 1, timeProvider);
+
+        // The backoff would otherwise have let it through several times over.
+        timeProvider.Advance(TimeSpan.FromMinutes(10));
+        Assert.Equal(0, manager.GetStats().AvailableSources);
+        Assert.Single(mockHttp.RequestedUrls);
+
+        await manager.StopAsync();
+        await torrent.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The other half: a status that says "not now" keeps its retries, so retiring on 404 cannot be
+    /// widened into giving up on a server having a bad minute.
+    /// </summary>
+    [Fact]
+    public async Task DownloadPieceAsync_503_RecordsFailureAndRetries()
     {
         var timeProvider = new FakeTimeProvider();
         var torrent = CreateTorrentWithPieces();
@@ -109,9 +142,9 @@ public class WebSeedManagerErrorTests
         manager.SetTestClient(mockHttp);
 
         // Fail 3 times
-        mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.NotFound));
-        mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.NotFound));
-        mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.NotFound));
+        mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
 
         manager.Start();
 
@@ -175,10 +208,11 @@ public class WebSeedManagerErrorTests
         var mockHttp = new MockHttpClient();
         manager.SetTestClient(mockHttp);
 
-        // Queue enough failures for both seeds
+        // Queue enough failures for both seeds. Transient, because the point here is a source that
+        // runs out of retries; a 404 retires a source outright and would never reach three.
         for (int i = 0; i < 10; i++)
         {
-            mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.NotFound));
+            mockHttp.Responses.Enqueue(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
         }
 
         manager.Start();
