@@ -22,7 +22,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp.WebTorrent 4.0.0 targets PeerSharp 4.0.0 and contains no WebTorrent-specific API changes. See https://github.com/ligenq/PeerSharp/blob/main/CHANGELOG.md for the core engine changes included in this release.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp.WebTorrent 5.0.0 targets PeerSharp 5.0.0. Upgrade both packages together and review the core engine's settings and IAlerts migration notes at https://github.com/ligenq/PeerSharp/blob/v5.0.0/CHANGELOG.md.</PackageReleaseNotes>
 		<IsTrimmable>true</IsTrimmable>
 		<RootNamespace>PeerSharp.WebTorrent</RootNamespace>
 		<AssemblyName>PeerSharp.WebTorrent</AssemblyName>

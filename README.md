@@ -39,7 +39,7 @@ polling statistics, and proxy capability reporting.
 ### Installation
 
 ```bash
-dotnet add package PeerSharp --version 4.0.0
+dotnet add package PeerSharp --version 5.0.0
 ```
 
 Requires .NET 10.0 or later.
@@ -49,7 +49,7 @@ Requires .NET 10.0 or later.
 Each GitHub release includes SPDX SBOMs for `PeerSharp` and `PeerSharp.WebTorrent` alongside the NuGet and symbol packages. Release packages have signed GitHub build-provenance and SBOM attestations. After downloading a package, verify its origin with the GitHub CLI:
 
 ```bash
-gh attestation verify PeerSharp.4.0.0.nupkg --repo ligenq/PeerSharp
+gh attestation verify PeerSharp.5.0.0.nupkg --repo ligenq/PeerSharp
 ```
 
 ### Basic Usage
@@ -382,7 +382,7 @@ magnet's metadata fetch and stop, `--run-for <s>` for an unattended run that exi
 PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
 
 ```bash
-dotnet add package PeerSharp.WebTorrent --version 4.0.0
+dotnet add package PeerSharp.WebTorrent --version 5.0.0
 ```
 
 ```csharp
