@@ -9,6 +9,87 @@ namespace PeerSharp.Tests.Core.Utp;
 public class UtpSackEmissionTests
 {
     [Theory(Timeout = 30000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PiggybackedSackRecoversLostRequestWithoutStateAcksOrTimer(bool fin)
+    {
+        await using var requester = new Peer();
+        await using var responder = new Peer(seq: 101, ack: 499);
+        byte[] requests = [10, 11, 12, 13, 14, 15];
+        foreach (byte request in requests)
+        {
+            await requester.Stream.WriteAsync(new byte[] { request }, TestContext.Current.CancellationToken);
+        }
+
+        // Drop request 500. Later requests give the responder positive evidence of
+        // the hole, but deliberately deliver NONE of its standalone STATE ACKs.
+        foreach (byte[] packet in requester.Packets(MessageType.ST_DATA).Skip(1))
+        {
+            responder.Receive(packet);
+        }
+        if (fin)
+        {
+            responder.Stream.Close();
+        }
+        else
+        {
+            await responder.Stream.WriteAsync(new byte[] { 0x42 }, TestContext.Current.CancellationToken);
+        }
+        byte[] report = responder.Last(fin ? MessageType.ST_FIN : MessageType.ST_DATA);
+        Assert.Equal(new byte[] { 0x1F, 0, 0, 0 }, Mask(report));
+        requester.Receive(report);
+
+        // No fake time has advanced: this must be fast recovery from the actual
+        // emitted extension, through the production parser, not timeout recovery.
+        Assert.Equal(7, requester.Packets(MessageType.ST_DATA).Length);
+        byte[] retry = requester.Last(MessageType.ST_DATA);
+        Assert.Equal((ushort)500, Read(retry, 16));
+        Assert.Equal(new byte[] { requests[0] }, Payload(retry));
+        Assert.Equal(0, Get(requester.Stream, "_timeoutCount"));
+        responder.Receive(retry);
+        byte[] received = new byte[requests.Length];
+        await responder.Stream.ReadExactlyAsync(received, TestContext.Current.CancellationToken);
+        Assert.Equal(requests, received);
+        requester.Receive(responder.Last(MessageType.ST_STATE));
+        Assert.Equal(0, requester.Stream.SentPacketsCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task LostTailRequestNeedsTimerDespiteWorkingPiggybackEmission()
+    {
+        await using var requester = new Peer();
+        await using var responder = new Peer(seq: 101, ack: 499);
+        await requester.Stream.WriteAsync(new byte[] { 0x13 }, TestContext.Current.CancellationToken);
+        // Drop the only request. The responder has no later request to expose a
+        // hole, but can continue sending previously requested data in reverse.
+        DateTimeOffset deadline = (DateTimeOffset)Get(requester.Stream, "_nextTimeout");
+        for (int i = 0; i < 9; i++)
+        {
+            requester.Advance(TimeSpan.FromMilliseconds(100));
+            await responder.Stream.WriteAsync(new byte[] { (byte)i }, TestContext.Current.CancellationToken);
+            byte[] data = responder.Last(MessageType.ST_DATA);
+            Assert.Empty(Mask(data)); // Correct: there is no out-of-order request.
+            requester.Receive(data);
+            responder.Receive(requester.Last(MessageType.ST_STATE));
+            Assert.Equal(deadline, Get(requester.Stream, "_nextTimeout"));
+            Assert.Single(requester.Packets(MessageType.ST_DATA));
+        }
+
+        // The manager's 500 ms timer uses a strict deadline comparison; 1.5 s is
+        // its first tick after the initial one-second retransmission deadline.
+        requester.Advance(TimeSpan.FromMilliseconds(600));
+        Assert.Equal(2, requester.Packets(MessageType.ST_DATA).Length);
+        byte[] retry = requester.Last(MessageType.ST_DATA);
+        Assert.Equal((ushort)500, Read(retry, 16));
+        responder.Receive(retry);
+        byte[] received = new byte[1];
+        await responder.Stream.ReadExactlyAsync(received, TestContext.Current.CancellationToken);
+        Assert.Equal(0x13, received[0]);
+        requester.Receive(responder.Last(MessageType.ST_STATE));
+        Assert.Equal(0, requester.Stream.SentPacketsCount);
+    }
+
+    [Theory(Timeout = 30000)]
     [InlineData(100, 0)]
     [InlineData(100, 7)]
     [InlineData(100, 8)]
@@ -268,6 +349,7 @@ public class UtpSackEmissionTests
             MessageType.ST_DATA, seq, acknowledgeWrites ? (ushort)(Stream.SeqNr - 1) : _initialAck, [1]));
         public void ReceiveAck(ushort ack) => Receive(Packet(MessageType.ST_STATE, (ushort)(Stream.AckNr + 1), ack, []));
         public void Retry() => _time.Advance(TimeSpan.FromSeconds(10));
+        public void Advance(TimeSpan elapsed) => _time.Advance(elapsed);
 
         public async ValueTask DisposeAsync()
         {
