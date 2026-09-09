@@ -1,8 +1,8 @@
 # Application integration APIs
 
 These APIs let applications use the engine's torrent semantics without maintaining their own
-copies. They are available in this source tree; applications consuming NuGet need a package
-containing these changes before adopting them.
+copies. They are available in PeerSharp 5.0.0 and later. See [the changelog](CHANGELOG.md)
+for migration notes when upgrading from 4.0.0.
 
 ## Findings from Peerfluence
 
