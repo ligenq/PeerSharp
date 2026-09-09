@@ -797,17 +797,14 @@ internal class UtpStream : Stream
             // by unrelated incoming requests/duplicate ACKs. Otherwise a live reverse
             // direction can postpone recovery of a lost packet indefinitely.
             //
-            // A deliberate departure from libtorrent, which re-arms on every valid packet
-            // it receives - "this is a valid incoming packet, update the timeout timer".
-            // It can afford to because parse_sack gives it a second way to learn a packet
-            // was lost, and it attaches that report to whatever packet is going out. This
-            // only attaches one to a pure acknowledgement, so while downloading - when the
-            // peer sends data and this side sends requests - a lost request has no
-            // recovery but this timer, and every packet the peer sends would push it back.
-            // What is left measures the thing a retransmission timer is for: no progress on
-            // our own outstanding data, which is also how TCP arms its RTO. Widening the
-            // report instead is the fix that removes the need for this, and it measured
-            // worse for reasons not yet understood - see the SACK extension in SendPacket.
+            // This deliberately differs from BEP 29's reset-on-any-packet rule.
+            // SendPacket already carries SACK on DATA and FIN as well as STATE;
+            // it cannot, however, report a lost tail packet when no later packet
+            // in that direction arrives to expose the hole. Reverse-direction data
+            // can continue without acknowledging that packet or supplying SACK evidence.
+            // Keep recovery tied to progress on our own flight, not reverse traffic.
+            // UtpSackEmissionTests covers both piggyback-only fast recovery and the
+            // lost-tail case; this rule is not a workaround for STATE-only emission.
             if (_sentPackets.Count == 0 || _state == UtpState.SynRecv)
             {
                 _nextTimeout = _timeProvider.GetUtcNow().AddMilliseconds(_packetTimeout);

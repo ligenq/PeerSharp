@@ -1,7 +1,36 @@
 # uTP loopback throughput investigation
 
-Investigated `main` at `73848a0` on 2026-09-06. Changes are on
-`codex/utp-throughput-investigation`, uncommitted.
+Investigated `main` at `73848a0` on 2026-09-06. The initial changes were subsequently
+committed as `77d3710` on `codex/utp-throughput-investigation`.
+
+## SACK emission follow-up (2026-09-09)
+
+The timer rationale added in `77d3710` incorrectly claimed that SACK emission was still
+STATE-only and that widening it had an unexplained performance regression. That description
+predates `9901e91`, which already corrected mask sizing, retransmission rebasing and MTU
+reservation, and enabled emission on DATA and FIN. The current emitter and parser implement
+that path; the comment, not the emission scope, was stale.
+
+Three deterministic, two-stream tests now exercise the production emitter and parser:
+
+- Drop the first of six request packets and all standalone STATE ACKs. A SACK carried on
+  reverse-direction DATA triggers retransmission of exactly the lost request, before time
+  advances. The responder then reads all six request payloads in order.
+- Repeat that test with the SACK carried on FIN instead of DATA.
+- Drop the only request while previously requested reverse-direction data continues arriving.
+  No SACK can be emitted: the responder has seen no later request to reveal a gap. The
+  progress-based deadline remains armed and recovers the request through a timeout.
+
+All three pass on the existing runtime behavior. Negative controls temporarily disabling
+DATA/FIN SACK emission or resetting the deadline on every received packet make the corresponding
+tests fail; those controls were removed afterward. Existing tests also cover full-sized writes,
+IPv4/IPv6 MTU reservation, mask padding, sequence wrap, and rebuilding/removing retained masks.
+
+Consequently, no additional emitter change is justified by the reported claim, and restoring
+the reset-on-any-packet timer rule is not justified by working piggyback emission. The timer
+departure remains intentional for loss cases without SACK evidence. This follow-up corrects
+the rationale and adds regression coverage; it changes no runtime behavior and makes no new
+throughput or third-party interoperability claim.
 
 ## Conclusion
 
