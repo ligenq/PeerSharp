@@ -1710,6 +1710,36 @@ public class UdpTrackerTests
         Assert.Equal(98, packet.Length);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_HostThatDoesNotResolve_FailsWithoutOpeningASocket()
+    {
+        // Known before anything is sent, so reported as a result rather than thrown and retried per family.
+        var factory = new FamilyUdpSocketFactory();
+        var tracker = new UdpTracker(
+            _timeProvider,
+            factory,
+            NullLoggerFactory.Instance,
+            (_, _) => Task.FromResult(Array.Empty<IPAddress>()));
+        tracker.Init("udp://gone.example:80/announce", _torrent, _callback);
 
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
 
+        Assert.False(_callback.Success);
+        Assert.Contains("gone.example", _callback.AnnounceErrorMessage);
+        Assert.Empty(factory.RequestedFamilies);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_ThroughTheNameCache_TreatsAnUnresolvableHostTheSameWay()
+    {
+        var names = new HostAddressCache(
+            _timeProvider,
+            (_, _) => Task.FromException<IPAddress[]>(new SocketException((int)SocketError.HostNotFound)));
+        var tracker = new UdpTracker(_timeProvider, NullLoggerFactory.Instance, names);
+        tracker.Init("udp://gone.example:80/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.False(_callback.Success);
+    }
 }

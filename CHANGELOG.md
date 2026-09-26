@@ -31,9 +31,48 @@ history has the reasoning and the measurements behind each one.
 - The library declares `IsAotCompatible`, and builds with the AOT analyzers without warnings.
 - Passing a bare `null` as the third `HttpStreamServer` constructor argument is now ambiguous; cast it
   to `ILoggerFactory` or `HttpStreamServerOptions`.
+- **Far fewer exceptions are thrown in ordinary operation.** Measured over a ninety-second streaming
+  session, about one in twenty of the exceptions that used to be raised still are, and none of them
+  passes from PeerSharp into framework code - which is what stops a debugger with Just My Code on:
+  - Tracker host names are resolved through a cache that also remembers names that do not resolve, and
+    an announce goes out only over the address families the host has. A tracker without an IPv6
+    address, or whose name no longer resolves, used to throw on every announce.
+  - Datagrams to addresses a socket refuses (0.0.0.0, multicast, the reserved 240/4 block, port 0)
+    are dropped before sending, and those peers are no longer dialled. After a send finds no route to a
+    destination, that address is left alone for a minute; other addresses remain usable.
+  - A peer resetting its connection ends the read as end of input instead of an `IOException`
+    rethrown through each stream layer. Closing a connection ends its loops by closing the stream
+    rather than by cancelling them, so the receive loop's read no longer throws from PeerSharp's
+    streams into `System.IO.Pipelines` - an exception per disconnect that stopped the debugger with
+    Just My Code on. A read that closing does not end is still cancelled, after five seconds.
+  - Pending dials given up when a magnet's metadata arrives end as failed attempts rather than one
+    cancellation exception each.
+  - Peer TCP connections, and the streaming server's, read their socket through
+    `SocketAsyncEventArgs`, so a reset, an abort or our own close ends the read as end of input with
+    no exception at all; the reason is kept for logging. A uTP connection that is reset or times out
+    now ends its reads the same way instead of throwing, and a uTP dial the peer resets is a failed
+    attempt.
+  - A handshake that stalls is given up by closing the connection when its deadline passes, rather
+    than by cancelling the read - one exception fewer for every peer that connects and says nothing.
+    After an encryption handshake times out the connection is closed rather than retried in plaintext
+    on the same socket, which was never going to succeed: the peer had already been sent the key.
+  - Waiting for room in a peer's send queue reports running out of time as a result instead of a
+    cancelled wait.
+  - An HTTP tracker announce over one address family is sent to one of the tracker's addresses in
+    that family, with its name in the Host header (which HttpClient also uses for the TLS server name
+    and certificate check), instead of choosing the family in a connect callback. A callback can
+    report a refused connection only by throwing from PeerSharp into HttpClient, which stopped the
+    debugger with Just My Code on for every tracker that was down. Up to three of the tracker's
+    addresses are tried, and redirects are followed by the tracker itself, each location resolved
+    again; like HttpClient, an https tracker is not followed to plain http. The connect callback
+    remains only for a configured bind address.
 
 ### Fixed
 
+- HTTP tracker proxying keeps DNS resolution at the proxy even when a local bind address is set.
+- HTTP tracker URLs and redirects containing IPv6 literals retain brackets in the Host header.
+- An unreachable UDP destination no longer suppresses reachable destinations in the same address
+  family. Destination backoff is bounded to 256 addresses.
 - Concurrent tracker DNS cache misses share one lookup, including when refreshing an expired entry.
 - **Closing one of several open streams no longer stops the others streaming.** Only the most recently
   opened stream was tracked, and closing it put the torrent back on rarest-first while any other

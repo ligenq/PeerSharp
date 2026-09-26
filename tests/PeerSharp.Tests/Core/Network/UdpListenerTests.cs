@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Sockets;
 using PeerSharp.Internals.Framework;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Core.Network;
@@ -33,8 +35,17 @@ public class UdpListenerTests
             return await _receiveChannel.Reader.ReadAsync(IgnoreCancellation ? CancellationToken.None : cancellationToken);
         }
 
+        public SocketError? SendError { get; set; }
+        public int SendAttempts { get; private set; }
+
         public ValueTask<int> SendAsync(ReadOnlyMemory<byte> datagram, IPEndPoint endPoint, CancellationToken ct)
         {
+            SendAttempts++;
+            if (SendError is { } error)
+            {
+                return ValueTask.FromException<int>(new SocketException((int)error));
+            }
+
             SentPackets.Add(datagram.ToArray());
             return new ValueTask<int>(datagram.Length);
         }
@@ -182,6 +193,100 @@ public class UdpListenerTests
         // Release the deliberately non-cooperative receive task so the test leaves no work behind.
         factory.LastSocket.EnqueueReceive([], new IPEndPoint(IPAddress.Loopback, 1));
         await listener.DisposeAsync();
+    }
+
+    [Theory(Timeout = 30000)]
+    [InlineData("0.0.0.0", 6881)]
+    [InlineData("253.253.253.253", 6881)]
+    [InlineData("203.0.113.9", 0)]
+    public async Task SendAsync_ToAnAddressNothingCanBeSentTo_DropsItWithoutAskingTheSocket(string address, int port)
+    {
+        // DHT nodes and peers hand these out; the socket refuses each with an exception.
+        var factory = new MockUdpSocketFactory();
+        await using var listener = new UdpListener(5000, factory, new Settings());
+        await listener.StartAsync(TestContext.Current.CancellationToken);
+
+        await listener.SendAsync(new byte[] { 1 }, new IPEndPoint(IPAddress.Parse(address), port), TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, factory.LastSocket.SendAttempts);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SendAsync_ToAnAddressWithNoRoute_StopsTryingOnlyThatAddressForAWhile()
+    {
+        // A missing internet route must not suppress LAN or loopback traffic in the same family.
+        var clock = new FakeTimeProvider();
+        var factory = new MockUdpSocketFactory();
+        await using var listener = new UdpListener(5000, factory, new Settings(), NullLoggerFactory.Instance, clock);
+        await listener.StartAsync(TestContext.Current.CancellationToken);
+        var ipv6Peer = new IPEndPoint(IPAddress.Parse("2001:db8::1"), 6881);
+        factory.LastSocket.SendError = SocketError.NetworkUnreachable;
+
+        await listener.SendAsync(new byte[] { 1 }, ipv6Peer, TestContext.Current.CancellationToken);
+        await listener.SendAsync(new byte[] { 2 }, ipv6Peer, TestContext.Current.CancellationToken);
+        Assert.Equal(1, factory.LastSocket.SendAttempts);
+
+        // Both families remain usable for other destinations; the failed address is retried later.
+        factory.LastSocket.SendError = null;
+        await listener.SendAsync(new byte[] { 5 }, new IPEndPoint(IPAddress.IPv6Loopback, 6881), TestContext.Current.CancellationToken);
+        await listener.SendAsync(new byte[] { 3 }, new IPEndPoint(IPAddress.Parse("203.0.113.9"), 6881), TestContext.Current.CancellationToken);
+        clock.Advance(UdpListener.UnroutableAddressBackoff);
+        await listener.SendAsync(new byte[] { 4 }, ipv6Peer, TestContext.Current.CancellationToken);
+
+        Assert.Equal([[5], [3], [4]], factory.LastSocket.SentPackets);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SendAsync_UnreachableIPv4Address_DoesNotBlockOtherIPv4Addresses()
+    {
+        var factory = new MockUdpSocketFactory();
+        await using var listener = new UdpListener(5000, factory, new Settings());
+        await listener.StartAsync(TestContext.Current.CancellationToken);
+        factory.LastSocket.SendError = SocketError.NetworkUnreachable;
+        var unreachable = IPAddress.Parse("203.0.113.9");
+
+        await listener.SendAsync(new byte[] { 1 }, new IPEndPoint(unreachable, 6881), TestContext.Current.CancellationToken);
+        factory.LastSocket.SendError = null;
+        // Changing ports or using a mapped address does not change the destination's route.
+        await listener.SendAsync(new byte[] { 2 }, new IPEndPoint(unreachable.MapToIPv6(), 6882), TestContext.Current.CancellationToken);
+        await listener.SendAsync(new byte[] { 3 }, new IPEndPoint(IPAddress.Loopback, 6881), TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, factory.LastSocket.SendAttempts);
+        Assert.Equal([[3]], factory.LastSocket.SentPackets);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SendAsync_ManyUnreachableAddresses_EvictsTheOldestBackoff()
+    {
+        var clock = new FakeTimeProvider();
+        var factory = new MockUdpSocketFactory();
+        await using var listener = new UdpListener(5000, factory, new Settings(), NullLoggerFactory.Instance, clock);
+        await listener.StartAsync(TestContext.Current.CancellationToken);
+        factory.LastSocket.SendError = SocketError.NetworkUnreachable;
+
+        for (int i = 0; i <= UdpListener.MaxUnroutableAddresses; i++)
+        {
+            await listener.SendAsync(new byte[] { 1 }, new IPEndPoint(IPAddress.Parse($"2001:db8::{i + 1:x}"), 6881), TestContext.Current.CancellationToken);
+            clock.Advance(TimeSpan.FromMilliseconds(1));
+        }
+
+        factory.LastSocket.SendError = null;
+        await listener.SendAsync(new byte[] { 2 }, new IPEndPoint(IPAddress.Parse("2001:db8::1"), 6881), TestContext.Current.CancellationToken);
+        await listener.SendAsync(new byte[] { 3 }, new IPEndPoint(IPAddress.Parse("2001:db8::2"), 6881), TestContext.Current.CancellationToken);
+
+        Assert.Equal([[2]], factory.LastSocket.SentPackets);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SendAsync_OtherSocketErrors_StillReachTheCaller()
+    {
+        var factory = new MockUdpSocketFactory();
+        await using var listener = new UdpListener(5000, factory, new Settings());
+        await listener.StartAsync(TestContext.Current.CancellationToken);
+        factory.LastSocket.SendError = SocketError.MessageSize;
+
+        await Assert.ThrowsAsync<SocketException>(() =>
+            listener.SendAsync(new byte[] { 1 }, new IPEndPoint(IPAddress.Parse("203.0.113.9"), 6881), TestContext.Current.CancellationToken));
     }
 }
 

@@ -1288,10 +1288,12 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             _torrent.Settings.Transfer.RemoveConcurrencyLimitListener(this);
             try
             {
-                await _cts.CancelAsync().ConfigureAwait(false);
+                // Queues first, so idle workers see them finish and return instead of each waking with
+                // an OperationCanceledException. Cancelling then stops the ones in the middle of a piece.
                 _incomingBlocks.Writer.TryComplete();
                 _peerEvaluationQueue.Writer.TryComplete();
                 _pieceProcessingQueue.Writer.TryComplete();
+                await _cts.CancelAsync().ConfigureAwait(false);
             }
             catch (Exception ex)
             {

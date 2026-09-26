@@ -60,30 +60,49 @@ public class HttpTrackerTests
     // client; it is here because a tracker no longer builds one of its own.
     private static HttpTracker CreateTracker() => new(NullLoggerFactory.Instance, new HttpClientFactory());
 
+    /// <summary>
+    /// Answers every request, recording where it was sent. An announce over one address family goes to
+    /// one of the tracker's addresses in it, so the family is read off the request.
+    /// </summary>
     private sealed class FamilyHttpClientFactory(
-        Func<AddressFamily?, HttpResponseMessage> responseFactory) : IHttpClientFactory
+        Func<HttpRequestMessage, AddressFamily?, HttpResponseMessage> responseFactory) : IHttpClientFactory
     {
+        public FamilyHttpClientFactory(Func<AddressFamily?, HttpResponseMessage> responseFactory)
+            : this((_, family) => responseFactory(family))
+        {
+        }
+
         public ConcurrentQueue<AddressFamily?> RequestedFamilies { get; } = [];
+
+        public ConcurrentQueue<(Uri Uri, string? Host)> Requests { get; } = [];
+
+        public ConcurrentQueue<bool> FollowRedirects { get; } = [];
 
         public HttpClient CreateClient(
             ProxySettings proxy,
             bool isTracker,
             IPAddress? bindAddress = null,
-            AddressFamily? addressFamily = null,
+            bool followRedirects = true,
             int maxConnectionsPerServer = IHttpClientFactory.DefaultMaxConnectionsPerServer)
         {
-            RequestedFamilies.Enqueue(addressFamily);
-            return new HttpClient(new FamilyHandler(() => responseFactory(addressFamily)));
+            FollowRedirects.Enqueue(followRedirects);
+            return new HttpClient(new FamilyHandler(request =>
+            {
+                var family = IPAddress.TryParse(request.RequestUri!.DnsSafeHost, out var address) ? address.AddressFamily : (AddressFamily?)null;
+                RequestedFamilies.Enqueue(family);
+                Requests.Enqueue((request.RequestUri, request.Headers.Host));
+                return responseFactory(request, family);
+            }));
         }
     }
 
-    private sealed class FamilyHandler(Func<HttpResponseMessage> responseFactory) : HttpMessageHandler
+    private sealed class FamilyHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             try
             {
-                return Task.FromResult(responseFactory());
+                return Task.FromResult(responseFactory(request));
             }
             catch (Exception ex)
             {
@@ -91,6 +110,17 @@ public class HttpTrackerTests
             }
         }
     }
+
+    private static readonly IPAddress TrackerIPv4 = IPAddress.Parse("198.51.100.7");
+    private static readonly IPAddress TrackerIPv6 = IPAddress.Parse("2001:db8::7");
+
+    /// <summary>A name cache that answers every name with <paramref name="addresses"/>.</summary>
+    private static HostAddressCache Names(params IPAddress[] addresses) =>
+        new(TimeProvider.System, (_, _) => Task.FromResult(addresses));
+
+    /// <summary>A name cache that answers each name from <paramref name="table"/>.</summary>
+    private static HostAddressCache Names(Dictionary<string, IPAddress[]> table) =>
+        new(TimeProvider.System, (host, _) => Task.FromResult(table.GetValueOrDefault(host, [])));
 
     private class MockCallback : ITrackerCallback
     {
@@ -142,7 +172,7 @@ public class HttpTrackerTests
         {
             Content = new ByteArrayContent(family == AddressFamily.InterNetwork ? ipv4Response : ipv6Response)
         });
-        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory);
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv4, TrackerIPv6));
         tracker.Init("http://tracker.example/announce", _torrent, _callback);
 
         await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
@@ -169,7 +199,7 @@ public class HttpTrackerTests
             }
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(response) };
         });
-        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory);
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv4, TrackerIPv6));
         tracker.Init("http://tracker.example/announce", _torrent, _callback);
 
         await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
@@ -188,7 +218,7 @@ public class HttpTrackerTests
         {
             Content = new ByteArrayContent(response)
         });
-        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory);
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv4, TrackerIPv6));
         tracker.Init("http://tracker.example/announce", _torrent, _callback);
 
         await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
@@ -203,6 +233,53 @@ public class HttpTrackerTests
         response.Dict["interval"] = new BNumber(interval);
         response.Dict[peersKey] = new BString(peerBytes);
         return BencodeWriter.Write(response);
+    }
+
+    [Theory]
+    [InlineData(ProxyType.Socks5, "127.0.0.1")]
+    [InlineData(ProxyType.Socks5, "::1")]
+    [InlineData(ProxyType.Http, "127.0.0.1")]
+    [InlineData(ProxyType.Http, "::1")]
+    public async Task AnnounceAsync_WithProxyAndBind_LeavesTrackerResolutionToTheProxy(ProxyType proxyType, string bind)
+    {
+        _torrent.Settings.Connection.BindAddress = IPAddress.Parse(bind);
+        _torrent.Settings.Proxy.Type = proxyType;
+        _torrent.Settings.Proxy.Host = "proxy.example";
+        _torrent.Settings.Proxy.ProxyTrackers = true;
+        int lookups = 0;
+        var names = new HostAddressCache(TimeProvider.System, (_, _) =>
+        {
+            Interlocked.Increment(ref lookups);
+            return Task.FromResult(Array.Empty<IPAddress>());
+        });
+        var factory = new FamilyHttpClientFactory(_ => Ok());
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, names);
+        tracker.Init("http://proxy-only.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        Assert.Equal(0, lookups);
+        Assert.Equal("proxy-only.example", Assert.Single(factory.Requests).Uri.Host);
+        Assert.All(factory.FollowRedirects, Assert.True);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_WithProxyExcludedFromTrackers_StillUsesTheBoundFamily()
+    {
+        _torrent.Settings.Connection.BindAddress = IPAddress.Loopback;
+        _torrent.Settings.Proxy.Type = ProxyType.Socks5;
+        _torrent.Settings.Proxy.Host = "proxy.example";
+        _torrent.Settings.Proxy.ProxyTrackers = false;
+        var factory = new FamilyHttpClientFactory(_ => Ok());
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv4, TrackerIPv6));
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        Assert.Equal([AddressFamily.InterNetwork], factory.RequestedFamilies);
+        Assert.Equal(TrackerIPv4.ToString(), Assert.Single(factory.Requests).Uri.Host);
     }
 
     [Fact(Timeout = 30000)]
@@ -932,6 +1009,206 @@ public class HttpTrackerTests
         }
 
         return count;
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_HostWithoutAnIPv6Address_AnnouncesOverIPv4Only()
+    {
+        // Most trackers have no AAAA record. Asking over IPv6 anyway made the connect path throw "no such
+        // host" on every announce.
+        byte[] response = BuildAnnounceResponse(1800, "peers", [1, 2, 3, 4, 0x1A, 0xE1]);
+        var factory = new FamilyHttpClientFactory(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(response) });
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv4));
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        Assert.Equal([AddressFamily.InterNetwork], factory.RequestedFamilies);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_HostThatDoesNotResolve_FailsWithoutMakingARequest()
+    {
+        var factory = new FamilyHttpClientFactory(_ => throw new InvalidOperationException("No request should be made."));
+        var names = new HostAddressCache(
+            TimeProvider.System,
+            (_, _) => Task.FromException<IPAddress[]>(new SocketException((int)SocketError.HostNotFound)));
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, names);
+        tracker.Init("http://gone.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.False(_callback.Success);
+        Assert.Contains("gone.example", _callback.ErrorMessage);
+        Assert.Empty(factory.RequestedFamilies);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_OverAFamily_GoesToTheTrackersAddress_NamingItInTheHostHeader()
+    {
+        // How the family is chosen without a connect callback, which could report a refused connection
+        // only by throwing into HttpClient. The Host header also names the server for TLS.
+        var factory = new FamilyHttpClientFactory(_ => Ok());
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv4));
+        tracker.Init("http://tracker.example:6969/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        var (uri, host) = Assert.Single(factory.Requests);
+        Assert.Equal("198.51.100.7", uri.Host);
+        Assert.Equal(6969, uri.Port);
+        Assert.Equal("/announce", uri.AbsolutePath);
+        Assert.Equal("tracker.example:6969", host);
+        Assert.All(factory.FollowRedirects, Assert.False);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_OverIPv6_BracketsTheAddress()
+    {
+        var factory = new FamilyHttpClientFactory(_ => Ok());
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv6));
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        var (uri, host) = Assert.Single(factory.Requests);
+        Assert.Equal("[2001:db8::7]", uri.Host);
+        Assert.Equal("tracker.example", host);
+        Assert.True(_callback.Success);
+    }
+
+    [Theory]
+    [InlineData("http://[::1]/announce", "[::1]")]
+    [InlineData("http://[::1]:6969/announce", "[::1]:6969")]
+    [InlineData("https://[::1]/announce", "[::1]")]
+    [InlineData("https://[::1]:6969/announce", "[::1]:6969")]
+    public async Task AnnounceAsync_IPv6Literal_KeepsBracketsInTheHostHeader(string url, string expectedHost)
+    {
+        var factory = new FamilyHttpClientFactory(_ => Ok());
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names());
+        tracker.Init(url, _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        Assert.Equal(expectedHost, Assert.Single(factory.Requests).Host);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_RedirectToIPv6Literal_KeepsBracketsInTheHostHeader()
+    {
+        var factory = new FamilyHttpClientFactory((request, _) => request.Headers.Host == "tracker.example"
+            ? Redirect("http://[::1]:6969/announce")
+            : Ok());
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv6));
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        Assert.Equal(2, factory.Requests.Count);
+        Assert.Equal("[::1]:6969", factory.Requests.Last().Host);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_AnAddressThatRefuses_MovesOnToTheNext()
+    {
+        // A tracker behind several A records has them so that one host being down is survivable.
+        var down = IPAddress.Parse("198.51.100.8");
+        var factory = new FamilyHttpClientFactory((request, _) => request.RequestUri!.Host == down.ToString()
+            ? throw new HttpRequestException(HttpRequestError.ConnectionError, "Connection refused")
+            : Ok());
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(down, TrackerIPv4));
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        Assert.Equal([down.ToString(), TrackerIPv4.ToString()], factory.Requests.Select(request => request.Uri.Host));
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_AnAddressThatAnswersWithAnError_IsNotRetriedElsewhere()
+    {
+        // The tracker answered: another of its addresses would give the same answer.
+        var factory = new FamilyHttpClientFactory(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError));
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv4, IPAddress.Parse("198.51.100.8")));
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.False(_callback.Success);
+        Assert.Single(factory.Requests);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_ARedirect_IsResolvedAgain_AndNamedInTheHostHeader()
+    {
+        // HttpClient would carry the first Host header to the new location, so redirects are followed here.
+        var mirror = IPAddress.Parse("203.0.113.9");
+        var factory = new FamilyHttpClientFactory((request, _) => request.Headers.Host == "tracker.example"
+            ? Redirect("http://mirror.example:8080/announce2")
+            : Ok());
+        var names = Names(new Dictionary<string, IPAddress[]>
+        {
+            ["tracker.example"] = [TrackerIPv4],
+            ["mirror.example"] = [mirror],
+        });
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, names);
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        var redirected = factory.Requests.Last();
+        Assert.Equal(mirror.ToString(), redirected.Uri.Host);
+        Assert.Equal("/announce2", redirected.Uri.AbsolutePath);
+        Assert.Equal("mirror.example:8080", redirected.Host);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_ARelativeRedirect_StaysWithTheTrackersName()
+    {
+        // Resolved against the URL that was asked for, not the address it was sent to.
+        var factory = new FamilyHttpClientFactory((request, _) => request.RequestUri!.AbsolutePath == "/announce"
+            ? Redirect("/moved")
+            : Ok());
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv4));
+        tracker.Init("http://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.True(_callback.Success);
+        var redirected = factory.Requests.Last();
+        Assert.Equal("/moved", redirected.Uri.AbsolutePath);
+        Assert.Equal("tracker.example", redirected.Host);
+    }
+
+    [Fact]
+    public async Task AnnounceAsync_AnHttpsTracker_IsNotFollowedToPlainHttp()
+    {
+        // HttpClient refuses the same downgrade on its own redirects.
+        var factory = new FamilyHttpClientFactory(_ => Redirect("http://tracker.example/announce"));
+        var tracker = new HttpTracker(NullLoggerFactory.Instance, factory, Names(TrackerIPv4));
+        tracker.Init("https://tracker.example/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.False(_callback.Success);
+        Assert.Single(factory.Requests);
+    }
+
+    private static HttpResponseMessage Ok() => new(HttpStatusCode.OK)
+    {
+        Content = new ByteArrayContent(BuildAnnounceResponse(1800, "peers", [1, 2, 3, 4, 0x1A, 0xE1]))
+    };
+
+    private static HttpResponseMessage Redirect(string location)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.Found);
+        response.Headers.Location = new Uri(location, UriKind.RelativeOrAbsolute);
+        return response;
     }
 }
 

@@ -270,7 +270,9 @@ public sealed class HttpStreamServer : IDisposable
         try
         {
             socket.NoDelay = true;
-            var transport = new NetworkStream(socket, ownsSocket: true);
+            // A client that resets the connection, or goes idle past the keep-alive timeout, ends its read
+            // as end of input rather than with an exception - players drop connections on every seek.
+            var transport = new Internals.Network.SocketStream(socket);
             await using (transport.ConfigureAwait(false))
             {
                 var connection = new HttpStreamConnection(transport, _handler, _timeProvider, _logger);

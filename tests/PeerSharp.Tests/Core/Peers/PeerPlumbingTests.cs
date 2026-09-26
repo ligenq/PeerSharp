@@ -55,34 +55,6 @@ public class MessageQueueTests
     }
 
     [Fact]
-    public async Task EnqueueAsync_WaitsForRoomAndThenSucceeds()
-    {
-        var queue = new MessageQueue(1);
-        queue.TryEnqueue(new PeerMessage(MessageId.Choke));
-
-        var pending = queue.EnqueueAsync(new PeerMessage(MessageId.Unchoke), TestContext.Current.CancellationToken);
-        Assert.False(pending.IsCompleted);
-
-        Assert.True(queue.TryDequeue(out _));
-        await pending;
-
-        Assert.Equal(1, queue.Count);
-    }
-
-    [Fact]
-    public async Task EnqueueAsync_IsCancellable()
-    {
-        var queue = new MessageQueue(1);
-        queue.TryEnqueue(new PeerMessage(MessageId.Choke));
-        using var cts = new CancellationTokenSource();
-
-        var pending = queue.EnqueueAsync(new PeerMessage(MessageId.Unchoke), cts.Token);
-        await cts.CancelAsync();
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await pending);
-    }
-
-    [Fact]
     public async Task WaitToReadAsync_CompletesWhenAMessageArrivesAndReportsFalseOnceClosedAndDrained()
     {
         var queue = new MessageQueue(8);
@@ -100,8 +72,8 @@ public class MessageQueueTests
     [Fact]
     public async Task ClosingTheQueueStillLetsWhatIsAlreadyInItBeRead()
     {
-        // The send loop drains after completion, so messages queued before the close must survive
-        // it rather than being discarded with the writer.
+        // Messages queued before the close stay readable, so whoever drains the queue can release them;
+        // the send loop does, unsent, since a completed queue means the connection is closing.
         var queue = new MessageQueue(8);
         queue.TryEnqueue(new PeerMessage(MessageId.Choke));
 
@@ -124,13 +96,13 @@ public class MessageQueueTests
     }
 
     [Fact]
-    public async Task EnqueueAsync_ThrowsOnceTheQueueIsClosed()
+    public async Task EnqueueingOnceTheQueueIsClosed_IsFalse()
     {
         var queue = new MessageQueue(4);
         queue.TryComplete();
+        using var message = new PeerMessage(MessageId.Choke);
 
-        await Assert.ThrowsAsync<ChannelClosedException>(async () =>
-            await queue.EnqueueAsync(new PeerMessage(MessageId.Choke), TestContext.Current.CancellationToken));
+        Assert.False(await queue.TryEnqueueWithinAsync(message, TimeSpan.FromSeconds(20)));
     }
 }
 

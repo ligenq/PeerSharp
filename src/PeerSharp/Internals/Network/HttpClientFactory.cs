@@ -17,11 +17,19 @@ internal interface IHttpClientFactory
     /// be disposed by the caller; it stays valid until the factory is disposed, or until this
     /// configuration is evicted (see <see cref="HttpClientFactory.MaxCachedClients"/>).
     /// </summary>
+    /// <param name="proxy">The proxy to go through, if any.</param>
+    /// <param name="isTracker">Trackers get a shorter timeout than web seeds.</param>
+    /// <param name="bindAddress">A local address to connect from, if one is configured.</param>
+    /// <param name="followRedirects">
+    /// False for a caller that addresses a server by IP and names it in the Host header: HttpClient
+    /// carries that header to wherever a redirect points, so such a caller follows redirects itself.
+    /// </param>
+    /// <param name="maxConnectionsPerServer">Connections held open per origin.</param>
     HttpClient CreateClient(
         ProxySettings proxy,
         bool isTracker,
         IPAddress? bindAddress = null,
-        AddressFamily? addressFamily = null,
+        bool followRedirects = true,
         int maxConnectionsPerServer = DefaultMaxConnectionsPerServer);
 }
 
@@ -51,22 +59,36 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
     private const int MaxConnectAttempts = 3;
 
     private readonly Dictionary<HttpClientKey, PooledClient> _clients = [];
+    private readonly HostAddressCache _hostAddresses;
     private readonly Lock _lock = new();
     private AtomicDisposal _disposal = new();
     private long _useCounter;
+
+    public HttpClientFactory()
+        : this(new HostAddressCache(TimeProvider.System))
+    {
+    }
+
+    /// <param name="hostAddresses">
+    /// Where names are resolved: by the connect path for a bind address, and by trackers, which address
+    /// a server by IP to choose the address family. Shared so a tracker host that does not resolve is
+    /// looked up once rather than on every announce.
+    /// </param>
+    public HttpClientFactory(HostAddressCache hostAddresses)
+    {
+        _hostAddresses = hostAddresses;
+    }
+
+    /// <summary>The name cache this factory's connections resolve through.</summary>
+    public HostAddressCache HostAddresses => _hostAddresses;
 
     public HttpClient CreateClient(
         ProxySettings proxy,
         bool isTracker,
         IPAddress? bindAddress = null,
-        AddressFamily? addressFamily = null,
+        bool followRedirects = true,
         int maxConnectionsPerServer = IHttpClientFactory.DefaultMaxConnectionsPerServer)
     {
-        if (bindAddress != null && addressFamily != null && bindAddress.AddressFamily != addressFamily)
-        {
-            throw new ArgumentException("The requested address family must match the bind address.", nameof(addressFamily));
-        }
-
         int perServer = Math.Clamp(maxConnectionsPerServer, 1, 256);
 
         // Structured, not interpolated. The old string key joined the fields with a separator the
@@ -81,7 +103,7 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             proxy.Password,
             isTracker,
             bindAddress,
-            addressFamily,
+            followRedirects,
             perServer);
 
         lock (_lock)
@@ -95,7 +117,7 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             }
 
             EvictUntilThereIsRoom();
-            var client = CreateNewClient(proxy, isTracker, bindAddress, addressFamily, perServer);
+            var client = CreateNewClient(proxy, isTracker, bindAddress, followRedirects, perServer);
             _clients[key] = new PooledClient(client) { LastUsed = ++_useCounter };
             return client;
         }
@@ -142,11 +164,11 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
         }
     }
 
-    private static HttpClient CreateNewClient(
+    private HttpClient CreateNewClient(
         ProxySettings proxy,
         bool isTracker,
         IPAddress? bindAddress,
-        AddressFamily? addressFamily,
+        bool followRedirects,
         int maxConnectionsPerServer)
     {
         var handler = new SocketsHttpHandler
@@ -155,14 +177,19 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
             MaxConnectionsPerServer = maxConnectionsPerServer,
             ConnectTimeout = TimeSpan.FromSeconds(10),
-            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+            AllowAutoRedirect = followRedirects
         };
 
-        var effectiveFamily = bindAddress?.AddressFamily ?? addressFamily;
-        if (effectiveFamily != null)
+        // Only for a bind address, which the default connect path has no way to apply. A callback can
+        // report a failed connect only by throwing, from our code into HttpClient's, so it is kept to
+        // the one configuration that needs it: choosing an address family is done by addressing the
+        // server by IP instead - see HttpTracker.
+        if (bindAddress != null)
         {
+            var hostAddresses = _hostAddresses;
             handler.ConnectCallback = (context, cancellationToken) =>
-                ConnectAsync(context.DnsEndPoint, bindAddress, effectiveFamily.Value, cancellationToken);
+                ConnectForTestingAsync(context.DnsEndPoint, bindAddress, bindAddress.AddressFamily, hostAddresses.ResolveAsync, cancellationToken);
         }
 
         if (proxy.Type != ProxyType.None && !string.IsNullOrEmpty(proxy.Host))
@@ -207,7 +234,7 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
         string? ProxyPassword,
         bool IsTracker,
         IPAddress? BindAddress,
-        AddressFamily? AddressFamily,
+        bool FollowRedirects,
         int MaxConnectionsPerServer);
 
     /// <summary>A cached client and when it was last handed out, which sets eviction order.</summary>
@@ -220,24 +247,12 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
         public long LastUsed { get; set; }
     }
 
-    private static ValueTask<Stream> ConnectAsync(
-        DnsEndPoint remoteEndPoint,
-        IPAddress? bindAddress,
-        AddressFamily addressFamily,
-        CancellationToken cancellationToken)
-        => ConnectForTestingAsync(
-            remoteEndPoint,
-            bindAddress,
-            addressFamily,
-            static (host, ct) => Dns.GetHostAddressesAsync(host, ct),
-            cancellationToken);
-
     /// <summary>
-    /// Connects to the first address of the requested family that accepts, in the order the resolver
-    /// returned them.
+    /// Connects from a bind address to the first address of its family that accepts, in the order the
+    /// resolver returned them.
     ///
     /// <para>
-    /// Choosing the address family means doing this by hand, and the thing not to lose while doing so
+    /// Binding means connecting by hand, and the thing not to lose while doing so
     /// is what the default connect path gives for free: it hands the socket the whole resolved set and
     /// walks it. A tracker published behind several A records has them precisely so that one host
     /// being down is survivable, and this path runs on every announce, so stopping at the first

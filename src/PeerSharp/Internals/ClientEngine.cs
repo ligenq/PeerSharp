@@ -83,13 +83,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         _fileHandleCache = new FileHandleCache(loggerFactory: loggerFactory); // Default 200 handles
         // One pool for this engine's trackers, web seeds and magnet fetches, disposed with the engine.
-        _httpClientFactory = new HttpClientFactory();
+        _httpClientFactory = new HttpClientFactory(new HostAddressCache(_timeProvider));
         _connectionGovernor = new ConnectionGovernor(settings);
 
         // Initialize dependencies
         _geoIp = new GeoIpService();
         _peerFactory = new PeerCommunicationFactory(loggerFactory);
-        _trackerFactory = new TrackerFactory(loggerFactory, _httpClientFactory);
+        _trackerFactory = new TrackerFactory(loggerFactory, _httpClientFactory, _httpClientFactory.HostAddresses);
 
         // Reads through GetStats, which refuses a disposed engine - hence the guard rather than the
         // call alone. Nothing is measured unless something subscribes to the meter.
@@ -1028,6 +1028,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // indefinitely.
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
+            // The deadline closes the stream, which ends a pending read as end of input, rather than being
+            // passed in to cancel the read - which could only report it by throwing, for every inbound peer
+            // that connects and then says nothing.
+            using var deadline = timeoutCts.Token.UnsafeRegister(static state => ((UtpStream)state!).CloseAndStopReading(), stream);
+
             // uTP peers negotiate MSE exactly as TCP peers do. This path used to read 68 bytes and
             // insist the first was 19, so every encrypted inbound uTP peer was rejected - its
             // Diffie-Hellman key looks like noise, which is what the old "Invalid uTP handshake ...
@@ -1038,7 +1043,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 stream,
                 this,
                 _logger,
-                timeoutCts.Token).ConfigureAwait(false);
+                CancellationToken.None).ConfigureAwait(false);
 
             if (!negotiated.Success)
             {

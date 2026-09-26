@@ -54,6 +54,30 @@ internal static class NetworkUtils
     }
 
     /// <summary>
+    /// Whether a unicast datagram or connection to this endpoint can leave the machine at all. Port
+    /// zero, the unspecified addresses, 0.0.0.0/8, multicast and the reserved 240.0.0.0/4 block
+    /// (which includes the broadcast address) cannot - the socket refuses them with an exception - and
+    /// peers, PEX and DHT nodes hand them out regardless. Private and loopback addresses are fine.
+    /// </summary>
+    public static bool IsDeliverableUnicast(IPEndPoint endPoint)
+    {
+        if (endPoint.Port is <= 0 or > ushort.MaxValue)
+        {
+            return false;
+        }
+
+        var address = endPoint.Address.IsIPv4MappedToIPv6 ? endPoint.Address.MapToIPv4() : endPoint.Address;
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            Span<byte> bytes = stackalloc byte[4];
+            address.TryWriteBytes(bytes, out _);
+            return bytes[0] is not 0 and < 224;
+        }
+
+        return !address.Equals(IPAddress.IPv6Any) && !address.IsIPv6Multicast;
+    }
+
+    /// <summary>
     /// Normalizes an IPv4-mapped IPv6 endpoint (e.g. [::ffff:1.2.3.4]:6881) to its plain IPv4 form.
     /// Dual-stack sockets report IPv4 peers in the mapped form while trackers and PEX hand out
     /// plain IPv4 addresses; without normalization the two forms compare as different endpoints.

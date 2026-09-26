@@ -430,7 +430,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _connectedPeers.TryAdd(peer, 0);
         Interlocked.Increment(ref _connectedPeersCount);
 
-        peer.Start(client.GetStream(), encryption);
+        // The factory gave the peer its stream over this socket; starting on a second one would read the
+        // same socket through two wrappers.
+        peer.Start(peer.Stream!, encryption);
     }
 
     public void AddPeers(IEnumerable<IPEndPoint> peers, PeerSourceKind sourceKind = PeerSourceKind.Unknown, PeerCommunication? source = null)
@@ -675,6 +677,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         if (port is <= 0 or > ushort.MaxValue)
         {
             _logger.LogDebug("Not dialling {Ip}:{Port} - not a port a peer can listen on", ip, port);
+            return;
+        }
+
+        // The same for addresses: 0.0.0.0, multicast and the reserved 240/4 block cannot be dialled,
+        // and trying costs a socket error for nothing.
+        if (IPAddress.TryParse(ip, out var dialled) && !NetworkUtils.IsDeliverableUnicast(new IPEndPoint(dialled, port)))
+        {
+            _logger.LogDebug("Not dialling {Ip}:{Port} - not an address a peer can listen on", ip, port);
             return;
         }
 
@@ -1731,7 +1741,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // Dropped here as well as in ConnectTo so the known-peer cache never holds one. 519 of
             // them turned up in one run against a cache bounded at 2000, which is a quarter of the
             // room given to addresses that can never be dialled.
-            if (endpoint is null or { Port: <= 0 } or { Port: > ushort.MaxValue })
+            if (endpoint is null || !NetworkUtils.IsDeliverableUnicast(endpoint))
             {
                 index++;
                 continue;
@@ -1887,6 +1897,28 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// another rendezvous when it fails, or a peer that is simply unreachable is retried forever.
     /// </para>
     /// </summary>
+    /// <summary>Undoes a dial that did not run its course, whether it threw or was given up on.</summary>
+    private async Task AbandonConnectionAttemptAsync(PeerCommunication peer, bool useGovernor)
+    {
+        if (_connectingPeers.TryRemove(peer, out _))
+        {
+            Interlocked.Decrement(ref _connectingPeersCount);
+        }
+        if (_connectedPeers.TryRemove(peer, out _))
+        {
+            Interlocked.Decrement(ref _connectedPeersCount);
+            UnregisterConnectedEndpoint(peer);
+            // The peer is only ever added to _connectedPeers after the governor
+            // connection slot is acquired, so removing it here means the slot would
+            // otherwise leak (ConnectionClosedAsync won't run for a peer we just removed).
+            if (useGovernor)
+            {
+                _governor.ReleaseConnectionSlot();
+            }
+        }
+        await peer.CloseAsync().ConfigureAwait(false);
+    }
+
     private async Task ConnectAndHandleAsync(PeerCommunication peer, string ip, int port, IReadOnlyList<TransportPreference> transportPlan, bool useGovernor, bool isHolepunch, ConnectionRequest? pendingRequest, CancellationToken cancellationToken)
     {
         IPEndPoint? endpoint = null;
@@ -1972,8 +2004,23 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     : fallbackTimeoutMs;
                 int attemptTimeoutMs = ConnectionBudgetCalculator.ForAttempt(
                     remainingTimeoutMs, hasFallback, capMs);
-                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, cancellationToken)
-                    .WaitAsync(cancellationToken).ConfigureAwait(false);
+                // Waited on without throwing when the manager gives up - every pending dial at once, when
+                // a magnet's metadata arrives. The dial ends itself on the same token; this only stops
+                // waiting for one that is slow to notice.
+                var connecting = peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, cancellationToken);
+                if (!connecting.IsCompleted)
+                {
+                    await ((Task)connecting).WaitAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                }
+
+                if (!connecting.IsCompleted || (cancellationToken.IsCancellationRequested && !connecting.IsCompletedSuccessfully))
+                {
+                    _logger.LogDebug("Connection attempt canceled for {Ip}:{Port}", ip, port);
+                    await AbandonConnectionAttemptAsync(peer, useGovernor).ConfigureAwait(false);
+                    return;
+                }
+
+                success = await connecting.ConfigureAwait(false);
 
                 if (attemptUtp)
                 {
@@ -2160,24 +2207,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             else
                 _logger.LogError(ex, "Connection continuation error for {Ip}:{Port}", ip, port);
 
-            // Cleanup on exception
-            if (_connectingPeers.TryRemove(peer, out _))
-            {
-                Interlocked.Decrement(ref _connectingPeersCount);
-            }
-            if (_connectedPeers.TryRemove(peer, out _))
-            {
-                Interlocked.Decrement(ref _connectedPeersCount);
-                UnregisterConnectedEndpoint(peer);
-                // The peer is only ever added to _connectedPeers after the governor
-                // connection slot is acquired, so removing it here means the slot would
-                // otherwise leak (ConnectionClosedAsync won't run for a peer we just removed).
-                if (useGovernor)
-                {
-                    _governor.ReleaseConnectionSlot();
-                }
-            }
-            await peer.CloseAsync().ConfigureAwait(false);
+            await AbandonConnectionAttemptAsync(peer, useGovernor).ConfigureAwait(false);
         }
         finally
         {
