@@ -348,6 +348,25 @@ await engine.ResumeAsync();
 var stream = await torrent.OpenStreamAsync(fileIndex: 0);
 ```
 
+A stream fetches the pieces ahead of its read position first, along with the start and end of the
+file where containers keep their indexes. Several streams can be open at once, which is what a player
+seeking or fetching an index does; the torrent returns to its configured strategy when the last one
+closes. How far ahead to fetch and how long to wait are in `settings.Streaming`.
+
+To hand a file to a player, serve it over HTTP. By default the server listens on loopback for a player
+on the same device. To stream to a Chromecast, a TV or another computer, bind it to this device's
+address on that network; the URL then carries a generated access token.
+
+```csharp
+using var server = new HttpStreamServer(torrent, fileIndex: 0, new HttpStreamServerOptions
+{
+    BindAddress = IPAddress.Parse("192.168.1.20"),
+});
+server.Start();
+
+// Give the player server.Url, and a cast receiver server.ContentType as well.
+```
+
 ### Adding Peers Directly
 
 Discovery finds peers on its own, but some are only reachable if you say so — a machine on the same

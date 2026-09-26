@@ -166,8 +166,14 @@ sealed class PeerSharp.Config.Settings
     PeerSharp.Config.ProxySettings Proxy { get; }
     PeerSharp.Config.QueueSettings Queue { get; }
     PeerSharp.Config.SessionSettings Session { get; }
+    PeerSharp.Config.StreamingSettings Streaming { get; }
     PeerSharp.Config.TransferSettings Transfer { get; }
     UInt32 MaxPeersPerTrackerRequest { get; set; }
+sealed class PeerSharp.Config.StreamingSettings
+    .ctor()
+    Int32 DataWaitTimeoutSeconds { get; set; }
+    Int32 MetadataWaitTimeoutSeconds { get; set; }
+    Int64 ReadAheadBytes { get; set; }
 sealed class PeerSharp.Config.TorrentClientOptions
     .ctor()
     Microsoft.Extensions.Logging.ILoggerFactory LoggerFactory { get; init; }
@@ -1052,6 +1058,14 @@ interface PeerSharp.PieceWriter.IFileHandleLease
 sealed class PeerSharp.Streaming.HttpStreamServer
     .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex)
     .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex, Microsoft.Extensions.Logging.ILoggerFactory loggerFactory)
+    .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex, PeerSharp.Streaming.HttpStreamServerOptions options)
+    .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex, PeerSharp.Streaming.HttpStreamServerOptions options, Microsoft.Extensions.Logging.ILoggerFactory loggerFactory)
+    String ContentType { get; }
     String Url { get; }
     Void Dispose()
     Void Start()
+sealed class PeerSharp.Streaming.HttpStreamServerOptions
+    .ctor()
+    Int32 Port { get; set; }
+    Net.IPAddress BindAddress { get; set; }
+    String AccessToken { get; set; }

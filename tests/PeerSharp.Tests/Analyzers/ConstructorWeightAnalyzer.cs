@@ -70,6 +70,12 @@ public sealed class ConstructorWeightAnalyzer : IDisposable
             var ctors = type.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             foreach (var ctor in ctors)
             {
+                // Exempted where it is declared, with a reason, rather than by a list kept here.
+                if (ctor.IsDefined(typeof(PeerSharp.Core.AllowHeavyConstructorAttribute), inherit: false))
+                {
+                    continue;
+                }
+
                 violations.AddRange(AnalyzeConstructor(type, ctor));
             }
         }

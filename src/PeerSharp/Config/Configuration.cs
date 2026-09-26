@@ -795,6 +795,41 @@ public sealed class SessionSettings
 }
 
 /// <summary>
+/// Settings for reading a file while it is still downloading, through
+/// <see cref="ITorrent.OpenStreamAsync(int, CancellationToken)"/> or an HTTP stream server.
+/// </summary>
+/// <remarks>
+/// Read when a stream is opened, so a change applies to streams opened after it.
+/// </remarks>
+public sealed class StreamingSettings
+{
+    /// <summary>
+    /// How far ahead of the read position, in bytes, pieces are fetched ahead of everything else.
+    /// Default is 20 MiB.
+    /// </summary>
+    /// <remarks>
+    /// A reader on a slow or distant device - a TV fetching over Wi-Fi - benefits from more; a device
+    /// short of storage or bandwidth from less. Pieces beyond the window still download at ordinary
+    /// priority.
+    /// </remarks>
+    public long ReadAheadBytes { get; set; } = 20L * 1024 * 1024;
+
+    /// <summary>
+    /// Seconds a read waits for the swarm to supply the pieces it needs before throwing
+    /// <see cref="TimeoutException"/>. Default is 60. Zero or less waits for as long as the reader's
+    /// cancellation token allows.
+    /// </summary>
+    public int DataWaitTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Seconds opening a stream on a magnet link waits for the torrent's metadata before throwing
+    /// <see cref="TimeoutException"/>. Default is 60. Zero or less waits for as long as the caller's
+    /// cancellation token allows.
+    /// </summary>
+    public int MetadataWaitTimeoutSeconds { get; set; } = 60;
+}
+
+/// <summary>
 /// Settings for data transfer and bandwidth management.
 /// </summary>
 public sealed class TransferSettings
@@ -1207,6 +1242,9 @@ public sealed class Settings
 
     /// <summary>Settings for session persistence (optional, disabled by default).</summary>
     public SessionSettings Session { get; } = new();
+
+    /// <summary>Settings for reading files while they download.</summary>
+    public StreamingSettings Streaming { get; } = new();
 
     /// <summary>Settings for data transfer.</summary>
     public TransferSettings Transfer { get; } = new();

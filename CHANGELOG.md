@@ -5,6 +5,49 @@ history has the reasoning and the measurements behind each one.
 
 ## Unreleased
 
+### Added
+
+- **`HttpStreamServer` can serve other devices.** `HttpStreamServerOptions` sets the address, the
+  port and an access token. A server bound to anything but loopback always requires a token in its
+  path, generated when none is given. `ContentType` reports the MIME type the file is served as,
+  for a cast sender's load request.
+- **`Settings.Streaming`** configures how far ahead a stream fetches (`ReadAheadBytes`) and how long a
+  read waits for data (`DataWaitTimeoutSeconds`) or a magnet for its metadata
+  (`MetadataWaitTimeoutSeconds`). Both waits were a fixed 60 seconds; zero now waits for as long as
+  the caller's token allows.
+- `.m4v`, `.ts`, `.m2ts`, `.mpg`, `.mpeg`, `.flv`, `.m4a`, `.aac` and `.opus` are served with their
+  media type instead of `application/octet-stream`, and subtitles (`.vtt`, `.srt`) can be served.
+
+### Changed
+
+- **`HttpStreamServer` no longer uses `HttpListener`.** It is built on a socket, so it can bind to a
+  network address on Windows without an administrator-granted URL reservation, and it serves
+  HTTP/1.1 keep-alive, `HEAD`, CORS preflight and CORS headers for cast receivers. Methods other than
+  `GET`, `HEAD` and `OPTIONS` are refused with 405 instead of being served as `GET`. A request that
+  stalls before its first byte is answered with 503 instead of a truncated body.
+- **`ITorrent.DownloadStrategy` reports the configured strategy while a stream is open.** Streaming is
+  applied on top of it and no longer overwrites it, so the configured strategy is what session
+  persistence saves.
+- The library declares `IsAotCompatible`, and builds with the AOT analyzers without warnings.
+- Passing a bare `null` as the third `HttpStreamServer` constructor argument is now ambiguous; cast it
+  to `ILoggerFactory` or `HttpStreamServerOptions`.
+
+### Fixed
+
+- Concurrent tracker DNS cache misses share one lookup, including when refreshing an expired entry.
+- **Closing one of several open streams no longer stops the others streaming.** Only the most recently
+  opened stream was tracked, and closing it put the torrent back on rarest-first while any other
+  stream was still reading. A player that fetched an MP4's index from the end of the file on a second
+  request could stall at the playhead until the read timed out. Every open stream now keeps its
+  pieces prioritised, the most recently read first, and every one is woken when a piece arrives.
+- **A stream opened on a magnet before its metadata arrived was not prioritised.** Metadata arriving
+  replaced the torrent's streaming state, so the waiting stream's priorities went where the piece
+  picker no longer looked.
+- **A torrent's configured download strategy was lost** when its metadata arrived, and when any
+  stream on it closed; both reset it to rarest-first.
+- Opening a stream on a magnet whose metadata never arrives throws `TimeoutException` rather than
+  `TaskCanceledException`, so it can be told apart from the caller cancelling.
+
 ## 5.0.0 — 2026-09-09
 
 ### Breaking changes and migration

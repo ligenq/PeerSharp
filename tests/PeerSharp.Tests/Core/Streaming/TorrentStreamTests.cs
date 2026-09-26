@@ -32,7 +32,7 @@ public class TorrentStreamTests
     {
         using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
 
-        Assert.Equal(DownloadStrategy.Streaming, _torrent.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.Streaming, _torrent.EffectiveDownloadStrategy);
         Assert.NotNull(_torrent.StreamingPriorityPieces);
 
         // Should prioritize start (header) pieces
@@ -378,12 +378,12 @@ public class TorrentStreamTests
     {
         await _torrent.StartAsync();
         var stream = await _torrent.Streaming.OpenStreamAsync(0);
-        Assert.Equal(DownloadStrategy.Streaming, _torrent.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.Streaming, _torrent.EffectiveDownloadStrategy);
         Assert.NotNull(_torrent.StreamingPriorityPieces);
 
         stream.Dispose();
 
-        Assert.Equal(DownloadStrategy.RarestFirst, _torrent.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.RarestFirst, _torrent.EffectiveDownloadStrategy);
         Assert.Null(_torrent.StreamingPriorityPieces);
     }
 
