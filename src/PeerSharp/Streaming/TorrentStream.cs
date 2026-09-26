@@ -10,31 +10,30 @@ namespace PeerSharp.Streaming;
 /// </summary>
 internal class TorrentStream : Stream
 {
-    // Buffering configuration
-    private const int BufferAheadBytes = 20 * 1024 * 1024;
-
     private const int FileEndPriorityBytes = 1 * 1024 * 1024;
 
-    // 1MB at end for headers
+    // Priorities are refreshed each time this much has been read since the last refresh.
     private const int PriorityUpdateIntervalBytes = 1024 * 1024;
 
     /// <summary>
-    /// How long a read waits for the swarm to supply the pieces it needs before giving up.
-    /// Exceeding it throws <see cref="TimeoutException"/> rather than reporting end-of-stream,
-    /// so a stalled swarm can never be mistaken for a complete file.
-    /// </summary>
-    private static readonly TimeSpan DataWaitTimeout = TimeSpan.FromSeconds(60);
-
-    /// <summary>
-    /// Fallback re-check interval, in case the piece-verified signal is missed (for example
-    /// when this stream is not the controller's active stream).
+    /// Fallback re-check interval, in case a piece-verified signal is missed - for example one that
+    /// arrives between checking what is available and starting to wait.
     /// </summary>
     private static readonly TimeSpan DataPollInterval = TimeSpan.FromSeconds(1);
 
     private readonly StreamingController _controller;
     private readonly SemaphoreSlim _dataSignal = new(0);
+
+    /// <summary>
+    /// How long a read waits for the swarm to supply the pieces it needs before giving up, or null
+    /// to wait for as long as the reader's token allows. Exceeding it throws
+    /// <see cref="TimeoutException"/> rather than reporting end-of-stream, so a stalled swarm can
+    /// never be mistaken for a complete file.
+    /// </summary>
+    private readonly TimeSpan? _dataWaitTimeout;
     private readonly long _fileSize;
     private readonly long _fileStartOffset;
+    private readonly long _readAheadBytes;
     private readonly int _firstPieceIndex;
     private readonly int _lastPieceIndex;
     private readonly ILogger<TorrentStream> _logger;
@@ -48,10 +47,6 @@ internal class TorrentStream : Stream
     // Track the piece range we're currently waiting for (for efficient signaling)
     // Accessed from multiple threads: consumer thread (WaitForDataAsync) and torrent thread (OnPieceVerified)
     private int _waitingStartPiece = -1;
-
-    // 20MB buffer ahead
-
-    // Update priorities every 1MB
 
     internal TorrentStream(StreamingController controller, Torrent torrent, int fileIndex, TimeProvider timeProvider)
         : this(controller, torrent, fileIndex, timeProvider, NullLogger<TorrentStream>.Instance)
@@ -87,10 +82,14 @@ internal class TorrentStream : Stream
         _firstPieceIndex = (int)(_fileStartOffset / pieceSize);
         _lastPieceIndex = (int)((_fileStartOffset + _fileSize - 1) / pieceSize);
 
-        // Configure for streaming
-        _controller.DownloadStrategy = DownloadStrategy.Streaming;
+        var settings = torrent.Settings.Streaming;
+        _readAheadBytes = Math.Max(0, settings.ReadAheadBytes);
+        _dataWaitTimeout = settings.DataWaitTimeoutSeconds > 0
+            ? TimeSpan.FromSeconds(settings.DataWaitTimeoutSeconds)
+            : null;
 
-        // Initial prioritization
+        // Being tracked is what puts the picker into streaming mode, for as long as this is open.
+        _controller.OnStreamOpened(this);
         UpdatePriorities(0);
 
         _logger.LogDebug("Opened TorrentStream for {FileName} ({Size} bytes)", Path.GetFileName(file.Path), _fileSize);
@@ -222,7 +221,7 @@ internal class TorrentStream : Stream
     {
         if (_disposal.MarkDisposed() && disposing)
         {
-            // Controller handles resetting strategy if this was the active stream
+            // The torrent leaves streaming mode once its last stream is gone.
             _controller.OnStreamDisposed(this);
             _dataSignal.Dispose();
         }
@@ -270,7 +269,7 @@ internal class TorrentStream : Stream
 
         int pieceSize = (int)_torrent.InfoFile.Info.PieceSize;
         long absolutePlayhead = _fileStartOffset + playheadPosition;
-        long bufferEnd = absolutePlayhead + BufferAheadBytes;
+        long bufferEnd = absolutePlayhead + _readAheadBytes;
 
         int playheadPiece = (int)(absolutePlayhead / pieceSize);
         int bufferEndPiece = (int)(bufferEnd / pieceSize);
@@ -315,10 +314,8 @@ internal class TorrentStream : Stream
             }
         }
 
-        // Update streaming priorities
-        // Note: This overrides priorities set by other streams if multiple are open.
-        // This is a known limitation of the current per-Torrent strategy design.
-        _controller.PriorityPieces = highPriority;
+        // Merged with every other open stream's by the controller, this one first.
+        _controller.UpdatePriorities(this, highPriority);
     }
 
     /// <summary>
@@ -328,7 +325,7 @@ internal class TorrentStream : Stream
     /// </summary>
     /// <exception cref="OperationCanceledException">The caller cancelled the read.</exception>
     /// <exception cref="TimeoutException">
-    /// No piece covering the requested offset arrived within <see cref="DataWaitTimeout"/>.
+    /// No piece covering the requested offset arrived within <see cref="_dataWaitTimeout"/>.
     /// </exception>
     private async Task<int> WaitForDataAsync(long position, int requestedLength, CancellationToken ct)
     {
@@ -363,10 +360,10 @@ internal class TorrentStream : Stream
                     return availableBytes;
                 }
 
-                if (_timeProvider.GetUtcNow() - startTime > DataWaitTimeout)
+                if (_dataWaitTimeout is { } timeout && _timeProvider.GetUtcNow() - startTime > timeout)
                 {
                     throw new TimeoutException(
-                        $"Timed out after {DataWaitTimeout.TotalSeconds:0}s waiting for piece data at offset {absoluteOffset} of torrent '{_torrent.Name}'.");
+                        $"Timed out after {timeout.TotalSeconds:0}s waiting for piece data at offset {absoluteOffset} of torrent '{_torrent.Name}'.");
                 }
 
                 // Wait for signal from OnPieceVerified, or re-check after the poll interval

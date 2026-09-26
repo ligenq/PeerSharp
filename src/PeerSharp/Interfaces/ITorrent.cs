@@ -73,6 +73,11 @@ public interface ITorrent
     /// <summary>
     /// Gets or sets the download strategy for piece selection.
     /// </summary>
+    /// <remarks>
+    /// While a stream opened by <see cref="OpenStreamAsync(int, CancellationToken)"/> is open, pieces
+    /// the stream needs are fetched first regardless of this setting. This property keeps reporting
+    /// the configured strategy throughout, and it applies again once the last stream closes.
+    /// </remarks>
     DownloadStrategy DownloadStrategy { get; set; }
 
     /// <summary>

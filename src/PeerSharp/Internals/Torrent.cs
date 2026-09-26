@@ -119,15 +119,18 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public long DiskWriteLimitBytesPerSecond { get => Configuration.DiskWriteLimitBytesPerSecond; set => Configuration.DiskWriteLimitBytesPerSecond = value; }
 
     // Configuration Passthrough
+    // The strategy this torrent was configured with. Opening a stream overrides it only for as long
+    // as the stream is open, and never writes here, so the configured choice survives streaming,
+    // metadata arriving, and a restart from saved state.
     public DownloadStrategy DownloadStrategy
     {
-        get => Streaming?.DownloadStrategy ?? DownloadStrategy.RarestFirst;
-        set
-        {
-            Streaming?.DownloadStrategy = value;
-            Configuration.DownloadStrategy = value;
-        }
+        get => Configuration.DownloadStrategy;
+        set => Configuration.DownloadStrategy = value;
     }
+
+    /// <summary>The strategy the piece picker follows: streaming while a stream is open.</summary>
+    internal DownloadStrategy EffectiveDownloadStrategy =>
+        Streaming?.IsStreaming == true ? DownloadStrategy.Streaming : Configuration.DownloadStrategy;
 
     public ITorrentEvents? Events { get; set; }
 
@@ -418,7 +421,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     internal PeerManager PeersInternal { get; private set; } = null!;
     internal TorrentServices Services { get; }
     internal StreamingController Streaming { get; private set; } = null!;
-    internal List<int>? StreamingPriorityPieces => Streaming?.PriorityPieces;
+    internal IReadOnlyList<int>? StreamingPriorityPieces => Streaming?.PriorityPieces;
 
     /// <summary>
     /// Lets the owning engine serialize starts with its session pause transition. Torrents created
@@ -1806,7 +1809,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         string? downloadPath = !string.IsNullOrEmpty(LocalState.DownloadPath) ? LocalState.DownloadPath : null;
 
         FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, downloadPath);
-        Streaming = new StreamingController(this, Services.TimeProvider, Services.LoggerFactory);
+        // Created once and kept. Initialize runs again when a magnet's metadata arrives, and a
+        // stream opened while waiting for that metadata belongs to this controller. Replacing the
+        // controller would leave the stream's priorities where the picker no longer looks.
+        Streaming ??= new StreamingController(this, Services.TimeProvider, Services.LoggerFactory);
 
         PeersInternal = new PeerManager(this, Services.GeoIp, Services.PeerFactory, Services.TimeProvider, Services.ConnectionGovernor, Services.LoggerFactory.CreateLogger<PeerManager>());
         TrackerManager = new TrackerManager(this, Services.TrackerFactory, Services.TimeProvider, Services.LoggerFactory.CreateLogger<TrackerManager>());

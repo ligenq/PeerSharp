@@ -1,21 +1,46 @@
-using System.Buffers;
+using System.Buffers.Text;
+using System.Globalization;
 using System.Net;
-using System.Diagnostics.CodeAnalysis;
+using System.Net.Sockets;
+using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using PeerSharp.Core;
 using PeerSharp.Internals;
 
 namespace PeerSharp.Streaming;
 
 /// <summary>
-/// A lightweight HTTP server that streams from a TorrentStream.
-/// Supports Range requests to enable seeking in media players.
+/// A lightweight HTTP server that streams one file of a torrent while it downloads. Supports range
+/// requests, so media players can seek.
 /// </summary>
-[ExcludeFromCodeCoverage]
+/// <remarks>
+/// <para>
+/// Built directly on a socket rather than on <see cref="HttpListener"/>. On Windows, HttpListener
+/// goes through http.sys, which refuses any address but loopback to a process without an
+/// administrator-granted URL reservation - so a server a Chromecast or a TV could reach was not
+/// possible there. A socket binds wherever it is told, on every platform.
+/// </para>
+/// <para>
+/// By default the server listens on loopback, for a player on the same device. To stream to another
+/// device, bind it to this device's address on the shared network with
+/// <see cref="HttpStreamServerOptions.BindAddress"/>; its <see cref="Url"/> then carries a secret
+/// token, so the file is served only to whoever was handed the URL.
+/// </para>
+/// </remarks>
 public sealed class HttpStreamServer : IDisposable
 {
-    private readonly HttpListener _listener;
+    /// <summary>
+    /// The most connections served at once. A player uses a handful; anything beyond this is refused
+    /// rather than allowed to hold streams, and the pieces they prioritise, without limit.
+    /// </summary>
+    private const int MaxConcurrentConnections = 32;
+
+    private readonly Socket _listener;
     private readonly HttpStreamRequestHandler _handler;
+    private readonly ITorrent _torrent;
+    private readonly int _fileIndex;
+    private readonly TimeProvider _timeProvider;
     private readonly CancellationTokenSource _cts = new();
 
     /// <summary>
@@ -24,7 +49,8 @@ public sealed class HttpStreamServer : IDisposable
     /// </summary>
     private readonly CancellationToken _stoppingToken;
     private readonly ILogger<HttpStreamServer> _logger;
-    private readonly string _baseUrl;
+    private int _connections;
+    private int _started;
     private AtomicDisposal _disposal = new();
 
     /// <summary>
@@ -34,7 +60,7 @@ public sealed class HttpStreamServer : IDisposable
     /// <param name="torrent">The torrent to stream from.</param>
     /// <param name="fileIndex">Index of the file within the torrent.</param>
     public HttpStreamServer(ITorrent torrent, int fileIndex)
-        : this(torrent, fileIndex, NullLoggerFactory.Instance)
+        : this(torrent, fileIndex, new HttpStreamServerOptions(), NullLoggerFactory.Instance)
     {
     }
 
@@ -46,118 +72,147 @@ public sealed class HttpStreamServer : IDisposable
     /// <param name="fileIndex">Index of the file within the torrent.</param>
     /// <param name="loggerFactory">Factory used to create the server's logger.</param>
     public HttpStreamServer(ITorrent torrent, int fileIndex, ILoggerFactory loggerFactory)
+        : this(torrent, fileIndex, new HttpStreamServerOptions(), loggerFactory)
     {
-        ArgumentNullException.ThrowIfNull(loggerFactory);
-
-        _stoppingToken = _cts.Token;
-        _logger = loggerFactory.CreateLogger<HttpStreamServer>();
-        _handler = new HttpStreamRequestHandler(torrent, fileIndex, loggerFactory);
-        _listener = new HttpListener();
-
-        // Find an available port
-        int port = GetAvailablePort();
-        _baseUrl = $"http://127.0.0.1:{port}/";
-        _listener.Prefixes.Add(_baseUrl);
     }
 
     /// <summary>
-    /// Gets the loopback URL a media player should open. Available before <see cref="Start"/>.
+    /// Initializes a server that streams one file from <paramref name="torrent"/>, listening where
+    /// <paramref name="options"/> says.
     /// </summary>
-    public string Url => $"{_baseUrl}stream";
+    /// <param name="torrent">The torrent to stream from.</param>
+    /// <param name="fileIndex">Index of the file within the torrent.</param>
+    /// <param name="options">The address, port and access token to use.</param>
+    /// <exception cref="ArgumentException">
+    /// The bind address is a wildcard address, or the access token is not URL-safe.
+    /// </exception>
+    /// <exception cref="SocketException">The address or port cannot be bound.</exception>
+    public HttpStreamServer(ITorrent torrent, int fileIndex, HttpStreamServerOptions options)
+        : this(torrent, fileIndex, options, NullLoggerFactory.Instance)
+    {
+    }
 
     /// <summary>
-    /// Begins accepting requests. Returns as soon as the listener is bound; connections are
+    /// Initializes a server that streams one file from <paramref name="torrent"/>, listening where
+    /// <paramref name="options"/> says.
+    /// </summary>
+    /// <param name="torrent">The torrent to stream from.</param>
+    /// <param name="fileIndex">Index of the file within the torrent.</param>
+    /// <param name="options">The address, port and access token to use.</param>
+    /// <param name="loggerFactory">Factory used to create the server's logger.</param>
+    /// <exception cref="ArgumentException">
+    /// The bind address is a wildcard address, or the access token is not URL-safe.
+    /// </exception>
+    /// <exception cref="SocketException">The address or port cannot be bound.</exception>
+    public HttpStreamServer(ITorrent torrent, int fileIndex, HttpStreamServerOptions options, ILoggerFactory loggerFactory)
+        : this(torrent, fileIndex, options, loggerFactory, TimeProvider.System)
+    {
+    }
+
+    [AllowHeavyConstructor(
+        "Binding is a local call with no network traffic, and it is what lets Url be known - with the " +
+        "port held - before Start, which callers rely on to hand a player the URL straight away.")]
+    internal HttpStreamServer(
+        ITorrent torrent,
+        int fileIndex,
+        HttpStreamServerOptions options,
+        ILoggerFactory loggerFactory,
+        TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(torrent);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+
+        var address = options.BindAddress ?? throw new ArgumentException("A bind address is required.", nameof(options));
+        if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any) || address.Equals(IPAddress.None))
+        {
+            throw new ArgumentException(
+                "Bind to the specific address a player will use. A URL naming every interface names none of them.",
+                nameof(options));
+        }
+
+        if (options.Port is < 0 or > IPEndPoint.MaxPort)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), options.Port, "The port must be between 0 and 65535.");
+        }
+
+        string? token = options.AccessToken ?? (IPAddress.IsLoopback(address) ? null : NewAccessToken());
+        if (token != null && !IsUrlSafe(token))
+        {
+            throw new ArgumentException("An access token may contain only letters, digits, '-' and '_'.", nameof(options));
+        }
+
+        string path = token == null
+            ? HttpStreamRequestHandler.DefaultPath
+            : $"/{token}{HttpStreamRequestHandler.DefaultPath}";
+
+        _torrent = torrent;
+        _fileIndex = fileIndex;
+        _timeProvider = timeProvider;
+        _stoppingToken = _cts.Token;
+        _logger = loggerFactory.CreateLogger<HttpStreamServer>();
+        _handler = new HttpStreamRequestHandler(torrent, fileIndex, path, loggerFactory);
+
+        // Bound now, listened on at Start, so the URL is known - and the port held - before any
+        // player is handed it. Probing for a free port and binding later could lose it in between.
+        _listener = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        try
+        {
+            _listener.Bind(new IPEndPoint(address, options.Port));
+        }
+        catch
+        {
+            _listener.Dispose();
+            _cts.Dispose();
+            throw;
+        }
+
+        // Plain HTTP by necessity: a cast receiver or TV cannot validate a certificate for an address
+        // on a home network. The access token in the path is what keeps other devices out.
+#pragma warning disable S5332
+        Url = $"http://{Authority((IPEndPoint)_listener.LocalEndPoint!)}{path}";
+#pragma warning restore S5332
+    }
+
+    /// <summary>
+    /// Gets the URL a media player should open. Available before <see cref="Start"/>.
+    /// </summary>
+    public string Url { get; }
+
+    /// <summary>
+    /// Gets the MIME type the file is served as, judged by its name - what a cast sender puts in its
+    /// load request. <c>application/octet-stream</c> until the torrent's metadata is known, and for
+    /// anything that is not a recognised media type.
+    /// </summary>
+    public string ContentType =>
+        _torrent.GetAllFileInfo().ElementAtOrDefault(_fileIndex) is { } file
+            ? StreamMediaTypes.GetMimeType(file.Path)
+            : StreamMediaTypes.Fallback;
+
+    /// <summary>
+    /// Begins accepting requests. Returns as soon as the listener is listening; connections are
     /// served in the background.
     /// </summary>
+    /// <exception cref="InvalidOperationException">The server has already been started.</exception>
+    /// <exception cref="ObjectDisposedException">The server has been disposed.</exception>
     public void Start()
     {
-        _listener.Start();
+        _disposal.ThrowIfDisposed(this);
+        if (Interlocked.Exchange(ref _started, 1) == 1)
+        {
+            throw new InvalidOperationException("The server has already been started.");
+        }
+
+        _listener.Listen();
         _ = AcceptConnectionsAsync(); // Fire-and-forget OK: method handles exceptions internally
         _logger.LogInformation("HTTP Stream Server started at {Url}", Url);
     }
 
-    private async Task AcceptConnectionsAsync()
-    {
-        try
-        {
-            while (_listener.IsListening)
-            {
-                var context = await _listener.GetContextAsync().ConfigureAwait(false);
-                _ = ProcessRequestAsync(context);
-            }
-        }
-        catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException)
-        {
-            // Normal during shutdown
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error accepting HTTP connections");
-        }
-    }
-
-    private async Task ProcessRequestAsync(HttpListenerContext context)
-    {
-        using var response = context.Response;
-        try
-        {
-            await _handler.ProcessAsync(
-                new HttpListenerStreamRequest(context.Request),
-                new HttpListenerStreamResponse(response),
-                _stoppingToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Server is shutting down — abandon this request quietly. The response is aborted
-            // rather than completed so a client cannot mistake a partial body for the whole file.
-            Abort(response);
-        }
-        catch (TimeoutException ex)
-        {
-            // The swarm stopped supplying the pieces this range needs. Content-Length has
-            // already been sent, so the only honest signal left is a broken connection.
-            _logger.LogWarning(ex, "Timed out waiting for torrent data while streaming");
-            Abort(response);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error processing HTTP stream request");
-            try
-            {
-                if (response.OutputStream.CanWrite)
-                {
-                    response.StatusCode = (int)HttpStatusCode.InternalServerError;
-                }
-            }
-            catch
-            {
-                // Ignore errors setting status code if headers already sent
-            }
-        }
-    }
-
-    private static void Abort(HttpListenerResponse response)
-    {
-        try
-        {
-            response.Abort();
-        }
-        catch
-        {
-            // Response may already be closed or the client already gone.
-        }
-    }
-
-    private static int GetAvailablePort()
-    {
-        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
-
-    /// <summary>Stops the listener and releases its resources. Safe to call more than once.</summary>
+    /// <summary>
+    /// Stops listening, ends every connection being served, and releases the listener. Safe to call
+    /// more than once.
+    /// </summary>
     public void Dispose()
     {
         if (_disposal.MarkDisposed())
@@ -166,307 +221,106 @@ public sealed class HttpStreamServer : IDisposable
             {
                 _cts.Cancel();
             }
-            catch
+            catch (AggregateException ex)
             {
-                // Ignore — token source may already be disposed under heavy contention.
+                // A registration on the stopping token threw. Shutdown carries on regardless.
+                _logger.LogDebug(ex, "A stopping callback failed during shutdown");
             }
 
-            try
-            {
-                _listener.Stop();
-                ((IDisposable)_listener).Dispose();
-            }
-            catch
-            {
-                // Ignore disposal errors
-            }
-
+            _listener.Dispose();
             _cts.Dispose();
         }
     }
-}
 
-internal sealed class HttpStreamRequestHandler
-{
-    private const int BufferSize = 81920;
-    private readonly ITorrent _torrent;
-    private readonly int _fileIndex;
-    private readonly ILogger<HttpStreamRequestHandler> _logger;
-
-    public HttpStreamRequestHandler(ITorrent torrent, int fileIndex)
-        : this(torrent, fileIndex, NullLoggerFactory.Instance)
+    private async Task AcceptConnectionsAsync()
     {
-    }
-
-    internal HttpStreamRequestHandler(ITorrent torrent, int fileIndex, ILoggerFactory loggerFactory)
-    {
-        _logger = loggerFactory.CreateLogger<HttpStreamRequestHandler>();
-        _torrent = torrent;
-        _fileIndex = fileIndex;
-    }
-
-    public async Task ProcessAsync(IHttpStreamRequest request, IHttpStreamResponse response, CancellationToken cancellationToken = default)
-    {
-        if (request.Path != "/stream")
-        {
-            response.StatusCode = (int)HttpStatusCode.NotFound;
-            return;
-        }
-
-        var fileInfo = _torrent.GetAllFileInfo().ElementAtOrDefault(_fileIndex);
-        if (fileInfo == null)
-        {
-            response.StatusCode = (int)HttpStatusCode.NotFound;
-            return;
-        }
-
-        long totalLength = fileInfo.Size;
-        var range = HttpRangeParser.Parse(request.RangeHeader, totalLength);
-        if (!range.IsValid)
-        {
-            response.StatusCode = (int)HttpStatusCode.RequestedRangeNotSatisfiable;
-            response.AddHeader("Content-Range", $"bytes */{totalLength}");
-            return;
-        }
-
-        long contentLength = range.End - range.Start + 1;
-        response.ProtocolVersion = new Version(1, 1);
-        response.AddHeader("Accept-Ranges", "bytes");
-        response.AddHeader("Connection", "keep-alive");
-        response.ContentType = HttpStreamMimeTypes.GetMimeType(fileInfo.Path);
-        response.ContentLength = contentLength;
-
-        if (range.IsPartial)
-        {
-            response.StatusCode = (int)HttpStatusCode.PartialContent;
-            response.AddHeader("Content-Range", $"bytes {range.Start}-{range.End}/{totalLength}");
-        }
-        else
-        {
-            response.StatusCode = (int)HttpStatusCode.OK;
-        }
-
-        if (request.Method == "HEAD")
-        {
-            _logger.LogDebug("Serving HEAD request for {File}", fileInfo.Path);
-            return;
-        }
-
-        _logger.LogDebug("Serving GET request for {File} range {Start}-{End} (Partial: {IsPartial})", fileInfo.Path, range.Start, range.End, range.IsPartial);
-
-        await using var stream = await _torrent.OpenStreamAsync(_fileIndex, cancellationToken).ConfigureAwait(false);
-        stream.Seek(range.Start, SeekOrigin.Begin);
-
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
         try
         {
-            long bytesRemaining = contentLength;
-
-            while (bytesRemaining > 0)
+            while (!_stoppingToken.IsCancellationRequested)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                int toRead = (int)Math.Min(buffer.Length, bytesRemaining);
-                int read = await stream.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken).ConfigureAwait(false);
-                if (read == 0)
+                var socket = await _listener.AcceptAsync(_stoppingToken).ConfigureAwait(false);
+                if (Interlocked.Increment(ref _connections) > MaxConcurrentConnections)
                 {
-                    // Content-Length was already announced from the file size, so a short read
-                    // here means the file is not what the metadata claims. Fail loudly instead
-                    // of completing the response with a truncated body.
-                    throw new EndOfStreamException(
-                        $"Stream for '{fileInfo.Path}' ended {bytesRemaining} bytes short of the announced range.");
+                    Interlocked.Decrement(ref _connections);
+                    _logger.LogWarning("Refusing a streaming connection: {Max} are already open", MaxConcurrentConnections);
+                    socket.Dispose();
+                    continue;
                 }
 
-                try
-                {
-                    await response.Body.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                }
-                catch (HttpListenerException)
-                {
-                    // Client disconnected while streaming; stop this response without failing the server.
-                    break;
-                }
-
-                bytesRemaining -= read;
+                _ = ServeConnectionAsync(socket); // Fire-and-forget OK: method handles exceptions internally
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal during shutdown
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or SocketException && _stoppingToken.IsCancellationRequested)
+        {
+            // Normal during shutdown: disposing the listener ends a pending accept this way.
+            _logger.LogDebug(ex, "Stopped accepting streaming connections");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error accepting HTTP connections");
+        }
+    }
+
+    private async Task ServeConnectionAsync(Socket socket)
+    {
+        try
+        {
+            socket.NoDelay = true;
+            var transport = new NetworkStream(socket, ownsSocket: true);
+            await using (transport.ConfigureAwait(false))
+            {
+                var connection = new HttpStreamConnection(transport, _handler, _timeProvider, _logger);
+                await connection.ServeAsync(_stoppingToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested)
+        {
+            // Server is shutting down - abandon this connection quietly. Closing it part way through a
+            // response is what tells the client the body is incomplete.
+        }
+        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
+        {
+            // The client went away, which is how most streaming connections end: a player seeking
+            // abandons the request it was reading.
+            _logger.LogDebug(ex, "Streaming client disconnected");
+        }
+        catch (TimeoutException ex)
+        {
+            // The swarm stopped supplying the pieces this range needs after the response had
+            // started. Content-Length has been sent, so the only honest signal left is a closed
+            // connection.
+            _logger.LogWarning(ex, "Timed out waiting for torrent data while streaming");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error serving HTTP stream connection");
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            socket.Dispose();
+            Interlocked.Decrement(ref _connections);
         }
     }
-}
 
-internal interface IHttpStreamRequest
-{
-    string Method { get; }
-    string Path { get; }
-    string? RangeHeader { get; }
-}
+    private static string NewAccessToken() => Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
 
-internal interface IHttpStreamResponse
-{
-    Stream Body { get; }
-    long ContentLength { get; set; }
-    string ContentType { get; set; }
-    Version ProtocolVersion { get; set; }
-    int StatusCode { get; set; }
-    void AddHeader(string name, string value);
-}
+    private static bool IsUrlSafe(string token) =>
+        token.Length > 0 && token.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
 
-internal readonly record struct HttpByteRange(bool IsValid, bool IsPartial, long Start, long End);
-
-internal static class HttpRangeParser
-{
-    public static HttpByteRange Parse(string? rangeHeader, long totalLength)
+    /// <summary>The host and port of an endpoint, written as a URL needs them.</summary>
+    private static string Authority(IPEndPoint endpoint)
     {
-        // No range header (or different unit): caller serves the whole file as a 200.
-        if (string.IsNullOrEmpty(rangeHeader) || !rangeHeader.StartsWith("bytes=", StringComparison.Ordinal))
+        if (endpoint.AddressFamily != AddressFamily.InterNetworkV6)
         {
-            bool wholeFileValid = totalLength > 0;
-            return new HttpByteRange(wholeFileValid, IsPartial: false, Start: 0, End: totalLength - 1);
+            return endpoint.ToString();
         }
 
-        var rangeValue = rangeHeader.AsSpan("bytes=".Length);
-
-        // RFC 7233 multi-range (e.g. "bytes=0-5,10-15") is not supported here. Treat any range
-        // header that contains a comma as malformed so we return 416 instead of silently serving
-        // the first range or the whole file.
-        if (rangeValue.IndexOf(',') >= 0)
-        {
-            return new HttpByteRange(IsValid: false, IsPartial: true, Start: 0, End: totalLength - 1);
-        }
-
-        int dashIndex = rangeValue.IndexOf('-');
-        if (dashIndex < 0)
-        {
-            return new HttpByteRange(IsValid: false, IsPartial: true, Start: 0, End: totalLength - 1);
-        }
-
-        var startSpan = rangeValue[..dashIndex];
-        var endSpan = rangeValue[(dashIndex + 1)..];
-
-        // RFC 7233 §2.1 suffix-byte-range-spec: "bytes=-N" means the last N bytes.
-        if (startSpan.IsEmpty)
-        {
-            if (!long.TryParse(endSpan, out long suffix) || suffix <= 0)
-            {
-                return new HttpByteRange(IsValid: false, IsPartial: true, Start: 0, End: totalLength - 1);
-            }
-
-            long suffixStart = Math.Max(0, totalLength - suffix);
-            bool suffixValid = totalLength > 0;
-            return new HttpByteRange(suffixValid, IsPartial: true, suffixStart, totalLength - 1);
-        }
-
-        if (!long.TryParse(startSpan, out long rangeStart))
-        {
-            return new HttpByteRange(IsValid: false, IsPartial: true, Start: 0, End: totalLength - 1);
-        }
-
-        long rangeEnd = totalLength - 1;
-        bool endPresent = !endSpan.IsEmpty;
-        if (endPresent && !long.TryParse(endSpan, out rangeEnd))
-        {
-            return new HttpByteRange(IsValid: false, IsPartial: true, Start: rangeStart, End: totalLength - 1);
-        }
-
-        // Open-ended high (bytes=N-) is allowed and resolves to N..totalLength-1. What decides
-        // satisfiability is the first byte position alone: RFC 7233 §2.1 makes a range unsatisfiable
-        // when it starts at or past the end, and a last-byte-pos that precedes it is malformed.
-        bool valid = totalLength > 0
-            && rangeStart >= 0
-            && rangeStart < totalLength
-            && (!endPresent || rangeEnd >= rangeStart);
-
-        // An end at or past the end of the file is not a rejection - "the byte range is interpreted
-        // as the remainder of the representation". Players request fixed-size chunks, so the last
-        // chunk of every file asks for more than is left, as does every chunk of a file smaller than
-        // one chunk. Answering those with 416 fails playback at the end of each file.
-        if (valid && rangeEnd >= totalLength)
-        {
-            rangeEnd = totalLength - 1;
-        }
-
-        return new HttpByteRange(valid, IsPartial: true, rangeStart, rangeEnd);
-    }
-}
-
-internal static class HttpStreamMimeTypes
-{
-    public static string GetMimeType(string path)
-    {
-        string ext = Path.GetExtension(path).ToLowerInvariant();
-        return ext switch
-        {
-            ".mp4" => "video/mp4",
-            ".mkv" => "video/x-matroska",
-            ".avi" => "video/x-msvideo",
-            ".mov" => "video/quicktime",
-            ".wmv" => "video/x-ms-wmv",
-            ".webm" => "video/webm",
-            ".mp3" => "audio/mpeg",
-            ".flac" => "audio/flac",
-            ".ogg" => "audio/ogg",
-            ".wav" => "audio/wav",
-            _ => "application/octet-stream"
-        };
-    }
-}
-
-[ExcludeFromCodeCoverage]
-internal sealed class HttpListenerStreamRequest : IHttpStreamRequest
-{
-    private readonly HttpListenerRequest _request;
-
-    public HttpListenerStreamRequest(HttpListenerRequest request)
-    {
-        _request = request;
-    }
-
-    public string Method => _request.HttpMethod;
-    public string Path => _request.Url?.AbsolutePath ?? string.Empty;
-    public string? RangeHeader => _request.Headers["Range"];
-}
-
-[ExcludeFromCodeCoverage]
-internal sealed class HttpListenerStreamResponse : IHttpStreamResponse
-{
-    private readonly HttpListenerResponse _response;
-
-    public HttpListenerStreamResponse(HttpListenerResponse response)
-    {
-        _response = response;
-    }
-
-    public Stream Body => _response.OutputStream;
-
-    public long ContentLength
-    {
-        get => _response.ContentLength64;
-        set => _response.ContentLength64 = value;
-    }
-
-    public string ContentType
-    {
-        get => _response.ContentType ?? string.Empty;
-        set => _response.ContentType = value;
-    }
-
-    public Version ProtocolVersion
-    {
-        get => _response.ProtocolVersion;
-        set => _response.ProtocolVersion = value;
-    }
-
-    public int StatusCode
-    {
-        get => _response.StatusCode;
-        set => _response.StatusCode = value;
-    }
-
-    public void AddHeader(string name, string value)
-    {
-        _response.AddHeader(name, value);
+        // An IPv6 literal goes in brackets, and a zone index's '%' has to be escaped (RFC 6874).
+        var host = endpoint.Address.ToString().Replace("%", "%25", StringComparison.Ordinal);
+        return string.Create(CultureInfo.InvariantCulture, $"[{host}]:{endpoint.Port}");
     }
 }

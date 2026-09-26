@@ -193,7 +193,7 @@ internal class TorrentPiecePickerContext : IPiecePickerContext
         _torrent = torrent;
     }
 
-    public DownloadStrategy DownloadStrategy => _torrent.DownloadStrategy;
+    public DownloadStrategy DownloadStrategy => _torrent.EffectiveDownloadStrategy;
     public int PieceCount => _torrent.Pieces.Count;
     public int CompletedPieceCount => _torrent.Pieces.ReceivedCount;
 

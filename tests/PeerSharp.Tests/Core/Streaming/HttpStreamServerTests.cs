@@ -1,4 +1,6 @@
 using System.Net;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Streaming;
 
 namespace PeerSharp.Tests.Core.Streaming;
@@ -14,7 +16,7 @@ public class HttpStreamRequestHandlerTests
     {
         var torrent = new FakeTorrent("movie.mp4", [1]);
 
-        Assert.Throws<ArgumentNullException>(() => new HttpStreamServer(torrent, 0, null!));
+        Assert.Throws<ArgumentNullException>(() => new HttpStreamServer(torrent, 0, (ILoggerFactory)null!));
     }
 
     [Fact(Timeout = 30000)]
@@ -94,14 +96,76 @@ public class HttpStreamRequestHandlerTests
         Assert.Equal("bytes */4", response.Headers["Content-Range"]);
     }
 
-    [Theory]
-    [InlineData("movie.mkv", "video/x-matroska")]
-    [InlineData("clip.avi", "video/x-msvideo")]
-    [InlineData("song.mp3", "audio/mpeg")]
-    [InlineData("file.bin", "application/octet-stream")]
-    public void GetMimeType_ReturnsExpectedType(string path, string expected)
+    [Fact(Timeout = 30000)]
+    public async Task Get_AllowsACastReceiverFromAnotherOriginToRead()
     {
-        Assert.Equal(expected, HttpStreamMimeTypes.GetMimeType(path));
+        // A cast receiver is a web page on another origin, and it is not allowed to read a response
+        // that does not say it may - nor the range headers it needs to seek, unless they are exposed.
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1, 2, 3, 4]), 0);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream", "bytes=0-1"), response);
+
+        Assert.Equal("*", response.Headers["Access-Control-Allow-Origin"]);
+        Assert.Contains("Content-Range", response.Headers["Access-Control-Expose-Headers"], StringComparison.Ordinal);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Options_AnswersACorsPreflightWithoutOpeningTheFile()
+    {
+        var torrent = new FakeTorrent("movie.mp4", [1], () => throw new InvalidOperationException("a preflight must not open the file"));
+        var handler = new HttpStreamRequestHandler(torrent, 0);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("OPTIONS", "/stream"), response);
+
+        Assert.Equal((int)HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Contains("GET", response.Headers["Access-Control-Allow-Methods"], StringComparison.Ordinal);
+        Assert.Equal("Range", response.Headers["Access-Control-Allow-Headers"]);
+    }
+
+    [Theory]
+    [InlineData("POST")]
+    [InlineData("PUT")]
+    [InlineData("DELETE")]
+    public async Task AnyOtherMethod_IsRefusedRatherThanServedAsAGet(string method)
+    {
+        // Every method but HEAD used to be answered as a GET, streaming the file to a POST.
+        var torrent = new FakeTorrent("movie.mp4", [1], () => throw new InvalidOperationException("must not open the file"));
+        var handler = new HttpStreamRequestHandler(torrent, 0);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest(method, "/stream"), response);
+
+        Assert.Equal((int)HttpStatusCode.MethodNotAllowed, response.StatusCode);
+        Assert.Equal("GET, HEAD, OPTIONS", response.Headers["Allow"]);
+    }
+
+    [Theory]
+    [InlineData("/stream")]
+    [InlineData("/wrong-token/stream")]
+    [InlineData("/secret-token/stream/")]
+    [InlineData("/SECRET-TOKEN/stream")]
+    public async Task AServerWithAToken_AnswersOnlyTheTokenPath(string path)
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0, "/secret-token/stream", NullLoggerFactory.Instance);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", path), response);
+
+        Assert.Equal((int)HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AServerWithAToken_ServesTheTokenPath()
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1, 2]), 0, "/secret-token/stream", NullLoggerFactory.Instance);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/secret-token/stream"), response);
+
+        Assert.Equal((int)HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(new byte[] { 1, 2 }, response.BodyBytes);
     }
 
     [Theory]
@@ -238,7 +302,7 @@ public class HttpStreamRequestHandlerTests
             handler.ProcessAsync(new FakeRequest("GET", "/stream"), response));
     }
 
-    private sealed record FakeRequest(string Method, string Path, string? RangeHeader = null) : IHttpStreamRequest;
+    internal sealed record FakeRequest(string Method, string Path, string? RangeHeader = null) : IHttpStreamRequest;
 
     /// <summary>
     /// Serves <paramref name="stallAfter"/> bytes and then behaves like a torrent stream whose
@@ -267,7 +331,6 @@ public class HttpStreamRequestHandlerTests
         public long ContentLength { get; set; }
         public string ContentType { get; set; } = string.Empty;
         public Dictionary<string, string> Headers { get; } = new(StringComparer.OrdinalIgnoreCase);
-        public Version ProtocolVersion { get; set; } = new(1, 0);
         public int StatusCode { get; set; }
 
         public void AddHeader(string name, string value)
@@ -276,7 +339,7 @@ public class HttpStreamRequestHandlerTests
         }
     }
 
-    private sealed class FakeTorrent : ITorrent
+    internal sealed class FakeTorrent : ITorrent
     {
         public bool SuperSeeding { get; set; }
 
