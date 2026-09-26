@@ -322,11 +322,9 @@ public class SyntheticPeerInteropTests : IDisposable
         // accepts first is not something a loaded machine guarantees, and asserting on an index
         // failed in CI twice for that reason alone.
         //
-        // Asked as Opening rather than as a bool. A connection is recorded when it is accepted and
-        // its first byte arrives afterwards, so the old two-state flag answered "is there an
-        // encrypted attempt?" with a socket that had sent nothing yet - which let this pass without
-        // encryption ever being offered, and made the run where it genuinely was not offered look
-        // like a flake.
+        // Opening stays null until enough bytes identify the handshake. In particular, a random
+        // encrypted key starting with 19 must be distinguished from the full plaintext prefix;
+        // otherwise a real encrypted attempt is recorded as plaintext and this fails at random.
         bool bothOffered = await SyntheticPeer.WaitForAsync(
             () => peer.Connections.Any(static c => c.Opening == HandshakeOpening.Encrypted)
                 && peer.Connections.Any(static c => c.Opening == HandshakeOpening.Plaintext),
@@ -347,7 +345,7 @@ public class SyntheticPeerInteropTests : IDisposable
         {
             HandshakeOpening.Plaintext => "plaintext",
             HandshakeOpening.Encrypted => "encrypted",
-            _ => "nothing sent"
+            _ => "opening incomplete"
         }));
 
     private ClientEngine CreateEngine(Encryption encryption, TimeSpan? pexInterval = null)

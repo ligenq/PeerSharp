@@ -76,12 +76,13 @@ internal sealed class SyntheticConnection(int ordinal)
     private System.Net.Sockets.NetworkStream? _stream;
     private readonly List<int> _servedMetadataPieces = [];
     private int _metadataResponseFrameBoundary;
+    private int _opening = -1;
 
     /// <summary>Zero-based order of arrival.</summary>
     public int Ordinal { get; } = ordinal;
 
     /// <summary>
-    /// What this attempt opened with, or null while nothing has arrived on the socket yet.
+    /// What this attempt opened with, or null until enough bytes have arrived to identify it.
     /// </summary>
     /// <remarks>
     /// Three states rather than two, because a connection is recorded when it is accepted and the
@@ -90,11 +91,18 @@ internal sealed class SyntheticConnection(int ordinal)
     /// encrypted attempt, and a test asking whether encryption was ever offered could be answered
     /// by a connection that had offered nothing at all.
     /// </remarks>
-    public HandshakeOpening? Opening { get; private set; }
+    public HandshakeOpening? Opening
+    {
+        get
+        {
+            int opening = Volatile.Read(ref _opening);
+            return opening < 0 ? null : (HandshakeOpening)opening;
+        }
+    }
 
     /// <summary>
     /// Whether this attempt opened with a plaintext BitTorrent handshake rather than the MSE key
-    /// exchange. False while nothing has arrived; ask <see cref="Opening"/> to tell those apart.
+    /// exchange. False until identified; ask <see cref="Opening"/> to tell those apart.
     /// </summary>
     public bool StartedWithPlaintextHandshake => Opening == HandshakeOpening.Plaintext;
 
@@ -153,7 +161,7 @@ internal sealed class SyntheticConnection(int ordinal)
     public Task Ready => _ready.Task;
 
     internal void RecordOpening(bool plaintext) =>
-        Opening = plaintext ? HandshakeOpening.Plaintext : HandshakeOpening.Encrypted;
+        Volatile.Write(ref _opening, (int)(plaintext ? HandshakeOpening.Plaintext : HandshakeOpening.Encrypted));
 
     internal void AttachStream(System.Net.Sockets.NetworkStream stream) => _stream = stream;
 
@@ -202,8 +210,8 @@ internal sealed class SyntheticConnection(int ordinal)
 
     internal void RecordHandshake(byte[] remainderOfHandshake)
     {
-        // The 67 bytes after the leading 19: 18 of protocol string, 8 reserved, 20 info hash, 20 peer id.
-        Reserved = remainderOfHandshake.AsSpan(18, 8).ToArray();
+        // The 67 bytes after the leading 19: 19 of protocol string, 8 reserved, 20 info hash, 20 peer id.
+        Reserved = remainderOfHandshake.AsSpan(19, 8).ToArray();
     }
 
     internal void Record(WireFrame frame)
