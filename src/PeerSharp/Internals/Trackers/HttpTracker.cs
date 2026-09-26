@@ -13,14 +13,38 @@ namespace PeerSharp.Internals.Trackers;
 internal class HttpTracker : TrackerBase, IDisposable
 {
     private const int MaxTrackerResponseBytes = 1024 * 1024;
+
+    /// <summary>
+    /// How many of a host's addresses one announce tries. A tracker behind several A records has them
+    /// so one host being down is survivable; a short walk keeps that without letting a long list of
+    /// dead records spend the whole request timeout.
+    /// </summary>
+    internal const int MaxAddressesPerAnnounce = 3;
+
+    /// <summary>How many redirects an announce follows, as HttpClient's own default allows.</summary>
+    internal const int MaxRedirects = 50;
     private readonly ILogger<HttpTracker> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly HostAddressCache _hostAddresses;
     private AtomicDisposal _disposal = new();
     private IHttpClient? _testClient;
 
     internal HttpTracker(ILoggerFactory loggerFactory, IHttpClientFactory httpClientFactory)
+        : this(
+            loggerFactory,
+            httpClientFactory,
+            (httpClientFactory as HttpClientFactory)?.HostAddresses ?? new HostAddressCache(TimeProvider.System))
+    {
+    }
+
+    /// <summary>
+    /// <paramref name="hostAddresses"/> is where the tracker's name is looked up, both to choose which
+    /// address families to announce over and to address the server in each.
+    /// </summary>
+    internal HttpTracker(ILoggerFactory loggerFactory, IHttpClientFactory httpClientFactory, HostAddressCache hostAddresses)
     {
         _httpClientFactory = httpClientFactory;
+        _hostAddresses = hostAddresses;
         _logger = loggerFactory.CreateLogger<HttpTracker>();
     }
 
@@ -31,7 +55,17 @@ internal class HttpTracker : TrackerBase, IDisposable
             string url = BuildUrl(evt);
             _logger.LogDebug("Announcing to {Url}", url);
 
-            var families = GetAnnounceAddressFamilies();
+            var families = await GetReachableAddressFamiliesAsync(ct).ConfigureAwait(false);
+            if (families.Count == 0)
+            {
+                // Known before any request is made, so it is reported as the result it is. Handing the
+                // request to HttpClient anyway made its connect callback throw "no such host" once per
+                // family, on every announce, for trackers whose names stopped resolving long ago.
+                _logger.LogDebug("Announce to {Url} skipped - its host has no usable address", Url);
+                RaiseAnnounceResult(false, new AnnounceResponse(), $"Tracker host {new Uri(Url).Host} has no usable address");
+                return;
+            }
+
             AnnounceResponse response;
             if (families.Count == 1)
             {
@@ -232,11 +266,108 @@ internal class HttpTracker : TrackerBase, IDisposable
         AddressFamily? addressFamily,
         CancellationToken ct)
     {
-        var client = GetClient(addressFamily);
+        if (addressFamily is { } family)
+        {
+            return await GetResponseBytesOverAsync(new Uri(url), family, ct).ConfigureAwait(false);
+        }
+
+        var client = GetClient();
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         return await ReadContentWithLimitAsync(response.Content, MaxTrackerResponseBytes, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Asks the tracker over one address family, by sending the request to one of its addresses in that
+    /// family and naming the tracker in the Host header - which HttpClient also uses for the TLS server
+    /// name and certificate check.
+    ///
+    /// <para>
+    /// The family used to be chosen in a connect callback. A callback can report a connection that was
+    /// refused only by throwing, and the exception went from our code into HttpClient's - once per
+    /// family for every tracker that was down, and a stop in the debugger for anyone with Just My Code on.
+    /// Addressing the server directly leaves connecting to HttpClient, whose failures stay inside it
+    /// until they reach the catch here.
+    /// </para>
+    ///
+    /// <para>
+    /// Redirects are followed here rather than by HttpClient, which would carry the Host header to
+    /// wherever the redirect points. Each location is resolved in the same family.
+    /// </para>
+    /// </summary>
+    private async Task<byte[]> GetResponseBytesOverAsync(Uri uri, AddressFamily family, CancellationToken ct)
+    {
+        var client = GetClient(followRedirects: false);
+        int redirects = 0;
+        while (true)
+        {
+            var addresses = (await _hostAddresses.ResolveAsync(uri.DnsSafeHost, ct).ConfigureAwait(false))
+                .Where(address => address.AddressFamily == family)
+                .Take(MaxAddressesPerAnnounce)
+                .ToArray();
+            if (addresses.Length == 0)
+            {
+                throw new HttpRequestException($"Tracker host {uri.Host} has no {family} address.");
+            }
+
+            using var response = await SendToFirstAnsweringAsync(client, uri, addresses, ct).ConfigureAwait(false);
+            if (redirects < MaxRedirects && FollowableRedirect(uri, response) is { } location)
+            {
+                uri = location;
+                redirects++;
+                continue;
+            }
+
+            response.EnsureSuccessStatusCode();
+            return await ReadContentWithLimitAsync(response.Content, MaxTrackerResponseBytes, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Tries each address in turn until one takes the connection.</summary>
+    private async Task<HttpResponseMessage> SendToFirstAnsweringAsync(
+        IHttpClient client,
+        Uri uri,
+        IPAddress[] addresses,
+        CancellationToken ct)
+    {
+        for (int i = 0; i < addresses.Length; i++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, new UriBuilder(uri) { Host = addresses[i].ToString() }.Uri);
+            string host = uri.HostNameType == UriHostNameType.IPv6 ? $"[{uri.IdnHost}]" : uri.IdnHost;
+            request.Headers.Host = uri.IsDefaultPort ? host : $"{host}:{uri.Port}";
+            try
+            {
+                return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex) when (ex.HttpRequestError == HttpRequestError.ConnectionError && i < addresses.Length - 1)
+            {
+                _logger.LogDebug(ex, "Tracker {Host} did not accept a connection at {Address}; trying the next address", uri.Host, addresses[i]);
+            }
+        }
+
+        // The last address rethrows rather than falling through, so only an empty list gets here.
+        throw new ArgumentException("There is no address to send the request to.", nameof(addresses));
+    }
+
+    /// <summary>
+    /// Where a redirect points, resolved against the URL that was asked for - not the address it was
+    /// sent to - or null if the response is not one to follow. Like HttpClient, an https tracker is not
+    /// followed to plain http.
+    /// </summary>
+    private static Uri? FollowableRedirect(Uri requested, HttpResponseMessage response)
+    {
+        bool isRedirect = response.StatusCode is HttpStatusCode.MovedPermanently or HttpStatusCode.Found
+            or HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect;
+        if (!isRedirect || response.Headers.Location is not { } location)
+        {
+            return null;
+        }
+
+        var target = location.IsAbsoluteUri ? location : new Uri(requested, location);
+        bool downgrade = requested.Scheme == Uri.UriSchemeHttps && target.Scheme != Uri.UriSchemeHttps;
+        bool supported = target.Scheme == Uri.UriSchemeHttp || target.Scheme == Uri.UriSchemeHttps;
+        return supported && !downgrade ? target : null;
     }
 
     private static async Task<byte[]> ReadContentWithLimitAsync(HttpContent content, int maxBytes, CancellationToken ct)
@@ -581,21 +712,40 @@ internal class HttpTracker : TrackerBase, IDisposable
         return baseUrl + sb.ToString();
     }
 
-    private IReadOnlyList<AddressFamily?> GetAnnounceAddressFamilies()
+    /// <summary>
+    /// The families to announce over, less those the tracker's host has no address in. Most trackers
+    /// have no AAAA record, which is ordinary rather than a failure. A proxy or a test client routes
+    /// the request itself, so nothing is filtered for those.
+    /// </summary>
+    private async Task<IReadOnlyList<AddressFamily?>> GetReachableAddressFamiliesAsync(CancellationToken ct)
     {
-        var bindAddress = Torrent.Settings.Connection.BindAddress;
-        if (bindAddress != null)
+        var families = GetAnnounceAddressFamilies();
+        if (families.Any(family => family == null))
         {
-            return [bindAddress.AddressFamily];
+            return families;
         }
 
+        var addresses = await _hostAddresses.ResolveAsync(new Uri(Url).DnsSafeHost, ct).ConfigureAwait(false);
+        return [.. families.Where(family => addresses.Any(address => address.AddressFamily == family))];
+    }
+
+    private IReadOnlyList<AddressFamily?> GetAnnounceAddressFamilies()
+    {
         var proxy = Torrent.Settings.Proxy;
         bool proxyIsActive = proxy.ProxyTrackers
             && proxy.Type != ProxyType.None
             && !string.IsNullOrEmpty(proxy.Host);
         if (_testClient != null || proxyIsActive)
         {
+            // Binding selects the local route to the proxy, not the tracker's address family.
+            // Keep the destination name intact so only the proxy resolves it.
             return [null];
+        }
+
+        var bindAddress = Torrent.Settings.Connection.BindAddress;
+        if (bindAddress != null)
+        {
+            return [bindAddress.AddressFamily];
         }
 
         return [AddressFamily.InterNetwork, AddressFamily.InterNetworkV6];
@@ -644,7 +794,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         return merged;
     }
 
-    private IHttpClient GetClient(AddressFamily? addressFamily = null)
+    private IHttpClient GetClient(bool followRedirects = true)
     {
         if (_testClient != null)
         {
@@ -661,14 +811,14 @@ internal class HttpTracker : TrackerBase, IDisposable
                 directSettings,
                 true,
                 Torrent.Settings.Connection.BindAddress,
-                addressFamily));
+                followRedirects));
         }
 
         return new DefaultHttpClient(_httpClientFactory.CreateClient(
             settings,
             true,
             Torrent.Settings.Connection.BindAddress,
-            addressFamily));
+            followRedirects));
     }
 
     private sealed record AnnounceAttempt(AnnounceResponse? Response, Exception? Error);

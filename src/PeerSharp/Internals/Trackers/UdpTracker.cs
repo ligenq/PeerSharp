@@ -53,6 +53,11 @@ internal class UdpTracker : TrackerBase, IDisposable
     {
     }
 
+    public UdpTracker(TimeProvider timeProvider, ILoggerFactory loggerFactory, HostAddressCache hostAddresses)
+        : this(timeProvider, new UdpSocketFactory(), loggerFactory, hostAddresses.ResolveAsync)
+    {
+    }
+
     internal UdpTracker(TimeProvider timeProvider, IUdpSocketFactory socketFactory)
         : this(timeProvider, socketFactory, NullLoggerFactory.Instance)
     {
@@ -75,8 +80,21 @@ internal class UdpTracker : TrackerBase, IDisposable
         _resolveAddressesAsync = resolveAddressesAsync;
     }
 
-    private static Task<IPAddress[]> ResolveAddressesAsync(string host, CancellationToken ct) =>
-        Dns.GetHostAddressesAsync(host, ct);
+    /// <summary>
+    /// A name that does not resolve comes back as no addresses, the way <see cref="HostAddressCache"/>
+    /// reports it, so both resolvers mean the same thing by an empty answer.
+    /// </summary>
+    private static async Task<IPAddress[]> ResolveAddressesAsync(string host, CancellationToken ct)
+    {
+        try
+        {
+            return await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
+        }
+        catch (SocketException)
+        {
+            return [];
+        }
+    }
 
     public override async Task AnnounceAsync(TrackerEvent evt, CancellationToken ct)
     {
@@ -85,7 +103,18 @@ internal class UdpTracker : TrackerBase, IDisposable
         {
             var responses = new List<AnnounceResponse>();
             var errors = new List<Exception>();
-            foreach (var addressFamily in GetAnnounceAddressFamilies())
+            var families = await GetReachableAddressFamiliesAsync(ct).ConfigureAwait(false);
+            if (families.Count == 0)
+            {
+                // Known before sending anything, so it is reported as the result it is rather than thrown
+                // and caught once per family and retry.
+                _connectionId = 0;
+                _logger.LogDebug("Tracker {Url} announce skipped - its host has no usable address", Url);
+                RaiseAnnounceResult(false, new AnnounceResponse(), $"Tracker host {new Uri(Url).Host} has no usable address");
+                return;
+            }
+
+            foreach (var addressFamily in families)
             {
                 if (_client != null && _connectedAddressFamily != addressFamily)
                 {
@@ -169,6 +198,24 @@ internal class UdpTracker : TrackerBase, IDisposable
     public override void Deinit()
     {
         ResetClientUnsafe();
+    }
+
+    /// <summary>
+    /// The families to announce over, less those the tracker's host has no address in. A tracker with
+    /// no AAAA record is the common case, not an error, and asking it over IPv6 anyway used to fail
+    /// with an exception on every announce. When a proxy chooses the route, the proxy resolves the
+    /// name and nothing is filtered here.
+    /// </summary>
+    private async Task<IReadOnlyList<AddressFamily?>> GetReachableAddressFamiliesAsync(CancellationToken ct)
+    {
+        var families = GetAnnounceAddressFamilies();
+        if (families.Any(family => family == null))
+        {
+            return families;
+        }
+
+        var addresses = await _resolveAddressesAsync(new Uri(Url).DnsSafeHost, ct).ConfigureAwait(false);
+        return [.. families.Where(family => addresses.Any(address => address.AddressFamily == family))];
     }
 
     private IReadOnlyList<AddressFamily?> GetAnnounceAddressFamilies()

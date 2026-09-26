@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Framework;
+using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
@@ -216,6 +217,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private long _connectionStartTicks;
 
     private CancellationTokenSource? _cts;
+    private readonly Lock _receiveReaderLock = new();
+    private PipeReader? _receivePipeReader;
+    private ITimer? _stuckReadTimer;
     private AtomicDisposal _disposal = new();
     private long _downloaded;
     private bool _encryptionHandshakeComplete;
@@ -344,7 +348,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
         // Use Wait mode to provide back-pressure. DropNewest causes protocol violations
         // (missing blocks/messages) which kills throughput.
-        _sendQueue = new MessageQueue(SendQueueCapacityMax);
+        _sendQueue = new MessageQueue(SendQueueCapacityMax, timeProvider);
     }
 
     /// <summary>
@@ -974,15 +978,33 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 {
                     var ipAddress = System.Net.IPAddress.Parse(ip);
                     var endpoint = new System.Net.IPEndPoint(ipAddress, port);
-                    UtpStream = _torrent.UtpManager.CreateStream(endpoint);
-                    Stream = UtpStream;
+                    // Held here as well as in the property: closing the connection clears the property,
+                    // and an abandoned dial is exactly the one that gets closed while this waits.
+                    var utpStream = _torrent.UtpManager.CreateStream(endpoint);
+                    UtpStream = utpStream;
+                    Stream = utpStream;
                     RemoteEndPoint = endpoint;
 
                     _logger.LogDebug("Initiating uTP connection to {Endpoint}", endpoint);
-                    if (!await UtpStream.ConnectAsync(TimeSpan.FromMilliseconds(timeoutMs), abortCts.Token).ConfigureAwait(false))
+                    if (!await utpStream.ConnectOrAbandonAsync(TimeSpan.FromMilliseconds(timeoutMs), abortCts.Token).ConfigureAwait(false))
                     {
-                        // The peer never answered the SYN, which uTP now reports rather than throws.
-                        LogConnectTimeout(ip, port, GetConnectionElapsedMs(), "uTP SYN timeout");
+                        if (abortCts.IsCancellationRequested)
+                        {
+                            LogConnectCancelled(ip, port);
+                            await CloseAsync().ConfigureAwait(false);
+                            return false;
+                        }
+
+                        // The peer never answered the SYN, or refused it, which uTP reports rather than throws.
+                        if (utpStream.EndedBy is IOException refused)
+                        {
+                            LogConnectFailed(ip, port, refused.Message);
+                        }
+                        else
+                        {
+                            LogConnectTimeout(ip, port, GetConnectionElapsedMs(), "uTP SYN timeout");
+                        }
+
                         await CloseAsync().ConfigureAwait(false);
                         return false;
                     }
@@ -1056,7 +1078,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         return false;
                     }
 
-                    Stream = Client.GetStream();
+                    Stream = new SocketStream(Client.Client);
                     RemoteEndPoint = Client.Client.RemoteEndPoint as System.Net.IPEndPoint;
                 }
                 else
@@ -1072,7 +1094,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     }
                     ConfigureTcpClient(Client, _torrent.Settings, _logger);
                     await Client.ConnectAsync(ip, port, linkedCts.Token).ConfigureAwait(false);
-                    Stream = Client.GetStream();
+                    Stream = new SocketStream(Client.Client);
                     RemoteEndPoint = Client.Client.RemoteEndPoint as System.Net.IPEndPoint;
                 }
             }
@@ -1481,10 +1503,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return;
             }
 
-            // Use WriteAsync with timeout to prevent indefinite blocking if send loop is stuck
-            using var timeoutCts = new CancellationTokenSource(SendQueueTimeoutMs);
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ConnectionToken);
-            await _sendQueue.EnqueueAsync(msg, linkedCts.Token).ConfigureAwait(false);
+            // Bounded, so a stuck send loop cannot block the caller indefinitely. Closing the connection
+            // completes the queue, which ends the wait too.
+            if (!await _sendQueue.TryEnqueueWithinAsync(msg, TimeSpan.FromMilliseconds(SendQueueTimeoutMs)).ConfigureAwait(false))
+            {
+                msg.Dispose();
+                if (!_sendQueue.IsCompleted && _cts?.IsCancellationRequested != true)
+                {
+                    _logger.LogWarning("Send queue timeout for {PeerName} - queue backed up, closing connection", Name);
+                    await CloseAsync().ConfigureAwait(false);
+                }
+            }
         }
         catch (ChannelClosedException)
         {
@@ -1806,16 +1835,22 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // Nothing can loop back to a connection that is gone, and the set must not grow forever.
         _torrent.ReleaseOutgoingPeerId(_ourPeerId);
 
-        if (_cts != null)
-        {
-            await _cts.CancelAsync().ConfigureAwait(false);
-        }
+        // Closed before cancelling, so the loops end the ordinary way: an idle send loop sees a finished
+        // queue, and the receive loop sees end of input from the closed stream. Cancelling first woke both
+        // with an exception, rethrown through every stream layer, on every disconnect - the commonest
+        // event in a swarm. Cancellation still follows for whatever is waiting on something else.
+        _sendQueue.TryComplete();
 
         // Always dispose resources, even if we weren't fully connected
         // This prevents leaks when connection fails during ConnectAsync
-        // Disposing Stream cascades through the encryption and rate limiting wrappers to the socket.
-        // Client and UtpStream are still disposed below for the paths that own one; both are
-        // idempotent, so the second call is a no-op.
+        // Disposing Stream cascades through the encryption and rate limiting wrappers to the socket, but
+        // only half-closes a uTP stream, which keeps its read waiting for the peer - so that one is closed
+        // for good first. A TcpClient goes first too: it shuts its socket down itself, and doing that to a
+        // socket the stream has already closed trips an exception inside the runtime. Closing it after is
+        // a no-op.
+        try { UtpStream?.CloseAndStopReading(); } catch { /* Ignore disposal errors */ }
+        try { Client?.Dispose(); } catch { /* Ignore disposal errors */ }
+
         try
         {
             if (Stream != null)
@@ -1828,14 +1863,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             /* Ignore disposal errors */
         }
 
-        try { Client?.Dispose(); } catch { /* Ignore disposal errors */ }
-        try { UtpStream?.Close(); } catch { /* Ignore disposal errors */ }
-
         Client = null;
         UtpStream = null;
         Stream = null;
 
-        _sendQueue.TryComplete();
+        if (_cts != null)
+        {
+            await _cts.CancelAsync().ConfigureAwait(false);
+        }
     }
 
     private byte[] CreateHandshakeBuffer()
@@ -2034,9 +2069,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             while (read < 68)
             {
-                using var timeoutCts = new CancellationTokenSource(10000);
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, timeoutCts.Token);
-                int r = await Stream.ReadAsync(hBuffer.AsMemory(read, 68 - read), linkedCts.Token).ConfigureAwait(false);
+                var (r, _) = await ReadHandshakeBytesAsync(Stream, hBuffer.AsMemory(read, 68 - read), 10000).ConfigureAwait(false);
                 if (r == 0) { await CloseAsync().ConfigureAwait(false); return; }
                 Interlocked.Exchange(ref _lastActivityTicksValue, Environment.TickCount64);
                 read += r;
@@ -2130,18 +2163,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             bool firstRead = true;
             while (!pe.IsComplete && !pe.IsError)
             {
-                int read;
-                try
+                // A short deadline for the first read, to notice an unresponsive peer quickly.
+                var (read, timedOut) = await ReadHandshakeBytesAsync(stream, buffer, firstRead ? 5000 : 30000).ConfigureAwait(false);
+                if (timedOut)
                 {
-                    // Use a timeout for the first read to detect unresponsive peers quickly
-                    using var timeoutCts = new CancellationTokenSource(firstRead ? 5000 : 30000);
-                    read = await stream.ReadAsync(buffer, timeoutCts.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-#pragma warning disable S6667 // Deliberately no stack trace: see note above.
                     _logger.LogDebug("Encryption handshake timeout for {PeerName}", Name);
-#pragma warning restore S6667
                     return EncryptionHandshakeResult.Failed;
                 }
 
@@ -2502,6 +2528,32 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         });
     }
 
+    /// <summary>
+    /// Reads part of a handshake, giving up after <paramref name="timeoutMs"/> by closing the connection -
+    /// which ends the read as end of input - rather than by cancelling the read, which can only report
+    /// it by throwing: once for every peer that connects and then says nothing, which is a large share
+    /// of them. A handshake that stalls loses its connection either way.
+    /// </summary>
+    /// <returns>What was read, and whether zero means the deadline passed rather than the peer hanging up.</returns>
+    private async ValueTask<(int Read, bool TimedOut)> ReadHandshakeBytesAsync(Stream stream, Memory<byte> buffer, int timeoutMs)
+    {
+        using var deadline = new CancellationTokenSource(timeoutMs);
+        using var giveUp = deadline.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
+
+        int read = await stream.ReadAsync(buffer, CancellationToken.None).ConfigureAwait(false);
+        return (read, read == 0 && deadline.IsCancellationRequested);
+    }
+
+    /// <summary>
+    /// Closes the transport under whatever is reading it, ending that read as end of input. Stream.Dispose
+    /// alone would only half-close a uTP stream, which keeps its read waiting for the peer.
+    /// </summary>
+    private void AbortTransport()
+    {
+        try { UtpStream?.CloseAndStopReading(); } catch { /* Ignore disposal errors */ }
+        try { Stream?.Dispose(); } catch { /* Ignore disposal errors */ }
+    }
+
     private async Task<bool> ReadHandshakeAsync()
     {
         try
@@ -2529,8 +2581,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             while (read < 68)
             {
-                using var timeoutCts = new CancellationTokenSource(10000);
-                int r = await Stream.ReadAsync(hBuffer.AsMemory(read, 68 - read), timeoutCts.Token).ConfigureAwait(false);
+                var (r, _) = await ReadHandshakeBytesAsync(Stream, hBuffer.AsMemory(read, 68 - read), 10000).ConfigureAwait(false);
                 if (r == 0)
                 {
                     return false;
@@ -2626,12 +2677,25 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             source,
             new StreamPipeReaderOptions(bufferSize: 4 * ProtocolConstants.BlockSize, leaveOpen: true));
         bool handshakeReceived = _handshakePreRead;
+        using var stuckReadFallback = token.UnsafeRegister(
+            static state => ((PeerCommunication)state!).EndReadIfStillPending(),
+            this);
+        _receivePipeReader = pipeReader;
 
         try
         {
             while (!token.IsCancellationRequested)
             {
-                ReadResult result = await pipeReader.ReadAsync(token).ConfigureAwait(false);
+                // No token: closing the connection is what ends this read, as end of input. A token here
+                // reaches every stream below through the pipe reader, and cancelling it on each disconnect
+                // threw from our streams into System.IO.Pipelines - an exception per closed peer, and a
+                // stop in the debugger for anyone with Just My Code on. See EndReadIfStillPending.
+                ReadResult result = await pipeReader.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+                if (result.IsCanceled)
+                {
+                    break;
+                }
+
                 Interlocked.Exchange(ref _lastActivityTicksValue, Environment.TickCount64);
                 var buffer = result.Buffer;
 
@@ -2747,8 +2811,57 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
         finally
         {
+            lock (_receiveReaderLock)
+            {
+                _receivePipeReader = null;
+                _stuckReadTimer?.Dispose();
+                _stuckReadTimer = null;
+            }
+
             await pipeReader.CompleteAsync().ConfigureAwait(false);
             Interlocked.Exchange(ref _receiveLoopState, 0);
+        }
+    }
+
+    /// <summary>
+    /// How long a closed connection's read may take to end on its own before it is cancelled. Every
+    /// transport ends a pending read when its stream is disposed - a socket, a uTP stream and a WebRTC
+    /// data channel all do - so this only matters for a stream that does not, which would otherwise
+    /// hold the receive loop forever.
+    /// </summary>
+    internal static readonly TimeSpan StuckReadGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Runs when the connection is cancelled. By then the stream has been closed, which normally ends
+    /// the read; cancelling it straight away would race that and throw. So the pipe reader's read is
+    /// cancelled only if it is still waiting after <see cref="StuckReadGrace"/>.
+    /// </summary>
+    private void EndReadIfStillPending()
+    {
+        lock (_receiveReaderLock)
+        {
+            if (_receivePipeReader is not { } reader || _stuckReadTimer != null)
+            {
+                return;
+            }
+
+            _stuckReadTimer = _timeProvider.CreateTimer(
+                static state => CancelStuckRead((PipeReader)state!),
+                reader,
+                StuckReadGrace,
+                Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    private static void CancelStuckRead(PipeReader reader)
+    {
+        try
+        {
+            reader.CancelPendingRead();
+        }
+        catch (InvalidOperationException)
+        {
+            // The loop finished and completed the reader as the timer fired: nothing left to end.
         }
     }
 
@@ -2932,6 +3045,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 int batchCount = 0;
                 while (_sendQueue.TryDequeue(out var msg))
                 {
+                    // Completed means the connection is closing and the stream is going or gone. What is
+                    // left in the queue is released unsent rather than written into a closed socket.
+                    if (_sendQueue.IsCompleted)
+                    {
+                        msg.Dispose();
+                        continue;
+                    }
+
                     try
                     {
                         var writeStart = _timeProvider.GetUtcNow();
@@ -3016,10 +3137,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return false;
             }
 
-            using var timeoutCts = new CancellationTokenSource(timeoutMs);
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ConnectionToken);
-            await _sendQueue.EnqueueAsync(msg, linkedCts.Token).ConfigureAwait(false);
-            return true;
+            if (await _sendQueue.TryEnqueueWithinAsync(msg, TimeSpan.FromMilliseconds(timeoutMs)).ConfigureAwait(false))
+            {
+                return true;
+            }
+
+            msg.Dispose();
+            return false;
         }
         catch (ChannelClosedException)
         {

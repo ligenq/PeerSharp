@@ -101,6 +101,19 @@ internal sealed class RateLimitedStream : Stream
                 _downloadChannels,
                 cancellationToken).ConfigureAwait(false);
 
+            if (_disposal.IsDisposed)
+            {
+                // Closed while waiting for quota - the way the receive loop's reads end, since they are
+                // not cancelled. Disposal has already returned the reservation, so this grant goes back
+                // on its own rather than being held by a stream nobody reads.
+                if (granted > 0)
+                {
+                    _bandwidthManager.ReturnBandwidth(granted, _downloadChannels);
+                }
+
+                return 0;
+            }
+
             if (granted <= 0)
             {
                 // Zero from a read means end of input, and this is not that - the socket is fine, we
@@ -124,6 +137,15 @@ internal sealed class RateLimitedStream : Stream
         {
             // Closed while waiting for quota. Zero is how a stream reports end of input, and every
             // caller already treats it as the connection being gone.
+            return 0;
+        }
+        catch (IOException)
+        {
+            // The peer reset the connection, or we closed it under a pending read. Either way it is
+            // gone, and how it went makes no difference to anything above: every reader treats end of
+            // input and an I/O error alike, by closing. Letting it through cost a rethrow at each of
+            // the layers stacked on this one - encryption, the handshake prefix and the pipe reader -
+            // for the most ordinary event in a swarm, several times a second.
             return 0;
         }
 

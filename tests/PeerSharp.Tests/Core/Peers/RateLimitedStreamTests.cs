@@ -178,4 +178,33 @@ public class RateLimitedStreamTests
 
         Assert.Throws<ObjectDisposedException>(() => inner.Position);
     }
+
+    [Fact]
+    public async Task ReadAsync_WhenThePeerResetsTheConnection_ReportsEndOfStream()
+    {
+        // Every reader above treats end of input and an I/O error alike, by closing, so passing the
+        // error on only cost a rethrow at each layer for the commonest event in a swarm.
+        var manager = new TestBandwidthManager();
+        await using var stream = Create(new ResettingStream(), manager);
+
+        int read = await stream.ReadAsync(new byte[100], TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, read);
+    }
+
+    private sealed class ResettingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new IOException("Connection reset by peer.");
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromException<int>(new IOException("Connection reset by peer."));
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }

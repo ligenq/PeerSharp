@@ -281,9 +281,11 @@ public class UtpExhaustiveTests
         // callers that swallow disconnects catch IOException.
         await Assert.ThrowsAsync<IOException>(async () => await stream.WriteAsync(new byte[1]));
 
-        // Read should throw IOException (Connection Reset)
-        // Currently this fails (returns 0) until we fix UtpStream to propagate the error
-        await Assert.ThrowsAsync<IOException>(async () => _ = await stream.ReadAsync(new byte[10]));
+        // A read reports the reset as end of input, as a TCP connection's does (see SocketStream): every
+        // reader treats both alike, and throwing made the commonest end of a peer connection an exception
+        // raised twice. The reason is kept for logging.
+        Assert.Equal(0, await stream.ReadAsync(new byte[10]));
+        Assert.IsType<IOException>(stream.EndedBy);
     }
 
     [Fact(Timeout = 30000)]

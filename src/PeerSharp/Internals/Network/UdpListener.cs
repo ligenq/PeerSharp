@@ -16,6 +16,14 @@ internal interface IUdpReceiver
 
 internal class UdpListener : IUdpListener
 {
+    /// <summary>
+    /// How long a destination is left alone after a send finds no route to it. Other addresses in
+    /// its family may still be reachable, including LAN peers when there is no route to the internet.
+    /// </summary>
+    internal static readonly TimeSpan UnroutableAddressBackoff = TimeSpan.FromMinutes(1);
+
+    internal const int MaxUnroutableAddresses = 256;
+
     private readonly Lock _lock = new();
     private readonly ILogger<UdpListener> _logger;
     private readonly int _port;
@@ -32,6 +40,12 @@ internal class UdpListener : IUdpListener
     private Task? _receiveTask;
     private bool _running;
     private readonly TimeProvider _timeProvider;
+    private readonly Dictionary<IPAddress, DateTimeOffset> _unroutableAddresses = [];
+
+    // Mirrors _unroutableAddresses.Count, readable without the lock. Every datagram - each uTP data
+    // packet among them - asks whether its destination is unroutable, and the answer is almost always
+    // that nothing is, so that case must not queue on a lock shared with the rest of the listener.
+    private int _unroutableCount;
 
     public UdpListener(int port, IUdpSocketFactory socketFactory, Settings settings)
         : this(port, socketFactory, settings, NullLoggerFactory.Instance)
@@ -74,8 +88,20 @@ internal class UdpListener : IUdpListener
         }
     }
 
+    /// <summary>
+    /// Sends one datagram. Like the network underneath it, this does not promise delivery: a datagram
+    /// to an address nothing can be sent to, or a destination with no route, is dropped without
+    /// throwing, which is what every caller did with the exception anyway.
+    /// </summary>
     public async Task SendAsync(ReadOnlyMemory<byte> data, IPEndPoint endpoint, CancellationToken ct)
     {
+        // Peers and DHT nodes hand out addresses such as 0.0.0.0 and the reserved 240/4 block. The
+        // socket refuses those with an exception, so they are dropped before it sees them.
+        if (!NetworkUtils.IsDeliverableUnicast(endpoint))
+        {
+            return;
+        }
+
         if (_client != null)
         {
             if (_proxyUdpEndPoint != null)
@@ -95,8 +121,63 @@ internal class UdpListener : IUdpListener
             }
             else
             {
-                await _client.SendAsync(data, endpoint, ct).ConfigureAwait(false);
+                var address = endpoint.Address.IsIPv4MappedToIPv6 ? endpoint.Address.MapToIPv4() : endpoint.Address;
+                if (IsUnroutable(address))
+                {
+                    return;
+                }
+
+                try
+                {
+                    await _client.SendAsync(data, endpoint, ct).ConfigureAwait(false);
+                }
+                catch (SocketException ex) when (ex.SocketErrorCode == SocketError.NetworkUnreachable)
+                {
+                    MarkUnroutable(address);
+                    _logger.LogDebug(ex, "No route to {Address}; not sending to it for {Backoff}", address, UnroutableAddressBackoff);
+                }
             }
+        }
+    }
+
+    private bool IsUnroutable(IPAddress address)
+    {
+        if (Volatile.Read(ref _unroutableCount) == 0)
+        {
+            return false;
+        }
+
+        lock (_lock)
+        {
+            if (!_unroutableAddresses.TryGetValue(address, out var until))
+            {
+                return false;
+            }
+
+            if (_timeProvider.GetUtcNow() < until)
+            {
+                return true;
+            }
+
+            _unroutableAddresses.Remove(address);
+            Volatile.Write(ref _unroutableCount, _unroutableAddresses.Count);
+            return false;
+        }
+    }
+
+    private void MarkUnroutable(IPAddress address)
+    {
+        lock (_lock)
+        {
+            // Discovery supplies untrusted destinations. Bound their retained state, evicting the
+            // oldest deadline first (which also prefers expired entries).
+            if (_unroutableAddresses.Count >= MaxUnroutableAddresses && !_unroutableAddresses.ContainsKey(address))
+            {
+                _unroutableAddresses.Remove(_unroutableAddresses.MinBy(entry => entry.Value).Key);
+            }
+
+            _unroutableAddresses[address] = _timeProvider.GetUtcNow() + UnroutableAddressBackoff;
+            Volatile.Write(ref _unroutableCount, _unroutableAddresses.Count);
         }
     }
 

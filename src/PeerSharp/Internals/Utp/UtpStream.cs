@@ -130,6 +130,8 @@ internal class UtpStream : Stream
 
     // Track seqs to prevent duplicates
     private TaskCompletionSource<bool>? _connectTcs;
+    private bool _abandonedConnectIsFailure;
+    private Exception? _endedBy;
 
     private int _curDelayIdx = 0;
 
@@ -474,9 +476,40 @@ internal class UtpStream : Stream
         }
     }
 
+    /// <summary>
+    /// Why the connection ended, when it was not a clean close: a reset from the peer, or a timeout. Reads
+    /// report every ending as end of input, as <see cref="Network.SocketStream"/> does for TCP; this is the
+    /// reason, for anyone who wants to log it.
+    /// </summary>
+    internal Exception? EndedBy
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _endedBy;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sends a FIN: a half-close, after which what the peer still sends can be read.
+    /// </summary>
     public override void Close()
     {
         CloseInternal(true);
+    }
+
+    /// <summary>
+    /// Sends a FIN and ends a pending read as end of input, for an owner that is done with the stream in
+    /// both directions. <see cref="Close"/> keeps reading, which is right for a half-close but left a
+    /// connection being torn down with a read that only its cancellation could end - an exception thrown
+    /// up through every layer above, on every uTP disconnect.
+    /// </summary>
+    internal void CloseAndStopReading()
+    {
+        CloseInternal(true);
+        EndPendingRead();
     }
 
     /// <summary>
@@ -500,9 +533,25 @@ internal class UtpStream : Stream
     /// linked source does - turns every unanswered peer back into an exception, which is the mistake
     /// HttpClient is still criticised for.
     /// </remarks>
-    public async Task<bool> ConnectAsync(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+    public Task<bool> ConnectAsync(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        => ConnectCoreAsync(timeout, abandonedIsFailure: false, cancellationToken);
+
+    /// <summary>
+    /// Opens the stream, reporting a caller that gave up, and a peer that reset the attempt, the same way
+    /// as a peer that never answered: false. For an owner that treats them alike - the peer manager, whose
+    /// pending dials are all given up at once when a magnet's metadata arrives - each was an exception for
+    /// an outcome it was going to handle identically. The caller can tell them apart from its token and
+    /// from <see cref="EndedBy"/>.
+    /// </summary>
+    internal Task<bool> ConnectOrAbandonAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        => ConnectCoreAsync(timeout, abandonedIsFailure: true, cancellationToken);
+
+    private async Task<bool> ConnectCoreAsync(TimeSpan? timeout, bool abandonedIsFailure, CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return abandonedIsFailure ? false : throw new OperationCanceledException(cancellationToken);
+        }
 
         Task<bool> connectTask;
         TaskCompletionSource<bool> connectTcs;
@@ -515,6 +564,7 @@ internal class UtpStream : Stream
 
             _state = UtpState.SynSend;
             _connectTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _abandonedConnectIsFailure = abandonedIsFailure;
             connectTcs = _connectTcs;
             SendPacket(MessageType.ST_SYN, null);
             connectTask = connectTcs.Task;
@@ -526,7 +576,10 @@ internal class UtpStream : Stream
             // A reply may have won immediately before this callback. Do not turn a successful
             // connection into a closed stream while the async continuation is still disposing the
             // registration.
-            if (connectTcs.TrySetCanceled(cancellationToken))
+            bool abandoned = abandonedIsFailure
+                ? connectTcs.TrySetResult(false)
+                : connectTcs.TrySetCanceled(cancellationToken);
+            if (abandoned)
             {
                 CloseInternal(false);
             }
@@ -550,18 +603,16 @@ internal class UtpStream : Stream
         if (_disposal.MarkDisposed())
         {
             CloseInternal(true);
+            EndPendingRead();
 
-            // Wait for pipe write task to complete (with timeout to avoid hanging)
+            // Wait for pipe write task to complete (with timeout to avoid hanging). Its outcome does not
+            // matter here, and neither does running out of time, so neither is thrown: a graceful close
+            // is still waiting for the peer's FIN, which made the timeout the usual case.
             if (_pipeWriteTask?.IsCompleted == false)
             {
-                try
-                {
-                    await _pipeWriteTask.WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
-                }
-                catch (Exception)
-                {
-                    // Task may have faulted, ignore during dispose
-                }
+                await _pipeWriteTask
+                    .WaitAsync(TimeSpan.FromMilliseconds(500))
+                    .ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
             }
 
             _writeSemaphore.Dispose();
@@ -572,6 +623,14 @@ internal class UtpStream : Stream
 
     public override void Flush()
     { }
+
+    /// <summary>
+    /// Ends a read that is waiting for data, as end of input. Disposing sends a FIN and keeps the
+    /// stream open until the peer answers, so a pending read was left waiting until its owner cancelled
+    /// it - an exception thrown through every layer above - even though the owner disposing the stream
+    /// is exactly the signal that it has stopped reading.
+    /// </summary>
+    private void EndPendingRead() => _pipe.Reader.CancelPendingRead();
 
     public override int Read(byte[] buffer, int offset, int count)
     {
@@ -588,6 +647,13 @@ internal class UtpStream : Stream
         try
         {
             var result = await _pipe.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (result.IsCanceled)
+            {
+                // Disposed by its owner, which has finished reading - see EndPendingRead.
+                _pipe.Reader.AdvanceTo(result.Buffer.Start);
+                return 0;
+            }
+
             var seq = result.Buffer;
             if (seq.IsEmpty && result.IsCompleted)
             {
@@ -781,9 +847,7 @@ internal class UtpStream : Stream
 
                 case MessageType.ST_RESET:
                     _logger.LogDebug("Reset from {Remote}", RemoteEndPoint);
-                    var ex = new IOException("Connection reset by remote peer");
-                    _connectTcs?.TrySetException(ex);
-                    CloseInternal(false, ex);
+                    CloseInternal(false, new IOException("Connection reset by remote peer"));
                     break;
             }
 
@@ -817,6 +881,7 @@ internal class UtpStream : Stream
         if (_disposal.MarkDisposed() && disposing)
         {
             CloseInternal(true);
+            EndPendingRead();
             _writeSemaphore.Dispose();
         }
         base.Dispose(disposing);
@@ -949,18 +1014,40 @@ internal class UtpStream : Stream
                 _manager.CloseStream(this);
                 ReleaseAllSentPackets();
                 ReleaseReorderBuffer();
-                _pipeWriteChannel.Writer.TryComplete(error);
+                // Completed without the error, so reads end as end of input the way they do on a TCP
+                // connection that was reset. Handing the error to the channel made it throw on the way
+                // out and again from every read, for the ordinary end of a peer connection. The reason
+                // is kept in EndedBy.
+                _endedBy ??= error;
+                _pipeWriteChannel.Writer.TryComplete();
             }
 
             CheckIfClosed();
 
             if (error != null)
             {
-                _connectTcs?.TrySetException(error);
+                // A reset or timeout while connecting: a peer that will not talk, which a caller that asked
+                // for it hears as false - see ConnectOrAbandonAsync.
+                if (_abandonedConnectIsFailure)
+                {
+                    _connectTcs?.TrySetResult(false);
+                }
+                else
+                {
+                    _connectTcs?.TrySetException(error);
+                }
             }
             else
             {
-                _connectTcs?.TrySetCanceled();
+                // Closed while still connecting: the connect is abandoned, reported the way its caller asked.
+                if (_abandonedConnectIsFailure)
+                {
+                    _connectTcs?.TrySetResult(false);
+                }
+                else
+                {
+                    _connectTcs?.TrySetCanceled();
+                }
             }
 
             // Wake up any pending writes so they can observe the closed state

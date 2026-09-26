@@ -54,7 +54,7 @@ internal class PeerCommunicationFactory : IPeerCommunicationFactory
         var peer = new PeerCommunication(torrent, listener, timeProvider, _loggerFactory)
         {
             Client = client,
-            Stream = client.GetStream(),
+            Stream = new Network.SocketStream(client.Client),
             RemoteEndPoint = client.Client.RemoteEndPoint as IPEndPoint,
             Connected = 1
         };
