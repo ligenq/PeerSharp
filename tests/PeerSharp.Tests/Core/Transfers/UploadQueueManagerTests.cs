@@ -161,6 +161,52 @@ public class UploadQueueManagerTests
     }
 
     [Fact]
+    public async Task ABlockAskedForAgain_AfterItsRequestWasCancelled_IsSent()
+    {
+        // A cancel applies to the request waiting when it came. A streaming client cancels to make room
+        // and asks again later; a hash failure has any client ask again. Both must be served.
+        using var cts = new CancellationTokenSource();
+        var pumpOnFirst = new SemaphoreSlim(0);
+        var gate = new TaskCompletionSource();
+        var executed = new ConcurrentQueue<int>();
+
+        await using var manager = CreateManager(async (_, item, _) =>
+        {
+            if (item.PieceIndex == 0 && executed.IsEmpty) { pumpOnFirst.Release(); await gate.Task; }
+            executed.Enqueue(item.PieceIndex);
+        }, cts.Token);
+
+        var peer = CreateUnchockedPeer();
+        manager.TryEnqueue(peer, new UploadQueueItem(0, 0, 16384)); // blocks pump
+        manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384)); // cancelled
+        Assert.True(await pumpOnFirst.WaitAsync(PumpStart));
+        manager.Cancel(peer, 1, 0);
+        manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384)); // asked for again
+        gate.SetResult();
+
+        await TorrentTestUtility.WaitUntilAsync(() => executed.Count >= 2, 10000, "the pump to send the block asked for again");
+        Assert.Equal([0, 1], executed.ToArray());
+    }
+
+    [Fact]
+    public async Task ACancelForARequestNoLongerWaiting_DoesNotRefuseTheNextOne()
+    {
+        using var cts = new CancellationTokenSource();
+        var executed = new ConcurrentQueue<int>();
+        await using var manager = CreateManager((_, item, _) => { executed.Enqueue(item.PieceIndex); return Task.CompletedTask; }, cts.Token);
+
+        var peer = CreateUnchockedPeer();
+        manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384));
+        await TorrentTestUtility.WaitUntilAsync(() => executed.Count >= 1, 10000, "the pump to send the block");
+
+        // Too late: already sent. It must not linger and refuse the block the next time it is asked for.
+        manager.Cancel(peer, 1, 0);
+        manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384));
+
+        await TorrentTestUtility.WaitUntilAsync(() => executed.Count >= 2, 10000, "the pump to send the block asked for again");
+    }
+
+    [Fact]
     public async Task Cancel_ForUnknownPeer_DoesNotThrow()
     {
         using var cts = new CancellationTokenSource();
