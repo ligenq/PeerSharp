@@ -73,16 +73,16 @@ internal sealed class UploadQueueManager : IAsyncDisposable
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true
         });
-        var cancelled = new ConcurrentDictionary<(int Piece, int Offset), byte>();
+        var waiting = new WaitingRequests();
         var peerCts = CancellationTokenSource.CreateLinkedTokenSource(_stopToken);
-        var pump = RunPumpAsync(peer, channel.Reader, cancelled, peerCts.Token);
-        return new PeerUploadQueue(channel, cancelled, pump, peerCts);
+        var pump = RunPumpAsync(peer, channel.Reader, waiting, peerCts.Token);
+        return new PeerUploadQueue(channel, waiting, pump, peerCts);
     }
 
     private async Task RunPumpAsync(
         PeerCommunication peer,
         ChannelReader<UploadQueueItem> reader,
-        ConcurrentDictionary<(int Piece, int Offset), byte> cancelled,
+        WaitingRequests waiting,
         CancellationToken token)
     {
         try
@@ -96,7 +96,7 @@ internal sealed class UploadQueueManager : IAsyncDisposable
                     break;
                 }
 
-                if (cancelled.ContainsKey((item.PieceIndex, item.Offset)))
+                if (waiting.Take(item.PieceIndex, item.Offset))
                 {
                     await peer.SendRejectAsync(item.ToBlockRequest()).ConfigureAwait(false);
                     continue;
@@ -120,7 +120,7 @@ internal sealed class UploadQueueManager : IAsyncDisposable
 
     private sealed class PeerUploadQueue(
         Channel<UploadQueueItem> channel,
-        ConcurrentDictionary<(int Piece, int Offset), byte> cancelled,
+        WaitingRequests waiting,
         Task pump,
         CancellationTokenSource peerCts) : IDisposable
     {
@@ -128,9 +128,20 @@ internal sealed class UploadQueueManager : IAsyncDisposable
 
         public Task PumpTask => pump;
 
-        public bool TryEnqueue(UploadQueueItem item) => channel.Writer.TryWrite(item);
+        public bool TryEnqueue(UploadQueueItem item)
+        {
+            // Counted before it can be read, so the pump never takes one it was not told of.
+            waiting.Add(item.PieceIndex, item.Offset);
+            if (channel.Writer.TryWrite(item))
+            {
+                return true;
+            }
 
-        public void Cancel(int piece, int offset) => cancelled.TryAdd((piece, offset), 0);
+            waiting.Take(item.PieceIndex, item.Offset);
+            return false;
+        }
+
+        public void Cancel(int piece, int offset) => waiting.Cancel(piece, offset);
 
         public void Dispose()
         {
@@ -142,6 +153,68 @@ internal sealed class UploadQueueManager : IAsyncDisposable
             peerCts.Cancel();
             channel.Writer.TryComplete();
             peerCts.Dispose();
+        }
+    }
+}
+
+/// <summary>
+/// The requests a peer has queued with us and not yet been answered, and which of them it has
+/// cancelled.
+/// </summary>
+/// <remarks>
+/// A cancel applies to a request still waiting, and to nothing after it. Cancels used to be kept for as
+/// long as the connection lasted, so a peer that cancelled a block and later asked for it again - as a
+/// streaming client does when it makes room for what its player needs, and any client does when a
+/// piece fails its hash - was refused that block every time, and had to get it elsewhere or not at all.
+/// A cancel for a request no longer waiting, already sent or never made, is ignored.
+/// </remarks>
+internal sealed class WaitingRequests
+{
+    private readonly Lock _lock = new();
+    private readonly Dictionary<(int Piece, int Offset), (int Queued, int Cancelled)> _requests = [];
+
+    /// <summary>A request has been queued.</summary>
+    public void Add(int piece, int offset)
+    {
+        lock (_lock)
+        {
+            var counts = _requests.GetValueOrDefault((piece, offset));
+            _requests[(piece, offset)] = (counts.Queued + 1, counts.Cancelled);
+        }
+    }
+
+    /// <summary>The peer cancelled a request for this block: the next one taken off the queue is refused, if one is waiting.</summary>
+    public void Cancel(int piece, int offset)
+    {
+        lock (_lock)
+        {
+            if (_requests.TryGetValue((piece, offset), out var counts) && counts.Cancelled < counts.Queued)
+            {
+                _requests[(piece, offset)] = (counts.Queued, counts.Cancelled + 1);
+            }
+        }
+    }
+
+    /// <summary>A request is taken off the queue. True when it was cancelled.</summary>
+    public bool Take(int piece, int offset)
+    {
+        lock (_lock)
+        {
+            if (!_requests.TryGetValue((piece, offset), out var counts))
+            {
+                return false;
+            }
+
+            if (counts.Queued <= 1)
+            {
+                _requests.Remove((piece, offset));
+            }
+            else
+            {
+                _requests[(piece, offset)] = (counts.Queued - 1, Math.Max(0, counts.Cancelled - 1));
+            }
+
+            return counts.Cancelled > 0;
         }
     }
 }

@@ -73,6 +73,11 @@ history has the reasoning and the measurements behind each one.
 
 ### Fixed
 
+- **A block cancelled once is sent when it is asked for again.** A peer's cancel was remembered for as
+  long as the connection lasted, so a later request for the same block - from a client making room for
+  what its player needs, or retrying a piece that failed its hash - was refused every time. A cancel
+  now applies to the request waiting when it arrives, and is ignored when none is.
+
 - **A torrent stopped and started again dials the peers it knew.** Stopping closed their connections
   and dropped the dials still queued, and nothing brought them back but the next tracker announce or
   DHT lookup - so a peer only a magnet link's `x.pe` or `AdditionalPeers` named was never found again.
