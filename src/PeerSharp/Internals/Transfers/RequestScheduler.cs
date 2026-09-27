@@ -13,6 +13,25 @@ internal sealed class RequestScheduler
     /// </summary>
     private static readonly TimeSpan RetryClaimTimeout = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// How many of the pieces a stream needs soonest are urgent: offered to every peer ahead of any
+    /// other piece, and asked of several peers at once, as the last pieces of a download are.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A player waits on the piece at its read position and on nothing else. Left to the ordinary
+    /// rules, that piece's blocks go to whichever peers started it, and are asked of a second peer only
+    /// once one has been outstanding past its soft timeout - seconds, during which a player holding a
+    /// second of video has stalled, while the fast peers fill their queues with pieces nobody needs yet.
+    /// </para>
+    /// <para>
+    /// Two, so that the piece after the one being read is already under way when the reader reaches it.
+    /// The duplicates cost little: each block is cancelled with the others once one copy lands, and only
+    /// these pieces are asked of more than one peer from the start.
+    /// </para>
+    /// </remarks>
+    internal const int UrgentStreamingPieces = 2;
+
     private readonly PieceStateManager _pieceStateManager;
     private readonly int _blockSize;
     private readonly ILogger<RequestScheduler> _logger;
@@ -22,6 +41,7 @@ internal sealed class RequestScheduler
     private readonly Torrent _torrent;
     private readonly IBlockRequestStrategy _standardStrategy;
     private readonly IBlockRequestStrategy _endGameStrategy;
+    private readonly Func<IReadOnlyList<int>?> _streamingPriorityPieces;
 
     public RequestScheduler(RequestSchedulerOptions options, PiecePicker piecePicker)
     {
@@ -36,6 +56,7 @@ internal sealed class RequestScheduler
         _blockSize = options.BlockSize;
         _standardStrategy = new StandardBlockRequestStrategy(_requestTracker, _timeProvider, options.GetSoftTimeoutMs, _blockSize);
         _endGameStrategy = new EndGameBlockRequestStrategy(_requestTracker, _blockSize);
+        _streamingPriorityPieces = options.GetStreamingPriorityPieces ?? (() => _torrent.StreamingPriorityPieces);
     }
 
     public async Task EvaluateNextRequestsAsync(PeerCommunication peer, bool endGameMode, Func<bool> isQueueFull)
@@ -70,6 +91,9 @@ internal sealed class RequestScheduler
             pending = existingReqs.Count;
         }
 
+        var streaming = _streamingPriorityPieces();
+        var urgent = UrgentPieces(streaming);
+
         if (pending >= maxRequests)
         {
             return;
@@ -78,27 +102,41 @@ internal sealed class RequestScheduler
         int needed = maxRequests - pending;
         int sent = 0;
 
-        var strategy = endGameMode ? _endGameStrategy : _standardStrategy;
-        foreach (var kvp in _pieceStateManager.ActivePieces)
+        // The pieces streams need come first, in the order they need them - started here if they have
+        // not been, rather than after every piece already under way has had its turn.
+        var streamingIndices = new HashSet<int>();
+        foreach (int index in streaming ?? [])
         {
             if (sent >= needed)
             {
                 break;
             }
 
+            if (!streamingIndices.Add(index) || (isChoked && !peer.IsAllowedFast(index)) || !peer.PeerPieces.HasPiece(index))
+            {
+                continue;
+            }
+
+            if (ActiveOrStarted(index) is { } state)
+            {
+                sent += await ProcessPieceForRequestsAsync(state, peer, needed - sent, StrategyFor(index, endGameMode, urgent)).ConfigureAwait(false);
+            }
+        }
+
+        foreach (var kvp in _pieceStateManager.ActivePieces)
+        {
             var state = kvp.Value;
+            if (sent >= needed)
+            {
+                break;
+            }
 
-            if (isChoked && !peer.IsAllowedFast(state.Index))
+            if (streamingIndices.Contains(state.Index) || (isChoked && !peer.IsAllowedFast(state.Index)) || !peer.PeerPieces.HasPiece(state.Index))
             {
                 continue;
             }
 
-            if (!peer.PeerPieces.HasPiece(state.Index))
-            {
-                continue;
-            }
-
-            sent += await ProcessPieceForRequestsAsync(state, peer, needed - sent, strategy).ConfigureAwait(false);
+            sent += await ProcessPieceForRequestsAsync(state, peer, needed - sent, StrategyFor(state.Index, endGameMode, urgent)).ConfigureAwait(false);
         }
 
         if (sent < needed && _pieceStateManager.Count < _pieceStateManager.MaxActivePieces)
@@ -120,7 +158,7 @@ internal sealed class RequestScheduler
                     if (_pieceStateManager.TryAddPiece(newState))
                     {
                         _logger.LogTrace("NEW PIECE {PieceIndex} started: {BlocksCount} blocks, {Size} bytes, active pieces now={ActiveCount}", pieceIndex, blocksCount, pieceSize, _pieceStateManager.Count);
-                        sent += await ProcessPieceForRequestsAsync(newState, peer, needed - sent, strategy).ConfigureAwait(false);
+                        sent += await ProcessPieceForRequestsAsync(newState, peer, needed - sent, StrategyFor(pieceIndex, endGameMode, urgent)).ConfigureAwait(false);
                     }
                     loopLimit--;
                 }
@@ -136,6 +174,68 @@ internal sealed class RequestScheduler
             _logger.LogTrace("Sent {SentCount} requests to {RemoteEndPoint}", sent, peer.RemoteEndPoint);
         }
     }
+
+    private IBlockRequestStrategy StrategyFor(int pieceIndex, bool endGameMode, HashSet<int>? urgent) =>
+        endGameMode || urgent?.Contains(pieceIndex) == true ? _endGameStrategy : _standardStrategy;
+
+    /// <summary>The first <see cref="UrgentStreamingPieces"/> pieces streams need that are not here yet; null when nothing streams.</summary>
+    private HashSet<int>? UrgentPieces(IReadOnlyList<int>? streaming)
+    {
+        if (streaming is null)
+        {
+            return null;
+        }
+
+        var urgent = new HashSet<int>();
+        foreach (int index in streaming)
+        {
+            if (urgent.Count == UrgentStreamingPieces)
+            {
+                break;
+            }
+
+            // The list is refreshed as the reader moves, so a piece in it may have arrived since.
+            if (!_torrent.Pieces.HasPiece(index))
+            {
+                urgent.Add(index);
+            }
+        }
+
+        return urgent;
+    }
+
+    /// <summary>
+    /// The piece under way at <paramref name="index"/>, or the same started now; null when it cannot be
+    /// started - it is here, not wanted, or every slot for a piece under way is taken.
+    /// </summary>
+    private PieceState? ActiveOrStarted(int index)
+    {
+        if (_pieceStateManager.ActivePieces.TryGetValue(index, out var state))
+        {
+            return state;
+        }
+
+        if (!CanStart(index))
+        {
+            return null;
+        }
+
+        long pieceSize = _torrent.InfoFile.Info.GetPieceSize(index);
+        var started = new PieceState(index, (int)((pieceSize + _blockSize - 1) / _blockSize));
+        if (_pieceStateManager.TryAddPiece(started))
+        {
+            _logger.LogTrace("NEW PIECE {PieceIndex} started for a stream, active pieces now={ActiveCount}", index, _pieceStateManager.Count);
+            return started;
+        }
+
+        // Another peer's pass started it first.
+        return _pieceStateManager.ActivePieces.TryGetValue(index, out state) ? state : null;
+    }
+
+    private bool CanStart(int index) =>
+        !_torrent.Pieces.HasPiece(index)
+        && _pieceStateManager.Count < _pieceStateManager.MaxActivePieces
+        && _piecePicker.IsPieceNeeded(index);
 
     private int GetTypicalBlocksPerPiece()
     {
@@ -286,4 +386,7 @@ internal sealed class RequestSchedulerOptions
     public required ILogger<RequestScheduler> Logger { get; init; }
     public required int BlockSize { get; init; }
     public required Func<PeerCommunication, int> GetSoftTimeoutMs { get; init; }
+
+    /// <summary>The pieces open streams need soonest, first first; the torrent's own when not given.</summary>
+    public Func<IReadOnlyList<int>?>? GetStreamingPriorityPieces { get; init; }
 }

@@ -184,6 +184,81 @@ public class RequestSchedulerTests
     }
 
     [Fact]
+    public async Task EvaluateNextRequestsAsync_ServesThePiecesAStreamNeeds_BeforeAnyOther()
+    {
+        // Two pieces under way; the stream needs piece 5, and the peer has room for one piece's blocks.
+        var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 4, maxActivePieces: 8, maxRequestsPerPeer: 4, streaming: [5]);
+        fixture.PieceStateManager.TryAddPiece(new PieceState(2, 4));
+        fixture.PieceStateManager.TryAddPiece(new PieceState(5, 4));
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
+        Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
+        Assert.All(requests.Keys, key => Assert.Equal(5, key.Piece));
+    }
+
+    [Fact]
+    public async Task EvaluateNextRequestsAsync_AsksForTheBlocksAStreamNeedsNext_EvenFromAPeerAlreadyAskedForThem()
+    {
+        // Another peer owes every block of pieces 5, 6 and 7, asked for just now. The stream needs them
+        // in that order: the first two are urgent, and asked again at once; the third waits its turn.
+        var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 2, maxActivePieces: 8, maxRequestsPerPeer: 16, streaming: [5, 6, 7]);
+        var other = new PeerCommunication(fixture.Torrent, new MockPeerListener(), TimeProvider.System);
+        foreach (int piece in new[] { 5, 6, 7 })
+        {
+            fixture.PieceStateManager.TryAddPiece(new PieceState(piece, 2));
+            AddPendingRequest(fixture.RequestTracker, other, piece, 0);
+            AddPendingRequest(fixture.RequestTracker, other, piece, 16384);
+        }
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
+        Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
+        Assert.Equal([5, 5, 6, 6], requests.Keys.Select(key => key.Piece).Where(piece => piece >= 5).Order());
+    }
+
+    [Fact]
+    public async Task EvaluateNextRequestsAsync_StartsThePieceAStreamNeeds_BeforeServingOthersUnderWay()
+    {
+        // Piece 2 is under way; the stream needs piece 5, not yet started. It is started and served first.
+        var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 4, maxActivePieces: 8, maxRequestsPerPeer: 4, streaming: [5]);
+        fixture.PieceStateManager.TryAddPiece(new PieceState(2, 4));
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
+        Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
+        Assert.All(requests.Keys, key => Assert.Equal(5, key.Piece));
+        Assert.True(fixture.PieceStateManager.ContainsPiece(5));
+    }
+
+    [Fact]
+    public async Task EvaluateNextRequestsAsync_StartsNoPieceForAStream_WhenEverySlotIsTaken()
+    {
+        var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 4, maxActivePieces: 1, maxRequestsPerPeer: 8, streaming: [5]);
+        fixture.PieceStateManager.TryAddPiece(new PieceState(2, 4));
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
+        Assert.False(fixture.PieceStateManager.ContainsPiece(5));
+        Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
+        Assert.All(requests.Keys, key => Assert.Equal(2, key.Piece));
+    }
+
+    [Fact]
+    public async Task EvaluateNextRequestsAsync_WithNothingStreaming_AsksNoPeerForABlockAnotherOwes()
+    {
+        var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 2, maxActivePieces: 1, maxRequestsPerPeer: 16);
+        var other = new PeerCommunication(fixture.Torrent, new MockPeerListener(), TimeProvider.System);
+        fixture.PieceStateManager.TryAddPiece(new PieceState(5, 2));
+        AddPendingRequest(fixture.RequestTracker, other, 5, 0);
+        AddPendingRequest(fixture.RequestTracker, other, 5, 16384);
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
+        Assert.False(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests) && requests.Keys.Any(key => key.Piece == 5));
+    }
+
+    [Fact]
     public async Task EvaluateNextRequestsAsync_DisconnectedPeer_DoesNotReclaimFailedPiece()
     {
         var fixture = CreateSchedulerFixture(pieceCount: 1, blocksPerPiece: 1, maxActivePieces: 1, maxRequestsPerPeer: 1);
@@ -206,7 +281,7 @@ public class RequestSchedulerTests
         field!.SetValue(target, value);
     }
 
-    private static SchedulerFixture CreateSchedulerFixture(int pieceCount, int blocksPerPiece, int maxActivePieces, int maxRequestsPerPeer)
+    private static SchedulerFixture CreateSchedulerFixture(int pieceCount, int blocksPerPiece, int maxActivePieces, int maxRequestsPerPeer, IReadOnlyList<int>? streaming = null)
     {
         const int blockSize = 16384;
         var metadata = new TorrentFileMetadata();
@@ -229,7 +304,8 @@ public class RequestSchedulerTests
             TimeProvider = TimeProvider.System,
             Logger = NullLogger<RequestScheduler>.Instance,
             BlockSize = blockSize,
-            GetSoftTimeoutMs = _ => 3000
+            GetSoftTimeoutMs = _ => 3000,
+            GetStreamingPriorityPieces = () => streaming,
         }, piecePicker);
 
         var peer = new PeerCommunication(torrent, new MockPeerListener(), TimeProvider.System);

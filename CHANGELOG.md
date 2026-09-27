@@ -35,6 +35,13 @@ history has the reasoning and the measurements behind each one.
 - The library declares `IsAotCompatible`, and builds with the AOT analyzers without warnings.
 - Passing a bare `null` as the third `HttpStreamServer` constructor argument is now ambiguous; cast it
   to `ILoggerFactory` or `HttpStreamServerOptions`.
+- **A stream's next pieces are fetched first, from every peer that has them.** The pieces open
+  streams need are started and offered to each peer ahead of any other piece, in the order the streams
+  need them, and the two a stream needs soonest are asked of several peers at once, as at the end of a
+  download, instead of waiting on whichever peer started them. Against a local swarm of one fast and
+  three slow seeders, a player at 16 Mbit/s waited 2.2 to 2.3 seconds for its first byte instead of up
+  to 7.7, and 1.5 seconds after a seek instead of up to 8.6; it no longer stalled in ten playbacks,
+  where before it stalled in most.
 - **Far fewer exceptions are thrown in ordinary operation.** Measured over a ninety-second streaming
   session, about one in twenty of the exceptions that used to be raised still are, and none of them
   passes from PeerSharp into framework code - which is what stops a debugger with Just My Code on:
