@@ -441,4 +441,107 @@ public class HttpStreamRequestHandlerTests
         public TorrentFile ExportTorrentFile() => throw new NotImplementedException();
         public void RegisterPeerTransport(IPeerTransport transport) => throw new NotImplementedException();
     }
+
+    // ------------------------------------------------------------------------------ side files --
+
+    [Fact(Timeout = 30000)]
+    public async Task ASideFile_IsServedBesideTheStream_WithTheSameToken()
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0, "/secret-token/stream", NullLoggerFactory.Instance);
+        handler.AddFile("english.vtt", "text/vtt", () => "WEBVTT\n"u8.ToArray());
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/secret-token/english.vtt"), response);
+
+        Assert.Equal((int)HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/vtt", response.ContentType);
+        Assert.Equal("WEBVTT\n"u8.ToArray(), response.BodyBytes);
+        Assert.Equal(7, response.ContentLength);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ASideFile_IsProducedAfreshForEveryRequest_AndNotToBeCached()
+    {
+        // Subtitles extracted as a film downloads grow between one fetch and the next.
+        int version = 0;
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0);
+        handler.AddFile("subs.vtt", "text/vtt", () => new[] { (byte)++version });
+
+        var first = new FakeResponse();
+        await handler.ProcessAsync(new FakeRequest("GET", "/subs.vtt"), first);
+        var second = new FakeResponse();
+        await handler.ProcessAsync(new FakeRequest("GET", "/subs.vtt"), second);
+
+        Assert.Equal(new byte[] { 1 }, first.BodyBytes);
+        Assert.Equal(new byte[] { 2 }, second.BodyBytes);
+        Assert.Equal("no-store", second.Headers["Cache-Control"]);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ASideFile_CanBeReadByACastReceiver()
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0);
+        handler.AddFile("subs.vtt", "text/vtt", () => "WEBVTT\n"u8.ToArray());
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/subs.vtt"), response);
+
+        Assert.Equal("*", response.Headers["Access-Control-Allow-Origin"]);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ASideFilesHeaders_ComeWithoutItsBody()
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0);
+        handler.AddFile("subs.vtt", "text/vtt", () => "WEBVTT\n"u8.ToArray());
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("HEAD", "/subs.vtt"), response);
+
+        Assert.Equal((int)HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(7, response.ContentLength);
+        Assert.Empty(response.BodyBytes);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ASideFileWithAnotherMethod_IsRefused()
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0);
+        handler.AddFile("subs.vtt", "text/vtt", () => "WEBVTT\n"u8.ToArray());
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("PUT", "/subs.vtt"), response);
+
+        Assert.Equal((int)HttpStatusCode.MethodNotAllowed, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("/wrong-token/subs.vtt")]
+    [InlineData("/secret-token/other.vtt")]
+    [InlineData("/secret-token/")]
+    [InlineData("/subs.vtt")]
+    public async Task ASideFile_IsFoundOnlyByItsTokenAndName(string path)
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0, "/secret-token/stream", NullLoggerFactory.Instance);
+        handler.AddFile("subs.vtt", "text/vtt", () => "WEBVTT\n"u8.ToArray());
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", path), response);
+
+        Assert.Equal((int)HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddingAFileAgain_ReplacesIt()
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0);
+        handler.AddFile("subs.vtt", "text/vtt", () => new byte[] { 1 });
+        handler.AddFile("subs.vtt", "text/plain", () => new byte[] { 2 });
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/subs.vtt"), response);
+
+        Assert.Equal("text/plain", response.ContentType);
+        Assert.Equal(new byte[] { 2 }, response.BodyBytes);
+    }
 }

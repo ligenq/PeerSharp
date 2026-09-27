@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -21,6 +22,11 @@ internal sealed class HttpStreamRequestHandler
     private readonly ITorrent _torrent;
     private readonly int _fileIndex;
     private readonly byte[] _path;
+
+    /// <summary>Where side files live: the stream's path up to and including its last slash.</summary>
+    private readonly byte[] _directory;
+
+    private readonly ConcurrentDictionary<string, SideFile> _files = new(StringComparer.Ordinal);
     private readonly ILogger<HttpStreamRequestHandler> _logger;
 
     public HttpStreamRequestHandler(ITorrent torrent, int fileIndex)
@@ -34,11 +40,20 @@ internal sealed class HttpStreamRequestHandler
         _torrent = torrent;
         _fileIndex = fileIndex;
         _path = Encoding.UTF8.GetBytes(path);
+        _directory = Encoding.UTF8.GetBytes(path[..(path.LastIndexOf('/') + 1)]);
     }
+
+    /// <summary>
+    /// Serves <paramref name="content"/> as <paramref name="name"/>, beside the stream, replacing a file
+    /// of that name. The content is asked for on every request, so it can change between them.
+    /// </summary>
+    public void AddFile(string name, string contentType, Func<ReadOnlyMemory<byte>> content) =>
+        _files[name] = new SideFile(contentType, content);
 
     public async Task ProcessAsync(IHttpStreamRequest request, IHttpStreamResponse response, CancellationToken cancellationToken = default)
     {
-        if (!IsTheStreamPath(request.Path))
+        SideFile? sideFile = null;
+        if (!IsTheStreamPath(request.Path) && !TryFindFile(request.Path, out sideFile))
         {
             response.StatusCode = (int)HttpStatusCode.NotFound;
             return;
@@ -62,6 +77,12 @@ internal sealed class HttpStreamRequestHandler
         {
             response.StatusCode = (int)HttpStatusCode.MethodNotAllowed;
             response.AddHeader("Allow", AllowedMethods);
+            return;
+        }
+
+        if (sideFile is not null)
+        {
+            await ServeSideFileAsync(sideFile, request, response, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -141,6 +162,38 @@ internal sealed class HttpStreamRequestHandler
     }
 
     /// <summary>
+    /// Serves a side file whole. They are small - subtitles, artwork - so ranges are not offered, and
+    /// they are not to be cached: one that is still being written is fetched again for its latest.
+    /// </summary>
+    private static async Task ServeSideFileAsync(SideFile file, IHttpStreamRequest request, IHttpStreamResponse response, CancellationToken cancellationToken)
+    {
+        var content = file.Content();
+        response.StatusCode = (int)HttpStatusCode.OK;
+        response.ContentType = file.ContentType;
+        response.ContentLength = content.Length;
+        response.AddHeader("Cache-Control", "no-store");
+
+        if (request.Method == "GET")
+        {
+            await response.Body.WriteAsync(content, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Finds the side file a request names. The directory part carries the access token, so it is
+    /// compared in constant time, as the stream's path is; the name after it is no secret.
+    /// </summary>
+    private bool TryFindFile(string path, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out SideFile? file)
+    {
+        file = null;
+        var candidate = Encoding.UTF8.GetBytes(path);
+        return !_files.IsEmpty
+            && candidate.Length > _directory.Length
+            && CryptographicOperations.FixedTimeEquals(candidate.AsSpan(0, _directory.Length), _directory)
+            && _files.TryGetValue(path[_directory.Length..], out file);
+    }
+
+    /// <summary>
     /// Whether a request is for the served file. Compared in constant time, since the path can carry
     /// the access token and an early-out comparison would reveal how much of a guess was right.
     /// </summary>
@@ -150,6 +203,9 @@ internal sealed class HttpStreamRequestHandler
         return candidate.Length == _path.Length && CryptographicOperations.FixedTimeEquals(candidate, _path);
     }
 }
+
+/// <summary>A small file served beside the stream, produced afresh for every request.</summary>
+internal sealed record SideFile(string ContentType, Func<ReadOnlyMemory<byte>> Content);
 
 internal interface IHttpStreamRequest
 {

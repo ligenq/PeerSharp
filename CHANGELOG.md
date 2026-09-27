@@ -17,6 +17,10 @@ history has the reasoning and the measurements behind each one.
   the caller's token allows.
 - `.m4v`, `.ts`, `.m2ts`, `.mpg`, `.mpeg`, `.flv`, `.m4a`, `.aac` and `.opus` are served with their
   media type instead of `application/octet-stream`, and subtitles (`.vtt`, `.srt`) can be served.
+- **`HttpStreamServer.AddFile`** serves a small file beside the stream, under the same token - such as
+  subtitles converted to WebVTT for a cast receiver, which only shows subtitles it fetches itself. The
+  content is produced on each request and served with CORS headers and without caching, so a file
+  that changes is fetched afresh.
 
 ### Changed
 

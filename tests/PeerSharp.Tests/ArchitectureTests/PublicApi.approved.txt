@@ -1060,6 +1060,7 @@ sealed class PeerSharp.Streaming.HttpStreamServer
     .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex, Microsoft.Extensions.Logging.ILoggerFactory loggerFactory)
     .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex, PeerSharp.Streaming.HttpStreamServerOptions options)
     .ctor(PeerSharp.Interfaces.ITorrent torrent, Int32 fileIndex, PeerSharp.Streaming.HttpStreamServerOptions options, Microsoft.Extensions.Logging.ILoggerFactory loggerFactory)
+    String AddFile(String name, String contentType, Func<ReadOnlyMemory<Byte>> content)
     String ContentType { get; }
     String Url { get; }
     Void Dispose()

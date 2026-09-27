@@ -329,6 +329,51 @@ public class HttpStreamServerTests
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
+
+    [Fact]
+    public async Task ASideFile_IsServedOverARealConnection_AtTheUrlItWasGiven()
+    {
+        using var server = new HttpStreamServer(new FakeTorrent("movie.mp4", [1]), 0);
+        string url = server.AddFile("english.vtt", "text/vtt", () => "WEBVTT\n"u8.ToArray());
+        server.Start();
+
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        var body = await client.GetStringAsync(url, TestContext.Current.CancellationToken);
+
+        Assert.Equal(server.Url[..^"stream".Length] + "english.vtt", url);
+        Assert.Equal("WEBVTT\n", body);
+    }
+
+    [Fact]
+    public void ASideFileOnAServerWithAToken_CarriesTheToken()
+    {
+        using var server = new HttpStreamServer(
+            new FakeTorrent("movie.mp4", [1]), 0, new HttpStreamServerOptions { BindAddress = IPAddress.Loopback, AccessToken = "secret" });
+
+        Assert.EndsWith("/secret/subs.vtt", server.AddFile("subs.vtt", "text/vtt", () => ReadOnlyMemory<byte>.Empty), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("stream")]
+    [InlineData("..")]
+    [InlineData("sub/titles.vtt")]
+    [InlineData("subs?.vtt")]
+    public void ASideFileName_MustBeSafeAndNotTheStreams(string name)
+    {
+        using var server = new HttpStreamServer(new FakeTorrent("movie.mp4", [1]), 0);
+
+        Assert.ThrowsAny<ArgumentException>(() => server.AddFile(name, "text/vtt", () => ReadOnlyMemory<byte>.Empty));
+    }
+
+    [Fact]
+    public void ASideFile_NeedsATypeAndContent()
+    {
+        using var server = new HttpStreamServer(new FakeTorrent("movie.mp4", [1]), 0);
+
+        Assert.ThrowsAny<ArgumentException>(() => server.AddFile("subs.vtt", "", () => ReadOnlyMemory<byte>.Empty));
+        Assert.Throws<ArgumentNullException>(() => server.AddFile("subs.vtt", "text/vtt", null!));
+    }
 }
 
 public class HttpRangeParserTests
