@@ -102,6 +102,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private int _connectedPeersCount = 0;
     private int _knownPeersCacheCount = 0;
 
+    /// <summary>How many times <see cref="StartAsync"/> has run: after the first, each is a restart.</summary>
+    private int _starts;
+
     private int _connectingPeersCount = 0;
     private Task? _connectionQueueTask;
     private AtomicDisposal _disposal = new();
@@ -1454,6 +1457,16 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // Start the connection queue processor
         _connectionQueueTask = ProcessConnectionQueueAsync(_mainLoopCts.Token);
 
+        // A torrent stopped and started again carries on with the peers it knew. Stopping closes their
+        // connections and drops the dials still queued; nothing brought any of them back but the next
+        // tracker announce or DHT lookup, and a peer only a magnet link's x.pe - or AdditionalPeers -
+        // named was never found again at all. libtorrent keeps its peer list across a pause for the
+        // same reason.
+        if (Interlocked.Increment(ref _starts) > 1)
+        {
+            RedialKnownPeers();
+        }
+
         try
         {
             if (_torrent.TrackerManager != null)
@@ -1770,6 +1783,32 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             index++;
         }
 
+        DialBest(candidates);
+    }
+
+    /// <summary>
+    /// Dials the best of the peers already known - each by its listening address, since an incoming
+    /// connection's source port is nothing anyone can dial - as a batch of fresh discoveries would be.
+    /// </summary>
+    private void RedialKnownPeers()
+    {
+        bool isSeeding = _torrent.Finished;
+        var now = _timeProvider.GetUtcNow();
+        var candidates = new List<(PeerHistory History, long Score)>();
+        foreach (var history in _knownPeersCache.Values)
+        {
+            if (history.IsListenAddress && !_connectedEndpoints.ContainsKey(history.EndPoint))
+            {
+                candidates.Add((history, history.GetScore(isSeeding, Priority.Normal, now)));
+            }
+        }
+
+        DialBest(candidates);
+    }
+
+    /// <summary>Dials the best-scoring candidates, as many as one tracker response is allowed to bring.</summary>
+    private void DialBest(List<(PeerHistory History, long Score)> candidates)
+    {
         candidates.Sort((a, b) => a.Score.CompareTo(b.Score));
         int max = (int)_settings.MaxPeersPerTrackerRequest;
         foreach (var (history, _) in candidates.Take(max))

@@ -73,6 +73,10 @@ history has the reasoning and the measurements behind each one.
 
 ### Fixed
 
+- **A torrent stopped and started again dials the peers it knew.** Stopping closed their connections
+  and dropped the dials still queued, and nothing brought them back but the next tracker announce or
+  DHT lookup - so a peer only a magnet link's `x.pe` or `AdditionalPeers` named was never found again.
+  A restart now redials the best of the known peers, as a batch of new ones would be.
 - HTTP tracker proxying keeps DNS resolution at the proxy even when a local bind address is set.
 - HTTP tracker URLs and redirects containing IPv6 literals retain brackets in the Host header.
 - An unreachable UDP destination no longer suppresses reachable destinations in the same address
