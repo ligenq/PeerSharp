@@ -181,6 +181,35 @@ public sealed class HttpStreamServer : IDisposable
     public string Url { get; }
 
     /// <summary>
+    /// Serves a small file beside the stream - subtitles for a cast receiver, say - and returns its URL,
+    /// which carries the same access token as <see cref="Url"/>. Adding a name again replaces the file.
+    /// </summary>
+    /// <param name="name">
+    /// The file's name in the URL: letters, digits, '-', '_' and '.'. It cannot be the stream's own name.
+    /// </param>
+    /// <param name="contentType">The MIME type it is served as, such as <c>text/vtt</c>.</param>
+    /// <param name="content">
+    /// Produces the file's bytes. Asked on every request, and the answer is marked as not to be cached,
+    /// so a file that grows - subtitles extracted as a film downloads - is fetched again at its latest.
+    /// </param>
+    /// <exception cref="ArgumentException">The name is empty, not URL-safe, or the stream's own.</exception>
+    public string AddFile(string name, string contentType, Func<ReadOnlyMemory<byte>> content)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentException.ThrowIfNullOrEmpty(contentType);
+        ArgumentNullException.ThrowIfNull(content);
+        if (!name.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.')
+            || name.All(c => c == '.')
+            || $"/{name}" == HttpStreamRequestHandler.DefaultPath)
+        {
+            throw new ArgumentException("A file name may contain only letters, digits, '-', '_' and '.', and cannot be the stream's.", nameof(name));
+        }
+
+        _handler.AddFile(name, contentType, content);
+        return Url[..(Url.LastIndexOf('/') + 1)] + name;
+    }
+
+    /// <summary>
     /// Gets the MIME type the file is served as, judged by its name - what a cast sender puts in its
     /// load request. <c>application/octet-stream</c> until the torrent's metadata is known, and for
     /// anything that is not a recognised media type.
