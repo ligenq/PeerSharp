@@ -723,7 +723,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     IUtPex IPeerCommunication.UtPex => UtPex;
 
-    internal TcpClient? Client { get; set; }
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S2292:Trivial properties should be auto-implemented", Justification = "Backing field used with Interlocked")]
+    internal TcpClient? Client { get => _client; set => _client = value; }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S2292:Trivial properties should be auto-implemented", Justification = "Backing field used with Interlocked")]
     internal int Connected { get => _connected; set => _connected = value; }
@@ -760,6 +761,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     internal void MarkUsefulDataExchanged() => Volatile.Write(ref _usefulDataExchanged, 1);
 
     private Stream? _stream;
+    private TcpClient? _client;
+    private UtpStream? _utpStream;
 
     /// <summary>
     /// The peer connection, always metered.
@@ -805,7 +808,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             leaveInnerOpen: false);
     }
 
-    internal UtpStream? UtpStream { get; set; }
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S2292:Trivial properties should be auto-implemented", Justification = "Backing field used with Interlocked")]
+    internal UtpStream? UtpStream { get => _utpStream; set => _utpStream = value; }
 
     // Connection-scoped token; falls back to non-cancelable when not connected yet.
     private CancellationToken ConnectionToken => _cts?.Token ?? CancellationToken.None;
@@ -1848,24 +1852,27 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // for good first. A TcpClient goes first too: it shuts its socket down itself, and doing that to a
         // socket the stream has already closed trips an exception inside the runtime. Closing it after is
         // a no-op.
-        try { UtpStream?.CloseAndStopReading(); } catch { /* Ignore disposal errors */ }
-        try { Client?.Dispose(); } catch { /* Ignore disposal errors */ }
+        //
+        // Each is taken exactly once: a close from the receive loop and one from the send loop - or a
+        // close and a dispose - can run this at the same time, and one of them reading a property the
+        // other had just cleared was a NullReferenceException on a busy swarm.
+        var utpStream = Interlocked.Exchange(ref _utpStream, null);
+        var client = Interlocked.Exchange(ref _client, null);
+        var stream = Interlocked.Exchange(ref _stream, null);
+        try { utpStream?.CloseAndStopReading(); } catch { /* Ignore disposal errors */ }
+        try { client?.Dispose(); } catch { /* Ignore disposal errors */ }
 
         try
         {
-            if (Stream != null)
+            if (stream != null)
             {
-                await Stream.DisposeAsync().ConfigureAwait(false);
+                await stream.DisposeAsync().ConfigureAwait(false);
             }
         }
         catch
         {
             /* Ignore disposal errors */
         }
-
-        Client = null;
-        UtpStream = null;
-        Stream = null;
 
         if (_cts != null)
         {
@@ -2046,7 +2053,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // Handle plaintext connection
         try
         {
-            if (Stream == null) { await CloseAsync().ConfigureAwait(false); return; }
+            if (Stream is not { } stream) { await CloseAsync().ConfigureAwait(false); return; }
 
             byte[] hBuffer = new byte[68];
             int read = 0;
@@ -2069,7 +2076,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             while (read < 68)
             {
-                var (r, _) = await ReadHandshakeBytesAsync(Stream, hBuffer.AsMemory(read, 68 - read), 10000).ConfigureAwait(false);
+                var (r, _) = await ReadHandshakeBytesAsync(stream, hBuffer.AsMemory(read, 68 - read), 10000).ConfigureAwait(false);
                 if (r == 0) { await CloseAsync().ConfigureAwait(false); return; }
                 Interlocked.Exchange(ref _lastActivityTicksValue, Environment.TickCount64);
                 read += r;
@@ -2558,7 +2565,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         try
         {
-            if (Stream == null)
+            if (Stream is not { } stream)
             {
                 return false;
             }
@@ -2581,7 +2588,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             while (read < 68)
             {
-                var (r, _) = await ReadHandshakeBytesAsync(Stream, hBuffer.AsMemory(read, 68 - read), 10000).ConfigureAwait(false);
+                var (r, _) = await ReadHandshakeBytesAsync(stream, hBuffer.AsMemory(read, 68 - read), 10000).ConfigureAwait(false);
                 if (r == 0)
                 {
                     return false;
@@ -2645,18 +2652,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
-        if (Stream == null)
+        if (Stream is not { } stream)
         {
             return;
         }
 
         // Anything read off the socket along with the handshake has to be seen before the socket itself,
         // or the message stream starts part way through a message.
-        // Anything read off the socket along with the handshake has to be seen before the socket itself,
-        // or the message stream starts part way through a message.
         var source = _bufferedAfterHandshake.Length > 0
-            ? new PrefixedStream(_bufferedAfterHandshake, Stream, leaveInnerOpen: true)
-            : Stream;
+            ? new PrefixedStream(_bufferedAfterHandshake, stream, leaveInnerOpen: true)
+            : stream;
         _bufferedAfterHandshake = [];
 
         // leaveOpen: the connection stream is owned by CleanupResourcesAsync, which disposes it to close
@@ -3023,12 +3028,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private async Task SendHandshakeAsync()
     {
-        if (Stream == null)
+        if (Stream is not { } stream)
         {
             return;
         }
 
-        await Stream.WriteAsync(CreateHandshakeBuffer(), CancellationToken.None).ConfigureAwait(false);
+        await stream.WriteAsync(CreateHandshakeBuffer(), CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task SendLoopAsync(CancellationToken token)
@@ -3160,9 +3165,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private async Task WriteMessageToStreamAsync(PeerMessage msg, CancellationToken token)
     {
-        if (Stream == null)
+        // Read once: the connection can close between a check and a use, clearing the property - which
+        // was a NullReferenceException. With no stream the connection is already closing, and the
+        // message goes nowhere, as everything else still queued does.
+        if (Stream is not { } stream)
         {
-            throw new InvalidOperationException("Cannot write message: stream is not connected");
+            return;
         }
 
         if (msg.Id == MessageId.Interested)
@@ -3182,7 +3190,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         try
         {
             int written = PeerProtocol.WriteMessage(msg, packet.AsSpan(0, len));
-            await Stream.WriteAsync(packet.AsMemory(0, written), token).ConfigureAwait(false);
+            await stream.WriteAsync(packet.AsMemory(0, written), token).ConfigureAwait(false);
         }
         finally
         {
