@@ -40,8 +40,6 @@ public sealed class StreamingSwarmTests : IDisposable
     /// </summary>
     private const int PlayedBytes = 16 * 1024 * 1024;
 
-    /// <summary>What the player buffers before it starts, again after each stall, and keeps ahead while playing: a second.</summary>
-    private const int StartupBufferBytes = BitrateBytesPerSecond;
 
     private const int ReadBytes = 64 * 1024;
     private const int FastSeederBytesPerSecond = 4 * 1024 * 1024;
@@ -66,6 +64,82 @@ public sealed class StreamingSwarmTests : IDisposable
     public async Task APlayer_IsKeptFed_FromAFastSeederAmongSlowOnes()
     {
         Assert.SkipUnless(Enabled, "Set PEERSHARP_STREAMING=1 to measure streaming against a local swarm.");
+
+        await InSwarmAsync(async (stream, payload, ct) =>
+        {
+            var fromStart = await PlayAsync(stream, payload, 0, ct);
+            var afterSeek = await PlayAsync(stream, payload, PayloadBytes / 4 * 3, ct);
+
+            Report("From the start", fromStart);
+            Report("After a seek three quarters in", afterSeek);
+
+            Assert.Equal(PlayedBytes, fromStart.Played);
+            Assert.Equal(PlayedBytes, afterSeek.Played);
+        });
+    }
+
+    /// <summary>
+    /// Opening a film part-way in - carrying on where it was left - with nothing of it downloaded:
+    /// what the player waits for is the piece where it resumes, not the start of the file.
+    /// </summary>
+    [Fact(Timeout = 300000)]
+    public async Task APlayer_ResumingPartWayIn_IsKeptFed()
+    {
+        Assert.SkipUnless(Enabled, "Set PEERSHARP_STREAMING=1 to measure streaming against a local swarm.");
+
+        await InSwarmAsync(async (stream, payload, ct) =>
+        {
+            var resumed = await PlayAsync(stream, payload, PayloadBytes / 3, ct);
+
+            Report("Resuming a third in", resumed);
+
+            Assert.Equal(PlayedBytes, resumed.Played);
+        });
+    }
+
+    /// <summary>
+    /// A 32 Mbit/s film - a 4K Blu-ray's rate - with the fast seeder at twice that, until ten seconds
+    /// in it slows to a crawl for six. What carries the player through is what was fetched ahead
+    /// before: a window of so many bytes is a few seconds of a film like this, one of so many seconds is
+    /// as long at any rate.
+    /// </summary>
+    [Fact(Timeout = 300000)]
+    public async Task APlayer_RidesOutTheFastSeederSlowingDown()
+    {
+        Assert.SkipUnless(Enabled, "Set PEERSHARP_STREAMING=1 to measure streaming against a local swarm.");
+        const int Bitrate = 4 * 1024 * 1024;
+
+        await InSwarmAsync(
+            async (stream, payload, fastSeeder, ct) =>
+            {
+                var slowing = SlowDownAsync(fastSeeder, after: TimeSpan.FromSeconds(10), lasting: TimeSpan.FromSeconds(6), restoreTo: 2 * Bitrate, ct);
+                var played = await PlayAsync(stream, payload, 0, ct, Bitrate, length: 24 * Bitrate);
+                await slowing;
+
+                Report("A 32 Mbit/s film, the fast seeder slowing for 6s", played);
+
+                Assert.Equal(24 * Bitrate, played.Played);
+            },
+            fastSeederBytesPerSecond: 2 * Bitrate);
+    }
+
+    private static async Task SlowDownAsync(ITorrent seeder, TimeSpan after, TimeSpan lasting, int restoreTo, CancellationToken ct)
+    {
+        await Task.Delay(after, ct);
+        seeder.UploadLimitBytesPerSecond = 64 * 1024;
+        await Task.Delay(lasting, ct);
+        seeder.UploadLimitBytesPerSecond = restoreTo;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="play"/> on a stream of the film from a swarm of one fast seeder and
+    /// <see cref="SlowSeeders"/> slow ones, as soon as the player's engine is connected to them all.
+    /// </summary>
+    private async Task InSwarmAsync(Func<Stream, byte[], CancellationToken, Task> play, int fastSeederBytesPerSecond = FastSeederBytesPerSecond) =>
+        await InSwarmAsync((stream, payload, _, ct) => play(stream, payload, ct), fastSeederBytesPerSecond);
+
+    private async Task InSwarmAsync(Func<Stream, byte[], ITorrent, CancellationToken, Task> play, int fastSeederBytesPerSecond = FastSeederBytesPerSecond)
+    {
         var ct = TestContext.Current.CancellationToken;
 
         byte[] payload = new byte[PayloadBytes];
@@ -79,10 +153,11 @@ public sealed class StreamingSwarmTests : IDisposable
         var seeders = new List<ClientEngine>();
         try
         {
-            seeders.Add(await StartSeederAsync(torrentFile, payload, "fast", FastSeederBytesPerSecond));
+            var (fastEngine, fastSeeder) = await StartSeederAsync(torrentFile, payload, "fast", fastSeederBytesPerSecond);
+            seeders.Add(fastEngine);
             for (int i = 0; i < SlowSeeders; i++)
             {
-                seeders.Add(await StartSeederAsync(torrentFile, payload, $"slow{i}", SlowSeederBytesPerSecond));
+                seeders.Add((await StartSeederAsync(torrentFile, payload, $"slow{i}", SlowSeederBytesPerSecond)).Engine);
             }
 
             // PEERSHARP_STREAMING_LOG names a file the player's engine logs to, in detail, for a run to look into.
@@ -94,14 +169,7 @@ public sealed class StreamingSwarmTests : IDisposable
             await ConnectAsync(leechEngine, leech, seeders, ct);
 
             await using var stream = await leech.OpenStreamAsync(0, ct);
-            var fromStart = await PlayAsync(stream, payload, 0, ct);
-            var afterSeek = await PlayAsync(stream, payload, PayloadBytes / 4 * 3, ct);
-
-            Report("From the start", fromStart);
-            Report("After a seek three quarters in", afterSeek);
-
-            Assert.Equal(PlayedBytes, fromStart.Played);
-            Assert.Equal(PlayedBytes, afterSeek.Played);
+            await play(stream, payload, fastSeeder, ct);
         }
         finally
         {
@@ -117,8 +185,10 @@ public sealed class StreamingSwarmTests : IDisposable
     /// second's worth before it starts, then consumes at the bitrate. A read that is not back by the
     /// time the player needs it is a stall; like a player, it then buffers a second again before going on.
     /// </summary>
-    private static async Task<Playback> PlayAsync(Stream stream, byte[] payload, long from, CancellationToken ct)
+    internal static async Task<Playback> PlayAsync(
+        Stream stream, byte[]? payload, long from, CancellationToken ct, int bitrate = BitrateBytesPerSecond, int length = PlayedBytes)
     {
+        int startupBuffer = bitrate;
         stream.Seek(from, SeekOrigin.Begin);
         var buffer = new byte[ReadBytes];
         var clock = Stopwatch.StartNew();
@@ -130,18 +200,18 @@ public sealed class StreamingSwarmTests : IDisposable
         var stalled = TimeSpan.Zero;
         bool playing = false;
 
-        while (played < PlayedBytes)
+        while (played < length)
         {
-            int read = await stream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(ReadBytes, PlayedBytes - played)), ct);
+            int read = await stream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(ReadBytes, length - played)), ct);
             Assert.True(read > 0);
-            Assert.True(buffer.AsSpan(0, read).SequenceEqual(payload.AsSpan((int)(from + played), read)), "The stream returned the wrong bytes.");
+            Assert.True(payload is null || buffer.AsSpan(0, read).SequenceEqual(payload.AsSpan((int)(from + played), read)), "The stream returned the wrong bytes.");
             firstByte ??= clock.Elapsed;
             played += read;
 
             var now = clock.Elapsed;
             if (!playing)
             {
-                if (played - playedFromStart >= StartupBufferBytes || played == PlayedBytes)
+                if (played - playedFromStart >= startupBuffer || played == length)
                 {
                     playing = true;
                     startedAt = now;
@@ -152,8 +222,8 @@ public sealed class StreamingSwarmTests : IDisposable
 
             // When playback, going since it last started, reaches what was just read. Late is a stall;
             // early by more than the buffer, the player waits rather than read further ahead.
-            var needed = startedAt + TimeSpan.FromSeconds((double)(played - read - playedFromStart) / BitrateBytesPerSecond);
-            var ahead = TimeSpan.FromSeconds((double)StartupBufferBytes / BitrateBytesPerSecond);
+            var needed = startedAt + TimeSpan.FromSeconds((double)(played - read - playedFromStart) / bitrate);
+            var ahead = TimeSpan.FromSeconds((double)startupBuffer / bitrate);
             if (now > needed + TimeSpan.FromMilliseconds(100))
             {
                 stalls++;
@@ -167,12 +237,12 @@ public sealed class StreamingSwarmTests : IDisposable
             }
         }
 
-        return new Playback(firstByte ?? TimeSpan.Zero, played, stalls, stalled, clock.Elapsed);
+        return new Playback(firstByte ?? TimeSpan.Zero, played, stalls, stalled, clock.Elapsed, bitrate);
     }
 
     private void Report(string what, Playback playback)
     {
-        double seconds = (double)playback.Played / BitrateBytesPerSecond;
+        double seconds = (double)playback.Played / playback.Bitrate;
         string line =
             $"{what}: first byte after {playback.FirstByte.TotalSeconds:F2}s; {playback.Stalls} stalls, " +
             $"{playback.Stalled.TotalSeconds:F1}s stalled over {seconds:F0}s of film ({playback.Elapsed.TotalSeconds:F1}s in all)";
@@ -186,7 +256,7 @@ public sealed class StreamingSwarmTests : IDisposable
         }
     }
 
-    private async Task<ClientEngine> StartSeederAsync(TorrentFile torrentFile, byte[] payload, string name, int uploadBytesPerSecond)
+    private async Task<(ClientEngine Engine, ITorrent Torrent)> StartSeederAsync(TorrentFile torrentFile, byte[] payload, string name, int uploadBytesPerSecond)
     {
         string path = Path.Combine(_testRoot, name);
         Directory.CreateDirectory(path);
@@ -197,7 +267,7 @@ public sealed class StreamingSwarmTests : IDisposable
         Assert.Equal(torrentFile.PieceCount, await torrent.ForceRecheckAsync());
         torrent.UploadLimitBytesPerSecond = uploadBytesPerSecond;
         await torrent.StartAsync();
-        return engine;
+        return (engine, torrent);
     }
 
     private async Task<ClientEngine> CreateEngineAsync(string downloadPath, ILoggerFactory? loggerFactory = null)
@@ -256,5 +326,5 @@ public sealed class StreamingSwarmTests : IDisposable
         _loggerFactory.Dispose();
     }
 
-    private readonly record struct Playback(TimeSpan FirstByte, long Played, int Stalls, TimeSpan Stalled, TimeSpan Elapsed);
+    internal readonly record struct Playback(TimeSpan FirstByte, long Played, int Stalls, TimeSpan Stalled, TimeSpan Elapsed, int Bitrate);
 }

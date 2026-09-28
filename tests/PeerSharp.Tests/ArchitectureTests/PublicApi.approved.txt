@@ -173,6 +173,7 @@ sealed class PeerSharp.Config.StreamingSettings
     .ctor()
     Int32 DataWaitTimeoutSeconds { get; set; }
     Int32 MetadataWaitTimeoutSeconds { get; set; }
+    Int32 ReadAheadSeconds { get; set; }
     Int64 ReadAheadBytes { get; set; }
 sealed class PeerSharp.Config.TorrentClientOptions
     .ctor()

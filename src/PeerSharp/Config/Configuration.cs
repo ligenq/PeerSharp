@@ -804,15 +804,29 @@ public sealed class SessionSettings
 public sealed class StreamingSettings
 {
     /// <summary>
-    /// How far ahead of the read position, in bytes, pieces are fetched ahead of everything else.
-    /// Default is 20 MiB.
+    /// How far ahead of the read position, in bytes, pieces are fetched ahead of everything else, at
+    /// least. Default is 20 MiB.
     /// </summary>
     /// <remarks>
     /// A reader on a slow or distant device - a TV fetching over Wi-Fi - benefits from more; a device
     /// short of storage or bandwidth from less. Pieces beyond the window still download at ordinary
-    /// priority.
+    /// priority. Once the reader's rate is known, <see cref="ReadAheadSeconds"/> can make the window
+    /// larger.
     /// </remarks>
     public long ReadAheadBytes { get; set; } = 20L * 1024 * 1024;
+
+    /// <summary>
+    /// How far ahead of the read position, in seconds at the rate the stream is being read, pieces are
+    /// fetched ahead of everything else, when that is more than <see cref="ReadAheadBytes"/>. Default is
+    /// 30. Zero or less fetches <see cref="ReadAheadBytes"/> ahead, whatever the rate.
+    /// </summary>
+    /// <remarks>
+    /// A player reads at the rate its film plays once its own buffer is full, so this is seconds of
+    /// film: 20 MiB is 80 seconds of a DVD rip and 5 of a 4K Blu-ray, where 30 seconds is time to ride
+    /// out a peer going quiet at either. The rate is measured over the last ten seconds of reading, and
+    /// the window is never more than 512 MiB however fast the stream is read.
+    /// </remarks>
+    public int ReadAheadSeconds { get; set; } = 30;
 
     /// <summary>
     /// Seconds a read waits for the swarm to supply the pieces it needs before throwing
