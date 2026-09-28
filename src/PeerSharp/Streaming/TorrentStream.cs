@@ -12,8 +12,24 @@ internal class TorrentStream : Stream
 {
     private const int FileEndPriorityBytes = 1 * 1024 * 1024;
 
+    /// <summary>
+    /// How much of the start of the file is fetched ahead of everything but the read position: where
+    /// a container keeps what a player reads before anything else - Matroska's tracks, the index of an
+    /// MP4 written for streaming.
+    /// </summary>
+    private const int FileStartPriorityBytes = 1 * 1024 * 1024;
+
     // Priorities are refreshed each time this much has been read since the last refresh.
     private const int PriorityUpdateIntervalBytes = 1024 * 1024;
+
+    /// <summary>The most fetched ahead, however fast the stream is read: a copy of the file reads far faster than any film plays.</summary>
+    private const long MaxReadAheadBytes = 512L * 1024 * 1024;
+
+    /// <summary>How far back the reader's rate is measured.</summary>
+    private static readonly TimeSpan ReadRateWindow = TimeSpan.FromSeconds(10);
+
+    /// <summary>How long a reader must have been read from before its rate is believed: its first reads are a player filling its buffer.</summary>
+    private static readonly TimeSpan ReadRateSettles = TimeSpan.FromSeconds(3);
 
     /// <summary>
     /// Fallback re-check interval, in case a piece-verified signal is missed - for example one that
@@ -34,6 +50,12 @@ internal class TorrentStream : Stream
     private readonly long _fileSize;
     private readonly long _fileStartOffset;
     private readonly long _readAheadBytes;
+    private readonly TimeSpan _readAheadTime;
+
+    /// <summary>What was read in the last <see cref="ReadRateWindow"/>, oldest first, and when; read and written by the reader alone.</summary>
+    private readonly Queue<(long Timestamp, int Bytes)> _reads = new();
+    private long _readsBytes;
+    private long _firstReadTimestamp = -1;
     private readonly int _firstPieceIndex;
     private readonly int _lastPieceIndex;
     private readonly ILogger<TorrentStream> _logger;
@@ -84,6 +106,7 @@ internal class TorrentStream : Stream
 
         var settings = torrent.Settings.Streaming;
         _readAheadBytes = Math.Max(0, settings.ReadAheadBytes);
+        _readAheadTime = TimeSpan.FromSeconds(Math.Max(0, settings.ReadAheadSeconds));
         _dataWaitTimeout = settings.DataWaitTimeoutSeconds > 0
             ? TimeSpan.FromSeconds(settings.DataWaitTimeoutSeconds)
             : null;
@@ -167,6 +190,7 @@ internal class TorrentStream : Stream
         await _torrent.FilesInternal.ReadAsync(absoluteOffset, buffer[..available], cancellationToken).ConfigureAwait(false);
 
         _position += available;
+        RecordRead(available);
 
         // Look-ahead update: periodically update priorities as we read forward
         if (_position - _lastPriorityUpdatePosition >= PriorityUpdateIntervalBytes)
@@ -263,13 +287,47 @@ internal class TorrentStream : Stream
         return available;
     }
 
+    private void RecordRead(int bytes)
+    {
+        long now = _timeProvider.GetTimestamp();
+        if (_firstReadTimestamp < 0)
+        {
+            _firstReadTimestamp = now;
+        }
+
+        _reads.Enqueue((now, bytes));
+        _readsBytes += bytes;
+        while (_reads.Count > 1 && _timeProvider.GetElapsedTime(_reads.Peek().Timestamp, now) > ReadRateWindow)
+        {
+            _readsBytes -= _reads.Dequeue().Bytes;
+        }
+    }
+
+    /// <summary>
+    /// How far ahead to fetch: <see cref="StreamingSettings.ReadAheadSeconds"/> at the rate the stream
+    /// has been read over the last <see cref="ReadRateWindow"/>, once that has settled, and never less
+    /// than <see cref="StreamingSettings.ReadAheadBytes"/> nor more than <see cref="MaxReadAheadBytes"/>.
+    /// </summary>
+    private long ReadAheadBytes()
+    {
+        if (_readAheadTime <= TimeSpan.Zero || _reads.Count == 0
+            || _timeProvider.GetElapsedTime(_firstReadTimestamp) < ReadRateSettles)
+        {
+            return _readAheadBytes;
+        }
+
+        double seconds = Math.Max(1, _timeProvider.GetElapsedTime(_reads.Peek().Timestamp).TotalSeconds);
+        double rate = _readsBytes / seconds;
+        return Math.Max(_readAheadBytes, (long)Math.Min(MaxReadAheadBytes, rate * _readAheadTime.TotalSeconds));
+    }
+
     private void UpdatePriorities(long playheadPosition)
     {
         _lastPriorityUpdatePosition = playheadPosition;
 
         int pieceSize = (int)_torrent.InfoFile.Info.PieceSize;
         long absolutePlayhead = _fileStartOffset + playheadPosition;
-        long bufferEnd = absolutePlayhead + _readAheadBytes;
+        long bufferEnd = absolutePlayhead + ReadAheadBytes();
 
         int playheadPiece = (int)(absolutePlayhead / pieceSize);
         int bufferEndPiece = (int)(bufferEnd / pieceSize);
@@ -281,7 +339,7 @@ internal class TorrentStream : Stream
         var highPriority = new List<int>();
         var added = new HashSet<int>();
 
-        // 1. Critical: Immediate playhead
+        // 1. What the reader needs next, from where it is.
         for (int i = playheadPiece; i <= bufferEndPiece; i++)
         {
             if (!_torrent.Pieces.HasPiece(i))
@@ -291,7 +349,20 @@ internal class TorrentStream : Stream
             }
         }
 
-        // 2. Footer: Prioritize end of file (metadata/indexes)
+        // 2. The start of the file, in order, then its end: what a player reads to open a file, and
+        //    an index kept at the end. After the read position, not before it: a reader carrying on
+        //    part-way in waits on where it is, and one opening the file is at its start already. This
+        //    was the first three pieces, ahead of the read position and in reverse order - up to
+        //    48 MB of a film fetched before the piece a resuming player was waiting for.
+        long startEnd = _fileStartOffset + Math.Min(_fileSize, FileStartPriorityBytes) - 1;
+        for (int i = _firstPieceIndex; i <= (int)(startEnd / pieceSize); i++)
+        {
+            if (!_torrent.Pieces.HasPiece(i) && added.Add(i))
+            {
+                highPriority.Add(i);
+            }
+        }
+
         long endStart = _fileStartOffset + _fileSize - FileEndPriorityBytes;
         int endPieceStart = (int)(endStart / pieceSize);
         endPieceStart = Math.Max(endPieceStart, _firstPieceIndex);
@@ -301,16 +372,6 @@ internal class TorrentStream : Stream
             if (!_torrent.Pieces.HasPiece(i) && added.Add(i))
             {
                 highPriority.Add(i);
-            }
-        }
-
-        // 3. Header: First few pieces
-        int headerPieces = Math.Min(3, _lastPieceIndex - _firstPieceIndex + 1);
-        for (int i = _firstPieceIndex; i < _firstPieceIndex + headerPieces; i++)
-        {
-            if (!_torrent.Pieces.HasPiece(i) && added.Add(i))
-            {
-                highPriority.Insert(0, i);
             }
         }
 

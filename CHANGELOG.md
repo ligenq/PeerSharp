@@ -15,6 +15,11 @@ history has the reasoning and the measurements behind each one.
   read waits for data (`DataWaitTimeoutSeconds`) or a magnet for its metadata
   (`MetadataWaitTimeoutSeconds`). Both waits were a fixed 60 seconds; zero now waits for as long as
   the caller's token allows.
+- **`StreamingSettings.ReadAheadSeconds`** fetches that many seconds ahead of a stream's read position,
+  at the rate it is being read - 30 by default - where that is more than `ReadAheadBytes`, which is now
+  the least fetched ahead. 20 MiB is five seconds of a 4K Blu-ray; with a 32 Mbit/s film and the fast
+  seeder of a local swarm slowing to a crawl for six seconds, the player no longer stalled, where it
+  stalled for about a second every time.
 - `.m4v`, `.ts`, `.m2ts`, `.mpg`, `.mpeg`, `.flv`, `.m4a`, `.aac` and `.opus` are served with their
   media type instead of `application/octet-stream`, and subtitles (`.vtt`, `.srt`) can be served.
 - **`HttpStreamServer.AddFile`** serves a small file beside the stream, under the same token - such as
@@ -42,6 +47,11 @@ history has the reasoning and the measurements behind each one.
   three slow seeders, a player at 16 Mbit/s waited 2.2 to 2.3 seconds for its first byte instead of up
   to 7.7, and 1.5 seconds after a seek instead of up to 8.6; it no longer stalled in ten playbacks,
   where before it stalled in most.
+- **A stream fetches the start of its file after its read position, not before.** The start is now the
+  file's first megabyte, where a container keeps what a player reads first, rather than its first three
+  pieces - up to 48 MB of a film - and it comes after the pieces the reader needs next. A player
+  opening a film part-way in, with none of it downloaded, waited 2.1 to 2.5 seconds for its first byte
+  instead of 3.2 to 3.8.
 - **Far fewer exceptions are thrown in ordinary operation.** Measured over a ninety-second streaming
   session, about one in twenty of the exceptions that used to be raised still are, and none of them
   passes from PeerSharp into framework code - which is what stops a debugger with Just My Code on:

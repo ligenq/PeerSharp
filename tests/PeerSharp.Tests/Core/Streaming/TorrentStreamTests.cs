@@ -65,6 +65,70 @@ public class TorrentStreamTests
         Assert.Contains(9, priorities);
     }
 
+    [Fact]
+    public void AReaderPartWayIn_IsFetchedFor_BeforeTheStartOfTheFile_ThenItsEnd()
+    {
+        // 8 MiB in 256 KiB pieces; half a megabyte of read-ahead from 4 MiB in is pieces 16 to 18. The
+        // start of the file is its first megabyte, pieces 0 to 3, in order; the end its last, 28 to 31.
+        var torrent = LargeTorrent();
+        torrent.Settings.Streaming.ReadAheadBytes = 512 * 1024;
+        torrent.Settings.Streaming.ReadAheadSeconds = 0;
+        using var stream = new TorrentStream(torrent.Streaming, torrent, 0, _timeProvider);
+
+        stream.Seek(4 * 1024 * 1024, SeekOrigin.Begin);
+
+        Assert.Equal([16, 17, 18, 0, 1, 2, 3, 28, 29, 30, 31], torrent.StreamingPriorityPieces!);
+    }
+
+    [Theory]
+    [InlineData(4, true)]
+    [InlineData(0, false)]
+    public async Task ReadAhead_ReachesSecondsAtTheRateTheStreamIsRead(int readAheadSeconds, bool reachesFurther)
+    {
+        // Read at half a megabyte a second for four seconds: four seconds ahead is two megabytes, where
+        // the bytes setting alone is half of one.
+        var torrent = LargeTorrent();
+        torrent.Settings.Streaming.ReadAheadBytes = 512 * 1024;
+        torrent.Settings.Streaming.ReadAheadSeconds = readAheadSeconds;
+        for (int piece = 0; piece < 8; piece++)
+        {
+            torrent.Pieces.AddPiece(piece);
+        }
+
+        await using var stream = new TorrentStream(torrent.Streaming, torrent, 0, _timeProvider);
+        var buffer = new byte[256 * 1024];
+        for (int read = 0; read < 8; read++)
+        {
+            await stream.ReadExactlyAsync(buffer, TestContext.Current.CancellationToken);
+            _timeProvider.Advance(TimeSpan.FromSeconds(0.5));
+        }
+
+        // Read to 2 MiB, piece 8: half a megabyte ahead reaches piece 10, two megabytes piece 15.
+        stream.Seek(2 * 1024 * 1024 + 1, SeekOrigin.Begin);
+        stream.Seek(2 * 1024 * 1024, SeekOrigin.Begin);
+
+        Assert.Contains(10, torrent.StreamingPriorityPieces!);
+        Assert.Equal(reachesFurther, torrent.StreamingPriorityPieces!.Contains(15));
+    }
+
+    /// <summary>A torrent of one 8 MiB file in 256 KiB pieces: larger than the start and end fetched first.</summary>
+    private static Torrent LargeTorrent()
+    {
+        const int PieceSize = 256 * 1024;
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.InfoFile.Info.PieceSize = PieceSize;
+        torrent.InfoFile.Info.FullSize = 32 * PieceSize;
+        torrent.InfoFile.Info.Files.Add(new Internals.TorrentFileEntry { Path = "film.mkv", Size = 32 * PieceSize, Offset = 0 });
+        torrent.InfoFile.Info.Pieces.Clear();
+        for (int i = 0; i < 32; i++)
+        {
+            torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        }
+
+        torrent.ReinitializeAfterMetadataAsync().GetAwaiter().GetResult();
+        return torrent;
+    }
+
     #endregion
 
     #region Stream Properties Tests
