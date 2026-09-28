@@ -1,0 +1,153 @@
+using Microsoft.Extensions.Logging.Abstractions;
+using PeerSharp.Clients;
+using PeerSharp.Tests.Integration;
+using System.Diagnostics;
+
+namespace PeerSharp.Tests.Interop;
+
+/// <summary>
+/// Streaming from a real swarm, with each peer given a longer or a shorter queue of requests: how long
+/// a player waits after opening a file part-way in, and after a seek, and what the download as a whole
+/// gets done meanwhile.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A peer answers requests in the order they came, so a request for what the player needs next waits
+/// behind whatever the peer was already asked for - as much as <c>RequestQueueTimeSeconds</c> of it,
+/// three seconds by default, libtorrent's. A shorter queue lets urgent requests through sooner; it can
+/// also leave a distant peer idle between one batch of requests and the next. Over loopback, where a
+/// round trip is nothing, one second took a third of a second off a seek; only a real swarm, with real
+/// round trips, can say what it costs.
+/// </para>
+/// <para>
+/// Runs alternate between the queue lengths, so each meets the swarm as the other did. Each is a fresh
+/// engine with its own empty copy of the torrent, given ten seconds to join the swarm and fill its
+/// peers' queues before the stream opens - a third of the way in - then plays; then seeks three quarters
+/// in and plays again. Gated like the soak tests: <c>PEERSHARP_SOAK=1</c> and
+/// <c>PEERSHARP_SOAK_TORRENT</c> or <c>PEERSHARP_SOAK_MAGNET</c>, content you have the right to share.
+/// <c>PEERSHARP_SOAK_RATE_BYTES</c> caps each run's download (default 4 MiB/s: faster, and a small image is
+/// downloaded by the time the player seeks, which then measures nothing),
+/// <c>PEERSHARP_STREAMING_BITRATE</c> sets the player's rate in bytes a second (default 1 MiB/s),
+/// <c>PEERSHARP_STREAMING_QUEUES</c> the queue lengths to compare (default <c>3;1</c>) and
+/// <c>PEERSHARP_STREAMING_ROUNDS</c> how many times each is run (default 3). Every run pulls some
+/// hundreds of megabytes.
+/// </para>
+/// </remarks>
+public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
+{
+    private static readonly TimeSpan JoinTime = TimeSpan.FromSeconds(10);
+    private const int PlayedSeconds = 20;
+
+    [Fact(Timeout = 3_600_000)]
+    public async Task Streaming_WithShorterAndLongerRequestQueues()
+    {
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PEERSHARP_SOAK")))
+        {
+            Assert.Skip("Set PEERSHARP_SOAK=1 and PEERSHARP_SOAK_TORRENT to stream from a real swarm.");
+        }
+
+        var ct = TestContext.Current.CancellationToken;
+        var source = await ResolveTorrentAsync(ct);
+        int bitrate = FromEnvironment("PEERSHARP_STREAMING_BITRATE", 1024 * 1024);
+        int rate = FromEnvironment("PEERSHARP_SOAK_RATE_BYTES", 4 * 1024 * 1024);
+        int rounds = FromEnvironment("PEERSHARP_STREAMING_ROUNDS", 3);
+        var queues = (Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_QUEUES") ?? "3;1")
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(int.Parse)
+            .ToList();
+
+        for (int round = 1; round <= rounds; round++)
+        {
+            foreach (int queueSeconds in queues)
+            {
+                var run = await RunAsync(source, queueSeconds, bitrate, rate, ct);
+                Report($"round {round}, queue {queueSeconds}s", run);
+            }
+        }
+    }
+
+    private async Task<Run> RunAsync(TorrentFile source, int queueSeconds, int bitrate, int rate, CancellationToken ct)
+    {
+        var settings = new Settings();
+        settings.Transfer.MaxDownloadSpeed = (uint)rate;
+        settings.Transfer.MaxUploadSpeed = (uint)rate;
+        settings.Transfer.RequestQueueTimeSeconds = queueSeconds;
+        string downloadPath = Path.Combine(Path.GetTempPath(), "peersharp-streaming", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(downloadPath);
+        settings.Files.DefaultDownloadPath = downloadPath;
+
+        var engine = ClientEngineFactory.Create(new TorrentClientOptions { Settings = settings, LoggerFactory = NullLoggerFactory.Instance });
+        try
+        {
+            await engine.InitializeAsync(ct);
+            var torrent = await engine.AddTorrentAsync(source, new AddTorrentOptions(), ct);
+            if (torrent.State == TorrentState.Stopped)
+            {
+                await torrent.StartAsync(ct);
+            }
+
+            await Task.Delay(JoinTime, ct);
+            int peers = torrent.Peers.ConnectedCount;
+            long before = (long)torrent.FinishedBytes;
+            var clock = Stopwatch.StartNew();
+
+            // The file is played as a film of the given rate; the largest file, where a torrent has several.
+            var largest = torrent.GetAllFileInfo().MaxBy(info => info.Size)!;
+            int file = largest.Index;
+            long size = largest.Size;
+            await using var stream = await torrent.OpenStreamAsync(file, ct);
+            var resumed = await StreamingSwarmTests.PlayAsync(stream, null, size / 3, ct, bitrate, PlayedSeconds * bitrate);
+            var afterSeek = await StreamingSwarmTests.PlayAsync(stream, null, size / 4 * 3, ct, bitrate, PlayedSeconds * bitrate);
+
+            double throughput = ((long)torrent.FinishedBytes - before) / clock.Elapsed.TotalSeconds;
+            await torrent.StopAsync(ct);
+            return new Run(peers, resumed, afterSeek, throughput);
+        }
+        finally
+        {
+            await engine.DisposeAsync();
+            try
+            {
+                Directory.Delete(downloadPath, recursive: true);
+            }
+            catch (IOException) { /* Best effort. */ }
+            catch (UnauthorizedAccessException) { /* Best effort. */ }
+        }
+    }
+
+    private void Report(string what, Run run)
+    {
+        string line =
+            $"{what}: {run.Peers} peers; resuming a third in, first byte {run.Resumed.FirstByte.TotalSeconds:F2}s, " +
+            $"{run.Resumed.Stalls} stalls ({run.Resumed.Stalled.TotalSeconds:F1}s); after a seek, first byte " +
+            $"{run.AfterSeek.FirstByte.TotalSeconds:F2}s, {run.AfterSeek.Stalls} stalls ({run.AfterSeek.Stalled.TotalSeconds:F1}s); " +
+            $"downloaded {run.BytesPerSecond / 1024 / 1024:F1} MiB/s";
+        output.WriteLine(line);
+        if (Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_REPORT") is { Length: > 0 } report)
+        {
+            File.AppendAllText(report, line + Environment.NewLine);
+        }
+    }
+
+    private static async Task<TorrentFile> ResolveTorrentAsync(CancellationToken ct)
+    {
+        var configured = Environment.GetEnvironmentVariable("PEERSHARP_SOAK_TORRENT")?.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+        if (configured is null)
+        {
+            Assert.Skip("Set PEERSHARP_SOAK_TORRENT to a .torrent path or URL of content you have the right to share.");
+        }
+
+        if (configured.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || configured.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+            return TorrentFile.Parse(await http.GetByteArrayAsync(configured, ct));
+        }
+
+        return TorrentFile.Parse(await File.ReadAllBytesAsync(configured, ct));
+    }
+
+    private static int FromEnvironment(string variable, int fallback) =>
+        int.TryParse(Environment.GetEnvironmentVariable(variable), out int value) && value > 0 ? value : fallback;
+
+    private readonly record struct Run(int Peers, StreamingSwarmTests.Playback Resumed, StreamingSwarmTests.Playback AfterSeek, double BytesPerSecond);
+}
