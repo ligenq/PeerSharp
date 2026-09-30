@@ -55,6 +55,21 @@ internal class UtpStream : Stream
 
     private const uint MaxRemoteWndSize = 4 * 1024 * 1024;
 
+    /// <summary>How few packets must be waiting for the reader before a drain held back for it resumes.</summary>
+    private const int DrainResumeCount = 900;
+
+    /// <summary>How long a gap in what the peer sent may stand, with nothing more arriving, before this side goes quiet.</summary>
+    internal static readonly TimeSpan GapBeforeQuiet = TimeSpan.FromSeconds(1);
+
+    /// <summary>How long nothing must have arrived from the peer for a gap to count as stalled.</summary>
+    private static readonly TimeSpan SilenceBeforeQuiet = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// How long this side sends nothing, to let a peer's retransmission timer run out: libtorrent's is at
+    /// least half a second and a round trip or so, restarted by every packet it receives.
+    /// </summary>
+    internal static readonly TimeSpan QuietPeriod = TimeSpan.FromMilliseconds(1500);
+
     // Link MTUs. Everything below counts the UDP payload - the uTP header plus its data - so the IP
     // and UDP headers have to come off these before they mean anything, as libtorrent's utp_stream
     // does with TORRENT_ETHERNET_MTU - TORRENT_IPV4_HEADER - TORRENT_UDP_HEADER.
@@ -116,6 +131,37 @@ internal class UtpStream : Stream
     private readonly Task? _pipeWriteTask;
     private readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
     private readonly PriorityQueue<ReceivedPacket, ushort> _reorderBuffer = new(new SeqComparer());
+
+    /// <summary>
+    /// Set when data waiting in the reorder buffer could not be passed on because the reader was
+    /// behind: the pipe writer drains it, and tells the peer the window is open again, once the reader
+    /// has caught up. Nothing else would - no packet the peer sends can arrive in order until then.
+    /// </summary>
+    private bool _drainPending;
+
+    /// <summary>When <see cref="_ackNr"/> last moved on: how long a gap in what the peer sent has stood.</summary>
+    private DateTimeOffset _lastAckAdvance;
+
+    /// <summary>When the peer last sent data.</summary>
+    private DateTimeOffset _lastDataReceived;
+
+    /// <summary>
+    /// Until when this side sends nothing, so a peer that will resend a lost packet only once its
+    /// retransmission timer runs out gets the chance; <see cref="DateTimeOffset.MinValue"/> when it is not quiet.
+    /// </summary>
+    /// <remarks>
+    /// libtorrent - qBittorrent's - resends a lost packet at once only the first time; after that it
+    /// waits for its retransmission timer, which every packet it receives starts again. A downloader
+    /// sends a steady stream of its own - requests, and a HAVE for each piece - so when that one
+    /// resend was lost too, the timer never ran out and the connection sent nothing more, however long
+    /// it lasted. Against Debian's swarm, nine of twenty-three qBittorrent peers on uTP stopped this way
+    /// within a minute, and no Transmission peer, whose timer runs from when it sent the packet.
+    /// </remarks>
+    private DateTimeOffset _quietUntil = DateTimeOffset.MinValue;
+
+    /// <summary>When this side may go quiet again, after the last time it did.</summary>
+    private DateTimeOffset _nextQuietAllowed = DateTimeOffset.MinValue;
+
     private readonly HashSet<ushort> _reorderBufferSeqs = [];
 
     // SACK SUPPORT: Dictionary for O(1) lookup/removal on selective ACKs
@@ -264,6 +310,7 @@ internal class UtpStream : Stream
 
         // Start the pipe write processing task
         _pipeWriteTask = ProcessPipeWriteChannelAsync();
+        _lastAckAdvance = _lastDataReceived = _timeProvider.GetUtcNow();
     }
 
     public override bool CanRead => true;
@@ -355,6 +402,27 @@ internal class UtpStream : Stream
                     RemoteEndPoint,
                     ProtocolConstants.UtpInactivityTimeoutMs);
                 CloseInternal(false, new TimeoutException("Inactivity timeout"));
+                return;
+            }
+
+            if (IsQuiet)
+            {
+                if (now < _quietUntil)
+                {
+                    return;
+                }
+
+                EndQuiet();
+            }
+            else if (_state == UtpState.Connected && _reorderBuffer.Count > 0
+                && now - _lastAckAdvance > GapBeforeQuiet
+                && now - _lastDataReceived > SilenceBeforeQuiet
+                && now >= _nextQuietAllowed)
+            {
+                _quietUntil = now + QuietPeriod;
+                _logger.LogDebug(
+                    "uTP {Remote}: Nothing sent to fill the gap after {AckNr} for {Waited}ms; going quiet so the peer resends it",
+                    RemoteEndPoint, _ackNr, (int)(now - _lastAckAdvance).TotalMilliseconds);
                 return;
             }
 
@@ -728,8 +796,8 @@ internal class UtpStream : Stream
                     throw new IOException("Connection closed while writing");
                 }
                 double effectiveWindow = Math.Min(_wndSize, _cwnd);
-                canSend = _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
-                if (!canSend)
+                canSend = !IsQuiet && _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
+                if (!canSend && !IsQuiet)
                 {
                     _lastMaxedOutWindow = _timeProvider.GetUtcNow();
                 }
@@ -745,8 +813,8 @@ internal class UtpStream : Stream
                         throw new IOException("Connection closed while writing");
                     }
                     double effectiveWindow = Math.Min(_wndSize, _cwnd);
-                    canSend = _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
-                    if (!canSend)
+                    canSend = !IsQuiet && _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
+                    if (!canSend && !IsQuiet)
                     {
                         _lastMaxedOutWindow = _timeProvider.GetUtcNow();
                     }
@@ -827,6 +895,7 @@ internal class UtpStream : Stream
                     {
                         _state = UtpState.Connected;
                     }
+                    _lastDataReceived = _timeProvider.GetUtcNow();
                     HandleData(header, data, headerSize);
                     break;
 
@@ -927,6 +996,25 @@ internal class UtpStream : Stream
         return (uint)(remainingSlots * GetPayloadMss(0));
     }
 
+    private bool IsQuiet => _quietUntil != DateTimeOffset.MinValue;
+
+    /// <summary>
+    /// Ends a quiet period, if one is on: the peer is told where this side is at once - its gap, and
+    /// whether filled - and data waiting to be sent goes.
+    /// </summary>
+    private void EndQuiet()
+    {
+        if (!IsQuiet)
+        {
+            return;
+        }
+
+        _quietUntil = DateTimeOffset.MinValue;
+        _nextQuietAllowed = _timeProvider.GetUtcNow() + GapBeforeQuiet;
+        SendPacket(MessageType.ST_STATE, null);
+        FlushPendingWrites();
+    }
+
     private void CheckIfClosed()
     {
         // Symmetric close: we are closed only if we both sent and received FIN,
@@ -954,6 +1042,20 @@ internal class UtpStream : Stream
 
             var next = _reorderBuffer.Peek();
 
+            // Delivered already - a copy the peer sent again reached us in order while this one waited.
+            // Left at the head, it would stop everything behind it for good.
+            if (Utils.CompareSeq(next.SeqNr, _ackNr) <= 0)
+            {
+                _reorderBuffer.Dequeue();
+                _reorderBufferSeqs.Remove(next.SeqNr);
+                if (next.Data.Pooled)
+                {
+                    _pool.Return(next.Data.Buffer);
+                }
+
+                continue;
+            }
+
             if (next.SeqNr != (ushort)(_ackNr + 1))
             {
                 break;
@@ -962,10 +1064,12 @@ internal class UtpStream : Stream
             // Write payload if any
             if (next.Data.Length > 0 && !_pipeWriteChannel.Writer.TryWrite(next.Data))
             {
-                break; // backpressure
+                Volatile.Write(ref _drainPending, true);
+                break; // backpressure: drained once the reader catches up
             }
 
             _ackNr = next.SeqNr;
+            _lastAckAdvance = _timeProvider.GetUtcNow();
             _reorderBuffer.Dequeue();
             _reorderBufferSeqs.Remove(next.SeqNr);
 
@@ -1106,7 +1210,7 @@ internal class UtpStream : Stream
 
     private void FlushPendingWrites()
     {
-        if (_disposal.IsDisposed)
+        if (_disposal.IsDisposed || IsQuiet)
         {
             return;
         }
@@ -1468,8 +1572,13 @@ internal class UtpStream : Stream
             int slotsNeeded = (payloadLen > 0 ? 1 : 0) + (isFin && !_finReceived ? 1 : 0);
             if (slotsNeeded > 0 && _pipeWriteChannel.Reader.Count + slotsNeeded > 1000)
             {
-                _logger.LogWarning("uTP {Remote}: Local buffer full, backpressuring packet {SeqNr}", RemoteEndPoint, seq);
-                // Send STATE to update window size but don't advance _ackNr
+                // The reader is behind. The packet is kept, to be passed on once it catches up, rather
+                // than dropped for the peer to send again: a sender whose retransmissions keep being
+                // dropped backs off each time, and a connection that went quiet this way stayed quiet
+                // for up to a minute.
+                _logger.LogDebug("uTP {Remote}: Reader behind; holding packet {SeqNr}", RemoteEndPoint, seq);
+                BufferOutOfOrder(header, data, headerSize, seq);
+                Volatile.Write(ref _drainPending, true);
                 SendPacket(MessageType.ST_STATE, null);
                 return;
             }
@@ -1484,6 +1593,8 @@ internal class UtpStream : Stream
                 }
             }
             _ackNr = seq;
+            _lastAckAdvance = _timeProvider.GetUtcNow();
+            EndQuiet();
 
             if (isFin && !_finReceived)
             {
@@ -1504,24 +1615,51 @@ internal class UtpStream : Stream
         }
         else
         {
-            // Out of order - check for duplicates and buffer limit
-            if (_reorderBuffer.Count < 1024 && !_reorderBufferSeqs.Contains(seq))
-            {
-                int payloadLen = data.Length - headerSize;
-                var payload = _pool.Rent(payloadLen);
-                Array.Copy(data, headerSize, payload, 0, payloadLen);
-
-                _reorderBuffer.Enqueue(
-                    new ReceivedPacket
-                    {
-                        SeqNr = seq,
-                        Data = new PacketBuffer(payload, payloadLen, pooled: true),
-                        IsFin = header.Type == MessageType.ST_FIN
-                    },
-                    seq);
-                _reorderBufferSeqs.Add(seq);
-            }
+            BufferOutOfOrder(header, data, headerSize, seq);
             SendPacket(MessageType.ST_STATE, null);
+        }
+    }
+
+    /// <summary>Keeps a packet that cannot be passed on yet, unless it is kept already or the buffer is full.</summary>
+    private void BufferOutOfOrder(MessageHeader header, byte[] data, int headerSize, ushort seq)
+    {
+        if (_reorderBuffer.Count >= 1024 || _reorderBufferSeqs.Contains(seq))
+        {
+            return;
+        }
+
+        int payloadLen = data.Length - headerSize;
+        var payload = _pool.Rent(payloadLen);
+        Array.Copy(data, headerSize, payload, 0, payloadLen);
+
+        _reorderBuffer.Enqueue(
+            new ReceivedPacket
+            {
+                SeqNr = seq,
+                Data = new PacketBuffer(payload, payloadLen, pooled: true),
+                IsFin = header.Type == MessageType.ST_FIN
+            },
+            seq);
+        _reorderBufferSeqs.Add(seq);
+    }
+
+    /// <summary>
+    /// Once the reader has caught up, passes on what the reorder buffer held for it, and tells the peer
+    /// the window is open again - an acknowledgement it would otherwise wait for its own timers to prompt.
+    /// </summary>
+    private void DrainAfterBackpressure()
+    {
+        lock (_lock)
+        {
+            if (!Volatile.Read(ref _drainPending) || _state == UtpState.Closed)
+            {
+                return;
+            }
+
+            Volatile.Write(ref _drainPending, false);
+            CheckReorderBuffer();
+            SendPacket(MessageType.ST_STATE, null);
+            CheckIfClosed();
         }
     }
 
@@ -1657,6 +1795,12 @@ internal class UtpStream : Stream
                     if (writeFailed)
                     {
                         return;
+                    }
+
+                    // Resumed once there is room for a good run of packets, not at the first free slot.
+                    if (Volatile.Read(ref _drainPending) && _pipeWriteChannel.Reader.Count <= DrainResumeCount)
+                    {
+                        DrainAfterBackpressure();
                     }
                 }
             }
@@ -1815,6 +1959,12 @@ internal class UtpStream : Stream
     {
         // Don't send packets on closed connections (except FIN during closing)
         if (_state == UtpState.Closed)
+        {
+            return;
+        }
+
+        // An acknowledgement held back while quiet is sent when it ends, with everything it would have said.
+        if (type == MessageType.ST_STATE && IsQuiet)
         {
             return;
         }
