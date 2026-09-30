@@ -829,6 +829,22 @@ public sealed class StreamingSettings
     public int ReadAheadSeconds { get; set; } = 30;
 
     /// <summary>
+    /// Seconds of work each peer is given while a stream has little downloaded ahead of where it is
+    /// read - just opened, just moved, or about to run out - instead of
+    /// <see cref="TransferSettings.RequestQueueTimeSeconds"/>. Default is 1. Zero or less leaves the
+    /// queue as it is.
+    /// </summary>
+    /// <remarks>
+    /// A peer answers requests in the order they came, so a request for what a player is waiting on
+    /// waits behind whatever the peer was already given: three seconds of it, by default. Against
+    /// Debian's swarm, with a player of ExoPlayer's defaults, a one-second queue started playback in
+    /// 4.5 seconds on average instead of 8, but downloaded 7 to 10 percent slower - so it is used only
+    /// while the stream needs it: until twenty seconds are downloaded ahead of the reader, and again
+    /// once fewer than ten are.
+    /// </remarks>
+    public int RequestQueueSecondsWhileBuffering { get; set; } = 1;
+
+    /// <summary>
     /// Seconds a read waits for the swarm to supply the pieces it needs before throwing
     /// <see cref="TimeoutException"/>. Default is 60. Zero or less waits for as long as the reader's
     /// cancellation token allows.

@@ -111,6 +111,37 @@ public class TorrentStreamTests
         Assert.Equal(reachesFurther, torrent.StreamingPriorityPieces!.Contains(15));
     }
 
+    [Fact]
+    public async Task AStream_IsBuffering_UntilEnoughIsDownloadedAheadAtItsRate_AndAgainWhenItMovesPastIt()
+    {
+        // Read at 64 KiB a second: twenty seconds of that is 1.25 MiB, five pieces of 256 KiB.
+        var torrent = LargeTorrent();
+        for (int piece = 0; piece < 12; piece++)
+        {
+            torrent.Pieces.AddPiece(piece);
+        }
+
+        await using var stream = new TorrentStream(torrent.Streaming, torrent, 0, _timeProvider);
+        Assert.True(stream.IsBuffering);
+        Assert.True(torrent.Streaming.IsBuffering);
+
+        var buffer = new byte[64 * 1024];
+        for (int read = 0; read < 8; read++)
+        {
+            await stream.ReadExactlyAsync(buffer, TestContext.Current.CancellationToken);
+            _timeProvider.Advance(TimeSpan.FromSeconds(1));
+        }
+
+        // Half a megabyte in, two and a half are downloaded ahead: more than twenty seconds' worth.
+        stream.OnPieceVerified(0);
+        Assert.False(stream.IsBuffering);
+        Assert.False(torrent.Streaming.IsBuffering);
+
+        // Moved to where nothing is downloaded, it is buffering again.
+        stream.Seek(6 * 1024 * 1024, SeekOrigin.Begin);
+        Assert.True(stream.IsBuffering);
+    }
+
     /// <summary>A torrent of one 8 MiB file in 256 KiB pieces: larger than the start and end fetched first.</summary>
     private static Torrent LargeTorrent()
     {

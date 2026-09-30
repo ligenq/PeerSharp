@@ -15,6 +15,12 @@ history has the reasoning and the measurements behind each one.
   read waits for data (`DataWaitTimeoutSeconds`) or a magnet for its metadata
   (`MetadataWaitTimeoutSeconds`). Both waits were a fixed 60 seconds; zero now waits for as long as
   the caller's token allows.
+- **`StreamingSettings.RequestQueueSecondsWhileBuffering`** gives each peer a shorter queue of work - one
+  second by default, instead of `RequestQueueTimeSeconds`' three - while a stream has little downloaded
+  ahead of where it is read: from when it opens or moves until twenty seconds are, and again once fewer
+  than ten are. A peer answers requests in order, so what a player waits on waits behind the peer's
+  queue. Against Debian's swarm with a player of ExoPlayer's defaults, it started playing after 5.1
+  seconds on average instead of 8.9, faster in all six pairs, at the same download rate.
 - **`StreamingSettings.ReadAheadSeconds`** fetches that many seconds ahead of a stream's read position,
   at the rate it is being read - 30 by default - where that is more than `ReadAheadBytes`, which is now
   the least fetched ahead. 20 MiB is five seconds of a 4K Blu-ray; with a 32 Mbit/s film and the fast
