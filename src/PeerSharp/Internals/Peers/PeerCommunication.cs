@@ -1360,9 +1360,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         var transferSettings = _torrent.Settings.Transfer;
         int speedBytesPerSec = (int)Math.Min(int.MaxValue, Math.Max(DownloadSpeed, SmoothedDownloadSpeed));
 
+        // While a stream is waiting for what it reads next, a short queue lets its requests through.
+        int queueTime = transferSettings.RequestQueueTimeSeconds;
+        int whileBuffering = _torrent.Settings.Streaming.RequestQueueSecondsWhileBuffering;
+        if (whileBuffering > 0 && whileBuffering < queueTime && _torrent.Streaming?.IsBuffering == true)
+        {
+            queueTime = whileBuffering;
+        }
+
         return PipelineDepthCalculator.CalculateOptimal(
             speedBytesPerSec,
-            transferSettings.RequestQueueTimeSeconds,
+            queueTime,
             transferSettings.EstimatedBandwidthBytesPerSec,
             transferSettings.InitialPipelineDepth,
             transferSettings.MaxRequestsPerPeer);

@@ -60,6 +60,26 @@ internal class StreamingController : IDisposable
 
     public bool HasStreamableFiles => StreamableFileIndices.Count > 0;
 
+    /// <summary>
+    /// Whether an open stream has little downloaded ahead of its reader - just opened, just moved, or
+    /// running low - for which peers are given a shorter queue of work.
+    /// </summary>
+    public bool IsBuffering
+    {
+        get
+        {
+            foreach (var stream in Volatile.Read(ref _openStreams))
+            {
+                if (stream.IsBuffering)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     /// <summary>Whether any stream is open, which is what puts the picker into streaming mode.</summary>
     public bool IsStreaming => Volatile.Read(ref _openStreams).Length > 0;
 

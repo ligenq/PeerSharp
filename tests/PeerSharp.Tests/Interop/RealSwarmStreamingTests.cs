@@ -29,7 +29,8 @@ namespace PeerSharp.Tests.Interop;
 /// <c>PEERSHARP_SOAK_RATE_BYTES</c> caps each run's download (default 4 MiB/s: faster, and a small image is
 /// downloaded by the time the player seeks, which then measures nothing),
 /// <c>PEERSHARP_STREAMING_BITRATE</c> sets the player's rate in bytes a second (default 1 MiB/s),
-/// <c>PEERSHARP_STREAMING_QUEUES</c> the queue lengths to compare (default <c>3;1</c>) and
+/// <c>PEERSHARP_STREAMING_QUEUES</c> the queue lengths to compare (default <c>3;1</c>; <c>3/1</c> is three
+/// seconds ordinarily and one while the stream buffers) and
 /// <c>PEERSHARP_STREAMING_ROUNDS</c> how many times each is run (default 3). Every run pulls some
 /// hundreds of megabytes.
 /// </para>
@@ -54,7 +55,6 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
         int seconds = FromEnvironment("PEERSHARP_STREAMING_SECONDS", 20);
         var queues = (Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_QUEUES") ?? "3;1")
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(int.Parse)
             .ToList();
         var players = (Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_PLAYERS") ?? "strict")
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -63,13 +63,13 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
 
         for (int round = 1; round <= rounds; round++)
         {
-            foreach (int queueSeconds in queues)
+            foreach (string queueSeconds in queues)
             {
                 foreach (var player in players)
                 {
                     // PEERSHARP_STREAMING_LOG names where each run's engine logs in detail, the run appended to the name.
                     string? log = Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_LOG") is { Length: > 0 } logBase
-                        ? $"{logBase}-{round}-{queueSeconds}s-{player.Name.Replace(' ', '-')}.log"
+                        ? $"{logBase}-{round}-{queueSeconds.Replace('/', '-')}s-{player.Name.Replace(' ', '-')}.log"
                         : null;
                     var run = await RunAsync(source, queueSeconds, bitrate, rate, seconds, player, log, ct);
                     Report($"round {round}, queue {queueSeconds}s, {player.Name}", run);
@@ -78,13 +78,19 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
         }
     }
 
+    /// <param name="queueSeconds">
+    /// The request queue in seconds, <c>3</c>, for the whole run; or <c>3/1</c>, the first ordinarily and
+    /// the second while the stream is buffering.
+    /// </param>
     private async Task<Run> RunAsync(
-        TorrentFile source, int queueSeconds, int bitrate, int rate, int seconds, StreamingSwarmTests.Player player, string? log, CancellationToken ct)
+        TorrentFile source, string queueSeconds, int bitrate, int rate, int seconds, StreamingSwarmTests.Player player, string? log, CancellationToken ct)
     {
         var settings = new Settings();
         settings.Transfer.MaxDownloadSpeed = (uint)rate;
         settings.Transfer.MaxUploadSpeed = (uint)rate;
-        settings.Transfer.RequestQueueTimeSeconds = queueSeconds;
+        var queue = queueSeconds.Split('/');
+        settings.Transfer.RequestQueueTimeSeconds = int.Parse(queue[0], System.Globalization.CultureInfo.InvariantCulture);
+        settings.Streaming.RequestQueueSecondsWhileBuffering = queue.Length > 1 ? int.Parse(queue[1], System.Globalization.CultureInfo.InvariantCulture) : 0;
         string downloadPath = Path.Combine(Path.GetTempPath(), "peersharp-streaming", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(downloadPath);
         settings.Files.DefaultDownloadPath = downloadPath;

@@ -95,6 +95,36 @@ public class PeerCommunicationTests
         CleanupPath(path);
     }
 
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(0, 3)]
+    public async Task GetOptimalPipelineDepth_IsShorter_WhileAStreamIsBuffering(int whileBuffering, int expectedSeconds)
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.InfoFile.Info.PieceSize = 256 * 1024;
+        torrent.InfoFile.Info.FullSize = 4 * 256 * 1024;
+        torrent.InfoFile.Info.Files.Add(new Internals.TorrentFileEntry { Path = "film.mkv", Size = 4 * 256 * 1024, Offset = 0 });
+        torrent.InfoFile.Info.Pieces.Clear();
+        for (int i = 0; i < 4; i++)
+        {
+            torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        }
+
+        await torrent.ReinitializeAfterMetadataAsync();
+        torrent.Settings.Transfer.RequestQueueTimeSeconds = 3;
+        torrent.Settings.Streaming.RequestQueueSecondsWhileBuffering = whileBuffering;
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        peer.SetSmoothedDownloadSpeedForTesting(1024 * 1024);
+        int ordinarily = peer.GetOptimalPipelineDepth();
+
+        // Just opened, nothing downloaded: the stream is buffering.
+        using var stream = new PeerSharp.Streaming.TorrentStream(torrent.Streaming, torrent, 0, TimeProvider.System);
+        int buffering = peer.GetOptimalPipelineDepth();
+
+        Assert.Equal(3 * 1024 * 1024 / (16 * 1024), ordinarily);
+        Assert.Equal(expectedSeconds * 1024 * 1024 / (16 * 1024), buffering);
+    }
+
     [Fact]
     public async Task GetAdaptivePipelineDepth_ReducesForStrikesAndHighRtt()
     {
