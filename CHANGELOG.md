@@ -90,6 +90,20 @@ history has the reasoning and the measurements behind each one.
 
 ### Fixed
 
+- **uTP connections no longer stop receiving for up to a minute.** Streaming from Debian's swarm, a
+  quarter to a third of the peers delivering over uTP - 22 to 26 in each one-minute run - went silent
+  for 5 to 54 seconds while still being sent requests. Two causes, both fixed; in the same runs it is
+  now none to two, for at most 18 seconds:
+  - A packet that arrived while the connection's reader was behind was dropped for the peer to send
+    again, and the packets waiting behind a gap were passed on only when the next packet in order
+    arrived. A copy sent again of one already waiting then stopped everything behind it for good. The
+    packet is now kept, what waits is passed on as soon as the reader catches up - with the window
+    announced open again - and a copy already delivered is set aside.
+  - libtorrent, qBittorrent's, resends a lost packet at once only the first time, then waits for a
+    timer that every packet it receives restarts - and a downloader sends a steady stream of requests
+    and HAVEs. When a gap has stood a second with nothing arriving, the connection now sends nothing
+    for a second and a half, which lets that timer run out, and libtorrent resends what is missing.
+
 - **A block cancelled once is sent when it is asked for again.** A peer's cancel was remembered for as
   long as the connection lasted, so a later request for the same block - from a client making room for
   what its player needs, or retrying a piece that failed its hash - was refused every time. A cancel

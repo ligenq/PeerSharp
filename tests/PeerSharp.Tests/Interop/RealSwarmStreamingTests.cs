@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Clients;
 using PeerSharp.Tests.Integration;
@@ -60,13 +61,17 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
         {
             foreach (int queueSeconds in queues)
             {
-                var run = await RunAsync(source, queueSeconds, bitrate, rate, ct);
+                // PEERSHARP_STREAMING_LOG names where each run's engine logs in detail, the run appended to the name.
+                string? log = Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_LOG") is { Length: > 0 } logBase
+                    ? $"{logBase}-{round}-{queueSeconds}s.log"
+                    : null;
+                var run = await RunAsync(source, queueSeconds, bitrate, rate, log, ct);
                 Report($"round {round}, queue {queueSeconds}s", run);
             }
         }
     }
 
-    private async Task<Run> RunAsync(TorrentFile source, int queueSeconds, int bitrate, int rate, CancellationToken ct)
+    private async Task<Run> RunAsync(TorrentFile source, int queueSeconds, int bitrate, int rate, string? log, CancellationToken ct)
     {
         var settings = new Settings();
         settings.Transfer.MaxDownloadSpeed = (uint)rate;
@@ -76,7 +81,10 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
         Directory.CreateDirectory(downloadPath);
         settings.Files.DefaultDownloadPath = downloadPath;
 
-        var engine = ClientEngineFactory.Create(new TorrentClientOptions { Settings = settings, LoggerFactory = NullLoggerFactory.Instance });
+        using var logging = log is null
+            ? null
+            : LoggerFactory.Create(builder => builder.SetMinimumLevel(LogLevel.Trace).AddProvider(new TimestampedFileLoggerProvider(log)));
+        var engine = ClientEngineFactory.Create(new TorrentClientOptions { Settings = settings, LoggerFactory = logging ?? NullLoggerFactory.Instance });
         try
         {
             await engine.InitializeAsync(ct);
