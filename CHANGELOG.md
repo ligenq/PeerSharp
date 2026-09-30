@@ -47,6 +47,13 @@ history has the reasoning and the measurements behind each one.
   three slow seeders, a player at 16 Mbit/s waited 2.2 to 2.3 seconds for its first byte instead of up
   to 7.7, and 1.5 seconds after a seek instead of up to 8.6; it no longer stalled in ten playbacks,
   where before it stalled in most.
+- **Blocks a stream is waiting on are asked of peers delivering well, and asked again when they keep
+  it waiting.** A block of the next pieces was asked of up to four peers, whichever had room first -
+  mostly slow ones - and those requests counted against the four until answered or timed out. Now
+  only a peer delivering well is asked for one already owed, and a request left unanswered for two
+  seconds no longer counts, so another fast peer can be. Streaming from Debian's swarm, four runs
+  each on the same day, a player stalled for 13 seconds in all across eight playbacks instead of 29,
+  at the same download rate.
 - **A stream fetches the start of its file after its read position, not before.** The start is now the
   file's first megabyte, where a container keeps what a player reads first, rather than its first three
   pieces - up to 48 MB of a film - and it comes after the pieces the reader needs next. A player

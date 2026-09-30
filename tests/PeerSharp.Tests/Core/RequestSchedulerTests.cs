@@ -201,8 +201,10 @@ public class RequestSchedulerTests
     public async Task EvaluateNextRequestsAsync_AsksForTheBlocksAStreamNeedsNext_EvenFromAPeerAlreadyAskedForThem()
     {
         // Another peer owes every block of pieces 5, 6 and 7, asked for just now. The stream needs them
-        // in that order: the first two are urgent, and asked again at once; the third waits its turn.
+        // in that order: the first two are urgent, and asked again at once of a peer delivering well;
+        // the third waits its turn.
         var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 2, maxActivePieces: 8, maxRequestsPerPeer: 16, streaming: [5, 6, 7]);
+        fixture.Peer.SetSmoothedDownloadSpeedForTesting(1_000_000);
         var other = new PeerCommunication(fixture.Torrent, new MockPeerListener(), TimeProvider.System);
         foreach (int piece in new[] { 5, 6, 7 })
         {
@@ -215,6 +217,23 @@ public class RequestSchedulerTests
 
         Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
         Assert.Equal([5, 5, 6, 6], requests.Keys.Select(key => key.Piece).Where(piece => piece >= 5).Order());
+    }
+
+    [Fact]
+    public async Task EvaluateNextRequestsAsync_AsksNoSlowPeerForAnUrgentBlockAnotherOwes()
+    {
+        // A slow peer is not asked for what another already owes: it would only add a request that
+        // comes too late.
+        var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 2, maxActivePieces: 1, maxRequestsPerPeer: 16, streaming: [5]);
+        fixture.Peer.SetSmoothedDownloadSpeedForTesting(10_000);
+        var other = new PeerCommunication(fixture.Torrent, new MockPeerListener(), TimeProvider.System);
+        fixture.PieceStateManager.TryAddPiece(new PieceState(5, 2));
+        AddPendingRequest(fixture.RequestTracker, other, 5, 0);
+        AddPendingRequest(fixture.RequestTracker, other, 5, 16384);
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
+        Assert.False(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests) && requests.Keys.Any(key => key.Piece == 5));
     }
 
     [Fact]

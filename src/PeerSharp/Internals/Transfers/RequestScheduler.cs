@@ -41,6 +41,7 @@ internal sealed class RequestScheduler
     private readonly Torrent _torrent;
     private readonly IBlockRequestStrategy _standardStrategy;
     private readonly IBlockRequestStrategy _endGameStrategy;
+    private readonly IBlockRequestStrategy _urgentStrategy;
     private readonly Func<IReadOnlyList<int>?> _streamingPriorityPieces;
 
     public RequestScheduler(RequestSchedulerOptions options, PiecePicker piecePicker)
@@ -56,6 +57,7 @@ internal sealed class RequestScheduler
         _blockSize = options.BlockSize;
         _standardStrategy = new StandardBlockRequestStrategy(_requestTracker, _timeProvider, options.GetSoftTimeoutMs, _blockSize);
         _endGameStrategy = new EndGameBlockRequestStrategy(_requestTracker, _blockSize);
+        _urgentStrategy = new UrgentBlockRequestStrategy(_requestTracker, _timeProvider, _blockSize);
         _streamingPriorityPieces = options.GetStreamingPriorityPieces ?? (() => _torrent.StreamingPriorityPieces);
     }
 
@@ -175,8 +177,15 @@ internal sealed class RequestScheduler
         }
     }
 
-    private IBlockRequestStrategy StrategyFor(int pieceIndex, bool endGameMode, HashSet<int>? urgent) =>
-        endGameMode || urgent?.Contains(pieceIndex) == true ? _endGameStrategy : _standardStrategy;
+    private IBlockRequestStrategy StrategyFor(int pieceIndex, bool endGameMode, HashSet<int>? urgent)
+    {
+        if (urgent?.Contains(pieceIndex) == true)
+        {
+            return _urgentStrategy;
+        }
+
+        return endGameMode ? _endGameStrategy : _standardStrategy;
+    }
 
     /// <summary>The first <see cref="UrgentStreamingPieces"/> pieces streams need that are not here yet; null when nothing streams.</summary>
     private HashSet<int>? UrgentPieces(IReadOnlyList<int>? streaming)
