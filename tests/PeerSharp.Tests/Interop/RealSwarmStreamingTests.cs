@@ -37,7 +37,6 @@ namespace PeerSharp.Tests.Interop;
 public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
 {
     private static readonly TimeSpan JoinTime = TimeSpan.FromSeconds(10);
-    private const int PlayedSeconds = 20;
 
     [Fact(Timeout = 3_600_000)]
     public async Task Streaming_WithShorterAndLongerRequestQueues()
@@ -52,26 +51,35 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
         int bitrate = FromEnvironment("PEERSHARP_STREAMING_BITRATE", 1024 * 1024);
         int rate = FromEnvironment("PEERSHARP_SOAK_RATE_BYTES", 4 * 1024 * 1024);
         int rounds = FromEnvironment("PEERSHARP_STREAMING_ROUNDS", 3);
+        int seconds = FromEnvironment("PEERSHARP_STREAMING_SECONDS", 20);
         var queues = (Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_QUEUES") ?? "3;1")
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(int.Parse)
+            .ToList();
+        var players = (Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_PLAYERS") ?? "strict")
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(name => name.Equals("exoplayer", StringComparison.OrdinalIgnoreCase) ? StreamingSwarmTests.Player.ExoPlayer : StreamingSwarmTests.Player.Strict)
             .ToList();
 
         for (int round = 1; round <= rounds; round++)
         {
             foreach (int queueSeconds in queues)
             {
-                // PEERSHARP_STREAMING_LOG names where each run's engine logs in detail, the run appended to the name.
-                string? log = Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_LOG") is { Length: > 0 } logBase
-                    ? $"{logBase}-{round}-{queueSeconds}s.log"
-                    : null;
-                var run = await RunAsync(source, queueSeconds, bitrate, rate, log, ct);
-                Report($"round {round}, queue {queueSeconds}s", run);
+                foreach (var player in players)
+                {
+                    // PEERSHARP_STREAMING_LOG names where each run's engine logs in detail, the run appended to the name.
+                    string? log = Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_LOG") is { Length: > 0 } logBase
+                        ? $"{logBase}-{round}-{queueSeconds}s-{player.Name.Replace(' ', '-')}.log"
+                        : null;
+                    var run = await RunAsync(source, queueSeconds, bitrate, rate, seconds, player, log, ct);
+                    Report($"round {round}, queue {queueSeconds}s, {player.Name}", run);
+                }
             }
         }
     }
 
-    private async Task<Run> RunAsync(TorrentFile source, int queueSeconds, int bitrate, int rate, string? log, CancellationToken ct)
+    private async Task<Run> RunAsync(
+        TorrentFile source, int queueSeconds, int bitrate, int rate, int seconds, StreamingSwarmTests.Player player, string? log, CancellationToken ct)
     {
         var settings = new Settings();
         settings.Transfer.MaxDownloadSpeed = (uint)rate;
@@ -104,8 +112,8 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
             int file = largest.Index;
             long size = largest.Size;
             await using var stream = await torrent.OpenStreamAsync(file, ct);
-            var resumed = await StreamingSwarmTests.PlayAsync(stream, null, size / 3, ct, bitrate, PlayedSeconds * bitrate);
-            var afterSeek = await StreamingSwarmTests.PlayAsync(stream, null, size / 4 * 3, ct, bitrate, PlayedSeconds * bitrate);
+            var resumed = await StreamingSwarmTests.PlayAsync(stream, null, size / 3, ct, bitrate, seconds * bitrate, player);
+            var afterSeek = await StreamingSwarmTests.PlayAsync(stream, null, size / 4 * 3, ct, bitrate, seconds * bitrate, player);
 
             double throughput = ((long)torrent.FinishedBytes - before) / clock.Elapsed.TotalSeconds;
             await torrent.StopAsync(ct);
@@ -126,9 +134,9 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
     private void Report(string what, Run run)
     {
         string line =
-            $"{what}: {run.Peers} peers; resuming a third in, first byte {run.Resumed.FirstByte.TotalSeconds:F2}s, " +
-            $"{run.Resumed.Stalls} stalls ({run.Resumed.Stalled.TotalSeconds:F1}s); after a seek, first byte " +
-            $"{run.AfterSeek.FirstByte.TotalSeconds:F2}s, {run.AfterSeek.Stalls} stalls ({run.AfterSeek.Stalled.TotalSeconds:F1}s); " +
+            $"{what}: {run.Peers} peers; resuming a third in, playing after {run.Resumed.StartedPlaying.TotalSeconds:F2}s, " +
+            $"{run.Resumed.Stalls} stalls ({run.Resumed.Stalled.TotalSeconds:F1}s); after a seek, playing after " +
+            $"{run.AfterSeek.StartedPlaying.TotalSeconds:F2}s, {run.AfterSeek.Stalls} stalls ({run.AfterSeek.Stalled.TotalSeconds:F1}s); " +
             $"downloaded {run.BytesPerSecond / 1024 / 1024:F1} MiB/s";
         output.WriteLine(line);
         if (Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_REPORT") is { Length: > 0 } report)

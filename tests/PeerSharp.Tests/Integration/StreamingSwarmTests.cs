@@ -186,13 +186,15 @@ public sealed class StreamingSwarmTests : IDisposable
     /// time the player needs it is a stall; like a player, it then buffers a second again before going on.
     /// </summary>
     internal static async Task<Playback> PlayAsync(
-        Stream stream, byte[]? payload, long from, CancellationToken ct, int bitrate = BitrateBytesPerSecond, int length = PlayedBytes)
+        Stream stream, byte[]? payload, long from, CancellationToken ct, int bitrate = BitrateBytesPerSecond, int length = PlayedBytes, Player? player = null)
     {
-        int startupBuffer = bitrate;
+        var buffering = player ?? Player.Strict;
+        long startupBuffer = (long)(buffering.Start.TotalSeconds * bitrate);
         stream.Seek(from, SeekOrigin.Begin);
         var buffer = new byte[ReadBytes];
         var clock = Stopwatch.StartNew();
         TimeSpan? firstByte = null;
+        TimeSpan? firstStarted = null;
         TimeSpan startedAt = TimeSpan.Zero;
         long playedFromStart = 0;
         long played = 0;
@@ -215,6 +217,7 @@ public sealed class StreamingSwarmTests : IDisposable
                 {
                     playing = true;
                     startedAt = now;
+                    firstStarted ??= now;
                 }
 
                 continue;
@@ -223,21 +226,21 @@ public sealed class StreamingSwarmTests : IDisposable
             // When playback, going since it last started, reaches what was just read. Late is a stall;
             // early by more than the buffer, the player waits rather than read further ahead.
             var needed = startedAt + TimeSpan.FromSeconds((double)(played - read - playedFromStart) / bitrate);
-            var ahead = TimeSpan.FromSeconds((double)startupBuffer / bitrate);
             if (now > needed + TimeSpan.FromMilliseconds(100))
             {
                 stalls++;
                 stalled += now - needed;
                 playing = false;
                 playedFromStart = played - read;
+                startupBuffer = (long)(buffering.AfterStall.TotalSeconds * bitrate);
             }
-            else if (now < needed - ahead)
+            else if (now < needed - buffering.Ahead)
             {
-                await Task.Delay(needed - ahead - now, ct);
+                await Task.Delay(needed - buffering.Ahead - now, ct);
             }
         }
 
-        return new Playback(firstByte ?? TimeSpan.Zero, played, stalls, stalled, clock.Elapsed, bitrate);
+        return new Playback(firstByte ?? TimeSpan.Zero, played, stalls, stalled, clock.Elapsed, bitrate, firstStarted ?? clock.Elapsed);
     }
 
     private void Report(string what, Playback playback)
@@ -326,5 +329,18 @@ public sealed class StreamingSwarmTests : IDisposable
         _loggerFactory.Dispose();
     }
 
-    internal readonly record struct Playback(TimeSpan FirstByte, long Played, int Stalls, TimeSpan Stalled, TimeSpan Elapsed, int Bitrate);
+    internal readonly record struct Playback(TimeSpan FirstByte, long Played, int Stalls, TimeSpan Stalled, TimeSpan Elapsed, int Bitrate, TimeSpan StartedPlaying);
+
+    /// <summary>How a player buffers: what it waits for before it starts, and again after a stall, and how far ahead it reads.</summary>
+    internal sealed record Player(string Name, TimeSpan Start, TimeSpan AfterStall, TimeSpan Ahead)
+    {
+        /// <summary>A second of buffer, always: every late read shows.</summary>
+        public static Player Strict { get; } = new("1s buffer", TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+
+        /// <summary>
+        /// ExoPlayer's defaults (Media3's DefaultLoadControl), as Android and Android TV players use them:
+        /// playing once 2.5 seconds are buffered, 5 after a stall, and reading up to 50 seconds ahead.
+        /// </summary>
+        public static Player ExoPlayer { get; } = new("ExoPlayer", TimeSpan.FromSeconds(2.5), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(50));
+    }
 }
