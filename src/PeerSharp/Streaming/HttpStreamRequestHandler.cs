@@ -130,16 +130,18 @@ internal sealed class HttpStreamRequestHandler
         stream.Seek(range.Start, SeekOrigin.Begin);
 
         byte[] buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
+        TimeSpan? firstByte = null;
+        long bytesRemaining = contentLength;
         try
         {
-            long bytesRemaining = contentLength;
-
             while (bytesRemaining > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
                 int toRead = (int)Math.Min(buffer.Length, bytesRemaining);
                 int read = await stream.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken).ConfigureAwait(false);
+                firstByte ??= System.Diagnostics.Stopwatch.GetElapsedTime(started);
                 if (read == 0)
                 {
                     // Content-Length was already announced from the file size, so a short read
@@ -158,6 +160,15 @@ internal sealed class HttpStreamRequestHandler
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+
+            // How long the player waited for this range, and how much of it it took before moving on.
+            _logger.LogDebug(
+                "Range {Start}-{End}: first byte after {FirstByteMs}ms, {Sent} bytes sent in {Ms}ms",
+                range.Start,
+                range.End,
+                (int?)firstByte?.TotalMilliseconds,
+                contentLength - bytesRemaining,
+                (int)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
         }
     }
 
