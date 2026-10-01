@@ -300,43 +300,88 @@ internal sealed class WebSeedManager : IAsyncDisposable
         return null!;
     }
 
+    /// <summary>
+    /// The pieces to fetch next, most wanted first: those streams need, in the order they need them,
+    /// then the rest in order.
+    /// </summary>
+    /// <remarks>
+    /// A piece peers are fetching is left to them - except the first
+    /// <see cref="Transfers.RequestScheduler.UrgentStreamingPieces"/> a stream is waiting on, which are
+    /// fetched here too. The first peer to unchoke a stream's torrent is given every block the stream
+    /// wants, and a slow one kept Big Buck Bunny's first megabyte two seconds; whichever answers first
+    /// fills the piece. Before streams were consulted, a torrent's web seeds spent their first seconds
+    /// on the files at its start while a stream waited on a piece hundreds further on.
+    /// </remarks>
     internal List<int> GetNeededPieces(int maxPieces = 10, ICollection<int>? inFlightPieces = null)
     {
         var result = new List<int>();
+        var considered = new HashSet<int>();
         var selection = _torrent.GetFileSelectionSnapshot();
         var fileTransfer = _torrent.FileTransferInternal;
 
-        for (int i = 0; i < _torrent.Pieces.Count; i++)
+        int urgent = 0;
+        foreach (int i in _torrent.StreamingPriorityPieces ?? [])
         {
-            if (inFlightPieces?.Contains(i) == true) continue;
-            // Skip if we already have this piece
-            if (_torrent.Pieces.HasPiece(i))
+            if (result.Count >= maxPieces)
+            {
+                return result;
+            }
+
+            if (!considered.Add(i) || i < 0 || i >= _torrent.Pieces.Count || _torrent.Pieces.HasPiece(i))
             {
                 continue;
             }
 
-            // Skip if piece is not needed based on file selection
-            if (!_torrent.InfoFile.Info.IsPieceNeeded(i, selection))
+            bool isUrgent = urgent++ < Transfers.RequestScheduler.UrgentStreamingPieces;
+            if (inFlightPieces?.Contains(i) != true
+                && _torrent.InfoFile.Info.IsPieceNeeded(i, selection)
+                && (isUrgent || fileTransfer?.IsPieceActive(i) != true))
+            {
+                result.Add(i);
+            }
+        }
+
+        for (int i = 0; i < _torrent.Pieces.Count && result.Count < maxPieces; i++)
+        {
+            if (considered.Contains(i) || inFlightPieces?.Contains(i) == true || _torrent.Pieces.HasPiece(i))
             {
                 continue;
             }
 
-            // Skip if piece is already being downloaded by peers
-            if (fileTransfer?.IsPieceActive(i) == true)
+            // Not wanted, or peers are already fetching it.
+            if (!_torrent.InfoFile.Info.IsPieceNeeded(i, selection) || fileTransfer?.IsPieceActive(i) == true)
             {
                 continue;
             }
 
             result.Add(i);
-
-            // Limit the number of pieces to process per iteration
-            if (result.Count >= maxPieces)
-            {
-                break;
-            }
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The pieces streams are waiting on most - the first
+    /// <see cref="Transfers.RequestScheduler.UrgentStreamingPieces"/> not here yet - in the order they
+    /// need them; empty when nothing streams.
+    /// </summary>
+    internal List<int> GetUrgentPieces()
+    {
+        var urgent = new List<int>();
+        foreach (int i in _torrent.StreamingPriorityPieces ?? [])
+        {
+            if (urgent.Count == Transfers.RequestScheduler.UrgentStreamingPieces)
+            {
+                break;
+            }
+
+            if (i >= 0 && i < _torrent.Pieces.Count && !_torrent.Pieces.HasPiece(i) && !urgent.Contains(i))
+            {
+                urgent.Add(i);
+            }
+        }
+
+        return urgent;
     }
 
     internal void SetTestClient(IHttpClient client)
@@ -481,6 +526,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         try
         {
+            long started = _timeProvider.GetTimestamp();
             long pieceSize = _torrent.InfoFile.Info.PieceSize;
             long pieceStart = pieceIndex * pieceSize;
             long pieceEnd = pieceStart + pieceSize;
@@ -520,6 +566,15 @@ internal sealed class WebSeedManager : IAsyncDisposable
                 return;
             }
 
+            RecordSuccess(source, _timeProvider.GetElapsedTime(started));
+
+            // Fetched from peers, or from another source racing this one, while this was on its way:
+            // fed in again it would start the piece over.
+            if (_torrent.Pieces.HasPiece(pieceIndex))
+            {
+                return;
+            }
+
             // Feed blocks to FileTransfer
             const int blockSize = ProtocolConstants.BlockSize;
             int offset = 0;
@@ -536,7 +591,6 @@ internal sealed class WebSeedManager : IAsyncDisposable
                 offset += blockLen;
             }
 
-            RecordSuccess(source);
             _logger.LogDebug("Successfully downloaded piece {PieceIndex} from {Url}", pieceIndex, source.Url);
         }
         catch (OperationCanceledException)
@@ -555,12 +609,19 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 
-    private WebSeedSource? GetAvailableSource(int perSourceLimit)
+    /// <summary>
+    /// A source free to take another piece, reserved for it: the least busy, and of those the fastest -
+    /// one not measured yet counting as fastest, so that it is measured. Pieces are handed out most
+    /// wanted first, so the most wanted goes to the fastest.
+    /// </summary>
+    private WebSeedSource? GetAvailableSource(int perSourceLimit, WebSeedSource? except = null)
     {
         lock (_lock)
         {
-            var source = _sources.Where(source => source.IsAvailable(_timeProvider, perSourceLimit))
-                .MinBy(source => source.ActiveDownloads);
+            var source = _sources.Where(source => source != except && source.IsAvailable(_timeProvider, perSourceLimit))
+                .OrderBy(source => source.ActiveDownloads)
+                .ThenBy(source => source.PieceSeconds ?? 0)
+                .FirstOrDefault();
             if (source != null)
             {
                 // Reserved here, under the same lock that chose it, so two fills cannot both take the
@@ -686,46 +747,49 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 
-    private void RecordSuccess(WebSeedSource source)
+    private void RecordSuccess(WebSeedSource source, TimeSpan took)
     {
         lock (_lock)
         {
             source.FailureCount = 0;
             source.LastSuccess = _timeProvider.GetUtcNow();
+            source.PieceSeconds = source.PieceSeconds is { } before
+                ? (before * 0.7) + (took.TotalSeconds * 0.3)
+                : took.TotalSeconds;
         }
     }
 
     private async Task WorkerLoopAsync(CancellationToken ct)
     {
-        var active = new Dictionary<int, Task>();
+        var active = new Dictionary<int, Download>();
+        var racing = new Dictionary<int, Download>();
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                foreach (int piece in active.Where(pair => pair.Value.IsCompleted).Select(pair => pair.Key).ToArray())
-                {
-                    await active[piece].ConfigureAwait(false);
-                    active.Remove(piece);
-                }
+                await ReapAsync(active, racing).ConfigureAwait(false);
+                await ReapAsync(racing, active).ConfigureAwait(false);
 
                 int limit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnections, 1, 64);
                 int sourceLimit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource, 1, limit);
-                if (CanStartMoreDownloads() && active.Count < limit)
+                if (CanStartMoreDownloads() && active.Count + racing.Count < limit)
                 {
-                    foreach (int piece in GetNeededPieces(limit - active.Count, active.Keys))
+                    // A piece a stream is waiting on comes before one it is not.
+                    RaceSlowSources(active, racing, limit, sourceLimit, ct);
+                    foreach (int piece in GetNeededPieces(limit - active.Count - racing.Count, active.Keys))
                     {
                         ct.ThrowIfCancellationRequested();
                         var source = GetAvailableSource(sourceLimit);
                         if (source == null) break;
-                        active.Add(piece, DownloadAndReleaseAsync(source, piece, ct));
+                        active.Add(piece, Begin(source, piece, ct));
                     }
                 }
 
                 // Completion replenishes a slot immediately. The timer is only for idle work,
-                // retries and live settings/source changes while all HTTP requests are blocked.
+                // retries, races and live settings/source changes while all HTTP requests are blocked.
                 using var pollCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 Task poll = Task.Delay(TimeSpan.FromMilliseconds(WorkerIntervalMs), _timeProvider, pollCts.Token);
-                await Task.WhenAny(active.Values.Append(poll)).ConfigureAwait(false);
+                await Task.WhenAny(active.Values.Concat(racing.Values).Select(download => download.Task).Append(poll)).ConfigureAwait(false);
                 await pollCts.CancelAsync().ConfigureAwait(false);
             }
         }
@@ -735,7 +799,103 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
         finally
         {
-            await Task.WhenAll(active.Values).ConfigureAwait(false);
+            await Task.WhenAll(active.Values.Concat(racing.Values).Select(download => download.Task)).ConfigureAwait(false);
+            foreach (var download in active.Values.Concat(racing.Values))
+            {
+                download.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Forgets the downloads in <paramref name="downloads"/> that have finished, and gives up the one
+    /// racing each in <paramref name="rivals"/> once the piece is here: the race is won.
+    /// </summary>
+    private async Task ReapAsync(Dictionary<int, Download> downloads, Dictionary<int, Download> rivals)
+    {
+        foreach (var (piece, download) in downloads.Where(pair => pair.Value.Task.IsCompleted).ToArray())
+        {
+            await download.Task.ConfigureAwait(false);
+            download.Dispose();
+            downloads.Remove(piece);
+            if (_torrent.Pieces.HasPiece(piece) && rivals.TryGetValue(piece, out var rival))
+            {
+                await rival.Cancel.CancelAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Asks a faster source for a piece a stream is waiting on that a slower one has had for as long as
+    /// the faster takes for a whole piece, and keeps whichever arrives first.
+    /// </summary>
+    /// <remarks>
+    /// Sources differ: archive.org's redirector took three seconds for a piece its own servers sent in
+    /// half of one, and starting Big Buck Bunny, it had the stream's first piece while the fast server
+    /// fetched the next four.
+    /// </remarks>
+    private void RaceSlowSources(Dictionary<int, Download> active, Dictionary<int, Download> racing, int limit, int sourceLimit, CancellationToken ct)
+    {
+        foreach (int piece in GetUrgentPieces())
+        {
+            if (active.Count + racing.Count >= limit)
+            {
+                return;
+            }
+
+            if (racing.ContainsKey(piece) || !active.TryGetValue(piece, out var slow))
+            {
+                continue;
+            }
+
+            var faster = GetAvailableSource(sourceLimit, except: slow.Source);
+            if (faster == null)
+            {
+                return;
+            }
+
+            double held = _timeProvider.GetElapsedTime(slow.Started).TotalSeconds;
+            if (faster.PieceSeconds is { } takes && takes <= held)
+            {
+                _logger.LogDebug("Racing piece {PieceIndex}: {Slow} has had it {Held:F1}s, {Fast} takes {Takes:F1}s", piece, slow.Source.Url, held, faster.Url, takes);
+                racing.Add(piece, Begin(faster, piece, ct));
+            }
+            else
+            {
+                lock (_lock)
+                {
+                    faster.ActiveDownloads--;
+                }
+            }
+        }
+    }
+
+    private Download Begin(WebSeedSource source, int piece, CancellationToken ct)
+    {
+        var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        return new Download(source, _timeProvider.GetTimestamp(), DownloadAndReleaseAsync(source, piece, cancel.Token), cancel);
+    }
+
+    /// <summary>A piece being fetched from one source, and how to give it up.</summary>
+    private sealed class Download(WebSeedSource source, long started, Task task, CancellationTokenSource cancel) : IDisposable
+    {
+        private AtomicDisposal _disposal = new();
+
+        public WebSeedSource Source => source;
+
+        /// <summary>When it began, as a <see cref="TimeProvider"/> timestamp.</summary>
+        public long Started => started;
+
+        public Task Task => task;
+
+        public CancellationTokenSource Cancel => cancel;
+
+        public void Dispose()
+        {
+            if (_disposal.MarkDisposed())
+            {
+                cancel.Dispose();
+            }
         }
     }
 
@@ -778,6 +938,9 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
         public int ActiveDownloads { get; set; }
         public int FailureCount { get; set; }
+
+        /// <summary>How long a piece takes to arrive from this source, smoothed; null until one has.</summary>
+        public double? PieceSeconds { get; set; }
 
         /// <summary>
         /// The files this source has answered for with a status that says the resource is not

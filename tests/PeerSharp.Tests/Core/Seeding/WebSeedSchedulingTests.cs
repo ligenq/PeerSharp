@@ -117,6 +117,86 @@ public class WebSeedSchedulingTests
         await manager.StopAsync();
     }
 
+    [Fact(Timeout = 15000)]
+    public async Task NeededPieces_PutWhatStreamsNeedFirst_InTheOrderTheyNeedIt()
+    {
+        await using var torrent = CreateTorrent();
+        await using var manager = new WebSeedManager(torrent, ["http://one.test/file"], new FakeTimeProvider());
+        using var stream = Stream(torrent, 5, 6, 2);
+
+        Assert.Equal([5, 6, 2, 0, 1], manager.GetNeededPieces(5));
+        Assert.Equal([5, 6], manager.GetUrgentPieces());
+
+        torrent.Pieces.AddPiece(5);
+        Assert.Equal([6, 2], manager.GetUrgentPieces());
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task Worker_RacesAPieceAStreamWaitsOn_FromAFasterSource_AndGivesUpTheSlowerOnceItIsHere()
+    {
+        await using var torrent = CreateTorrent();
+        torrent.Settings.Transfer.WebSeedMaxConnections = 2;
+        torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource = 1;
+        var clock = new FakeTimeProvider();
+        var client = new ControlledClient();
+        await using var manager = new WebSeedManager(torrent, ["http://slow.test/file", "http://fast.test/file"], clock);
+        manager.SetTestClient(client);
+        using var stream = Stream(torrent, 3, 4);
+        manager.Start();
+
+        // The stream's two pieces go out first, one to each source.
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == 2);
+        var slow = client.Requests.Single(request => request.Host == "slow.test");
+        var fast = client.Requests.Single(request => request.Host == "fast.test");
+        Assert.Equal(3, slow.Piece);
+        Assert.Equal(4, fast.Piece);
+
+        // The fast source sends its whole piece in the half second the slow one has had its own.
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        torrent.Pieces.AddPiece(4);
+        fast.Completion.SetResult(new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(new byte[16384]) });
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == 3);
+        var race = client.Requests.Last();
+        Assert.Equal(("fast.test", 3), (race.Host, race.Piece));
+
+        torrent.Pieces.AddPiece(3);
+        race.Completion.SetResult(new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(new byte[16384]) });
+        await TorrentTestUtility.WaitUntilAsync(() => slow.Request.IsCanceled);
+        await manager.StopAsync();
+        Assert.Equal(0, manager.GetStats().ActiveDownloads);
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task Worker_RacesNothing_WhileNothingStreams()
+    {
+        await using var torrent = CreateTorrent();
+        torrent.Settings.Transfer.WebSeedMaxConnections = 2;
+        torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource = 1;
+        var clock = new FakeTimeProvider();
+        var client = new ControlledClient();
+        await using var manager = new WebSeedManager(torrent, ["http://one.test/file", "http://two.test/file"], clock);
+        manager.SetTestClient(client);
+        manager.Start();
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == 2);
+        var second = client.Requests.Single(request => request.Piece == 1);
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        torrent.Pieces.AddPiece(1);
+        second.Completion.SetResult(new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(new byte[16384]) });
+
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == 3);
+        Assert.Equal(2, client.Requests.Last().Piece);
+        await manager.StopAsync();
+    }
+
+    /// <summary>A stream open on <paramref name="torrent"/> that needs <paramref name="pieces"/>, in that order.</summary>
+    private static PeerSharp.Streaming.TorrentStream Stream(Torrent torrent, params int[] pieces)
+    {
+        var stream = new PeerSharp.Streaming.TorrentStream(torrent.Streaming, torrent, 0, TimeProvider.System);
+        torrent.Streaming.UpdatePriorities(stream, pieces);
+        return stream;
+    }
+
     private static Torrent CreateTorrent()
     {
         var metadata = new TorrentFileMetadata();
@@ -132,7 +212,7 @@ public class WebSeedSchedulingTests
         return torrent;
     }
 
-    private sealed record Pending(int Piece, TaskCompletionSource<HttpResponseMessage> Completion);
+    private sealed record Pending(int Piece, TaskCompletionSource<HttpResponseMessage> Completion, string Host, Task<HttpResponseMessage> Request);
 
     private sealed class FailingClient : IHttpClient
     {
@@ -153,8 +233,9 @@ public class WebSeedSchedulingTests
         public Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, HttpCompletionOption completionOption, CancellationToken cancellationToken)
         {
             var completion = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-            Requests.Enqueue(new Pending((int)(request.Headers.Range!.Ranges.Single().From!.Value / 16384), completion));
-            return completion.Task.WaitAsync(cancellationToken);
+            var answer = completion.Task.WaitAsync(cancellationToken);
+            Requests.Enqueue(new Pending((int)(request.Headers.Range!.Ranges.Single().From!.Value / 16384), completion, request.RequestUri!.Host, answer));
+            return answer;
         }
     }
 }
