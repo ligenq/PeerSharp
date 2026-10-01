@@ -645,6 +645,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// </summary>
     internal IReadOnlyList<int>? PendingSelectOnlyFileIndices { get; set; }
 
+    /// <summary>
+    /// The file selection a caller asked for when adding the torrent
+    /// (<see cref="Config.AddTorrentOptions.FileSelections"/>), waiting for metadata to arrive so it
+    /// can be applied. Null when none is pending.
+    /// </summary>
+    internal IReadOnlyList<FileSelection>? PendingFileSelections { get; set; }
+
     // Completed once metadata is available and applied (immediately for torrents created
     // from a .torrent file; after the post-download reinitialize for magnet torrents).
     private readonly TaskCompletionSource _metadataApplied = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -707,6 +714,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         Initialize();
         PeersInternal.ImportConnectionPreferences(peerPreferences);
         await ApplyPendingSelectOnlyFileIndicesAsync(ct).ConfigureAwait(false);
+        await ApplyPendingFileSelectionsAsync(ct).ConfigureAwait(false);
         if (retainedPeers.Count > 0)
         {
             await PeersInternal.AdoptPeersAfterMetadataRebuildAsync(retainedPeers).ConfigureAwait(false);
@@ -768,6 +776,36 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
 
         _logger.LogInformation("BEP 53: Magnet 'so=' selection applied - downloading {Selected} of {Total} files", fileCount - deselected, fileCount);
+    }
+
+    /// <summary>
+    /// Applies the file selection given when the torrent was added, one entry per file in order. No-ops
+    /// until metadata is available. It is the caller's choice for this torrent, made as it was added, so
+    /// it wins over a selection from resume data and over a magnet link's "so=" restriction. A list
+    /// whose length turns out not to match the files is not applied: there is no telling which file an
+    /// entry was meant for.
+    /// </summary>
+    internal async Task ApplyPendingFileSelectionsAsync(CancellationToken ct = default)
+    {
+        var selections = PendingFileSelections;
+        if (selections == null || !HasMetadata)
+        {
+            return;
+        }
+
+        PendingFileSelections = null;
+
+        int fileCount = InfoFile.Info.GetVisibleFileCount();
+        if (selections.Count != fileCount)
+        {
+            _logger.LogWarning("Ignoring the file selection given when adding {Name}: it has {Given} entries for {Files} files", Name, selections.Count, fileCount);
+            return;
+        }
+
+        for (int i = 0; i < fileCount; i++)
+        {
+            await SetFileSelectionAsync(i, selections[i], ct).ConfigureAwait(false);
+        }
     }
 
     public Task SetAllFilesPriorityAsync(Priority priority, CancellationToken cancellationToken = default)

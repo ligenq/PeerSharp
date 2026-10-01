@@ -1599,23 +1599,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             }
 
             AddOptionPeers(torrent, options);
-
-            // Add additional trackers from options
-            if (options?.AdditionalTrackers != null)
-            {
-                foreach (var tracker in options.AdditionalTrackers)
-                {
-                    torrent.TrackerManager.AddTracker(tracker);
-                }
-            }
-
-            if (options?.AdditionalWebSeeds != null)
-            {
-                foreach (var webSeed in options.AdditionalWebSeeds)
-                {
-                    torrent.WebSeeds.Add(webSeed);
-                }
-            }
+            AddOptionSources(torrent, options);
 
             // Apply options
             if (options != null)
@@ -1642,6 +1626,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 torrent.PendingSelectOnlyFileIndices = magnetLink.SelectOnlyFileIndices;
                 await torrent.ApplyPendingSelectOnlyFileIndicesAsync(cancellationToken).ConfigureAwait(false);
             }
+
+            // Applied after the magnet's own restriction, which it overrides; without metadata yet, when
+            // the metadata arrives.
+            torrent.PendingFileSelections = options?.FileSelections;
+            await torrent.ApplyPendingFileSelectionsAsync(cancellationToken).ConfigureAwait(false);
 
             // Preview mode: leave the torrent stopped once metadata has been downloaded so the
             // application can inspect the file list and adjust selections before starting.
@@ -1893,6 +1882,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(torrentFile);
         cancellationToken.ThrowIfCancellationRequested();
+        if (options?.FileSelections is { } selections && selections.Count != torrentFile.FileCount)
+        {
+            throw new ArgumentException(
+                $"FileSelections has {selections.Count} entries but the torrent has {torrentFile.FileCount} files.", nameof(options));
+        }
 
         var torrent = AddTorrentInternal(torrentFile.Metadata, options?.Events, options?.ResumeData);
 
@@ -1907,6 +1901,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             torrent.PeersInternal.ImportConnectionPreferences(restoredPeerPreferences);
 
             AddOptionPeers(torrent, options);
+            AddOptionSources(torrent, options);
 
             // Apply options
             if (options != null)
@@ -1924,6 +1919,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 torrent.SuperSeeding = options.SuperSeeding;
                 torrent.QueueAutoStart = options.StartImmediately;
             }
+
+            // Before starting: a torrent's web seeds fetch from the moment it starts, and would fetch
+            // files the caller does not want.
+            torrent.PendingFileSelections = options?.FileSelections;
+            await torrent.ApplyPendingFileSelectionsAsync(cancellationToken).ConfigureAwait(false);
 
             // Start if requested
             if (options?.StartImmediately ?? true)
@@ -1964,6 +1964,20 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
 
         return torrent;
+    }
+
+    /// <summary>Adds the trackers and web seeds the caller gave on top of the torrent's own.</summary>
+    private static void AddOptionSources(Torrent torrent, AddTorrentOptions? options)
+    {
+        foreach (var tracker in options?.AdditionalTrackers ?? [])
+        {
+            torrent.TrackerManager.AddTracker(tracker);
+        }
+
+        foreach (var webSeed in options?.AdditionalWebSeeds ?? [])
+        {
+            torrent.WebSeeds.Add(webSeed);
+        }
     }
 
     private void AddOptionPeers(Torrent torrent, AddTorrentOptions? options)

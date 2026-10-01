@@ -68,9 +68,16 @@ public sealed class AddTorrentOptions
     public ITorrentEvents? Events { get; set; }
 
     /// <summary>
-    /// Gets or sets the initial file selection/priority settings.
-    /// If null, all files are selected with normal priority.
+    /// Gets or sets the initial file selection/priority settings: one entry per file, in the torrent's
+    /// file order. If null, all files are selected with normal priority.
     /// </summary>
+    /// <remarks>
+    /// Applied before the torrent starts, so nothing deselected is requested - not even by web seeds,
+    /// which fetch from the moment a torrent starts - and over any selection in
+    /// <see cref="ResumeData"/> or a magnet link's "so=" restriction. For a torrent file, a list whose
+    /// length differs from the file count is an <see cref="ArgumentException"/>; for a magnet link it is
+    /// applied once the metadata arrives, and ignored with a warning if the counts differ then.
+    /// </remarks>
     public IReadOnlyList<FileSelection>? FileSelections { get; set; }
 
     /// <summary>

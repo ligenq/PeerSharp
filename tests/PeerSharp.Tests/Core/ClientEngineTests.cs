@@ -106,6 +106,75 @@ public class ClientEngineTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task AddTorrentAsync_AppliesTheGivenFileSelection()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        var torrent = await engine.AddTorrentAsync(
+            new TorrentFile(ThreeFileMetadata()),
+            new AddTorrentOptions
+            {
+                StartImmediately = false,
+                FileSelections = [new FileSelection(), new FileSelection(false, Priority.DoNotDownload), new FileSelection(true, Priority.High)],
+            });
+
+        var selections = torrent.GetAllFileSelections();
+        Assert.True(selections[0].Selected);
+        Assert.False(selections[1].Selected);
+        Assert.Equal(Priority.High, selections[2].Priority);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddTorrentAsync_RefusesAFileSelectionOfTheWrongLength()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => engine.AddTorrentAsync(
+            new TorrentFile(ThreeFileMetadata()),
+            new AddTorrentOptions { StartImmediately = false, FileSelections = [new FileSelection()] }));
+
+        Assert.Empty(engine.GetTorrents());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddTorrentAsync_AddsTheGivenTrackersAndWebSeeds()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        var torrent = await engine.AddTorrentAsync(
+            new TorrentFile(ThreeFileMetadata()),
+            new AddTorrentOptions
+            {
+                StartImmediately = false,
+                AdditionalTrackers = ["http://tracker.example/announce"],
+                AdditionalWebSeeds = ["http://seed.example/files/"],
+            });
+
+        Assert.Contains(torrent.Trackers.GetTrackers(), tracker => tracker.Url == "http://tracker.example/announce");
+        Assert.Contains("http://seed.example/files/", torrent.WebSeeds.GetAll());
+    }
+
+    private static TorrentFileMetadata ThreeFileMetadata()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Version = TorrentVersion.V1;
+        metadata.Info.Hash = InfoHash.CreateRandom();
+        metadata.Info.Name = "three";
+        metadata.Info.PieceSize = 100;
+        metadata.Info.FullSize = 300;
+        for (int i = 0; i < 3; i++)
+        {
+            metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = $"f{i}", Size = 100, Offset = i * 100 });
+            metadata.Info.Pieces.Add(new byte[20]);
+        }
+
+        return metadata;
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task RemoveTorrentAsync_RemovesFromList()
     {
         var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
