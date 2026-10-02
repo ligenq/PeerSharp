@@ -1457,7 +1457,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         return (int)Math.Clamp(timeout, minMs, maxMs);
     }
 
-    private async Task CancelBlockRequestAsync(int pieceIndex, int offset, PeerCommunication source)
+    private async Task CancelBlockRequestAsync(int pieceIndex, int offset, PeerCommunication? source)
     {
         var key = (pieceIndex, offset);
         if (_requestTracker.TryGetBlockPeers(key, out var list))

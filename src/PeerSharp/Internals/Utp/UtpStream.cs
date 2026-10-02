@@ -1061,6 +1061,15 @@ internal class UtpStream : Stream
                 break;
             }
 
+            // FIN needs an EOF marker as well as any payload. Keep the packet queued until
+            // both fit, otherwise it could be acknowledged with no EOF delivered to the reader.
+            int slotsNeeded = (next.Data.Length > 0 ? 1 : 0) + (next.IsFin ? 1 : 0);
+            if (_pipeWriteChannel.Reader.Count + slotsNeeded > 1000)
+            {
+                Volatile.Write(ref _drainPending, true);
+                break;
+            }
+
             // Write payload if any
             if (next.Data.Length > 0 && !_pipeWriteChannel.Writer.TryWrite(next.Data))
             {
@@ -1072,6 +1081,12 @@ internal class UtpStream : Stream
             _lastAckAdvance = _timeProvider.GetUtcNow();
             _reorderBuffer.Dequeue();
             _reorderBufferSeqs.Remove(next.SeqNr);
+
+            // Empty packets are not handed to the pipe writer, which normally returns the buffer.
+            if (next.Data.Length == 0 && next.Data.Pooled)
+            {
+                _pool.Return(next.Data.Buffer);
+            }
 
             // FIN handling - after processing FIN, break to prevent further data processing
             if (next.IsFin && !_finReceived)

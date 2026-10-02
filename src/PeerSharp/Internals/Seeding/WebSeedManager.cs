@@ -767,8 +767,8 @@ internal sealed class WebSeedManager : IAsyncDisposable
         {
             while (!ct.IsCancellationRequested)
             {
-                await ReapAsync(active, racing).ConfigureAwait(false);
-                await ReapAsync(racing, active).ConfigureAwait(false);
+                await ReapAsync(active).ConfigureAwait(false);
+                await ReapAsync(racing).ConfigureAwait(false);
 
                 int limit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnections, 1, 64);
                 int sourceLimit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource, 1, limit);
@@ -808,20 +808,27 @@ internal sealed class WebSeedManager : IAsyncDisposable
     }
 
     /// <summary>
-    /// Forgets the downloads in <paramref name="downloads"/> that have finished, and gives up the one
-    /// racing each in <paramref name="rivals"/> once the piece is here: the race is won.
+    /// Gives up downloads whose pieces have been verified, and forgets downloads that have finished.
+    /// Verification can happen after an HTTP task has been reaped, or peers can win the race, so
+    /// cancellation depends on the piece's state rather than another HTTP task finishing.
     /// </summary>
-    private async Task ReapAsync(Dictionary<int, Download> downloads, Dictionary<int, Download> rivals)
+    private async Task ReapAsync(Dictionary<int, Download> downloads)
     {
-        foreach (var (piece, download) in downloads.Where(pair => pair.Value.Task.IsCompleted).ToArray())
+        foreach (var (piece, download) in downloads.ToArray())
         {
+            if (!download.Task.IsCompleted && _torrent.Pieces.HasPiece(piece) && !download.Cancel.IsCancellationRequested)
+            {
+                await download.Cancel.CancelAsync().ConfigureAwait(false);
+            }
+
+            if (!download.Task.IsCompleted)
+            {
+                continue;
+            }
+
             await download.Task.ConfigureAwait(false);
             download.Dispose();
             downloads.Remove(piece);
-            if (_torrent.Pieces.HasPiece(piece) && rivals.TryGetValue(piece, out var rival))
-            {
-                await rival.Cancel.CancelAsync().ConfigureAwait(false);
-            }
         }
     }
 

@@ -13,7 +13,7 @@ internal sealed class BlockProcessor
     private readonly RequestCompletionTracker _requestCompletionTracker;
     private readonly Torrent _torrent;
     private readonly ILogger<BlockProcessor> _logger;
-    private readonly Func<int, int, PeerCommunication, Task> _cancelBlockRequestAsync;
+    private readonly Func<int, int, PeerCommunication?, Task> _cancelBlockRequestAsync;
 
     public BlockProcessor(BlockProcessorOptions options)
     {
@@ -158,6 +158,9 @@ internal sealed class BlockProcessor
                 stored = true;
                 _downloader.AddDownloaded(block.Length);
 
+                // A web seed can race every peer owing this block; there is no peer source to exclude.
+                await _cancelBlockRequestAsync(block.PieceIndex, block.Offset, null).ConfigureAwait(false);
+
                 if (state.TryCompleteAndSetWriting())
                 {
                     pieceToProcess = state;
@@ -192,6 +195,6 @@ internal sealed class BlockProcessorOptions
     public required TransferStats Downloader { get; init; }
     public required RequestCompletionTracker RequestCompletionTracker { get; init; }
     public required Torrent Torrent { get; init; }
-    public required Func<int, int, PeerCommunication, Task> CancelBlockRequest { get; init; }
+    public required Func<int, int, PeerCommunication?, Task> CancelBlockRequest { get; init; }
     public required ILogger<BlockProcessor> Logger { get; init; }
 }
