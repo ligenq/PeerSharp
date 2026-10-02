@@ -14,6 +14,27 @@ namespace PeerSharp.Tests.Core.Peers;
 
 public class PeerManagerTests
 {
+    [Theory(Timeout = 30000)]
+    [InlineData(4294967296L, 100L)]
+    [InlineData(0L, 4294967396L)]
+    [InlineData(262144L, 100L)]
+    public async Task MetadataData_OverflowingFields_ClosesPeerBeforeApplyingData(long piece, long size)
+    {
+        var ctx = CreateContext();
+        try
+        {
+            var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System) { Connected = 1, Stream = new MemoryStream() };
+            peer.UtMetadata.SetLocalMessageId(5);
+            var header = new PeerSharp.BEncoding.BDict();
+            header.Dict["msg_type"] = new PeerSharp.BEncoding.BNumber(1);
+            header.Dict["piece"] = new PeerSharp.BEncoding.BNumber(piece);
+            header.Dict["total_size"] = new PeerSharp.BEncoding.BNumber(size);
+            byte[] data = [.. PeerSharp.BEncoding.BencodeWriter.Write(header), .. new byte[100]];
+            await ctx.Manager.ExtendedMessageReceivedAsync(peer, 5, data);
+            Assert.Equal(0, peer.Connected);
+        }
+        finally { await CleanupAsync(ctx); }
+    }
     [Fact]
     public async Task MetadataRebuild_AdoptsSameLivePeerAndPreservesGovernorSlot()
     {

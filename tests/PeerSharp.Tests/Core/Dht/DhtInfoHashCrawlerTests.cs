@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Dht;
+using PeerSharp.BEncoding;
 using System.Net;
 
 namespace PeerSharp.Tests.Core.Dht;
@@ -100,6 +101,18 @@ public class DhtInfoHashCrawlerTests
     public async Task Crawl_CanReturnRepeatSightingsWithoutChangingTheUniqueLimit()
     {
         await using var fixture = await DhtLoopbackFixture.CreateAsync();
+        // A second holder supplies the repeat sighting without re-querying the first holder
+        // before its advertised refresh interval expires.
+        var secondHolder = new IPEndPoint(IPAddress.Parse("192.0.2.3"), 6883);
+        fixture.ServerTransport.Aliases.Add(secondHolder);
+        var ping = new BDict();
+        ping.Dict["t"] = new BString("seed"u8.ToArray());
+        ping.Dict["y"] = new BString("q"u8.ToArray());
+        ping.Dict["q"] = new BString("ping"u8.ToArray());
+        var args = new BDict();
+        args.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        ping.Dict["a"] = args;
+        fixture.Server.Receive(BencodeWriter.Write(ping), secondHolder);
         var stored = SeedServerStore(fixture, 1);
         var crawler = CreateCrawler(fixture, new DhtIndexerOptions
         {

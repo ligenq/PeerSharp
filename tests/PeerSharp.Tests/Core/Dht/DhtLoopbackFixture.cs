@@ -23,6 +23,8 @@ internal sealed class DhtLoopbackFixture : IAsyncDisposable
     public sealed class LoopbackTransport : IUdpListener
     {
         private IUdpReceiver? _receiver;
+        private IPEndPoint? _replySource;
+        public HashSet<IPEndPoint> Aliases { get; } = [];
 
         public required IPEndPoint LocalEndPoint { get; init; }
 
@@ -44,13 +46,23 @@ internal sealed class DhtLoopbackFixture : IAsyncDisposable
         {
             OnSend?.Invoke(data);
 
-            if (Blackhole || Peer?._receiver is null)
+            if (Blackhole)
             {
                 DroppedPackets++;
                 return Task.CompletedTask;
             }
 
-            Peer._receiver.Receive(data.ToArray(), LocalEndPoint);
+            var destination = endpoint.Equals(LocalEndPoint) ? this : Peer;
+            if (destination?._receiver is null ||
+                (!endpoint.Equals(destination.LocalEndPoint) && !destination.Aliases.Contains(endpoint)))
+            {
+                DroppedPackets++;
+                return Task.CompletedTask;
+            }
+            var previousSource = destination._replySource;
+            destination._replySource = endpoint;
+            try { destination._receiver.Receive(data.ToArray(), _replySource ?? LocalEndPoint); }
+            finally { destination._replySource = previousSource; }
             return Task.CompletedTask;
         }
 

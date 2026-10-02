@@ -608,6 +608,10 @@ internal class UdpTracker : TrackerBase, IDisposable
                     _proxyControlClient = result.ControlClient;
 
                     var ips = await _resolveAddressesAsync(uri.Host, ct).ConfigureAwait(false);
+                    if (ips.Length == 0)
+                    {
+                        throw new UdpTrackerException($"DNS resolution failed: no addresses found for {uri.Host}", isTransient: true);
+                    }
                     var preferredIp = ips.FirstOrDefault(ip => ip.AddressFamily == result.ProxyUdpEndPoint.AddressFamily) ?? ips[0];
                     _endpoint = new IPEndPoint(preferredIp, uri.Port);
                 }
@@ -694,27 +698,30 @@ internal class UdpTracker : TrackerBase, IDisposable
             throw new InvalidOperationException("Not connected");
         }
 
-        var now = _timeProvider.GetUtcNow();
-        while ((_timeProvider.GetUtcNow() - now) < _requestTimeout)
+        using var timeoutCts = new CancellationTokenSource(_requestTimeout, _timeProvider);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ct);
+        while (!timeoutCts.IsCancellationRequested)
         {
             try
             {
-                using var timeoutCts = new CancellationTokenSource(_requestTimeout);
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ct);
                 var res = await _client.ReceiveAsync(linkedCts.Token).ConfigureAwait(false);
+
+                var expectedSender = _proxyUdpEndPoint ?? _endpoint;
+                if (expectedSender == null || !NetworkUtils.NormalizeEndPoint(res.RemoteEndPoint).Equals(NetworkUtils.NormalizeEndPoint(expectedSender)))
+                {
+                    continue;
+                }
 
                 var buffer = res.Buffer;
                 if (_proxyUdpEndPoint != null)
                 {
-                    var (Payload, _) = ProxyHelper.UnwrapSocks5UdpPacket(buffer);
-                    if (Payload.IsEmpty)
+                    var (Payload, remote) = ProxyHelper.UnwrapSocks5UdpPacket(buffer);
+                    if (Payload.IsEmpty || _endpoint == null || !NetworkUtils.NormalizeEndPoint(remote).Equals(NetworkUtils.NormalizeEndPoint(_endpoint)))
                     {
                         continue;
                     }
 
                     buffer = Payload.ToArray();
-                    // Use the unwrapped remote endpoint if needed, but for tracker response
-                    // we usually just care about the transaction ID in the payload.
                 }
 
                 if (buffer.Length >= 8) // Header is at least 8 bytes (Action + TransID)
@@ -735,7 +742,7 @@ internal class UdpTracker : TrackerBase, IDisposable
                     // Else: Stale packet, ignore and loop
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 break;
             }

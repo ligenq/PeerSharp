@@ -963,6 +963,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 FireAndForget(p.SetInterestedAsync(true), "SetInterested (Metadata)");
             }
         }
+        catch (InvalidDataException ex)
+        {
+            _logger.LogDebug(ex, "Invalid metadata handshake from {RemoteEndPoint}", p.RemoteEndPoint);
+            return p.CloseAsync();
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "ExtendedHandshakeFinished error for {RemoteEndPoint}", p.RemoteEndPoint);
@@ -982,25 +987,32 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 int consumed = Consumed;
                 if (node is BDict dict)
                 {
-                    var msgType = dict.GetLong("msg_type") ?? 0;
-                    var piece = (int)(dict.GetLong("piece") ?? 0);
-                    var totalSize = (int?)dict.GetLong("total_size");
-
-                    if (totalSize.HasValue && _torrent.MetadataDownloadInternal != null)
+                    var msgType = dict.GetLong("msg_type") ?? throw new InvalidDataException("Missing metadata message type");
+                    if (msgType is < 0 or > 2)
                     {
-                        try { _torrent.MetadataDownloadInternal.InitializeMetadataBuffer(totalSize.Value); }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Metadata buffer init error");
-                            _torrent.FireErrorEvent(new TorrentException("Metadata buffer initialization error.", _torrent.Hash, ex));
-                        }
+                        return; // BEP 9: unknown message types must be ignored.
                     }
+                    var pieceValue = dict.GetLong("piece");
+                    if (pieceValue is null or < 0 or > int.MaxValue)
+                    {
+                        throw new InvalidDataException("Invalid metadata piece index");
+                    }
+                    int piece = (int)pieceValue.Value;
 
                     if (msgType == (int)UtMetadata.MessageType.Data)
                     {
+                        var totalSize = dict.GetLong("total_size");
+                        if (totalSize is null or <= 0 or > int.MaxValue ||
+                            totalSize > Math.Max(1, _torrent.Settings.Transfer.MaxMetadataSizeBytes) ||
+                            (long)piece * UtMetadata.PieceSize >= totalSize ||
+                            data.Length - consumed != Math.Min(UtMetadata.PieceSize, totalSize.Value - (long)piece * UtMetadata.PieceSize))
+                        {
+                            throw new InvalidDataException("Invalid metadata data size");
+                        }
                         byte[] payload = data.Length > consumed ? data[consumed..] : [];
                         if (_torrent.MetadataDownloadInternal != null)
                         {
+                            _torrent.MetadataDownloadInternal.InitializeMetadataBuffer((int)totalSize.Value);
                             await _torrent.MetadataDownloadInternal.MetadataPieceReceivedAsync(p, piece, payload).ConfigureAwait(false);
                         }
                     }
@@ -1014,50 +1026,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     }
                 }
             }
-            else if (_torrent.MetadataDownloadInternal?.Active == true)
-            {
-                // Fallback: some peers may respond with mismatched ext IDs. Detect ut_metadata by payload shape.
-                var (Node, Consumed) = BencodeParser.ParseWithConsumed(data);
-                if (Node is BDict dict && dict.GetLong("msg_type") is long msgTypeVal)
-                {
-                    var msgType = (int)msgTypeVal;
-                    var piece = (int)(dict.GetLong("piece") ?? 0);
-                    var totalSize = (int?)dict.GetLong("total_size");
-
-                    _logger.LogWarning(
-                        "Received ut_metadata message with mismatched ext id {ExtId} (expected {ExpectedId}) from {RemoteEndPoint}",
-                        type,
-                        p.UtMetadata.LocalMessageId,
-                        p.RemoteEndPoint);
-
-                    if (totalSize.HasValue && _torrent.MetadataDownloadInternal != null)
-                    {
-                        try { _torrent.MetadataDownloadInternal.InitializeMetadataBuffer(totalSize.Value); }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Metadata buffer init error");
-                            _torrent.FireErrorEvent(new TorrentException("Metadata buffer initialization error.", _torrent.Hash, ex));
-                        }
-                    }
-
-                    if (msgType == (int)UtMetadata.MessageType.Data)
-                    {
-                        byte[] payload = data.Length > Consumed ? data[Consumed..] : [];
-                        if (_torrent.MetadataDownloadInternal != null)
-                        {
-                            await _torrent.MetadataDownloadInternal.MetadataPieceReceivedAsync(p, piece, payload).ConfigureAwait(false);
-                        }
-                    }
-                    else if (msgType == (int)UtMetadata.MessageType.Request)
-                    {
-                        _torrent.MetadataDownloadInternal?.MetadataRequestReceived(p, piece);
-                    }
-                    else if (msgType == (int)UtMetadata.MessageType.Reject)
-                    {
-                        _torrent.MetadataDownloadInternal?.MetadataRejectReceived(p, piece);
-                    }
-                }
-            }
+        }
+        catch (Exception ex) when (ex is InvalidDataException or FormatException)
+        {
+            _logger.LogDebug(ex, "Invalid metadata message from {RemoteEndPoint}", p.RemoteEndPoint);
+            await p.CloseAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -1468,8 +1441,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    public async Task StartAsync()
+    public Task StartAsync()
     {
+        _disposal.ThrowIfDisposed(this);
+        if (_mainLoopCts is { IsCancellationRequested: false })
+        {
+            return Task.CompletedTask;
+        }
         _mainLoopCts?.Dispose();
         _mainLoopCts = new CancellationTokenSource();
 
@@ -1489,36 +1467,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             RedialKnownPeers();
         }
 
-        try
-        {
-            if (_torrent.TrackerManager != null)
-            {
-                await _torrent.TrackerManager.StartAsync().ConfigureAwait(false);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to start tracker manager");
-            _torrent.FireErrorEvent(new TorrentException("Failed to start tracker manager.", _torrent.Hash, ex));
-        }
+        return Task.CompletedTask;
     }
 
     public async Task StopAsync()
     {
-        // Stop the main loop and connection processor
-        if (_mainLoopCts != null)
-        {
-            await _mainLoopCts.CancelAsync().ConfigureAwait(false);
-        }
-
-        if (_mainLoopTask is { } mainLoopTask)
-        {
-            await mainLoopTask.ConfigureAwait(false);
-        }
-        if (_connectionQueueTask is { } connectionQueueTask)
-        {
-            await connectionQueueTask.ConfigureAwait(false);
-        }
+        await StopSchedulingAsync().ConfigureAwait(false);
 
         // Wait for active connection attempts to finish or fail
         // Use a timeout to avoid hanging indefinitely if a task is stuck
@@ -1582,20 +1536,27 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// </summary>
     internal async Task<IReadOnlyList<PeerCommunication>> DetachConnectedPeersForMetadataRebuildAsync()
     {
+        await StopSchedulingAsync().ConfigureAwait(false);
+        return await DetachPeersAsync().ConfigureAwait(false);
+    }
+
+    private async Task StopSchedulingAsync()
+    {
         if (_mainLoopCts != null)
         {
-            await _mainLoopCts.CancelAsync().ConfigureAwait(false);
+            try { await _mainLoopCts.CancelAsync().ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to cancel peer scheduling"); }
         }
-
-        if (_mainLoopTask is { } mainLoopTask)
+        try
         {
-            await mainLoopTask.ConfigureAwait(false);
+            await Task.WhenAll(_mainLoopTask ?? Task.CompletedTask, _connectionQueueTask ?? Task.CompletedTask).ConfigureAwait(false);
         }
-        if (_connectionQueueTask is { } connectionQueueTask)
-        {
-            await connectionQueueTask.ConfigureAwait(false);
-        }
+        catch (OperationCanceledException) when (_mainLoopCts?.IsCancellationRequested == true) { /* Expected during shutdown. */ }
+        catch (Exception ex) { _logger.LogWarning(ex, "Peer scheduling failed during shutdown"); }
+    }
 
+    private async Task<IReadOnlyList<PeerCommunication>> DetachPeersAsync()
+    {
         try
         {
             if (!_activeConnectionTasks.IsEmpty)
@@ -1713,7 +1674,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return adopted;
     }
 
-    private async Task ReleaseTransferredPeerAsync(PeerCommunication peer)
+    internal async Task ReleaseTransferredPeerAsync(PeerCommunication peer)
     {
         // The old manager deliberately retained this slot and this peer has not been registered in the
         // new manager, so CloseAsync cannot release it through ConnectionClosedAsync.

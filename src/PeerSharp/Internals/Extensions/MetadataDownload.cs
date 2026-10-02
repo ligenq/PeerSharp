@@ -165,6 +165,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     {
         lock (_lock)
         {
+            _disposal.ThrowIfDisposed(this);
             if (size <= 0 || size > MaxMetadataSizeBytes)
             {
                 throw new InvalidDataException($"Invalid metadata size {size}. Maximum allowed is {MaxMetadataSizeBytes} bytes.");
@@ -181,8 +182,9 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             }
 
             _metadataSize = size;
+            _lastReportedProgress = -1f;
             _metadataBuffer = new byte[size];
-            _receivedPieces = new BitArray((size + UtMetadata.PieceSize - 1) / UtMetadata.PieceSize, false);
+            _receivedPieces = new BitArray((size - 1) / UtMetadata.PieceSize + 1, false);
             _logger.LogInformation("Initialized metadata buffer for size: {Size}", size);
 
             ReleaseSpeculativeRequests();
@@ -322,11 +324,11 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
         if (finished)
         {
-            // Fire metadata received events
-            FireMetadataReceivedEvent();
-
             // Re-initialize Torrent (Pieces, FileTransfer, TrackerManager)
             await _torrent.ReinitializeAfterMetadataAsync().ConfigureAwait(false);
+
+            // Callbacks observe a settled torrent and cannot prevent the handoff.
+            FireMetadataReceivedEvent();
 
             _logger.LogInformation("Metadata download finished for {TorrentName}", _torrent.Name);
         }
@@ -362,12 +364,12 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 return;
             }
 
-            int offset = pieceIndex * UtMetadata.PieceSize;
-            if (offset >= _metadataBuffer.Length)
+            if (pieceIndex > (_metadataBuffer.Length - 1) / UtMetadata.PieceSize)
             {
                 peer.UtMetadata.SendReject(pieceIndex);
                 return;
             }
+            int offset = pieceIndex * UtMetadata.PieceSize;
 
             int length = Math.Min(UtMetadata.PieceSize, _metadataBuffer.Length - offset);
             byte[] data = new byte[length];
@@ -385,6 +387,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     {
         lock (_lock)
         {
+            _disposal.ThrowIfDisposed(this);
             if (Finished)
             {
                 return; // If finished, we don't need to track peers for downloading
@@ -400,6 +403,11 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                 remoteExtensions.GetEnabledMessageId(UtMetadata.Name).HasValue &&
                 peer.UtMetadata.RemoteMessageId.HasValue)
             {
+                if (remoteExtensions.MetadataSize is { } declaredSize &&
+                    (declaredSize <= 0 || declaredSize > MaxMetadataSizeBytes))
+                {
+                    throw new InvalidDataException("Invalid advertised metadata size.");
+                }
                 if (!_activePeers.Contains(peer))
                 {
                     _activePeers.Add(peer);
@@ -471,6 +479,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     {
         lock (_lock)
         {
+            _disposal.ThrowIfDisposed(this);
             if (Finished)
             {
                 return;
@@ -479,7 +488,6 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             _pendingRequests.Clear();
             _requestAttempts.Clear();
             _refusedRequests.Clear();
-            _pieceSuppliers.Clear();
             _firstRequestAt = null;
             _requestsSent = 0;
             _responsesReceived = 0;
@@ -500,7 +508,6 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
             _pendingRequests.Clear();
             _requestAttempts.Clear();
             _refusedRequests.Clear();
-            _pieceSuppliers.Clear();
         }
     }
 
@@ -510,12 +517,6 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         {
             if (!Active || Finished)
             {
-                return;
-            }
-
-            if (_metadataSize == 0)
-            {
-                FillPeerRequests();
                 return;
             }
 
@@ -553,13 +554,12 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private void FireMetadataReceivedEvent()
     {
         // Fire callback
-        _torrent.Events?.MetadataReceived?.Invoke(_torrent);
+        try { _torrent.Events?.MetadataReceived?.Invoke(_torrent); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Metadata received callback failed"); }
 
         // Fire alert
         _torrent.Alerts.MetadataAlert(AlertId.MetadataInitialized, _torrent);
 
-        // Fire state change
-        _torrent.FireStateChangedEvent(TorrentState.Active);
     }
 
     private void FireProgressEvent()
@@ -592,7 +592,8 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         };
 
         // Fire callback
-        _torrent.Events?.MetadataProgress?.Invoke(_torrent, progressInfo);
+        try { _torrent.Events?.MetadataProgress?.Invoke(_torrent, progressInfo); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Metadata progress callback failed"); }
 
         // Fire alert
         _torrent.Alerts.MetadataProgressAlert(_torrent, currentProgress, received, total);
@@ -625,6 +626,11 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         // without letting it become the end of the download.
         if (_pendingRequests.Count > 0 || _requestAttempts.Count == 0 ||
             _activePeers.Count == 0 || !HasMissingPieces())
+        {
+            return;
+        }
+
+        if (TrySwitchMetadataSize())
         {
             return;
         }
@@ -704,12 +710,32 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         }
     }
 
-    private static bool PeerCanDeclareMetadata(IPeerCommunication peer) =>
-        peer.UtMetadata.RemoteMessageId != null && peer.RemoteExtensions?.MetadataSize is > 0;
+    private bool PeerCanDeclareMetadata(IPeerCommunication peer) =>
+        peer.UtMetadata.RemoteMessageId != null && peer.RemoteExtensions?.MetadataSize is > 0 and var size &&
+        (_metadataSize == 0 || size == _metadataSize);
+
+    private bool TrySwitchMetadataSize()
+    {
+        var candidate = _activePeers.FirstOrDefault(peer => peer.RemoteExtensions?.MetadataSize is > 0 and var size &&
+            size <= MaxMetadataSizeBytes && size != _metadataSize && !_refusedRequests.Contains((peer, 0)));
+        if (candidate == null)
+        {
+            return false;
+        }
+        int size = candidate.RemoteExtensions!.MetadataSize!.Value;
+        _metadataSize = 0;
+        _metadataBuffer = [];
+        _receivedPieces = new BitArray(0);
+        _pieceSuppliers.Clear();
+        _requestAttempts.Clear();
+        InitializeMetadataBuffer(size);
+        return true;
+    }
 
     private bool TryAssignPeer(IPeerCommunication peer)
     {
-        if (peer.UtMetadata.RemoteMessageId == null)
+        if (peer.UtMetadata.RemoteMessageId == null ||
+            (_metadataSize > 0 && peer.RemoteExtensions?.MetadataSize is > 0 and var size && size != _metadataSize))
         {
             return false;
         }
@@ -937,6 +963,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         }
 
         _receivedPieces.SetAll(false);
+        _lastReportedProgress = -1f;
         _pendingRequests.Clear();
         foreach (var supplier in suppliers)
         {
@@ -948,6 +975,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
         _pieceSuppliers.Clear();
         FillPeerRequests();
+        FireProgressEvent();
     }
 
     /// <summary>

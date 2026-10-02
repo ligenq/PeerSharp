@@ -9,6 +9,25 @@ namespace PeerSharp.Tests.Core;
 
 public class ClientEngineTests
 {
+    [Fact(Timeout = 30000)]
+    public async Task Dispose_DuringInitialization_WaitsForNetworkStartBeforeDisposal()
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _networkManager.StartHandler = async () => { entered.SetResult(); await release.Task; };
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        var initialize = engine.InitializeAsync();
+        await entered.Task;
+        var dispose = engine.DisposeAsync().AsTask();
+        Assert.False(dispose.IsCompleted);
+        Assert.Equal(0, _networkManager.DisposeCallCount);
+        release.SetResult();
+        await initialize;
+        await dispose;
+        Assert.Equal(1, _networkManager.DisposeCallCount);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.InitializeAsync());
+    }
+
     private class MockNetworkManager : INetworkManager
     {
         public IDhtManager Dht { get; set; } = null!;
@@ -23,11 +42,12 @@ public class ClientEngineTests
         public bool Stopped { get; private set; }
         public int StopCallCount { get; private set; }
         public int DisposeCallCount { get; private set; }
+        public Func<Task>? StartHandler { get; set; }
 
         public Task StartAsync(CancellationToken cancellationToken = default)
         {
             Started = true;
-            return Task.CompletedTask;
+            return StartHandler?.Invoke() ?? Task.CompletedTask;
         }
 
         public Task StopAsync(CancellationToken ct = default)

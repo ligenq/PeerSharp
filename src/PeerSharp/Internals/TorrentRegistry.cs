@@ -90,6 +90,14 @@ internal sealed class TorrentRegistry
         }
     }
 
+    internal IReadOnlyList<Torrent> GetAllIncludingTransient()
+    {
+        lock (_lock)
+        {
+            return _torrents.Concat(_transient).ToArray();
+        }
+    }
+
     public bool Remove(InfoHash hash, [NotNullWhen(true)] out Torrent? torrent)
     {
         lock (_lock)

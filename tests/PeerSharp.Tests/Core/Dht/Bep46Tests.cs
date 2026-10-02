@@ -148,6 +148,8 @@ public class Bep46Tests
             new Settings(),
             networkManager: new EngineNetworkManager(fixture.Client),
             takeOwnership: false);
+        fixture.ServerTransport.Aliases.UnionWith(Enumerable.Range(1, 6)
+            .Select(index => new IPEndPoint(IPAddress.Parse($"192.0.2.{index + 10}"), 7000 + index)));
         await engine.InitializeAsync();
 
         var publisher = TorrentPublisherKey.Create();
