@@ -127,6 +127,52 @@ public class UploadQueueManagerTests
         Assert.Equal([0], executed.ToArray());
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task ARejectedDuplicateRequest_DoesNotUndoAnEarlierCancellation()
+    {
+        using var cts = new CancellationTokenSource();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var executed = new ConcurrentQueue<int>();
+        await using var manager = CreateManager(async (_, item, ct) =>
+        {
+            if (item.PieceIndex == 0)
+            {
+                started.SetResult();
+                await gate.Task.WaitAsync(ct);
+            }
+
+            executed.Enqueue(item.PieceIndex);
+            if (item.PieceIndex == UploadQueueManager.MaxQueueDepthPerPeer)
+            {
+                finished.SetResult();
+            }
+        }, cts.Token);
+        var peer = CreateUnchockedPeer();
+
+        try
+        {
+            Assert.True(manager.TryEnqueue(peer, new UploadQueueItem(0, 0, 16384)));
+            await started.Task.WaitAsync(PumpStart);
+            for (int i = 1; i <= UploadQueueManager.MaxQueueDepthPerPeer; i++)
+            {
+                Assert.True(manager.TryEnqueue(peer, new UploadQueueItem(i, 0, 16384)));
+            }
+
+            manager.Cancel(peer, 1, 0);
+            Assert.False(manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384)));
+            gate.SetResult();
+            await finished.Task.WaitAsync(PumpStart);
+            Assert.DoesNotContain(1, executed);
+            Assert.Equal(UploadQueueManager.MaxQueueDepthPerPeer, executed.Count);
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+    }
+
     [Fact]
     public async Task Cancel_SameItem_IsDeduplicated()
     {

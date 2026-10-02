@@ -189,6 +189,69 @@ public class WebSeedSchedulingTests
         await manager.StopAsync();
     }
 
+    [Theory(Timeout = 15000)]
+    [InlineData("slow.test")]
+    [InlineData("fast.test")]
+    public async Task Worker_CancelsTheLosingSource_WhenVerificationFinishesAfterTheWinningHttpTask(string winnerHost)
+    {
+        await using var torrent = CreateTorrent();
+        torrent.Settings.Transfer.WebSeedMaxConnections = 2;
+        torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource = 1;
+        var clock = new FakeTimeProvider();
+        var client = new ControlledClient();
+        await using var manager = new WebSeedManager(torrent, ["http://slow.test/file", "http://fast.test/file"], clock);
+        manager.SetTestClient(client);
+        using var stream = Stream(torrent, 3, 4);
+        manager.Start();
+
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == 2);
+        var fast = client.Requests.Single(request => request.Host == "fast.test");
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        torrent.Pieces.AddPiece(4);
+        fast.Completion.SetResult(new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(new byte[16384]) });
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == 3);
+        var winner = client.Requests.Single(request => request.Piece == 3 && request.Host == winnerHost);
+        var loser = client.Requests.Single(request => request.Piece == 3 && request.Host != winnerHost);
+
+        // Keep the worker from replenishing slots while the piece waits in the hash/write queue.
+        torrent.FilesInternal.Checking = true;
+        winner.Completion.SetResult(new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(new byte[16384]) });
+        await TorrentTestUtility.WaitUntilAsync(() => manager.GetStats().ActiveDownloads == 1);
+
+        // Allow several cleanup passes before verification; merely receiving bytes must not
+        // cancel the rival, since the bytes could still fail their hash.
+        for (int i = 0; i < 3; i++)
+        {
+            clock.Advance(TimeSpan.FromSeconds(1));
+            await Task.Delay(100);
+        }
+
+        Assert.False(loser.Request.IsCanceled);
+        torrent.Pieces.AddPiece(3);
+        await TorrentTestUtility.AdvanceUntilAsync(clock, () => loser.Request.IsCanceled, TimeSpan.FromSeconds(1), timeoutMs: 3000);
+        await manager.StopAsync();
+        Assert.Equal(0, manager.GetStats().ActiveDownloads);
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task Worker_CancelsAnHttpDownload_WhenPeersVerifyItsPiece()
+    {
+        await using var torrent = CreateTorrent();
+        torrent.Settings.Transfer.WebSeedMaxConnections = 1;
+        var clock = new FakeTimeProvider();
+        var client = new ControlledClient();
+        await using var manager = new WebSeedManager(torrent, ["http://one.test/file"], clock);
+        manager.SetTestClient(client);
+        manager.Start();
+
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == 1);
+        var download = client.Requests.Single();
+        torrent.Pieces.AddPiece(download.Piece);
+        await TorrentTestUtility.AdvanceUntilAsync(clock, () => download.Request.IsCanceled, TimeSpan.FromSeconds(1), timeoutMs: 3000);
+        await manager.StopAsync();
+        Assert.Equal(0, manager.GetStats().ActiveDownloads);
+    }
+
     /// <summary>A stream open on <paramref name="torrent"/> that needs <paramref name="pieces"/>, in that order.</summary>
     private static PeerSharp.Streaming.TorrentStream Stream(Torrent torrent, params int[] pieces)
     {

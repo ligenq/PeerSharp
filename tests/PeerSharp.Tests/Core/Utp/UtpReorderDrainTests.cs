@@ -3,6 +3,7 @@ using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utp;
 using System.Buffers.Binary;
 using System.Net;
+using System.Reflection;
 
 namespace PeerSharp.Tests.Core.Utp;
 
@@ -57,6 +58,50 @@ public class UtpReorderDrainTests
     }
 
     private static ushort Seq(int index) => (ushort)(2 + index);
+
+    [Theory(Timeout = 30000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BufferedFin_WhenDrainingFillsTheChannel_DeliversAllDataAndEof(bool finHasPayload)
+    {
+        var (stream, _) = Connected();
+        using (stream)
+        {
+            for (int i = 0; i < Packets; i++)
+            {
+                Data(stream, Seq(i));
+            }
+
+            var channel = typeof(UtpStream).GetField("_pipeWriteChannel", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(stream)!;
+            var reader = channel.GetType().GetProperty("Reader")!.GetValue(channel)!;
+            var count = reader.GetType().GetProperty("Count")!;
+            await TorrentTestUtility.WaitUntilAsync(() => (int)count.GetValue(reader)! == 1000);
+
+            // The pipe writer is blocked until we start reading. Arrange two full 100-packet
+            // drains, with FIN needing the slot immediately after the final payload.
+            var reorder = typeof(UtpStream).GetField("_reorderBuffer", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(stream)!;
+            int buffered = (int)reorder.GetType().GetProperty("Count")!.GetValue(reorder)!;
+            int dataPackets = Packets + 200 - buffered - (finHasPayload ? 1 : 0);
+            for (int i = Packets; i < dataPackets; i++)
+            {
+                Data(stream, Seq(i));
+            }
+
+            byte[] finPayload = finHasPayload ? new byte[Payload] : [];
+            if (finHasPayload)
+            {
+                BinaryPrimitives.WriteUInt16BigEndian(finPayload, Seq(dataPackets));
+            }
+
+            stream.ProcessPacketWithSack(Header(MessageType.ST_FIN, Seq(dataPackets)), finPayload, 0, null, null, Remote);
+            await AssertDeliveredInOrderAsync(stream, dataPackets + (finHasPayload ? 1 : 0));
+
+            int eof = await stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken)
+                .AsTask().WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Equal(0, eof);
+            Assert.Equal(Seq(dataPackets), stream.AckNr);
+        }
+    }
 
     private static (UtpStream Stream, CountingManager Manager) Connected()
     {

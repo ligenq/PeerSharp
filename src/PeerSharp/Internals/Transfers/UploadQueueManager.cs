@@ -128,18 +128,7 @@ internal sealed class UploadQueueManager : IAsyncDisposable
 
         public Task PumpTask => pump;
 
-        public bool TryEnqueue(UploadQueueItem item)
-        {
-            // Counted before it can be read, so the pump never takes one it was not told of.
-            waiting.Add(item.PieceIndex, item.Offset);
-            if (channel.Writer.TryWrite(item))
-            {
-                return true;
-            }
-
-            waiting.Take(item.PieceIndex, item.Offset);
-            return false;
-        }
+        public bool TryEnqueue(UploadQueueItem item) => waiting.TryEnqueue(channel.Writer, item);
 
         public void Cancel(int piece, int offset) => waiting.Cancel(piece, offset);
 
@@ -173,14 +162,36 @@ internal sealed class WaitingRequests
     private readonly Lock _lock = new();
     private readonly Dictionary<(int Piece, int Offset), (int Queued, int Cancelled)> _requests = [];
 
+    /// <summary>Records a request only if the channel accepts it, before the pump can take it.</summary>
+    public bool TryEnqueue(ChannelWriter<UploadQueueItem> writer, UploadQueueItem item)
+    {
+        lock (_lock)
+        {
+            if (!writer.TryWrite(item))
+            {
+                return false;
+            }
+
+            // Take and Cancel use the same lock, so neither can observe an accepted request
+            // before it is counted. A refused request leaves earlier cancellations untouched.
+            AddCore(item.PieceIndex, item.Offset);
+            return true;
+        }
+    }
+
     /// <summary>A request has been queued.</summary>
     public void Add(int piece, int offset)
     {
         lock (_lock)
         {
-            var counts = _requests.GetValueOrDefault((piece, offset));
-            _requests[(piece, offset)] = (counts.Queued + 1, counts.Cancelled);
+            AddCore(piece, offset);
         }
+    }
+
+    private void AddCore(int piece, int offset)
+    {
+        var counts = _requests.GetValueOrDefault((piece, offset));
+        _requests[(piece, offset)] = (counts.Queued + 1, counts.Cancelled);
     }
 
     /// <summary>The peer cancelled a request for this block: the next one taken off the queue is refused, if one is waiting.</summary>
