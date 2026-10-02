@@ -14,6 +14,26 @@ namespace PeerSharp.Tests.Core.Trackers;
 
 public class UdpTrackerTests
 {
+    [Fact(Timeout = 30000)]
+    public async Task ConnectResponse_FromWrongEndpoint_IsIgnored()
+    {
+        using var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
+        using var cancellation = new CancellationTokenSource();
+        var announce = tracker.AnnounceAsync(TrackerEvent.None, cancellation.Token);
+        var request = await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
+        var response = new byte[16];
+        BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(4), BinaryPrimitives.ReadInt32BigEndian(request.AsSpan(12)));
+        BinaryPrimitives.WriteInt64BigEndian(response.AsSpan(8), 1234);
+        _socketFactory.LastSocket.TriggerResponse(response, new IPEndPoint(IPAddress.Loopback, 81));
+        await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(2));
+        Assert.Single(_socketFactory.LastSocket.SentPackets);
+        _socketFactory.LastSocket.TriggerResponse(response);
+        await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => announce);
+    }
+
     private sealed class TestPortListener(int port) : IPortListener
     {
         public int Port { get; } = port;
@@ -26,6 +46,7 @@ public class UdpTrackerTests
     {
         public List<byte[]> SentPackets { get; } = [];
         public bool Closed { get; private set; }
+        private IPEndPoint? _lastDestination;
         private TaskCompletionSource<UdpReceiveResult>? _receiveTcs;
         private readonly Queue<UdpReceiveResult> _queuedResponses = new();
         private readonly Lock _receiveLock = new();
@@ -33,9 +54,9 @@ public class UdpTrackerTests
 
         public Socket Client => throw new NotImplementedException();
 
-        public void TriggerResponse(byte[] data)
+        public void TriggerResponse(byte[] data, IPEndPoint? sender = null)
         {
-            var response = new UdpReceiveResult(data, new IPEndPoint(IPAddress.Loopback, 0));
+            var response = new UdpReceiveResult(data, sender ?? _lastDestination!);
             TaskCompletionSource<UdpReceiveResult>? tcs;
             lock (_receiveLock)
             {
@@ -165,6 +186,7 @@ public class UdpTrackerTests
 
         public ValueTask<int> SendAsync(ReadOnlyMemory<byte> datagram, IPEndPoint endPoint, CancellationToken ct)
         {
+            _lastDestination = endPoint;
             var packet = datagram.ToArray();
             lock (_sentPacketWaiters)
             {

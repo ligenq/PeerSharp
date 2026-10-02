@@ -480,16 +480,22 @@ public class TorrentTests
     }
 
     [Fact]
-    public async Task StopAsync_SwallowsPeerTransportStopException()
+    public async Task StopAsync_PeerTransportFailure_RequiresRecoveryBeforeRestart()
     {
-        var torrent = TorrentTestUtility.CreateMinimal();
+        await using var torrent = TorrentTestUtility.CreateMinimal();
         var transport = new RecordingPeerTransport { ThrowOnStop = true };
         torrent.RegisterPeerTransport(transport);
 
         await torrent.StartAsync();
-        await torrent.StopAsync();
+        await Assert.ThrowsAsync<AggregateException>(() => torrent.StopAsync());
 
         Assert.Equal(1, transport.StopCalls);
+        Assert.False(torrent.Started);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => torrent.StartAsync());
+        transport.ThrowOnStop = false;
+        await torrent.StopAsync();
+        await torrent.StartAsync();
+        Assert.True(torrent.Started);
     }
 
     [Fact]
@@ -512,7 +518,7 @@ public class TorrentTests
         public int StartCalls { get; private set; }
         public int StopCalls { get; private set; }
         public int DisposeCalls { get; private set; }
-        public bool ThrowOnStop { get; init; }
+        public bool ThrowOnStop { get; set; }
         public bool ThrowOnDispose { get; init; }
 
         public Task StartAsync(CancellationToken cancellationToken = default)

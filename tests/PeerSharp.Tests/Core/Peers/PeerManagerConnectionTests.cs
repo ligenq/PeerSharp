@@ -151,10 +151,9 @@ public class PeerManagerConnectionTests
         var peer1 = factory.LastCreated;
 
         // Verify delay logic: advance time
-        timeProvider.Advance(TimeSpan.FromSeconds(1.1));
-
-        // Now second should proceed
-        await TorrentTestUtility.WaitUntilAsync(() => !ReferenceEquals(factory.LastCreated, peer1), because: "second peer to be created");
+        await TorrentTestUtility.AdvanceUntilAsync(timeProvider,
+            () => !ReferenceEquals(factory.LastCreated, peer1), TimeSpan.FromSeconds(1.1),
+            because: "second peer to be created after its delay is armed");
 
         Assert.NotSame(peer1, factory.LastCreated);
         Assert.Equal(1, factory.LastCreated.ConnectCalls);

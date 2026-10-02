@@ -8,6 +8,116 @@ namespace PeerSharp.Tests.Core.Dht;
 
 public class DhtManagerTests
 {
+    [Fact]
+    public async Task UnknownQuery_ReturnsMethodUnknownError()
+    {
+        await using var dht = new DhtManager(_localId, _listener, _settings, _timeProvider);
+        await dht.StartAsync();
+        var query = new BDict();
+        query.Dict["t"] = new BString("x"u8.ToArray());
+        query.Dict["y"] = new BString("q"u8.ToArray());
+        query.Dict["q"] = new BString("unknown"u8.ToArray());
+        var args = new BDict();
+        args.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        query.Dict["a"] = args;
+        dht.Receive(BencodeWriter.Write(query), new IPEndPoint(IPAddress.Loopback, 6881));
+        var response = Assert.IsType<BDict>(BencodeParser.Parse(Assert.Single(_listener.SentPackets).Data));
+        Assert.Equal("e", response.GetString("y"));
+        Assert.Equal(204, Assert.IsType<BNumber>(Assert.IsType<BList>(response.Get("e")).List[0]).Value);
+    }
+    [Theory(Timeout = 30000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AwaitedQuery_SpoofedResponseOrError_CannotCompleteRealRequest(bool error)
+    {
+        await using var fixture = await DhtLoopbackFixture.CreateAsync();
+        fixture.ClientTransport.Blackhole = true;
+        byte[]? packet = null;
+        fixture.ClientTransport.OnSend = data => packet = data.ToArray();
+        var pending = fixture.Client.SampleInfoHashesAsync(fixture.ServerEndPoint, new DhtTarget(InfoHash.CreateRandom().Span));
+        var query = Assert.IsType<BDict>(BencodeParser.Parse(Assert.IsType<byte[]>(packet)));
+        var reply = new BDict();
+        reply.Dict["t"] = query.Get("t")!;
+        reply.Dict["y"] = new BString(error ? "e"u8.ToArray() : "r"u8.ToArray());
+        var body = new BDict();
+        body.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        body.Dict["samples"] = new BString(InfoHash.CreateRandom().ToArray());
+        if (error)
+        {
+            var failure = new BList();
+            failure.List.Add(new BNumber(204));
+            failure.List.Add(new BString("unknown"u8.ToArray()));
+            reply.Dict["e"] = failure;
+        }
+        else { reply.Dict["r"] = body; }
+        fixture.Client.Receive(BencodeWriter.Write(reply), new IPEndPoint(fixture.ServerEndPoint.Address, fixture.ServerEndPoint.Port + 1));
+        var expected = InfoHash.CreateRandom();
+        reply.Dict["y"] = new BString("r"u8.ToArray());
+        reply.Dict.Remove("e");
+        body.Dict["samples"] = new BString(expected.ToArray());
+        reply.Dict["r"] = body;
+        fixture.Client.Receive(BencodeWriter.Write(reply), fixture.ServerEndPoint);
+        var result = await pending;
+        Assert.Equal(expected, Assert.Single(Assert.IsType<DhtInfoHashSampleReply>(result).Samples));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PingResponse_WrongSenderOrMalformedId_DoesNotConsumeTransaction(bool malformedId)
+    {
+        await using var dht = new DhtManager(_localId, _listener, _settings, _timeProvider);
+        await dht.StartAsync();
+        var expected = new IPEndPoint(IPAddress.Loopback, 6881);
+        dht.Ping(expected);
+        var query = Assert.IsType<BDict>(BencodeParser.Parse(Assert.Single(_listener.SentPackets).Data));
+        var reply = new BDict();
+        reply.Dict["t"] = query.Get("t")!;
+        reply.Dict["y"] = new BString("r"u8.ToArray());
+        var body = new BDict();
+        body.Dict["id"] = new BString(new byte[malformedId ? 19 : 20]);
+        reply.Dict["r"] = body;
+        dht.Receive(BencodeWriter.Write(reply), malformedId ? expected : new IPEndPoint(IPAddress.Loopback, 6882));
+        Assert.Equal(1, dht.TransactionCount);
+        Assert.Equal(0, dht.KnownNodeCount);
+        body.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        dht.Receive(BencodeWriter.Write(reply), expected);
+        Assert.Equal(0, dht.TransactionCount);
+        Assert.Equal(1, dht.KnownNodeCount);
+    }
+
+    [Theory]
+    [InlineData("find_node", "target")]
+    [InlineData("get_peers", "info_hash")]
+    public async Task Query_ShortTarget_ReturnsProtocolError(string method, string targetField)
+    {
+        await using var dht = new DhtManager(_localId, _listener, _settings, _timeProvider);
+        await dht.StartAsync();
+        var query = new BDict();
+        query.Dict["t"] = new BString("x"u8.ToArray());
+        query.Dict["y"] = new BString("q"u8.ToArray());
+        query.Dict["q"] = new BString(System.Text.Encoding.ASCII.GetBytes(method));
+        var args = new BDict();
+        args.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        args.Dict[targetField] = new BString(new byte[19]);
+        query.Dict["a"] = args;
+        dht.Receive(BencodeWriter.Write(query), new IPEndPoint(IPAddress.Loopback, 6881));
+        var reply = Assert.IsType<BDict>(BencodeParser.Parse(Assert.Single(_listener.SentPackets).Data));
+        Assert.Equal("e", reply.GetString("y"));
+        Assert.Equal(203, Assert.IsType<BNumber>(Assert.IsType<BList>(reply.Get("e")).List[0]).Value);
+    }
+
+    [Fact]
+    public async Task Stop_ClearsTransactions_AndStartAfterDisposeThrows()
+    {
+        var dht = new DhtManager(_localId, _listener, _settings, _timeProvider);
+        await dht.StartAsync();
+        dht.Ping(new IPEndPoint(IPAddress.Loopback, 6881));
+        await dht.StopAsync();
+        Assert.Equal(0, dht.TransactionCount);
+        await dht.DisposeAsync();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => dht.StartAsync());
+    }
     private sealed class BlockingDnsResolver : IDnsResolver
     {
         public async Task<IPAddress[]> GetHostAddressesAsync(string hostNameOrAddress, CancellationToken cancellationToken = default)

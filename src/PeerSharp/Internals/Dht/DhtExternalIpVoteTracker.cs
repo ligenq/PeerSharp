@@ -8,6 +8,7 @@ internal sealed class DhtExternalIpVoteTracker
     private readonly int _requiredVotes;
     private IPAddress? _externalIp;
     private int _votes;
+    private readonly HashSet<IPAddress> _sources = [];
 
     public DhtExternalIpVoteTracker(IPAddress? externalIp = null, int initialVotes = 0, int requiredVotes = 3)
     {
@@ -40,7 +41,15 @@ internal sealed class DhtExternalIpVoteTracker
         return ProcessReport(TryParseReport(ipBytes));
     }
 
+    public DhtExternalIpVoteResult ProcessReport(ReadOnlySpan<byte> ipBytes, IPAddress source)
+    {
+        return ProcessReport(TryParseReport(ipBytes), source);
+    }
+
     public DhtExternalIpVoteResult ProcessReport(IPAddress? reportedIp)
+        => ProcessReport(reportedIp, null);
+
+    private DhtExternalIpVoteResult ProcessReport(IPAddress? reportedIp, IPAddress? source)
     {
         if (reportedIp == null || !DhtSecurity.ShouldValidate(reportedIp))
         {
@@ -49,6 +58,15 @@ internal sealed class DhtExternalIpVoteTracker
 
         lock (_lock)
         {
+            bool newCandidate = _externalIp == null || !_externalIp.Equals(reportedIp);
+            if (newCandidate)
+            {
+                _sources.Clear();
+            }
+            if (source != null && (newCandidate || _votes < _requiredVotes) && !_sources.Add(source))
+            {
+                return DhtExternalIpVoteResult.Ignored;
+            }
             if (_externalIp == null)
             {
                 _externalIp = reportedIp;

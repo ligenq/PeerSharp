@@ -10,6 +10,29 @@ namespace PeerSharp.Tests.Core.Network;
 
 public class LsdManagerTests
 {
+    [Fact]
+    public async Task PrivateTorrent_AnnounceAndReceive_DoNotExposeOrDiscoverPeers()
+    {
+        await using var torrent = TorrentTestUtility.CreateMinimal(new TorrentFileMetadata { Info = { Hash = InfoHash.CreateRandom(), IsPrivate = true } });
+        _resolver.Torrents[torrent.Hash] = torrent;
+        await using var lsd = new LsdManager(_settings, _resolver, _timeProvider, _socketFactory);
+        lsd.Start();
+        await lsd.AnnounceAsync(torrent.Hash);
+        Assert.Empty(_socketFactory.IPv4Socket.SentPackets);
+        Assert.Empty(_socketFactory.IPv6Socket.SentPackets);
+        var sender = new IPEndPoint(IPAddress.Parse("1.2.3.4"), 12345);
+        lsd.ProcessMessage($"BT-SEARCH * HTTP/1.1\r\nPort: 6000\r\nInfohash: {torrent.Hash.ToHexString()}\r\ncookie: other\r\n\r\n", sender);
+        Assert.False(KnownPeersContain(torrent, new IPEndPoint(sender.Address, 6000)));
+    }
+
+    [Fact]
+    public async Task ProcessMessage_OutOfRangePort_IsIgnored()
+    {
+        await using var torrent = TorrentTestUtility.CreateMinimal(new TorrentFileMetadata { Info = { Hash = InfoHash.CreateRandom() } });
+        _resolver.Torrents[torrent.Hash] = torrent;
+        await using var lsd = new LsdManager(_settings, _resolver, _timeProvider, _socketFactory);
+        lsd.ProcessMessage($"BT-SEARCH * HTTP/1.1\r\nPort: 65536\r\nInfohash: {torrent.Hash.ToHexString()}\r\ncookie: other\r\n\r\n", new IPEndPoint(IPAddress.Loopback, 12345));
+    }
     private class MockUdpSocket : IUdpSocket
     {
         public List<byte[]> SentPackets { get; } = [];
