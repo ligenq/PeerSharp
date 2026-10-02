@@ -218,6 +218,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     {
         remote = NetworkUtils.NormalizeEndPoint(remote);
 
+        if (!AcceptsIncomingEncryption(encryption))
+        {
+            stream.Close();
+            return;
+        }
+
         // Reject if force proxy is enabled (incoming connections are not proxied)
         if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
         {
@@ -340,6 +346,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private async Task AddIncomingTcpPeerCoreAsync(System.Net.Sockets.TcpClient client, byte[] handshake, ProtocolEncryption? encryption)
     {
+        if (!AcceptsIncomingEncryption(encryption))
+        {
+            client.Close();
+            return;
+        }
+
         // Reject if force proxy is enabled (incoming connections are not proxied)
         if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
         {
@@ -436,6 +448,16 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // The factory gave the peer its stream over this socket; starting on a second one would read the
         // same socket through two wrappers.
         peer.Start(peer.Stream!, encryption);
+    }
+
+    private bool AcceptsIncomingEncryption(ProtocolEncryption? encryption)
+    {
+        return _settings.Connection.Encryption switch
+        {
+            Encryption.Require => encryption != null,
+            Encryption.Refuse => encryption == null,
+            _ => true
+        };
     }
 
     public void AddPeers(IEnumerable<IPEndPoint> peers, PeerSourceKind sourceKind = PeerSourceKind.Unknown, PeerCommunication? source = null)

@@ -114,6 +114,53 @@ public class UtpSackFastRetransmitTests
         Assert.True((double)Get(stream, "_cwnd")! > 50000d, "The window was cut twice for one hole.");
     }
 
+    [Theory]
+    [InlineData(100)]
+    [InlineData(65532)]
+    public void EachHoleNeedsEnoughLaterAcknowledgedPackets(int firstSeq)
+    {
+        var clock = new FakeTimeProvider();
+        var stream = CreateStream(clock);
+        var outstanding = Outstanding(stream, clock, (ushort)firstSeq, count: 12);
+        ushort earlyHole = (ushort)(firstSeq + 1);
+        ushort lateHole = (ushort)(firstSeq + 6);
+
+        Ack(stream, (ushort)firstSeq, [((ushort)(firstSeq + 2), (ushort)(firstSeq + 5)),
+            ((ushort)(firstSeq + 7), (ushort)(firstSeq + 7))]);
+
+        Assert.True(Resent(outstanding[earlyHole]));
+        Assert.False(Resent(outstanding[lateHole]));
+
+        // Four later packets now provide enough evidence for the second hole too.
+        Ack(stream, (ushort)firstSeq, [((ushort)(firstSeq + 2), (ushort)(firstSeq + 5)),
+            ((ushort)(firstSeq + 7), (ushort)(firstSeq + 10))]);
+        Assert.True(Resent(outstanding[lateHole]));
+    }
+
+    [Fact]
+    public void RepeatedSackRangesDoNotCountTheSamePacketTwice()
+    {
+        var clock = new FakeTimeProvider();
+        var stream = CreateStream(clock);
+        var outstanding = Outstanding(stream, clock, firstSeq: 1, count: 8);
+
+        Ack(stream, ackNr: 1, sack: [(3, 4), (3, 4)]);
+
+        Assert.False(Resent(outstanding[2]));
+    }
+
+    [Fact]
+    public void SackBitsBeyondLastSentDoNotSupplyLossEvidence()
+    {
+        var clock = new FakeTimeProvider();
+        var stream = CreateStream(clock);
+        var outstanding = Outstanding(stream, clock, firstSeq: 1, count: 8);
+
+        Ack(stream, ackNr: 1, sack: [(9, 16)]);
+
+        Assert.All(outstanding.Values, packet => Assert.False(Resent(packet)));
+    }
+
     /// <summary>Puts <paramref name="count"/> packets in flight and returns them by sequence number.</summary>
     private static Dictionary<ushort, object> Outstanding(
         UtpStream stream, FakeTimeProvider clock, ushort firstSeq, int count)

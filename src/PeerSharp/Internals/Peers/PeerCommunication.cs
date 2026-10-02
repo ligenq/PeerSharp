@@ -966,6 +966,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             // Use provided timeout (from adaptive timeout manager)
             using var connectTimeoutCts = new CancellationTokenSource(timeoutMs);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ConnectionToken, connectTimeoutCts.Token, ct);
+            // The dial budget also bounds negotiation and handshake writes/reads.
+            using var abandon = linkedCts.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
 
             // The same tokens without the deadline. Giving up on a peer is this engine's own decision
             // and belongs in the result; only these two mean somebody asked us to stop.
@@ -1103,6 +1105,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
             }
 
+            linkedCts.Token.ThrowIfCancellationRequested();
             _connected = 1;
 
             // From here a handshake is genuinely attempted, so whatever happens next is evidence
@@ -1134,14 +1137,20 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         return false;
                     }
 
+                    linkedCts.Token.ThrowIfCancellationRequested();
                     try { await Listener.HandshakeFinishedAsync(this).ConfigureAwait(false); } catch (Exception ex) { _logger.LogError(ex, "HandshakeFinished callback error"); }
                     StartBackgroundLoops();
                     return true;
                 }
                 else if (encryptionResult == EncryptionHandshakeResult.PlaintextDetected)
                 {
-                    // Peer sent plaintext response, already handled in handshake
-                    _logger.LogDebug("Peer {Ip}:{Port} responded with plaintext, handshake complete", ip, port);
+                    if (encryptionSetting == Encryption.Require || !await PerformPlaintextHandshakeAsync().ConfigureAwait(false))
+                    {
+                        await CloseAsync().ConfigureAwait(false);
+                        return false;
+                    }
+
+                    linkedCts.Token.ThrowIfCancellationRequested();
                     try { await Listener.HandshakeFinishedAsync(this).ConfigureAwait(false); } catch (Exception ex) { _logger.LogError(ex, "HandshakeFinished callback error"); }
                     StartBackgroundLoops();
                     return true;
@@ -1176,6 +1185,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             _logger.LogDebug("Trying plaintext handshake with {Ip}:{Port}", ip, port);
             if (await PerformPlaintextHandshakeAsync().ConfigureAwait(false))
             {
+                linkedCts.Token.ThrowIfCancellationRequested();
                 try { await Listener.HandshakeFinishedAsync(this).ConfigureAwait(false); } catch (Exception ex) { _logger.LogError(ex, "HandshakeFinished callback error"); }
                 StartBackgroundLoops();
                 return true;
@@ -1644,7 +1654,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
 
         _handshakePreRead = true;
-        _preReadHandshake = handshake;
+        _preReadHandshake = handshake.AsSpan(0, 68).ToArray();
+        if (handshake.Length > 68)
+        {
+            _bufferedAfterHandshake = handshake.AsSpan(68).ToArray();
+        }
 
         // Extract reserved bytes flags (bytes 20-27)
         RemoteSupportsExtensions = parsed.SupportsExtensions;
@@ -2009,6 +2023,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private async Task IncomingHandshakeLoopAsync(CancellationToken token)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(DefaultConnectionTimeoutMs);
+        using var abandon = deadline.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
+        var encryptionSetting = _torrent.Settings.Connection.Encryption;
+        if ((_encryptionHandshakeComplete && encryptionSetting == Encryption.Refuse)
+            || (_handshakePreRead && !_encryptionHandshakeComplete && encryptionSetting == Encryption.Require))
+        {
+            await CloseAsync().ConfigureAwait(false);
+            return;
+        }
+
         // If encryption was already established by PortListener/dispatcher, skip negotiation
         if (_encryptionHandshakeComplete)
         {
@@ -2030,8 +2055,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
-        var encryptionSetting = _torrent.Settings.Connection.Encryption;
-
         // Try encrypted handshake first (unless Encryption=Refuse)
         if (encryptionSetting != Encryption.Refuse)
         {
@@ -2044,18 +2067,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 StartBackgroundLoops();
                 return;
             }
-            else if (result == EncryptionHandshakeResult.PlaintextDetected)
+            else if (result == EncryptionHandshakeResult.PlaintextDetected && encryptionSetting != Encryption.Require)
             {
                 // Handle as plaintext - fall through
                 _logger.LogDebug("Incoming connection from {PeerName} is plaintext", Name);
             }
-            else if (encryptionSetting == Encryption.Require)
+            else
             {
-                _logger.LogWarning("Encryption required but incoming connection from {PeerName} failed encryption", Name);
+                _logger.LogDebug("Incoming encryption negotiation failed for {PeerName}", Name);
                 await CloseAsync().ConfigureAwait(false);
                 return;
             }
-            // Failed encryption in Allow mode - try plaintext
         }
 
         // Handle plaintext connection
@@ -2122,6 +2144,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private async Task OutgoingConnectedHandshakeLoopAsync(CancellationToken token)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(DefaultConnectionTimeoutMs);
+        using var abandon = deadline.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
         try
         {
             if (!await PerformPlaintextHandshakeAsync().ConfigureAwait(false))
@@ -2164,7 +2189,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return EncryptionHandshakeResult.Failed;
             }
 
-            var pe = new ProtocolEncryptionHandshake(_torrent.InfoFile.Info.Hash.ToArray(), initiator);
+            var info = _torrent.InfoFile.Info;
+            using var pe = new ProtocolEncryptionHandshake(
+                (info.IsV1 ? info.Hash : info.HashV2.TruncateToV1()).ToArray(), initiator);
 
             if (initiator)
             {
@@ -2196,12 +2223,23 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 Interlocked.Exchange(ref _lastActivityTicksValue, Environment.TickCount64);
 
                 // Detect if peer responded with plaintext BitTorrent handshake instead of encryption
-                if (firstRead && initiator && read >= 20 && buffer[0] == 19 && buffer.AsSpan(1, 19).SequenceEqual("BitTorrent protocol"u8))
+                if (firstRead && buffer[0] == 19)
                 {
-                    _logger.LogDebug("Peer {PeerName} responded with plaintext instead of encryption", Name);
-                    // Buffer the received data and handle as plaintext
-                    _plaintextBuffer = buffer.AsSpan(0, read).ToArray();
-                    return EncryptionHandshakeResult.PlaintextDetected;
+                    while (read < 20)
+                    {
+                        var (more, _) = await ReadHandshakeBytesAsync(stream, buffer.AsMemory(read, 20 - read), 5000).ConfigureAwait(false);
+                        if (more == 0)
+                        {
+                            return EncryptionHandshakeResult.ConnectionClosed;
+                        }
+                        read += more;
+                    }
+
+                    if (buffer.AsSpan(1, 19).SequenceEqual("BitTorrent protocol"u8))
+                    {
+                        _plaintextBuffer = buffer.AsSpan(0, read).ToArray();
+                        return EncryptionHandshakeResult.PlaintextDetected;
+                    }
                 }
                 firstRead = false;
 
@@ -2219,13 +2257,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return EncryptionHandshakeResult.Failed;
             }
 
-            // Decrypt it and store in _plaintextBuffer so ReadHandshakeAsync can pick it up
+            // IA is already decrypted; any bytes beyond Pe3/Pe4 still need decryption.
             var trailing = pe.TrailingData;
-            if (trailing.Length > 0 && pe.Encryption != null)
+            if (pe.Encryption == null)
             {
-                pe.Encryption.RC4In.Decrypt(trailing);
-                _plaintextBuffer = trailing;
+                return EncryptionHandshakeResult.Failed;
             }
+            pe.Encryption.Decrypt(trailing);
+            _plaintextBuffer = [.. pe.ReceivedPayload ?? [], .. trailing];
 
             // Re-check the property: if CloseAsync ran while we were handshaking,
             // Stream will have been nulled and the underlying socket disposed,
@@ -2236,12 +2275,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // and owning it makes one Dispose cascade down to the socket.
                 Stream = new EncryptedStream(
                     stream,
-                    pe.Encryption ?? new ProtocolEncryption(),
+                    pe.Encryption,
                     leaveInnerOpen: false);
 
-                if (pe.ReceivedPayload != null)
+                if (!initiator && !await ReadHandshakeAsync().ConfigureAwait(false))
                 {
-                    await SetHandshakeReceivedAsync(pe.ReceivedPayload).ConfigureAwait(false);
+                    return EncryptionHandshakeResult.ConnectionClosed;
                 }
 
                 return EncryptionHandshakeResult.Success;
