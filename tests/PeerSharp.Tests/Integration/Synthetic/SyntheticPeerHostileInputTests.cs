@@ -119,7 +119,7 @@ public class SyntheticPeerHostileInputTests : IDisposable
     /// that real requests still flow and the test has something to be wrong about.
     /// </summary>
     [Fact(Timeout = 120000)]
-    public async Task AHaveForAPieceThatCannotExistIsNeverRequestedBack()
+    public async Task AHaveForAPieceThatCannotExistClosesTheConnection()
     {
         var cancellationToken = TestContext.Current.CancellationToken;
         await using var peer = SyntheticPeer.Start(new SyntheticPeerOptions());
@@ -135,21 +135,16 @@ public class SyntheticPeerHostileInputTests : IDisposable
         BinaryPrimitives.WriteInt32BigEndian(impossible, int.MaxValue);
         await connection.SendFrameAsync(4, impossible, cancellationToken);
 
-        BinaryPrimitives.WriteInt32BigEndian(impossible, -1);
-        await connection.SendFrameAsync(4, impossible, cancellationToken);
-
-        await connection.SendFrameAsync(1, ReadOnlyMemory<byte>.Empty, cancellationToken); // Unchoke.
-
-        await AssertRequestsStayInsideTheTorrentAsync(connection, cancellationToken);
+        Assert.True(await connection.WaitForCloseAsync(TimeSpan.FromSeconds(10), cancellationToken));
+        await AssertEngineStillServesPeersAsync(engine, torrent, cancellationToken);
     }
 
     /// <summary>
-    /// A bitfield four times longer than the torrent, every bit set. The decoder accepts any length
-    /// here and the piece map clamps, so nothing throws - which is exactly why the interesting question
-    /// is what gets requested afterwards rather than whether it was rejected.
+    /// A bitfield four times longer than the torrent, every bit set, must be rejected before the
+    /// advertised bits can influence piece picking.
     /// </summary>
     [Fact(Timeout = 120000)]
-    public async Task AnOverlongBitfieldDoesNotProduceRequestsForPiecesThatDoNotExist()
+    public async Task AnOverlongBitfieldClosesTheConnection()
     {
         var cancellationToken = TestContext.Current.CancellationToken;
         await using var peer = SyntheticPeer.Start(new SyntheticPeerOptions());
@@ -162,9 +157,8 @@ public class SyntheticPeerHostileInputTests : IDisposable
         byte[] overlong = new byte[((PieceCount + 7) / 8) * 4];
         Array.Fill(overlong, (byte)0xFF);
         await connection.SendFrameAsync(5, overlong, cancellationToken);
-        await connection.SendFrameAsync(1, ReadOnlyMemory<byte>.Empty, cancellationToken); // Unchoke.
-
-        await AssertRequestsStayInsideTheTorrentAsync(connection, cancellationToken);
+        Assert.True(await connection.WaitForCloseAsync(TimeSpan.FromSeconds(10), cancellationToken));
+        await AssertEngineStillServesPeersAsync(engine, torrent, cancellationToken);
     }
 
     /// <summary>
@@ -214,35 +208,6 @@ public class SyntheticPeerHostileInputTests : IDisposable
             $"A piece message carried {(oversized.Length > 0 ? oversized[0].Payload.Length - 8 : 0)} bytes for a " +
             $"block that may be at most {PieceLength}. A peer can then choose how much we read and send per " +
             $"request. Traffic: {connection.Describe()}");
-    }
-
-    /// <summary>
-    /// The shared claim of the two availability tests: whatever the peer said it had, nothing may be
-    /// asked for that is not a piece of this torrent.
-    /// </summary>
-    private static async Task AssertRequestsStayInsideTheTorrentAsync(
-        SyntheticConnection connection, CancellationToken cancellationToken)
-    {
-        bool requested = await connection.WaitForFrameAsync(
-            static frame => frame.Id == 6, TimeSpan.FromSeconds(60), cancellationToken);
-
-        Assert.True(
-            requested,
-            $"Nothing was requested at all, so this test cannot tell a correctly ignored piece from a " +
-            $"connection that never got going. Traffic: {connection.Describe()}");
-
-        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
-
-        var outside = connection.Frames
-            .Where(static frame => frame.Id == 6 && frame.Payload.Length >= 4)
-            .Select(static frame => BinaryPrimitives.ReadInt32BigEndian(frame.Payload))
-            .Where(static index => index < 0 || index >= PieceCount)
-            .ToArray();
-
-        Assert.True(
-            outside.Length == 0,
-            $"Requested piece index(es) {string.Join(", ", outside.Distinct())} from a torrent with " +
-            $"{PieceCount} pieces. The peer decided what we would ask for by claiming to have it.");
     }
 
     private static byte[] FullBitfield()

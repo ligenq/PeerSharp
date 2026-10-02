@@ -70,6 +70,8 @@ internal sealed class Storage : IStorage
     /// </summary>
     public IReadOnlyDictionary<int, string>? RenamedFiles { get; init; }
 
+    internal Func<PiecesProgress>? GetCompletedPieces { get; init; }
+
     internal bool IsInitialized => Volatile.Read(ref _initialized) == 1;
 
     public void DeleteAll()
@@ -583,6 +585,8 @@ internal sealed class Storage : IStorage
                     toAllocate.Add((fullPath, file.Size));
                 }
 
+                ValidateCompletedPiecesBeforeAllocation();
+
                 if (toAllocate.Count > 0)
                 {
                     var allocationOptions = new ParallelOptions
@@ -628,6 +632,33 @@ internal sealed class Storage : IStorage
         }
     }
 
+    private void ValidateCompletedPiecesBeforeAllocation()
+    {
+        var pieces = GetCompletedPieces?.Invoke();
+        if (pieces == null || pieces.ReceivedCount == 0 || _fileMapper == null)
+        {
+            return;
+        }
+        var lengths = _files.Select(entry => entry.FullPath != null && File.Exists(entry.FullPath)
+            ? new FileInfo(entry.FullPath).Length : 0).ToArray();
+        for (int piece = 0; piece < pieces.Count; piece++)
+        {
+            if (!pieces.HasPiece(piece))
+            {
+                continue;
+            }
+            foreach (var operation in _fileMapper.MapRange((long)piece * _info.Info.PieceSize, checked((int)_info.Info.GetPieceSize(piece))))
+            {
+                if (!_info.Info.Files[operation.FileIndex].IsPadding &&
+                    (_files[operation.FileIndex].FullPath == null || operation.FileOffset + operation.Length > lengths[operation.FileIndex]))
+                {
+                    pieces.RemovePiece(piece);
+                    break;
+                }
+            }
+        }
+    }
+
     public async Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct = default)
     {
         byte[] buffer = GC.AllocateUninitializedArray<byte>(length);
@@ -637,6 +668,12 @@ internal sealed class Storage : IStorage
 
     public async ValueTask ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposal.IsDisposed, this);
+        if (!IsInitialized)
+        {
+            throw new InvalidOperationException("Storage is not initialized");
+        }
         // A block that lies inside one file, which is almost every read a seeding torrent does. The
         // general path below takes the selection lock, materialises the operations into a list and
         // collects a second list of the locks it took, all for one read of sixteen kilobytes. Under
@@ -692,13 +729,6 @@ internal sealed class Storage : IStorage
 
             foreach (var (fileIdx, fileOffset, readSize, bufferOffset) in fileOperations)
             {
-                if (_fileSkipped[fileIdx])
-                {
-                    // Deselected file - the data legitimately does not exist locally
-                    buffer.Slice(bufferOffset, readSize).Span.Clear();
-                    continue;
-                }
-
                 if (_fileFailed[fileIdx])
                 {
                     // Serving zeroed data for a failed file would poison uploads: remote peers
@@ -713,6 +743,10 @@ internal sealed class Storage : IStorage
                 var entry = _files[fileIdx];
                 if (entry.FullPath == null)
                 {
+                    if (!_info.Info.Files[fileIdx].IsPadding)
+                    {
+                        throw new StorageException("Cannot read a file with an invalid path", null, isRecoverable: false);
+                    }
                     buffer.Slice(bufferOffset, readSize).Span.Clear();
                     continue;
                 }
@@ -747,13 +781,6 @@ internal sealed class Storage : IStorage
     /// </summary>
     private async ValueTask ReadFromOneFileAsync(int fileIdx, long fileOffset, Memory<byte> destination, CancellationToken ct)
     {
-        if (_fileSkipped[fileIdx])
-        {
-            // Deselected file - the data legitimately does not exist locally.
-            destination.Span.Clear();
-            return;
-        }
-
         if (_fileFailed[fileIdx])
         {
             // Serving zeroed data for a failed file would poison uploads. See the general path.
@@ -766,6 +793,10 @@ internal sealed class Storage : IStorage
         var entry = _files[fileIdx];
         if (entry.FullPath == null)
         {
+            if (!_info.Info.Files[fileIdx].IsPadding)
+            {
+                throw new StorageException("Cannot read a file with an invalid path", null, isRecoverable: false);
+            }
             destination.Span.Clear();
             return;
         }
@@ -896,6 +927,12 @@ internal sealed class Storage : IStorage
 
     public async ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposal.IsDisposed, this);
+        if (!IsInitialized)
+        {
+            throw new InvalidOperationException("Storage is not initialized");
+        }
         // Everything after this point must run inside the try: leaking the in-flight count
         // (for example when the token is already cancelled, or _fileSelectionLock has been
         // disposed by a racing shutdown) would leave _writesDrained permanently uncompleted and
@@ -928,12 +965,6 @@ internal sealed class Storage : IStorage
 
                 foreach (var (fileIdx, fileOffset, writeSize, dataOffset) in fileOperations)
                 {
-                    if (_fileSkipped[fileIdx])
-                    {
-                        // Deselected file - dropping this span is intentional
-                        continue;
-                    }
-
                     if (_fileFailed[fileIdx])
                     {
                         // Never pretend the write succeeded: silently skipping would let the piece
@@ -950,6 +981,12 @@ internal sealed class Storage : IStorage
                     {
                         try
                         {
+                            if (_fileSkipped[fileIdx])
+                            {
+                                // Selection controls scheduling, but bytes already verified must survive
+                                // a selection change or a shared-piece edge in a deselected file.
+                                await EnsureFileAllocatedAsync(entry.FullPath, entry.Length, ct).ConfigureAwait(false);
+                            }
                             using var lease = await _handleCache.GetHandleAsync(entry.FullPath, true, ct).ConfigureAwait(false);
                             await WriteWithThrottleAsync(lease.Handle, data.Slice(dataOffset, writeSize), fileOffset, ct).ConfigureAwait(false);
                             // Set under the file lock that FlushAsync also takes, so a flush cannot
@@ -975,6 +1012,10 @@ internal sealed class Storage : IStorage
                                 ex,
                                 isRecoverable: !fileNowFailed);
                         }
+                    }
+                    else if (!_info.Info.Files[fileIdx].IsPadding)
+                    {
+                        throw new StorageException("Cannot store verified data for a file with an invalid path", null, isRecoverable: false);
                     }
                 }
             }
@@ -1236,7 +1277,16 @@ internal sealed class Storage : IStorage
         // showed up in a profile as thread-pool churn rather than as disk work.
         if (_diskLimiter == null || !_diskLimiter.IsReadLimitedNow())
         {
-            await RandomAccess.ReadAsync(handle, buffer, fileOffset, ct).ConfigureAwait(false);
+            int read = 0;
+            while (read < buffer.Length)
+            {
+                int count = await RandomAccess.ReadAsync(handle, buffer[read..], fileOffset + read, ct).ConfigureAwait(false);
+                if (count == 0)
+                {
+                    throw new EndOfStreamException("File ended before the requested torrent range was read");
+                }
+                read += count;
+            }
             return;
         }
 
@@ -1278,7 +1328,7 @@ internal sealed class Storage : IStorage
 
             if (bytesRead == 0)
             {
-                break;
+                throw new EndOfStreamException("File ended before the requested torrent range was read");
             }
         }
     }

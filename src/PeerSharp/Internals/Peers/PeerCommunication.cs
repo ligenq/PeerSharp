@@ -317,6 +317,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private int _rttVarianceMs = 50;
 
     private int _strikes;
+    private readonly HashSet<int> _uploadAllowedFastPieces = [];
     private IReadOnlyList<int>? _suggestedSnapshot;
     private int _totalMessageCount = 0;
     private long _totalMessageWindowStart = Environment.TickCount64;
@@ -574,7 +575,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _deferredHavePieces.Add(pieceIndex);
     }
 
-    private static bool HasNonZeroSpareBits(byte[] bitfield, int pieceCount)
+    private static bool HasNonZeroSpareBits(ReadOnlySpan<byte> bitfield, int pieceCount)
     {
         int spareBits = 8 - (pieceCount & 7);
         return spareBits < 8 && (bitfield[^1] & ((1 << spareBits) - 1)) != 0;
@@ -1424,6 +1425,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
     }
 
+    public bool IsUploadAllowedFast(int pieceIndex)
+    {
+        lock (_fastPiecesLock)
+        {
+            return RemoteSupportsFastExtension && _uploadAllowedFastPieces.Contains(pieceIndex);
+        }
+    }
+
     // Default 100ms RTT estimate
     public void RecordRtt(int rttMs)
     {
@@ -1462,6 +1471,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             PieceIndex = pieceIndex
         };
+        lock (_fastPiecesLock)
+        {
+            _uploadAllowedFastPieces.Add(pieceIndex);
+        }
         await SendMessageAsync(msg).ConfigureAwait(false);
     }
 
@@ -2344,7 +2357,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
-        if (msg.Id == MessageId.Bitfield && _firstMessageProcessed)
+        if (msg.Id is MessageId.Suggest or MessageId.AllowedFast or MessageId.HaveAll or MessageId.HaveNone or MessageId.Reject &&
+            !RemoteSupportsFastExtension)
+        {
+            throw new InvalidDataException("Fast extension message received without negotiation");
+        }
+        if (msg.Id is MessageId.Bitfield or MessageId.HaveAll or MessageId.HaveNone && _firstMessageProcessed)
         {
             if (!_torrent.HasMetadata)
             {
@@ -2402,6 +2420,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     }
                     else
                     {
+                        if ((uint)msg.HavePieceIndex >= (uint)PeerPieces.Count)
+                        {
+                            throw new InvalidDataException("Have refers to a piece outside the torrent");
+                        }
                         PeerPieces.AddPiece(msg.HavePieceIndex);
                     }
                     HasReportedPieces = true;
@@ -2418,6 +2440,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     }
                     else
                     {
+                        if (receivedBitfield.Length != (PeerPieces.Count + 7) / 8 || HasNonZeroSpareBits(receivedBitfield, PeerPieces.Count))
+                        {
+                            throw new InvalidDataException("Invalid bitfield length or spare bits");
+                        }
                         PeerPieces.FromBitfield(receivedBitfield);
                     }
                     HasReportedPieces = true;
@@ -2473,11 +2499,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 await SafeNotifyListenerAsync(msg).ConfigureAwait(false);
                 return; // Don't call MessageReceived again at end of method
             case MessageId.Suggest:
+                ValidateOfferedPieceIndex(msg.PieceIndex);
                 AddSuggestedPiece(msg.PieceIndex);
                 _logger.LogDebug("{PeerName} SUGGESTS piece {PieceIndex}", Name, msg.PieceIndex);
                 break;
 
             case MessageId.AllowedFast:
+                ValidateOfferedPieceIndex(msg.PieceIndex);
                 AddAllowedFastPiece(msg.PieceIndex);
                 _logger.LogDebug("{PeerName} ALLOWED FAST piece {PieceIndex}", Name, msg.PieceIndex);
                 break;
@@ -2488,7 +2516,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 break;
 
             case MessageId.Request:
-                if (!AmChoking)
+                if (!AmChoking || RemoteSupportsFastExtension)
                 {
                     await SafeNotifyListenerAsync(msg).ConfigureAwait(false);
                 }
@@ -2535,6 +2563,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         if (msg.Id != MessageId.Request && msg.Id != MessageId.Reject)
         {
             await SafeNotifyListenerAsync(msg).ConfigureAwait(false);
+        }
+    }
+
+    private void ValidateOfferedPieceIndex(int pieceIndex)
+    {
+        if (pieceIndex < 0 || (PeerPieces.Count > 0 && pieceIndex >= PeerPieces.Count))
+        {
+            throw new InvalidDataException("Offered piece is outside the torrent");
         }
     }
 

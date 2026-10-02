@@ -284,6 +284,33 @@ public class TorrentFileMetadataTests
     }
 
     [Fact]
+    public void FinalSinglePieceHashChunkIncludesItsPaddingSibling()
+    {
+        var info = CreateV2Info(513 * 16_384, new byte[32], 513);
+        var request = info.GetV2HashRequestForPiece(512);
+        Assert.NotNull(request);
+        Assert.Equal(512, request.Index);
+        Assert.Equal(2, request.Length);
+    }
+
+    [Theory]
+    [InlineData(0, 1, 0)]
+    [InlineData(0, 3, 0)]
+    [InlineData(1, 2, 0)]
+    [InlineData(0, 2, -1)]
+    [InlineData(0, 2, int.MaxValue)]
+    [InlineData(int.MaxValue - 1, 2, 1)]
+    [InlineData(0, int.MaxValue, 1)]
+    public void InvalidV2HashRangesAreRejectedWithoutChangingHashes(int index, int length, int proofLayers)
+    {
+        byte[] root = new byte[32];
+        var info = CreateV2Info(4 * 16_384, root, 4);
+        Assert.Null(info.GetV2Hashes(root, 0, index, length, proofLayers));
+        Assert.False(info.TryAddV2Hashes(root, 0, index, length, proofLayers, new byte[128]));
+        Assert.Empty(info.Files[0].PieceLayerHashes);
+    }
+
+    [Fact]
     public void TryAddV2Hashes_LibtorrentStylePaddedFinalChunk_VerifiesAndCachesRealHashesOnly()
     {
         // Multi-chunk file (>512 pieces) where the final chunk uses NextPow2(remaining) padding.

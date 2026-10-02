@@ -323,11 +323,7 @@ internal sealed class RequestScheduler
                 bool queued = await peer.SendRequestAsync(request).ConfigureAwait(false);
                 if (!queued)
                 {
-                    if (_requestTracker.TryGetPeerRequests(peer, out var pending))
-                    {
-                        pending.TryRemove((pieceIndex, offset), out _);
-                    }
-                    _requestTracker.RemoveBlockRequest(pieceIndex, offset, peer);
+                    _requestTracker.TryRemovePeerRequest(peer, (pieceIndex, offset), out _, request);
                     if (peer.Connected == 0)
                     {
                         state.ReleaseRetryClaim(peer);

@@ -4,14 +4,17 @@ using Microsoft.Extensions.Time.Testing;
 
 namespace PeerSharp.Tests.Core.Streaming;
 
-public class TorrentStreamTests
+public class TorrentStreamTests : IAsyncLifetime
 {
+    private readonly string _testRoot = Path.Combine(Path.GetTempPath(), "PeerSharpStreamTests", Guid.NewGuid().ToString("N"));
+    private readonly List<Torrent> _testTorrents = [];
     private readonly Torrent _torrent;
     private readonly FakeTimeProvider _timeProvider = new();
 
     public TorrentStreamTests()
     {
-        _torrent = TorrentTestUtility.CreateMinimal();
+        _torrent = TorrentTestUtility.CreateMinimal(downloadPath: Path.Combine(_testRoot, "small"));
+        _testTorrents.Add(_torrent);
         // Setup a file: 10KB total, 1KB pieces
         _torrent.InfoFile.Info.PieceSize = 1000;
         _torrent.InfoFile.Info.FullSize = 10000;
@@ -23,6 +26,7 @@ public class TorrentStreamTests
         }
 
         _torrent.ReinitializeAfterMetadataAsync().GetAwaiter().GetResult();
+        _torrent.FilesInternal.InitializeAsync([], TestContext.Current.CancellationToken).GetAwaiter().GetResult();
     }
 
     #region Constructor Tests
@@ -143,10 +147,11 @@ public class TorrentStreamTests
     }
 
     /// <summary>A torrent of one 8 MiB file in 256 KiB pieces: larger than the start and end fetched first.</summary>
-    private static Torrent LargeTorrent()
+    private Torrent LargeTorrent()
     {
         const int PieceSize = 256 * 1024;
-        var torrent = TorrentTestUtility.CreateMinimal();
+        var torrent = TorrentTestUtility.CreateMinimal(downloadPath: Path.Combine(_testRoot, "large"));
+        _testTorrents.Add(torrent);
         torrent.InfoFile.Info.PieceSize = PieceSize;
         torrent.InfoFile.Info.FullSize = 32 * PieceSize;
         torrent.InfoFile.Info.Files.Add(new Internals.TorrentFileEntry { Path = "film.mkv", Size = 32 * PieceSize, Offset = 0 });
@@ -157,7 +162,22 @@ public class TorrentStreamTests
         }
 
         torrent.ReinitializeAfterMetadataAsync().GetAwaiter().GetResult();
+        torrent.FilesInternal.InitializeAsync([], TestContext.Current.CancellationToken).GetAwaiter().GetResult();
         return torrent;
+    }
+
+    public ValueTask InitializeAsync() => ValueTask.CompletedTask;
+
+    public async ValueTask DisposeAsync()
+    {
+        foreach (var torrent in _testTorrents)
+        {
+            await torrent.DisposeAsync();
+        }
+        if (Directory.Exists(_testRoot))
+        {
+            Directory.Delete(_testRoot, true);
+        }
     }
 
     #endregion
@@ -551,8 +571,6 @@ public class TorrentStreamTests
 
     #endregion
 }
-
-
 
 
 

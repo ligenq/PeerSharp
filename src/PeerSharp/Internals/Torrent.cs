@@ -1443,6 +1443,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// </summary>
     private bool IsResumeDataUsable(TorrentStateData state, out string? reason)
     {
+        if (state.Info == null || state.Pieces == null || state.Selection == null || state.RenamedFiles == null ||
+            state.Selection.Contains(null!) || state.RenamedFiles.Contains(null!) ||
+            state.AddedTime < -62135596800L || state.AddedTime > 253402300799L ||
+            state.SeedTimeSeconds < 0 || state.SeedTimeSeconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerSecond)
+        {
+            reason = "it contains invalid or missing state fields";
+            return false;
+        }
         if (state.Version > SupportedResumeVersion)
         {
             reason = $"it was written by a newer version (format {state.Version}, this build understands {SupportedResumeVersion})";
@@ -1482,6 +1490,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             if (state.Pieces.Length != expectedBytes)
             {
                 reason = $"its bitfield is {state.Pieces.Length} bytes, but {expectedPieces} pieces need {expectedBytes}";
+                return false;
+            }
+            int spareBits = (8 - expectedPieces % 8) % 8;
+            if (spareBits != 0 && (state.Pieces[^1] & ((1 << spareBits) - 1)) != 0)
+            {
+                reason = "its bitfield contains nonzero spare bits";
                 return false;
             }
         }

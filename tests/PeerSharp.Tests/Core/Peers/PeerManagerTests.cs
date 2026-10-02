@@ -26,6 +26,7 @@ public class PeerManagerTests
         peer.Stream = new MemoryStream();
         Stream retainedStream = peer.Stream;
         SetPrivateProperty(peer, "PeerPieces", new PiecesProgress(0));
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
         await (Task)InvokePrivate(peer, "ProcessMessageAsync", new PeerMessage(MessageId.HaveAll))!;
         Assert.True(ctx.Governor.TryAcquireConnectionSlot());
         ctx.Manager.AddConnectedPeerForTesting(peer);
