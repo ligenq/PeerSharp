@@ -94,7 +94,7 @@ internal class NetworkManager : INetworkManager
         // Initialize packet handlers
         if (settings.Connection.EnableUtpIn || settings.Connection.EnableUtpOut)
         {
-            Utp.OnNewConnection = _onUtpConnection;
+            Utp.OnNewConnection = settings.Connection.EnableUtpIn ? _onUtpConnection : null;
             Utp.Start(UdpListener);
         }
 

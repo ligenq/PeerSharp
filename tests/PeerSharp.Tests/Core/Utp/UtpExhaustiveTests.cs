@@ -453,8 +453,7 @@ public class UtpExhaustiveTests
         uint theirTimestampAgo)
     {
         await stream.WriteAsync(data);
-        Assert.True(_listener.SentPackets.TryDequeue(out var pkt));
-        var h = ParseHeader(pkt.Data);
+        var h = ParseHeader(TakeDataPacket());
         byte[] ack = CreatePacket(2, 0, GetRecvId(stream), (ushort)(h.SeqNr + 1), h.SeqNr);
         UtpManager.WriteUInt32BigEndian(ack, 4, Utils.TimestampMicro() - theirTimestampAgo);
         UtpManager.WriteUInt32BigEndian(ack, 8, delayMicro);
@@ -464,11 +463,21 @@ public class UtpExhaustiveTests
     private async Task SendAndAck(UtpStream stream, byte[] data, uint delayMicro)
     {
         await stream.WriteAsync(data);
-        Assert.True(_listener.SentPackets.TryDequeue(out var pkt));
-        var h = ParseHeader(pkt.Data);
+        var h = ParseHeader(TakeDataPacket());
         byte[] ack = CreatePacket(2, 0, GetRecvId(stream), (ushort)(h.SeqNr + 1), h.SeqNr);
         UtpManager.WriteUInt32BigEndian(ack, 8, delayMicro);
         _listener.SimulateReceive(ack, _remoteParams);
+    }
+
+    private byte[] TakeDataPacket()
+    {
+        Assert.True(_listener.SentPackets.TryDequeue(out var packet), "Expected an outgoing DATA packet");
+        // Advancing the clock can put keep-alives ahead of the application write.
+        while (ParseHeader(packet.Data).Type != (byte)MessageType.ST_DATA)
+        {
+            Assert.True(_listener.SentPackets.TryDequeue(out packet), "Expected an outgoing DATA packet");
+        }
+        return packet.Data;
     }
 
     [Fact(Timeout = 30000)]
@@ -730,14 +739,10 @@ public class UtpExhaustiveTests
     {
         var stream = await ConnectStream();
 
-        // Move last-send timestamp 30s into the past so the keep-alive threshold is met.
-        // _nextTimeout is already t_0+1000ms (set during handshake), so now=t_0 < _nextTimeout:
-        // CheckTimeout() goes to the else-if(Connected) branch, not the packet-timeout branch.
-        var lastSendField = typeof(UtpStream).GetField("_lastSendTime", BindingFlags.NonPublic | BindingFlags.Instance);
-        lastSendField!.SetValue(stream, _time.GetUtcNow().AddSeconds(-30));
-
         _listener.SentPackets.Clear();
-        stream.CheckTimeout(); // call directly; (now - _lastSendTime) = 30s > 29s threshold
+        // Let the manager's real timer path reach both the expired retransmission
+        // deadline and the keep-alive interval on an otherwise idle connection.
+        _time.Advance(TimeSpan.FromSeconds(30));
 
         Assert.True(_listener.SentPackets.TryDequeue(out var keepAlive));
         var header = ParseHeader(keepAlive.Data);

@@ -385,7 +385,9 @@ internal class UtpStream : Stream
     {
         lock (_lock)
         {
-            if (_state == UtpState.Closed || _disposal.IsDisposed)
+            // Application disposal starts a graceful close. Transport timers must
+            // keep retrying its FIN and eventually remove an unanswered connection.
+            if (_state == UtpState.Closed)
             {
                 return;
             }
@@ -509,7 +511,7 @@ internal class UtpStream : Stream
                     CheckIfClosed();
                 }
             }
-            else if (_state == UtpState.Connected)
+            if (_state == UtpState.Connected)
             {
                 // KEEP-ALIVE and ZERO-WINDOW PROBING
                 // Per libutp: KEEPALIVE_INTERVAL = 29000ms
@@ -853,7 +855,20 @@ internal class UtpStream : Stream
             _lastReceiveTime = _timeProvider.GetUtcNow();
             UpdatePeerExtensionBits(extensionBits);
 
-            if ((header.Type != MessageType.ST_SYN || _state != UtpState.None) && !IsAckNrValid(header.AckNr))
+            // A SYN has no defined ACK. A retry must only repeat our handshake
+            // response, even if data we sent since the first SYN is outstanding.
+            if (header.Type == MessageType.ST_SYN && _state != UtpState.None)
+            {
+                if ((_state == UtpState.SynRecv || _state == UtpState.Connected) && header.SeqNr == _ackNr)
+                {
+                    _lastReplyDelay = Utils.TimestampMicro() - header.TimestampMicroseconds;
+                    _logger.LogDebug("uTP {Remote}: Received duplicate SYN, resending ACK", RemoteEndPoint);
+                    SendPacket(MessageType.ST_STATE, null);
+                }
+                return;
+            }
+
+            if (header.Type != MessageType.ST_SYN && !IsAckNrValid(header.AckNr))
             {
                 _logger.LogTrace("uTP {Remote}: Invalid ack_nr {AckNr} for seq {SeqNr}", RemoteEndPoint, header.AckNr, _seqNr);
                 return;
@@ -904,12 +919,6 @@ internal class UtpStream : Stream
                     {
                         _state = UtpState.SynRecv;
                         _ackNr = header.SeqNr;
-                        SendPacket(MessageType.ST_STATE, null);
-                    }
-                    else if ((_state == UtpState.SynRecv || _state == UtpState.Connected) && header.SeqNr == _ackNr)
-                    {
-                        // Duplicate SYN (retransmission), resend ACK
-                        _logger.LogDebug("uTP {Remote}: Received duplicate SYN, resending ACK", RemoteEndPoint);
                         SendPacket(MessageType.ST_STATE, null);
                     }
                     break;
@@ -1225,7 +1234,8 @@ internal class UtpStream : Stream
 
     private void FlushPendingWrites()
     {
-        if (_disposal.IsDisposed || IsQuiet)
+        // ACKs still clock reliability retries while a disposed stream is closing.
+        if (_state == UtpState.Closed || IsQuiet)
         {
             return;
         }
@@ -1495,9 +1505,8 @@ internal class UtpStream : Stream
             return;
         }
 
-        // How much the peer says it holds past the gap. More than the limit means the packets behind
-        // the hole are arriving while it is not, which is loss; a few is a path reordering.
-        int ackedPastHole = 0;
+        // Ignore evidence for packets we have not sent, including padding in a
+        // peer's mask. Ranges from multiple extensions may overlap.
         ushort highestAcked = ackNr;
         foreach (var (start, end) in sackRanges)
         {
@@ -1506,10 +1515,19 @@ internal class UtpStream : Stream
                 continue;
             }
 
-            ackedPastHole += (ushort)(end - start) + 1;
-            if (Utils.CompareSeq(end, highestAcked) > 0)
+            ushort effectiveEnd = Utils.CompareSeq(end, lastSent) > 0 ? lastSent : end;
+            if (Utils.CompareSeq(start, effectiveEnd) <= 0 && Utils.CompareSeq(effectiveEnd, highestAcked) > 0)
             {
-                highestAcked = end;
+                highestAcked = effectiveEnd;
+            }
+        }
+
+        int ackedPastHole = 0;
+        for (ushort seq = (ushort)(ackNr + 1); Utils.CompareSeq(seq, highestAcked) <= 0; seq++)
+        {
+            if (IsSelectivelyAcked(seq, sackRanges))
+            {
+                ackedPastHole++;
             }
         }
 
@@ -1523,7 +1541,18 @@ internal class UtpStream : Stream
             Utils.CompareSeq(seq, highestAcked) < 0 && Utils.CompareSeq(seq, lastSent) <= 0;
             seq++)
         {
-            if (Utils.CompareSeq(seq, _fastResendSeqNr) < 0 || IsSelectivelyAcked(seq, sackRanges))
+            // Only acknowledgments after this particular hole count as evidence
+            // of its loss. Near the tail, a few overtaking packets are reordering.
+            if (IsSelectivelyAcked(seq, sackRanges))
+            {
+                ackedPastHole--;
+                continue;
+            }
+            if (ackedPastHole <= DuplicateAcksBeforeResend)
+            {
+                break;
+            }
+            if (Utils.CompareSeq(seq, _fastResendSeqNr) < 0)
             {
                 continue;
             }
@@ -1917,18 +1946,7 @@ internal class UtpStream : Stream
         UtpManager.WriteUInt32BigEndian(pkt.Buffer, 8, _lastReplyDelay);
 
         _lastSendTime = _timeProvider.GetUtcNow();
-        // Fire-and-forget UDP send; cancellation isn't meaningful for datagrams here.
-        var task = _manager.SendAsync(pkt.Buffer.AsMemory(0, pkt.Length), RemoteEndPoint, CancellationToken.None);
-        if (!task.IsCompletedSuccessfully)
-        {
-            _ = task.ContinueWith(t =>
-            {
-                if (t.IsFaulted)
-                {
-                    _logger.LogTrace(t.Exception, "ResendPacket failed for {Remote}", RemoteEndPoint);
-                }
-            }, TaskScheduler.Default);
-        }
+        SendReliabilityPacket(pkt);
     }
 
     private void ResetMtu()
@@ -2062,24 +2080,22 @@ internal class UtpStream : Stream
             _seqNr++;
 
             _lastSendTime = _timeProvider.GetUtcNow();
-            // Fire-and-forget UDP send; cancellation isn't meaningful for datagrams here.
-            var task = _manager.SendAsync(buffer.AsMemory(0, totalLen), RemoteEndPoint, CancellationToken.None);
-            if (!task.IsCompletedSuccessfully)
-            {
-                _ = task.ContinueWith(t =>
-                {
-                    if (t.IsFaulted)
-                    {
-                        _logger.LogTrace(t.Exception, "SendPacket failed for {Remote}", RemoteEndPoint);
-                    }
-                }, TaskScheduler.Default);
-            }
+            SendReliabilityPacket(pkt);
         }
         else
         {
             _lastSendTime = _timeProvider.GetUtcNow();
             _ = SendAsyncAndReturn(buffer, totalLen);
         }
+    }
+
+    private void SendReliabilityPacket(SentPacket packet)
+    {
+        // ACKs and close may return the reliability buffer to the pool, and retries
+        // update its header. Each send owns an immutable snapshot until UDP finishes.
+        byte[] buffer = _pool.Rent(packet.Length);
+        packet.Buffer.AsSpan(0, packet.Length).CopyTo(buffer);
+        _ = SendAsyncAndReturn(buffer, packet.Length);
     }
 
     private async Task SendAsyncAndReturn(byte[] buffer, int length)
