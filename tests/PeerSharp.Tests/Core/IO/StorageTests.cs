@@ -454,7 +454,7 @@ public class StorageTests : IAsyncLifetime
     }
 
     [Fact(Timeout = 30000)]
-    public async Task Read_SkippedFile_ReturnsZeros()
+    public async Task Read_MissingSkippedFile_ReportsMissingData()
     {
         var selection = new List<FileSelection>
         {
@@ -465,9 +465,7 @@ public class StorageTests : IAsyncLifetime
         await _storage.InitAsync(selection);
 
         // Read from file2 which is skipped
-        byte[] data = await _storage.ReadAsync(1500, 100);
-
-        Assert.All(data, b => Assert.Equal(0, b));
+        await Assert.ThrowsAsync<StorageException>(() => _storage.ReadAsync(1500, 100));
     }
 
     [Fact(Timeout = 30000)]
@@ -504,7 +502,7 @@ public class StorageTests : IAsyncLifetime
     }
 
     [Fact(Timeout = 30000)]
-    public async Task UpdateFileSelection_DisablesWrites()
+    public async Task UpdateFileSelection_PreservesInFlightWrites()
     {
         var selection = new List<FileSelection>
         {
@@ -523,7 +521,7 @@ public class StorageTests : IAsyncLifetime
         _handleCache.CloseTorrentHandles(_tempDir);
 
         byte[] file2Data = File.ReadAllBytes(Path.Combine(_tempDir, "folder", "file2.txt"));
-        Assert.All(file2Data.Take(100), b => Assert.Equal(0, b));
+        Assert.Equal(data, file2Data.AsSpan(0, data.Length).ToArray());
     }
 
     private static byte[] BuildTorrentWithAttrPaddingPath(string paddingPath)

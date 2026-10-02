@@ -423,9 +423,38 @@ internal class TorrentFileInfo
         return InfoHash.Empty;
     }
 
+    internal bool VerifyV1PieceHash(int pieceIndex, ReadOnlySpan<byte> data)
+    {
+        if (!IsV1 || pieceIndex < 0 || pieceIndex >= Pieces.Count || PieceSize == 0)
+        {
+            return false;
+        }
+        long length = Math.Min(PieceSize, FullSize - (long)pieceIndex * PieceSize);
+        if (length <= 0 || data.Length != GetPieceSize(pieceIndex) || data.Length > length)
+        {
+            return false;
+        }
+        if (length == data.Length)
+        {
+            return System.Security.Cryptography.SHA1.HashData(data).AsSpan().SequenceEqual(Pieces[pieceIndex]);
+        }
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA1);
+        hash.AppendData(data);
+        // Hybrid v1 hashes include the padding file following a short v2 file piece.
+        Span<byte> zeros = stackalloc byte[1024];
+        zeros.Clear();
+        for (long remaining = length - data.Length; remaining > 0; remaining -= zeros.Length)
+        {
+            hash.AppendData(zeros[..(int)Math.Min(remaining, zeros.Length)]);
+        }
+        return hash.GetHashAndReset().AsSpan().SequenceEqual(Pieces[pieceIndex]);
+    }
+
     public byte[]? GetV2Hashes(byte[] piecesRoot, int baseLayer, int index, int length, int proofLayers)
     {
-        if (!IsV2 || piecesRoot.Length != Utilities.MerkleTree.HashSize || index < 0 || length <= 0)
+        if (!IsV2 || piecesRoot.Length != Utilities.MerkleTree.HashSize || index < 0 ||
+            length < 2 || length > 8192 || (length & (length - 1)) != 0 || index % length != 0 ||
+            proofLayers < 0 || proofLayers > 31)
         {
             return null;
         }
@@ -471,7 +500,8 @@ internal class TorrentFileInfo
         if (!IsV2 ||
             piecesRoot.Length != Utilities.MerkleTree.HashSize ||
             index < 0 ||
-            length <= 0 ||
+            length < 2 || length > 8192 || (length & (length - 1)) != 0 || index % length != 0 ||
+            proofLayers < 0 || proofLayers > 31 ||
             baseLayer != Utilities.MerkleTree.GetPieceLayerDepth(PieceSize))
         {
             return false;
@@ -490,7 +520,8 @@ internal class TorrentFileInfo
             }
 
             int paddedLayerSize = Utilities.MerkleTree.CeilingPowerOf2(file.PieceCount);
-            if (index >= file.PieceCount || index + length > paddedLayerSize)
+            if (index >= file.PieceCount || length > paddedLayerSize - index ||
+                !Utilities.MerkleTree.ValidateLayerRequest(PieceSize, file.Size, baseLayer, index, length, proofLayers))
             {
                 return false;
             }
@@ -572,7 +603,7 @@ internal class TorrentFileInfo
         // BEP 52 / libtorrent: pad chunk length to the next power of two (capped at 512).
         // The sender fills entries past the file's piece count with pad hashes so the
         // chunk forms a balanced sub-tree we can hash up to a known root.
-        int chunkLength = Math.Min(512, Utilities.MerkleTree.CeilingPowerOf2(remaining));
+        int chunkLength = Math.Clamp(Utilities.MerkleTree.CeilingPowerOf2(remaining), 2, 512);
         int baseLayer = Utilities.MerkleTree.GetPieceLayerDepth(PieceSize);
         int proofLayers = Utilities.MerkleTree.GetTotalLevels(file.Size) - baseLayer - 1;
         if (proofLayers < 0)

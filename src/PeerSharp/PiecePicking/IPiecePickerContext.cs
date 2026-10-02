@@ -174,7 +174,9 @@ internal class TorrentPieceCheckerContext : IPieceCheckerContext
         {
             var expected = _torrent.InfoFile.Info.GetV2ExpectedPieceHash(pieceIndex);
             bool padToPieceSize = _torrent.InfoFile.Info.ShouldPadV2PieceToPieceSize(pieceIndex);
-            return expected != null && MerkleTree.VerifyPiece(pieceData, pieceIndex, expected, _torrent.InfoFile.Info.PieceSize, padToPieceSize);
+            var info = _torrent.InfoFile.Info;
+            return expected != null && MerkleTree.VerifyPiece(pieceData, pieceIndex, expected, info.PieceSize, padToPieceSize) &&
+                (!info.IsV1 || info.VerifyV1PieceHash(pieceIndex, pieceData));
         }
 
         return false;

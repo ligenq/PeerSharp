@@ -102,7 +102,7 @@ internal sealed class UploadQueueManager : IAsyncDisposable
                     continue;
                 }
 
-                if (peer.AmChoking && !peer.IsAllowedFast(item.PieceIndex))
+                if (peer.AmChoking && !peer.IsUploadAllowedFast(item.PieceIndex))
                 {
                     await peer.SendRejectAsync(item.ToBlockRequest()).ConfigureAwait(false);
                     continue;

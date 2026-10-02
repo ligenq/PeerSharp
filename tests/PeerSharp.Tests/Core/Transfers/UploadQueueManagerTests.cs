@@ -410,9 +410,8 @@ public class UploadQueueManagerTests
         var peer = new PeerCommunication(torrent, new MockPeerListener(), TimeProvider.System);
         Assert.True(peer.AmChoking); // choked — no Unchoke() call
 
-        // Inject piece 5 into the peer's AllowedFast set directly (AddAllowedFastPiece is private)
-        var field = typeof(PeerCommunication).GetField("_allowedFastPieces", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        ((HashSet<int>)field.GetValue(peer)!).Add(5);
+        typeof(PeerCommunication).GetProperty(nameof(peer.RemoteSupportsFastExtension))!.SetValue(peer, true);
+        await peer.SendAllowedFastAsync(5);
 
         manager.TryEnqueue(peer, new UploadQueueItem(5, 0, 16384));
 

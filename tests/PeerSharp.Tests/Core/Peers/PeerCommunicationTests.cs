@@ -901,11 +901,12 @@ public class PeerCommunicationTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
         var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
 
-        var msg = new PeerMessage(MessageId.Suggest) { PieceIndex = 7 };
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
+        var msg = new PeerMessage(MessageId.Suggest) { PieceIndex = 0 };
         await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
 
         var suggested = peer.GetSuggestedPieces();
-        Assert.Contains(7, suggested);
+        Assert.Contains(0, suggested);
 
         await torrent.DisposeAsync();
         CleanupPath(path);
@@ -919,10 +920,11 @@ public class PeerCommunicationTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
         var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
 
-        var msg = new PeerMessage(MessageId.AllowedFast) { PieceIndex = 11 };
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
+        var msg = new PeerMessage(MessageId.AllowedFast) { PieceIndex = 0 };
         await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
 
-        Assert.True(peer.IsAllowedFast(11));
+        Assert.True(peer.IsAllowedFast(0));
 
         await torrent.DisposeAsync();
         CleanupPath(path);
@@ -938,6 +940,7 @@ public class PeerCommunicationTests
         var peer = new PeerCommunication(torrent, listener, TimeProvider.System);
 
         var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 2, BlockOffset = 0, BlockLength = 16384 };
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
         await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
 
         Assert.Contains(listener.Received, m => m.Id == MessageId.Reject);
@@ -1142,6 +1145,18 @@ public class PeerCommunicationTests
 
         await torrent.DisposeAsync();
         CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task ChokedFastRequestReachesTheUploadHandlerForAcceptanceOrRejection()
+    {
+        var listener = new RecordingPeerListener();
+        await using var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1WithPieces());
+        var peer = new PeerCommunication(torrent, listener, TimeProvider.System);
+        typeof(PeerCommunication).GetProperty(nameof(peer.RemoteSupportsFastExtension))!.SetValue(peer, true);
+        using var message = new PeerMessage(MessageId.Request) { PieceIndex = 0, BlockLength = 16384 };
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", message);
+        Assert.Contains(message, listener.Received);
     }
 
     [Fact]

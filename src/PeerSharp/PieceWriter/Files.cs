@@ -23,19 +23,30 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
         IBandwidthManager bandwidth,
         string torrentHash,
         ILoggerFactory loggerFactory,
-        IReadOnlyDictionary<int, string>? renamedFiles)
+        IReadOnlyDictionary<int, string>? renamedFiles,
+        Func<PiecesProgress> getCompletedPieces)
     {
         DownloadPath = path;
         var diskLimiter = new DiskBandwidthLimiter(bandwidth, torrentHash);
         _storage = new Storage(metadata, path, new PathValidator(path), handleCache, enableSparseFiles, diskLimiter, loggerFactory)
         {
-            RenamedFiles = renamedFiles
+            RenamedFiles = renamedFiles,
+            GetCompletedPieces = getCompletedPieces
         };
         _blockCache = new BlockCache(cacheSizeBytes, readAheadBlocks, enableReadAhead, totalSize);
         _blockCache.Initialize(_storage);
     }
 
-    public bool Checking { get; set; }
+    private bool _checking;
+    public bool Checking
+    {
+        get => Volatile.Read(ref _checking);
+        set
+        {
+            Volatile.Write(ref _checking, value);
+            _blockCache.Clear();
+        }
+    }
 
     /// <summary>
     /// The download path for this torrent's files.
@@ -73,7 +84,8 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
             torrent.Bandwidth,
             torrent.Hash.ToHexStringUpper(),
             loggerFactory,
-            torrent.GetRenamedFileMap());
+            torrent.GetRenamedFileMap(),
+            () => torrent.Pieces);
     }
 
     public Task DeleteFilesAsync(CancellationToken ct = default)
@@ -127,7 +139,14 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
 
     public async Task ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct)
     {
-        await _blockCache.ReadAsync(offset, buffer, ct).ConfigureAwait(false);
+        if (Checking)
+        {
+            await _storage.ReadAsync(offset, buffer, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            await _blockCache.ReadAsync(offset, buffer, ct).ConfigureAwait(false);
+        }
     }
 
     public Task StartAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default)
