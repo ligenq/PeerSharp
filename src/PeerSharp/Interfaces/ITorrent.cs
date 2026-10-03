@@ -231,11 +231,13 @@ public interface ITorrent
     /// <summary>
     /// Gets or sets the ratio limit for auto-stop. Null disables ratio auto-stop.
     /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative or non-finite.</exception>
     float? RatioLimit { get; set; }
 
     /// <summary>
     /// Gets or sets the seed time limit for auto-stop. Null disables time-based auto-stop.
     /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     TimeSpan? SeedTimeLimit { get; set; }
 
     /// <summary>

@@ -723,6 +723,8 @@ public sealed class ProxySettings
 /// </summary>
 public sealed class QueueSettings
 {
+    private int _maxActiveDownloads = 3;
+    private int _maxActiveSeeds = 2;
     /// <summary>
     /// Whether queue management is enabled. Default is false.
     /// When enabled, the engine will auto-start/stop torrents to respect limits.
@@ -736,15 +738,23 @@ public sealed class QueueSettings
 
     /// <summary>
     /// Maximum number of active downloading torrents. 0 means unlimited.
-    /// Default is 3.
+    /// Default is 3. Negative values are rejected.
     /// </summary>
-    public int MaxActiveDownloads { get; set; } = 3;
+    public int MaxActiveDownloads
+    {
+        get => Volatile.Read(ref _maxActiveDownloads);
+        set { ArgumentOutOfRangeException.ThrowIfNegative(value); Volatile.Write(ref _maxActiveDownloads, value); }
+    }
 
     /// <summary>
     /// Maximum number of active seeding torrents. 0 means unlimited.
-    /// Default is 2.
+    /// Default is 2. Negative values are rejected.
     /// </summary>
-    public int MaxActiveSeeds { get; set; } = 2;
+    public int MaxActiveSeeds
+    {
+        get => Volatile.Read(ref _maxActiveSeeds);
+        set { ArgumentOutOfRangeException.ThrowIfNegative(value); Volatile.Write(ref _maxActiveSeeds, value); }
+    }
 
     /// <summary>
     /// Queue evaluation interval in seconds. Default is 5.
@@ -1226,6 +1236,8 @@ public sealed class AlertSettings
 /// </remarks>
 public sealed class Settings
 {
+    private uint _maxPeersPerTrackerRequest = 200;
+    private byte[] _peerId = new byte[20];
     /// <summary>Settings for the engine's alert queue.</summary>
     public AlertSettings Alerts { get; } = new();
 
@@ -1241,8 +1253,12 @@ public sealed class Settings
     /// <summary>Maximum number of unique known peers to keep in cache.</summary>
     public int MaxKnownPeersCache { get; set; } = 2000;
 
-    /// <summary>Maximum number of peers to request from a tracker in one announce.</summary>
-    public uint MaxPeersPerTrackerRequest { get; set; } = 200;
+    /// <summary>Maximum number of peers to request from a tracker in one announce, up to <see cref="int.MaxValue"/>.</summary>
+    public uint MaxPeersPerTrackerRequest
+    {
+        get => Volatile.Read(ref _maxPeersPerTrackerRequest);
+        set { ArgumentOutOfRangeException.ThrowIfGreaterThan(value, (uint)int.MaxValue); Volatile.Write(ref _maxPeersPerTrackerRequest, value); }
+    }
 
     /// <summary>
     /// Whether UDP announces carry the tracker URL's path and query as BEP 41 options.
@@ -1263,8 +1279,17 @@ public sealed class Settings
     /// </summary>
     public bool SendUdpTrackerUrlData { get; set; } = true;
 
-    /// <summary>The client's unique 20-byte Peer ID (BEP 20).</summary>
-    public byte[] PeerId { get; set; } = new byte[20];
+    /// <summary>The client's unique 20-byte Peer ID (BEP 20). Set before initialization; an all-zero ID is generated automatically.</summary>
+    public byte[] PeerId
+    {
+        get => Volatile.Read(ref _peerId);
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            if (value.Length != 20) throw new ArgumentException("Peer ID must contain exactly 20 bytes.", nameof(value));
+            Volatile.Write(ref _peerId, value.ToArray());
+        }
+    }
 
     /// <summary>Settings for network proxy.</summary>
     public ProxySettings Proxy { get; } = new();

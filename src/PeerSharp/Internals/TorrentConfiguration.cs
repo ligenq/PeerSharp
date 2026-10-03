@@ -18,6 +18,9 @@ internal sealed class TorrentConfiguration
     private int _maxConnections;
     private int _maxUploadSlots;
     private long _uploadLimitBytesPerSecond;
+    private int _downloadStrategy = (int)DownloadStrategy.RarestFirst;
+    private float? _ratioLimit;
+    private TimeSpan? _seedTimeLimit;
 
     public TorrentConfiguration(ITorrent torrent, IBandwidthManager bandwidth)
     {
@@ -68,7 +71,11 @@ internal sealed class TorrentConfiguration
     }
 
     // Streaming
-    public DownloadStrategy DownloadStrategy { get; set; } = DownloadStrategy.RarestFirst;
+    public DownloadStrategy DownloadStrategy
+    {
+        get => (DownloadStrategy)Volatile.Read(ref _downloadStrategy);
+        set { TorrentOptionValidation.ValidateStrategy(value); Volatile.Write(ref _downloadStrategy, (int)value); }
+    }
 
     // Caller-set priorities for individual pieces, overriding what the file selection implies. Read
     // by the picker on its hot path, hence concurrent - and checked for emptiness first, so a torrent
@@ -79,19 +86,27 @@ internal sealed class TorrentConfiguration
     public int MaxConnections
     {
         get => Volatile.Read(ref _maxConnections);
-        set => Volatile.Write(ref _maxConnections, value);
+        set { ArgumentOutOfRangeException.ThrowIfNegative(value); Volatile.Write(ref _maxConnections, value); }
     }
 
     public int MaxUploadSlots
     {
         get => Volatile.Read(ref _maxUploadSlots);
-        set => Volatile.Write(ref _maxUploadSlots, value);
+        set { ArgumentOutOfRangeException.ThrowIfNegative(value); Volatile.Write(ref _maxUploadSlots, value); }
     }
 
     public bool QueueAutoStart { get; set; } = true;
     public int QueuePriority { get; set; }
-    public float? RatioLimit { get; set; }
-    public TimeSpan? SeedTimeLimit { get; set; }
+    public float? RatioLimit
+    {
+        get { lock (_limitsLock) return _ratioLimit; }
+        set { TorrentOptionValidation.ValidateRatio(value); lock (_limitsLock) _ratioLimit = value; }
+    }
+    public TimeSpan? SeedTimeLimit
+    {
+        get { lock (_limitsLock) return _seedTimeLimit; }
+        set { TorrentOptionValidation.ValidateSeedTime(value); lock (_limitsLock) _seedTimeLimit = value; }
+    }
 
     // Lives here rather than on SuperSeedManager because that manager is rebuilt when a magnet's
     // metadata arrives, and the caller's choice has to survive the rebuild.

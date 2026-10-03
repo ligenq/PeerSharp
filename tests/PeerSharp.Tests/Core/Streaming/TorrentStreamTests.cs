@@ -72,7 +72,7 @@ public class TorrentStreamTests : IAsyncLifetime
     [Fact]
     public void AReaderPartWayIn_IsFetchedFor_BeforeTheStartOfTheFile_ThenItsEnd()
     {
-        // 8 MiB in 256 KiB pieces; half a megabyte of read-ahead from 4 MiB in is pieces 16 to 18. The
+        // 8 MiB in 256 KiB pieces; half a megabyte of read-ahead from 4 MiB in is pieces 16 to 17. The
         // start of the file is its first megabyte, pieces 0 to 3, in order; the end its last, 28 to 31.
         var torrent = LargeTorrent();
         torrent.Settings.Streaming.ReadAheadBytes = 512 * 1024;
@@ -81,7 +81,7 @@ public class TorrentStreamTests : IAsyncLifetime
 
         stream.Seek(4 * 1024 * 1024, SeekOrigin.Begin);
 
-        Assert.Equal([16, 17, 18, 0, 1, 2, 3, 28, 29, 30, 31], torrent.StreamingPriorityPieces!);
+        Assert.Equal([16, 17, 0, 1, 2, 3, 28, 29, 30, 31], torrent.StreamingPriorityPieces!);
     }
 
     [Theory]
@@ -107,11 +107,11 @@ public class TorrentStreamTests : IAsyncLifetime
             _timeProvider.Advance(TimeSpan.FromSeconds(0.5));
         }
 
-        // Read to 2 MiB, piece 8: half a megabyte ahead reaches piece 10, two megabytes piece 15.
+        // Read to 2 MiB, piece 8: half a megabyte ahead reaches piece 9, two megabytes piece 15.
         stream.Seek(2 * 1024 * 1024 + 1, SeekOrigin.Begin);
         stream.Seek(2 * 1024 * 1024, SeekOrigin.Begin);
 
-        Assert.Contains(10, torrent.StreamingPriorityPieces!);
+        Assert.Contains(9, torrent.StreamingPriorityPieces!);
         Assert.Equal(reachesFurther, torrent.StreamingPriorityPieces!.Contains(15));
     }
 
@@ -209,6 +209,43 @@ public class TorrentStreamTests : IAsyncLifetime
     #endregion
 
     #region Seek Tests
+
+    [Fact]
+    public void Seek_ToEndReleasesPrioritiesAndBuffering()
+    {
+        using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        stream.Seek(0, SeekOrigin.End);
+        Assert.Empty(_torrent.StreamingPriorityPieces!);
+        Assert.False(stream.IsBuffering);
+        stream.Seek(0, SeekOrigin.Begin);
+        Assert.NotEmpty(_torrent.StreamingPriorityPieces!);
+        Assert.True(stream.IsBuffering);
+    }
+
+    [Fact]
+    public void FullyAvailableStreamDoesNotLimitOtherReadersAsBuffering()
+    {
+        for (int i = 0; i < 10; i++) _torrent.Pieces.AddPiece(i);
+        using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        Assert.False(stream.IsBuffering);
+        Assert.False(_torrent.Streaming.IsBuffering);
+    }
+
+    [Fact]
+    public void ReadRateHistoryStaysBoundedForTinyReads()
+    {
+        using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        var recordRead = typeof(TorrentStream).GetMethod("RecordRead", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .CreateDelegate<Action<int>>(stream);
+        for (int i = 0; i < 200_000; i++)
+        {
+            recordRead(1);
+            _timeProvider.Advance(TimeSpan.FromTicks(1000));
+        }
+        var history = (System.Collections.ICollection)typeof(TorrentStream)
+            .GetField("_reads", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(stream)!;
+        Assert.InRange(history.Count, 1, 101);
+    }
 
     [Fact]
     public void Seek_UpdatesPriorities()
@@ -432,10 +469,8 @@ public class TorrentStreamTests : IAsyncLifetime
         // Advance time past the 60 second timeout
         _timeProvider.Advance(TimeSpan.FromSeconds(61));
 
-        // A stalled swarm must not be reported as end-of-file: returning 0 here would make
-        // CopyToAsync and the HTTP stream server silently truncate the file. The waiter notices
-        // on its next poll, which runs on the real clock at a 1s cadence.
-        await Assert.ThrowsAsync<TimeoutException>(() => readTask.WaitAsync(TimeSpan.FromSeconds(10)));
+        // The injected clock expires the deadline immediately, without waiting for the real-clock poll.
+        await Assert.ThrowsAsync<TimeoutException>(() => readTask.WaitAsync(TimeSpan.FromMilliseconds(500)));
     }
 
     #endregion

@@ -204,7 +204,7 @@ internal sealed class RequestScheduler
             }
 
             // The list is refreshed as the reader moves, so a piece in it may have arrived since.
-            if (!_torrent.Pieces.HasPiece(index))
+            if (index >= 0 && index < _torrent.Pieces.Count && !_torrent.Pieces.HasPiece(index))
             {
                 urgent.Add(index);
             }

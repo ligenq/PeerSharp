@@ -1653,6 +1653,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         ArgumentNullException.ThrowIfNull(magnetLink);
         cancellationToken.ThrowIfCancellationRequested();
 
+        options = options?.Snapshot();
+
         Torrent? torrent = null;
         byte[]? torrentBytes = null;
 
@@ -1976,6 +1978,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(torrentFile);
         cancellationToken.ThrowIfCancellationRequested();
+        options = options?.Snapshot();
         if (options?.FileSelections is { } selections && selections.Count != torrentFile.FileCount)
         {
             throw new ArgumentException(

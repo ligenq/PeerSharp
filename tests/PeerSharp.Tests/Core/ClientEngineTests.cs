@@ -9,6 +9,27 @@ namespace PeerSharp.Tests.Core;
 
 public class ClientEngineTests
 {
+    [Fact]
+    public async Task AddMagnetAsync_CopiesSelectionsForFutureMetadata()
+    {
+        await using var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        FileSelection[] selections = [new(true, Priority.High)];
+        var magnet = MagnetLink.Parse("magnet:?xt=urn:btih:" + new string('a', 40));
+        var torrent = (Torrent)await engine.AddMagnetAsync(magnet,
+            new AddTorrentOptions { StartImmediately = false, FileSelections = selections });
+        selections[0] = new(false, Priority.DoNotDownload);
+        Assert.Equal(new FileSelection(true, Priority.High), Assert.Single(torrent.PendingFileSelections!));
+    }
+
+    [Fact]
+    public async Task AddTorrentAsync_InvalidOptionsDoNotRegisterTorrent()
+    {
+        await using var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => engine.AddTorrentAsync(
+            new TorrentFile(ThreeFileMetadata()), new AddTorrentOptions { StartImmediately = false, RatioLimit = float.NaN }));
+        Assert.Empty(engine.GetTorrents());
+    }
+
     [Fact(Timeout = 30000)]
     public async Task Dispose_DuringInitialization_WaitsForNetworkStartBeforeDisposal()
     {

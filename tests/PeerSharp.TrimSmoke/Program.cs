@@ -1,55 +1,78 @@
 using PeerSharp.Clients;
 using PeerSharp.Config;
 using PeerSharp.Core;
+using System.Net;
 
 namespace PeerSharp.TrimSmoke;
 
 /// <summary>
-/// Exercises a representative slice of the public API so the trimmer has real roots to analyse.
-///
-/// The point is the publish, not the run: <c>PublishTrimmed</c> with warnings as errors fails the
-/// build if anything reachable from here uses reflection the trimmer cannot follow. Touching the
-/// engine, torrent parsing, torrent creation and configuration keeps the roots wide enough that
-/// the check is meaningful - trimming an unreferenced library proves nothing.
-///
-/// It does run in CI as well, as a cheap check that the trimmed binary is not merely well-formed
-/// but actually starts.
+/// Exercises the public API through a trimmed executable, including engine initialization,
+/// hybrid torrent hashing, file verification and streaming. Trim warnings fail the publish;
+/// runtime assertions also catch dependencies that survive analysis but fail after trimming.
 /// </summary>
 public static class Program
 {
     public static async Task<int> Main()
     {
-        // Configuration and engine construction.
-        var settings = new Settings();
-        settings.Connection.MaxConnections = 50;
-        var options = new TorrentClientOptions { Settings = settings };
-        await using var engine = ClientEngineFactory.Create(options);
-
-        // Torrent creation, which pulls in hashing, the Merkle tree and the bencode writer.
-        byte[] payload = new byte[64 * 1024];
-        Random.Shared.NextBytes(payload);
-
-        var created = await new TorrentFileBuilder()
-            .WithName("trim-smoke")
-            .WithVersion(TorrentFileVersion.Hybrid)
-            .WithPieceLength(16 * 1024)
-            .AddTracker("https://tracker.invalid/announce")
-            .AddFile("trim-smoke/data.bin", payload)
-            .BuildAsync();
-
-        // Parsing back, which pulls in the bencode parser and metadata validation.
-        var reparsed = TorrentFile.Parse(created.RawData.ToArray());
-        if (reparsed.InfoHash != created.InfoHash)
+        string directory = Path.Combine(Path.GetTempPath(), "PeerSharp.TrimSmoke-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string payloadPath = Path.Combine(directory, "data.bin");
+        try
         {
-            Console.Error.WriteLine("Round-trip produced a different info hash.");
-            return 1;
+            var settings = new Settings
+            {
+                Files = { DefaultDownloadPath = directory },
+                Connection =
+                {
+                    BindAddress = IPAddress.Loopback,
+                    TcpPort = 0,
+                    UdpPort = 0,
+                    EnableUtpIn = false,
+                    EnableUtpOut = false,
+                    EnableLsd = false,
+                    UpnpPortMapping = false,
+                    NatPmpPortMapping = false
+                },
+                Dht = { Enabled = false }
+            };
+            await using var engine = ClientEngineFactory.Create(new TorrentClientOptions { Settings = settings });
+            await engine.InitializeAsync();
+
+            byte[] payload = new byte[64 * 1024];
+            Random.Shared.NextBytes(payload);
+            await File.WriteAllBytesAsync(payloadPath, payload);
+            var created = await new TorrentFileBuilder()
+                .WithName("data.bin")
+                .WithVersion(TorrentFileVersion.Hybrid)
+                .WithPieceLength(16 * 1024)
+                .AddFile("data.bin", payload)
+                .BuildAsync();
+            var reparsed = TorrentFile.Parse(created.RawData.ToArray());
+            if (reparsed.InfoHash != created.InfoHash) throw new InvalidDataException("Torrent hash changed during round-trip.");
+            var magnet = MagnetLink.Parse($"magnet:?xt=urn:btih:{created.InfoHash}");
+
+            var torrent = await engine.AddTorrentAsync(reparsed, new AddTorrentOptions { StartImmediately = false });
+            if (await torrent.ForceRecheckAsync() != created.PieceCount) throw new InvalidDataException("File verification failed.");
+            await torrent.StartAsync();
+            await using (var stream = await torrent.OpenStreamAsync(0))
+            {
+                byte[] received = new byte[payload.Length];
+                await stream.ReadExactlyAsync(received);
+                if (!received.AsSpan().SequenceEqual(payload)) throw new InvalidDataException("Streaming bytes differ from the payload.");
+                stream.Seek(123, SeekOrigin.Begin);
+                byte[] range = new byte[37];
+                await stream.ReadExactlyAsync(range);
+                if (!range.AsSpan().SequenceEqual(payload.AsSpan(123, range.Length))) throw new InvalidDataException("Seek returned incorrect bytes.");
+            }
+            await torrent.StopAsync();
+            Console.WriteLine($"Trim smoke OK: {reparsed.PieceCount} verified pieces, full stream and seek; magnet={magnet.InfoHash}");
+            return 0;
         }
-
-        var magnet = MagnetLink.Parse($"magnet:?xt=urn:btih:{created.InfoHash}");
-
-        Console.WriteLine(
-            $"Trim smoke OK: {reparsed.FileCount} file(s), {reparsed.PieceCount} piece(s), " +
-            $"magnet={magnet.InfoHash}, maxConnections={settings.Connection.MaxConnections}");
-        return 0;
+        finally
+        {
+            File.Delete(payloadPath);
+            // The smoke writes one known file. Non-recursive deletion will expose unexpected output.
+            Directory.Delete(directory);
+        }
     }
 }
