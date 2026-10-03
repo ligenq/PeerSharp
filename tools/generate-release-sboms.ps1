@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$')]
     [string] $Version,
 
     [string] $PackagesDirectory = 'packages'
@@ -9,8 +10,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $packagesPath = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $PackagesDirectory))
-$stagingRoot = Join-Path $repositoryRoot "artifacts/sbom-drops/$Version"
-$validationRoot = Join-Path $repositoryRoot "artifacts/sbom-validation/$Version"
+# Each invocation scans only its own candidates; a previous manifest or package must never
+# become an input when the same version is packed again in a long-lived checkout.
+$invocationId = [Guid]::NewGuid().ToString('N')
+$stagingRoot = Join-Path $repositoryRoot "artifacts/sbom-drops/$Version/$invocationId"
+$validationRoot = Join-Path $repositoryRoot "artifacts/sbom-validation/$Version/$invocationId"
 
 $packageDefinitions = @(
     @{
@@ -119,6 +123,7 @@ foreach ($definition in $packageDefinitions) {
     # still reachable from a surviving top-level dependency.
     $keep = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($target in $assets.targets.Values) {
+        $visited = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $pending = [System.Collections.Generic.Queue[string]]::new()
         foreach ($key in $target.Keys) {
             if ($roots.Contains(($key -split '/')[0])) {
@@ -128,9 +133,10 @@ foreach ($definition in $packageDefinitions) {
 
         while ($pending.Count -gt 0) {
             $key = $pending.Dequeue()
-            if (!$keep.Add($key)) {
+            if (!$visited.Add($key)) {
                 continue
             }
+            $keep.Add($key) | Out-Null
 
             foreach ($dependency in @($target[$key].dependencies.Keys)) {
                 foreach ($candidate in $target.Keys) {

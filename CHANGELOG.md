@@ -35,6 +35,10 @@ history has the reasoning and the measurements behind each one.
 
 ### Changed
 
+- Add-time options and their collections are copied before asynchronous setup begins. Changing the
+  original options afterward no longer changes a torrent's pending file selection or resume data.
+- Invalid peer ID lengths, overflowing tracker peer counts, negative queue limits and invalid
+  torrent strategy, ratio or seeding-time limits are rejected. Use null to disable ratio/time limits.
 - **`HttpStreamServer` no longer uses `HttpListener`.** It is built on a socket, so it can bind to a
   network address on Windows without an administrator-granted URL reservation, and it serves
   HTTP/1.1 keep-alive, `HEAD`, CORS preflight and CORS headers for cast receivers. Methods other than
@@ -103,6 +107,16 @@ history has the reasoning and the measurements behind each one.
 
 ### Fixed
 
+- Blocklists distinguish IPv4 and IPv6 ranges and normalize mapped IPv4 addresses, closing a filter
+  bypass. IPv6 text ranges are parsed correctly; reversed or mixed-family ranges are ignored.
+- GeoIP reloads replace the entire database atomically. Invalid, truncated or cancelled loads keep
+  the previous database, and clearing either database during a load prevents it from being restored
+  by that load. Parsing bounds limit oversized inputs and accept streams that return short reads.
+- Stream rate history stays bounded for tiny reads, EOF releases priorities, and deadlines use the
+  supplied clock.
+- Release builds and dry runs have read-only permissions; only publishing receives write/OIDC
+  permissions. Release candidates are checked against their hashes, retries can finish asset uploads,
+  and SBOM generation uses fresh staging directories and follows dependencies in each target graph.
 - **uTP connections no longer stop receiving for up to a minute.** Streaming from Debian's swarm, a
   quarter to a third of the peers delivering over uTP - 22 to 26 in each one-minute run - went silent
   for 5 to 54 seconds while still being sent requests. Two causes, both fixed; in the same runs it is

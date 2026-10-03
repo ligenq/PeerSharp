@@ -5,6 +5,21 @@ namespace PeerSharp.Tests.Core;
 
 public class TorrentConfigurationTests
 {
+    [Fact]
+    public void InvalidOverridesLeavePreviousValuesIntact()
+    {
+        _config.RatioLimit = 2;
+        _config.SeedTimeLimit = TimeSpan.FromMinutes(1);
+        Assert.Throws<ArgumentOutOfRangeException>(() => _config.RatioLimit = float.NaN);
+        Assert.Throws<ArgumentOutOfRangeException>(() => _config.RatioLimit = -1);
+        Assert.Throws<ArgumentOutOfRangeException>(() => _config.SeedTimeLimit = TimeSpan.FromSeconds(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => _config.DownloadStrategy = (DownloadStrategy)999);
+        Assert.Throws<ArgumentOutOfRangeException>(() => _config.MaxConnections = -1);
+        Assert.Throws<ArgumentOutOfRangeException>(() => _config.MaxUploadSlots = -1);
+        Assert.Equal(2, _config.RatioLimit);
+        Assert.Equal(TimeSpan.FromMinutes(1), _config.SeedTimeLimit);
+    }
+
     private readonly Torrent _torrent;
     private readonly MockBandwidthManager _bandwidthManager;
     private readonly TorrentConfiguration _config;
@@ -117,7 +132,6 @@ public class TorrentConfigurationTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
-
 
 
 

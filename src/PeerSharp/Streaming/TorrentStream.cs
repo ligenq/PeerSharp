@@ -27,6 +27,7 @@ internal class TorrentStream : Stream
 
     /// <summary>How far back the reader's rate is measured.</summary>
     private static readonly TimeSpan ReadRateWindow = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ReadRateBucket = TimeSpan.FromMilliseconds(100);
 
     /// <summary>Seconds downloaded ahead of the reader, at its rate, below which the stream is buffering again.</summary>
     internal const int ThinBufferSeconds = 10;
@@ -62,10 +63,13 @@ internal class TorrentStream : Stream
     private readonly long _readAheadBytes;
     private readonly TimeSpan _readAheadTime;
 
-    /// <summary>What was read in the last <see cref="ReadRateWindow"/>, oldest first, and when; read and written by the reader alone.</summary>
-    private readonly Queue<(long Timestamp, int Bytes)> _reads = new();
+    /// <summary>Completed 100 ms buckets from the last <see cref="ReadRateWindow"/>; bounded even for one-byte reads.</summary>
+    private readonly Queue<(long Timestamp, long Bytes)> _reads = new();
     private long _readsBytes;
-    private long _firstReadTimestamp = -1;
+    private long _firstReadTimestamp;
+    private long _bucketTimestamp;
+    private long _bucketBytes;
+    private bool _hasRead;
 
     /// <summary>The reader's rate, for other threads to read; zero while it is not yet known.</summary>
     private double _publishedRate;
@@ -133,7 +137,7 @@ internal class TorrentStream : Stream
     /// <summary>
     /// Whether the stream has little downloaded ahead of where it is read: from when it opens or moves,
     /// or runs down below <see cref="ThinBufferSeconds"/> at the reader's rate, until
-    /// <see cref="HealthyBufferSeconds"/> are. While its rate is unknown, it is taken as buffering.
+    /// <see cref="HealthyBufferSeconds"/> are. While its rate is unknown, the configured byte window determines buffering.
     /// </summary>
     internal bool IsBuffering => Volatile.Read(ref _buffering) == 1;
 
@@ -223,7 +227,7 @@ internal class TorrentStream : Stream
             RecordRead(available);
 
             // Look-ahead update: periodically update priorities as we read forward
-            if (_position - _lastPriorityUpdatePosition >= PriorityUpdateIntervalBytes)
+            if (_position == _fileSize || _position - _lastPriorityUpdatePosition >= PriorityUpdateIntervalBytes)
             {
                 UpdatePriorities(_position);
             }
@@ -344,14 +348,22 @@ internal class TorrentStream : Stream
     private void RecordRead(int bytes)
     {
         long now = _timeProvider.GetTimestamp();
-        if (_firstReadTimestamp < 0)
+        if (!_hasRead)
         {
+            _hasRead = true;
             _firstReadTimestamp = now;
+            _bucketTimestamp = now;
+        }
+        else if (_timeProvider.GetElapsedTime(_bucketTimestamp, now) >= ReadRateBucket)
+        {
+            _reads.Enqueue((_bucketTimestamp, _bucketBytes));
+            _bucketTimestamp = now;
+            _bucketBytes = 0;
         }
 
-        _reads.Enqueue((now, bytes));
+        _bucketBytes += bytes;
         _readsBytes += bytes;
-        while (_reads.Count > 1 && _timeProvider.GetElapsedTime(_reads.Peek().Timestamp, now) > ReadRateWindow)
+        while (_reads.Count > 0 && _timeProvider.GetElapsedTime(_reads.Peek().Timestamp, now) > ReadRateWindow)
         {
             _readsBytes -= _reads.Dequeue().Bytes;
         }
@@ -372,12 +384,13 @@ internal class TorrentStream : Stream
     /// <summary>The rate the stream has been read at over the last <see cref="ReadRateWindow"/>, once it has settled; null before.</summary>
     private double? ReadRate()
     {
-        if (_reads.Count == 0 || _timeProvider.GetElapsedTime(_firstReadTimestamp) < ReadRateSettles)
+        if (!_hasRead || _timeProvider.GetElapsedTime(_firstReadTimestamp) < ReadRateSettles)
         {
             return null;
         }
 
-        double seconds = Math.Max(1, _timeProvider.GetElapsedTime(_reads.Peek().Timestamp).TotalSeconds);
+        long oldest = _reads.Count > 0 ? _reads.Peek().Timestamp : _bucketTimestamp;
+        double seconds = Math.Max(1, _timeProvider.GetElapsedTime(oldest).TotalSeconds);
         return _readsBytes / seconds;
     }
 
@@ -387,16 +400,23 @@ internal class TorrentStream : Stream
     /// </summary>
     private void UpdateBuffering()
     {
+        long position = Volatile.Read(ref _position);
+        if (position >= _fileSize)
+        {
+            Volatile.Write(ref _buffering, 0);
+            return;
+        }
         double rate = Volatile.Read(ref _publishedRate);
         if (rate <= 0)
         {
-            Volatile.Write(ref _buffering, 1);
+            long initialWindow = Math.Max(1, _readAheadBytes);
+            Volatile.Write(ref _buffering, DownloadedAhead(position, initialWindow) >= initialWindow ? 0 : 1);
             return;
         }
 
         bool buffering = IsBuffering;
-        long wanted = (long)(rate * (buffering ? HealthyBufferSeconds : ThinBufferSeconds));
-        long ahead = DownloadedAhead(Volatile.Read(ref _position), wanted);
+        long wanted = Math.Max(1, (long)Math.Min(MaxReadAheadBytes, rate * (buffering ? HealthyBufferSeconds : ThinBufferSeconds)));
+        long ahead = DownloadedAhead(position, wanted);
         if (buffering && ahead >= wanted)
         {
             Volatile.Write(ref _buffering, 0);
@@ -433,7 +453,7 @@ internal class TorrentStream : Stream
     {
         UpdateBuffering();
         _lastPriorityUpdatePosition = playheadPosition;
-        if (_fileSize == 0)
+        if (playheadPosition >= _fileSize)
         {
             _controller.UpdatePriorities(this, []);
             return;
@@ -444,7 +464,7 @@ internal class TorrentStream : Stream
         long bufferEnd = absolutePlayhead + Math.Min(_fileSize - playheadPosition, ReadAheadBytes());
 
         int playheadPiece = (int)(absolutePlayhead / pieceSize);
-        int bufferEndPiece = (int)(bufferEnd / pieceSize);
+        int bufferEndPiece = (int)((Math.Max(absolutePlayhead + 1, bufferEnd) - 1) / pieceSize);
 
         // Clamp to file range
         playheadPiece = Math.Max(playheadPiece, _firstPieceIndex);
@@ -521,10 +541,11 @@ internal class TorrentStream : Stream
         Interlocked.Exchange(ref _waitingStartPiece, (int)(absoluteOffset / pieceSize));
         Interlocked.Exchange(ref _waitingEndPiece, (int)((absoluteOffset + requestedLength - 1) / pieceSize));
 
+        using var timeoutCts = _dataWaitTimeout is { } waitTimeout ? new CancellationTokenSource(waitTimeout, _timeProvider) : null;
+        using var waitCts = timeoutCts != null ? CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token) : null;
+        var waitToken = waitCts?.Token ?? ct;
         try
         {
-            var startTime = _timeProvider.GetUtcNow();
-
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
@@ -535,15 +556,14 @@ internal class TorrentStream : Stream
                     return availableBytes;
                 }
 
-                if (_dataWaitTimeout is { } timeout && _timeProvider.GetUtcNow() - startTime > timeout)
-                {
-                    throw new TimeoutException(
-                        $"Timed out after {timeout.TotalSeconds:0}s waiting for piece data at offset {absoluteOffset} of torrent '{_torrent.Name}'.");
-                }
-
                 // Wait for signal from OnPieceVerified, or re-check after the poll interval
-                await _dataSignal.WaitAsync(DataPollInterval, ct).ConfigureAwait(false);
+                await _dataSignal.WaitAsync(DataPollInterval, waitToken).ConfigureAwait(false);
             }
+        }
+        catch (OperationCanceledException) when (timeoutCts?.IsCancellationRequested == true && !ct.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Timed out after {_dataWaitTimeout!.Value.TotalSeconds:0}s waiting for piece data at offset {absoluteOffset} of torrent '{_torrent.Name}'.");
         }
         finally
         {
