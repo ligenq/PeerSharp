@@ -240,12 +240,14 @@ public class HttpTrackerTests
     [InlineData(ProxyType.Socks5, "::1")]
     [InlineData(ProxyType.Http, "127.0.0.1")]
     [InlineData(ProxyType.Http, "::1")]
+    [InlineData(ProxyType.None, "127.0.0.1")]
     public async Task AnnounceAsync_WithProxyAndBind_LeavesTrackerResolutionToTheProxy(ProxyType proxyType, string bind)
     {
         _torrent.Settings.Connection.BindAddress = IPAddress.Parse(bind);
         _torrent.Settings.Proxy.Type = proxyType;
         _torrent.Settings.Proxy.Host = "proxy.example";
         _torrent.Settings.Proxy.ProxyTrackers = true;
+        _torrent.Settings.Proxy.ForceProxy = proxyType == ProxyType.None;
         int lookups = 0;
         var names = new HostAddressCache(TimeProvider.System, (_, _) =>
         {

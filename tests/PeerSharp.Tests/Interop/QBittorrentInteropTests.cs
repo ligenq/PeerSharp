@@ -357,7 +357,12 @@ public sealed class QBittorrentInteropTests : IAsyncLifetime
 
         await File.WriteAllTextAsync(Path.Combine(configDir, "qBittorrent.ini"), ini);
 
-        var info = new ProcessStartInfo(exe) { UseShellExecute = false };
+        var info = new ProcessStartInfo(exe)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
         info.ArgumentList.Add($"--profile={profileDir}");
         info.ArgumentList.Add("--confirm-legal-notice");
         info.ArgumentList.Add("--no-splash");

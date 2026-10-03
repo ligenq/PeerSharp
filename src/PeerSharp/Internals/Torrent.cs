@@ -161,6 +161,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public InfoHash Hash => InfoFile.Info.Hash;
     InfoHash IPeerTransportHost.Hash => InfoFile.Info.GetTrackerInfoHash();
+    bool IPeerTransportHost.AllowsDirectConnections => !Settings.Proxy.ForceProxy &&
+        !(Settings.Proxy.ProxyPeers && Settings.Proxy.Type != ProxyType.None && !string.IsNullOrEmpty(Settings.Proxy.Host));
 
     public InfoHash HashV2 => InfoFile.Info.HashV2;
 
@@ -1597,8 +1599,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private void NotifyEvent<T>(Action<ITorrent, T>? callback, T value)
     {
-        try { callback?.Invoke(this, value); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Torrent event callback failed for {TorrentName}", Name); }
+        TorrentEventDispatcher.Invoke(callback, this, value, _logger);
     }
 
     internal void FireErrorEvent(Exception exception)

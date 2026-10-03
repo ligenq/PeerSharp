@@ -47,8 +47,15 @@ internal static class ProxyHelper
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        var connectRequest = $"CONNECT {targetHost}:{targetPort} HTTP/1.1\r\n" +
-                             $"Host: {targetHost}:{targetPort}\r\n";
+        ArgumentException.ThrowIfNullOrEmpty(targetHost);
+        ArgumentOutOfRangeException.ThrowIfLessThan(targetPort, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(targetPort, 65535);
+        if (targetHost.Any(char.IsWhiteSpace) || targetHost.Any(char.IsControl) || targetHost.IndexOfAny(['/', '\\', '?', '#', '@']) >= 0)
+            throw new ArgumentException("Invalid HTTP CONNECT host.", nameof(targetHost));
+        string authorityHost = IPAddress.TryParse(targetHost, out var address) && address.AddressFamily == AddressFamily.InterNetworkV6
+            ? $"[{address}]" : targetHost;
+        var connectRequest = $"CONNECT {authorityHost}:{targetPort} HTTP/1.1\r\n" +
+                             $"Host: {authorityHost}:{targetPort}\r\n";
 
         if (!string.IsNullOrEmpty(username))
         {
@@ -64,6 +71,7 @@ internal static class ProxyHelper
         int totalRead = 0;
         do
         {
+            if (totalRead == buffer.Length) throw new IOException("HTTP proxy response headers exceed 4096 bytes.");
             int read = await stream.ReadAsync(buffer.AsMemory(totalRead, 1), cancellationToken).ConfigureAwait(false);
             if (read == 0)
             {
@@ -78,13 +86,10 @@ internal static class ProxyHelper
 
         var response = Encoding.UTF8.GetString(buffer, 0, totalRead);
         var statusLine = response.Split("\r\n")[0];
-
-        // Validate HTTP status line format: "HTTP/x.x 200 ..."
-        if (!statusLine.StartsWith("HTTP/", StringComparison.OrdinalIgnoreCase) ||
-            !statusLine.Contains(" 200 "))
-        {
+        var statusParts = statusLine.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        if (statusParts.Length < 2 || (statusParts[0] != "HTTP/1.0" && statusParts[0] != "HTTP/1.1") ||
+            !int.TryParse(statusParts[1], out int status) || status < 200 || status >= 300)
             throw new IOException($"HTTP Proxy connection failed: {statusLine}");
-        }
 
         logger.LogDebug("HTTP Proxy: Connection established to {TargetHost}:{TargetPort}", targetHost, targetPort);
         return (stream, client);
@@ -129,6 +134,7 @@ internal static class ProxyHelper
         ILogger logger,
         CancellationToken cancellationToken)
     {
+        ValidateSocks5Fields(targetHost, targetPort, username, password);
         // 1. Version identifier/method selection message
         byte[] authMethods = string.IsNullOrEmpty(username)
             ? [0x05, 0x01, 0x00]
@@ -165,7 +171,7 @@ internal static class ProxyHelper
 
             byte[] authResponse = new byte[2];
             await ReadExactAsync(stream, authResponse, cancellationToken).ConfigureAwait(false);
-            if (authResponse[1] != 0x00)
+            if (authResponse[0] != 0x01 || authResponse[1] != 0x00)
             {
                 throw new IOException("SOCKS5 authentication failed");
             }
@@ -215,6 +221,7 @@ internal static class ProxyHelper
         byte[] response = new byte[4];
         await ReadExactAsync(stream, response, cancellationToken).ConfigureAwait(false);
 
+        if (response[0] != 0x05 || response[2] != 0x00) throw new IOException("Invalid SOCKS5 reply header.");
         if (response[1] != 0x00)
         {
             throw new IOException($"SOCKS5 connection failed with error: {response[1]}");
@@ -284,6 +291,7 @@ internal static class ProxyHelper
         IPAddress? bindAddress,
         CancellationToken cancellationToken)
     {
+        ValidateSocks5Fields(proxyHost, 1, username, password);
         // 1. Handshake (Method Selection)
         byte[] authMethods = string.IsNullOrEmpty(username)
             ? [0x05, 0x01, 0x00]
@@ -299,7 +307,8 @@ internal static class ProxyHelper
 
         if (methodResponse[1] == 0x02) // Auth
         {
-            var userBytes = Encoding.UTF8.GetBytes(username!);
+            if (string.IsNullOrEmpty(username)) throw new IOException("Proxy selected authentication that was not offered.");
+            var userBytes = Encoding.UTF8.GetBytes(username);
             var passBytes = Encoding.UTF8.GetBytes(password ?? "");
             byte[] authRequest = new byte[3 + userBytes.Length + passBytes.Length];
             authRequest[0] = 0x01;
@@ -311,7 +320,7 @@ internal static class ProxyHelper
 
             byte[] authResponse = new byte[2];
             await ReadExactAsync(stream, authResponse, cancellationToken).ConfigureAwait(false);
-            if (authResponse[1] != 0x00)
+            if (authResponse[0] != 0x01 || authResponse[1] != 0x00)
             {
                 throw new IOException("SOCKS5 authentication failed");
             }
@@ -328,6 +337,7 @@ internal static class ProxyHelper
         // 3. UDP ASSOCIATE Response
         byte[] response = new byte[4];
         await ReadExactAsync(stream, response, cancellationToken).ConfigureAwait(false);
+        if (response[0] != 0x05 || response[2] != 0x00) throw new IOException("Invalid SOCKS5 reply header.");
         if (response[1] != 0x00)
         {
             throw new IOException($"SOCKS5 UDP ASSOCIATE failed with error: {response[1]}");
@@ -470,6 +480,25 @@ internal static class ProxyHelper
         return totalLength;
     }
 
+    internal static int WriteSocks5UdpPacket(ReadOnlySpan<byte> payload, string host, int port, Span<byte> destination)
+    {
+        ValidateSocks5Fields(host, port, null, null);
+        int hostLength = Encoding.ASCII.GetByteCount(host);
+        int headerLength = 7 + hostLength;
+        if (destination.Length < headerLength + payload.Length)
+        {
+            throw new ArgumentException("Destination buffer too small for SOCKS5 UDP packet.", nameof(destination));
+        }
+        destination[..3].Clear();
+        destination[3] = 0x03;
+        destination[4] = (byte)hostLength;
+        Encoding.ASCII.GetBytes(host, destination.Slice(5, hostLength));
+        destination[5 + hostLength] = (byte)(port >> 8);
+        destination[6 + hostLength] = (byte)port;
+        payload.CopyTo(destination[headerLength..]);
+        return headerLength + payload.Length;
+    }
+
     /// <summary>
     /// Unwraps a SOCKS5 UDP relay packet, extracting the payload and remote endpoint.
     /// </summary>
@@ -487,7 +516,7 @@ internal static class ProxyHelper
             return (ReadOnlyMemory<byte>.Empty, new IPEndPoint(IPAddress.Any, 0));
         }
 
-        if (packet[2] != 0)
+        if (packet[0] != 0 || packet[1] != 0 || packet[2] != 0)
         {
             return (ReadOnlyMemory<byte>.Empty, new IPEndPoint(IPAddress.Any, 0));
         }
@@ -539,6 +568,16 @@ internal static class ProxyHelper
         offset += 2;
 
         return (packet.AsMemory(offset), new IPEndPoint(address, port));
+    }
+
+    private static void ValidateSocks5Fields(string targetHost, int targetPort, string? username, string? password)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(targetPort, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(targetPort, 65535);
+        if (Encoding.UTF8.GetByteCount(targetHost) > 255 && !IPAddress.TryParse(targetHost, out _))
+            throw new ArgumentException("SOCKS5 host names may contain at most 255 bytes.", nameof(targetHost));
+        if (Encoding.UTF8.GetByteCount(username ?? "") > 255 || Encoding.UTF8.GetByteCount(password ?? "") > 255)
+            throw new ArgumentException("SOCKS5 credentials may contain at most 255 bytes.");
     }
 
     private static async Task ReadExactAsync(Stream stream, byte[] buffer, CancellationToken cancellationToken)

@@ -25,6 +25,7 @@ internal sealed class DhtLoopbackFixture : IAsyncDisposable
         private IUdpReceiver? _receiver;
         private IPEndPoint? _replySource;
         public HashSet<IPEndPoint> Aliases { get; } = [];
+        public Dictionary<IPEndPoint, LoopbackTransport> Routes { get; } = [];
 
         public required IPEndPoint LocalEndPoint { get; init; }
 
@@ -52,7 +53,8 @@ internal sealed class DhtLoopbackFixture : IAsyncDisposable
                 return Task.CompletedTask;
             }
 
-            var destination = endpoint.Equals(LocalEndPoint) ? this : Peer;
+            var destination = endpoint.Equals(LocalEndPoint) ? this
+                : Routes.GetValueOrDefault(endpoint) ?? Peer;
             if (destination?._receiver is null ||
                 (!endpoint.Equals(destination.LocalEndPoint) && !destination.Aliases.Contains(endpoint)))
             {
@@ -83,6 +85,28 @@ internal sealed class DhtLoopbackFixture : IAsyncDisposable
     public required LoopbackTransport ServerTransport { get; init; }
 
     public required IPEndPoint ServerEndPoint { get; init; }
+    private readonly List<DhtManager> _additionalServers = [];
+
+    public async Task AddServersAsync(int count)
+    {
+        // Distinct managers have independent storage and per-source query budgets, just as
+        // replication targets in the real DHT do.
+        for (int index = 0; index < count; index++)
+        {
+            var endpoint = new IPEndPoint(IPAddress.Parse($"192.0.2.{index + 10}"), 7000 + index);
+            var transport = new LoopbackTransport { LocalEndPoint = endpoint, Peer = ClientTransport };
+            ClientTransport.Routes.Add(endpoint, transport);
+            var settings = new Settings();
+            settings.Dht.BootstrapNodes = [];
+            var manager = new DhtManager(InfoHash.CreateRandom(), transport, settings, TimeProvider.System);
+            _additionalServers.Add(manager);
+            await manager.StartAsync();
+            Client.Ping(endpoint);
+        }
+        // Independent nodes confirm our external address during the first pings. That changes
+        // the client's node ID and resets its routing table, so refresh the earlier contacts.
+        foreach (var endpoint in ClientTransport.Routes.Keys) Client.Ping(endpoint);
+    }
 
     /// <summary>
     /// Builds a client and a server, starts both, and seeds the client's routing table with the
@@ -133,6 +157,7 @@ internal sealed class DhtLoopbackFixture : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        foreach (var manager in _additionalServers) await manager.DisposeAsync();
         await Client.DisposeAsync();
         await Server.DisposeAsync();
     }

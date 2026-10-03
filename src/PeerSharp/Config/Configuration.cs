@@ -647,6 +647,8 @@ public sealed class ProxySettings
     /// <remarks>
     /// DHT uses a configured proxy. Peer and tracker traffic follow their respective proxy flags.
     /// A SOCKS5 server must still support UDP association for a permitted connection to succeed.
+    /// Proxied DHT bootstrap uses saved nodes or IP addresses in DhtSettings.BootstrapNodes;
+    /// hostname bootstrap is skipped to prevent local DNS lookups outside the proxy.
     /// </remarks>
     public UdpProxyCapabilities GetUdpCapabilities() => new(
         Internals.Network.UdpProxyPolicy.Decide(this, proxyTraffic: true) != Internals.Network.UdpProxyPolicy.Decision.Refuse,

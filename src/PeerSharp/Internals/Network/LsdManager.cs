@@ -59,7 +59,7 @@ internal class LsdManager : ILsdManager
 
     public async Task AnnounceAsync(InfoHash infoHash, CancellationToken token = default)
     {
-        if (!_running || _resolver.GetTorrent(infoHash) is Torrent { InfoFile.Info.IsPrivate: true })
+        if (_settings.Proxy.ForceProxy || !_running || _resolver.GetTorrent(infoHash) is Torrent { InfoFile.Info.IsPrivate: true })
         {
             return;
         }
@@ -103,7 +103,7 @@ internal class LsdManager : ILsdManager
 
     public void Start()
     {
-        if (!_settings.Connection.EnableLsd || _running)
+        if (_settings.Proxy.ForceProxy || !_settings.Connection.EnableLsd || _running)
         {
             return;
         }
@@ -194,7 +194,7 @@ internal class LsdManager : ILsdManager
 
     internal void ProcessMessage(string message, IPEndPoint sender)
     {
-        if (string.IsNullOrWhiteSpace(message))
+        if (_settings.Proxy.ForceProxy || string.IsNullOrWhiteSpace(message))
         {
             return;
         }
@@ -296,7 +296,7 @@ internal class LsdManager : ILsdManager
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                if (_running)
+                if (_settings.Proxy.ForceProxy || _running)
                 {
                     _logger.LogDebug(ex, "LSD receive error");
                 }

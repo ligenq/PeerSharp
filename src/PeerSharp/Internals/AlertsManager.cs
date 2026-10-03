@@ -226,30 +226,33 @@ internal class AlertsManager : IAlertsManager
 
     public List<Alert> PopAlerts()
     {
-        var result = new List<Alert>();
-
-        // First, so the consumer learns it has a gap before it reads the alerts either side of it.
-        // Built here rather than queued: a notice about a full queue cannot be one more thing that
-        // needs room in it.
-        long dropped = Interlocked.Exchange(ref _droppedSinceReport, 0);
-        if (dropped > 0)
+        lock (_lock)
         {
-            result.Add(new AlertsDroppedAlert
+            var result = new List<Alert>();
+
+            // First, so the consumer learns it has a gap before it reads the alerts either side of it.
+            // Built here rather than queued: a notice about a full queue cannot be one more thing that
+            // needs room in it.
+            long dropped = Interlocked.Exchange(ref _droppedSinceReport, 0);
+            if (dropped > 0)
             {
-                Id = AlertId.AlertsDropped,
-                Dropped = dropped,
-                TotalDropped = Interlocked.Read(ref _droppedTotal),
-                Capacity = _settings.MaxQueueSize,
-                Timestamp = _timeProvider.GetUtcNow()
-            });
-        }
+                result.Add(new AlertsDroppedAlert
+                {
+                    Id = AlertId.AlertsDropped,
+                    Dropped = dropped,
+                    TotalDropped = Interlocked.Read(ref _droppedTotal),
+                    Capacity = _settings.MaxQueueSize,
+                    Timestamp = _timeProvider.GetUtcNow()
+                });
+            }
 
-        while (_alerts.TryDequeue(out var alert))
-        {
-            result.Add(alert);
-            Interlocked.Decrement(ref _alertCount);
+            while (_alerts.TryDequeue(out var alert))
+            {
+                result.Add(alert);
+                Interlocked.Decrement(ref _alertCount);
+            }
+            return result;
         }
-        return result;
     }
 
     /// <summary>
@@ -265,21 +268,24 @@ internal class AlertsManager : IAlertsManager
     /// </summary>
     public void PostAlert(Alert alert)
     {
-        if (!IsAlertRegistered(alert.Id))
+        lock (_lock)
         {
-            return;
-        }
+            if (!IsAlertRegistered(alert.Id))
+            {
+                return;
+            }
 
-        int capacity = Math.Max(1, _settings.MaxQueueSize);
-        int currentCount = Interlocked.Increment(ref _alertCount);
-        if (currentCount > capacity && !TryMakeRoom(alert, capacity))
-        {
-            Interlocked.Decrement(ref _alertCount);
-            RecordDrop();
-            return;
-        }
+            int capacity = Math.Max(1, _settings.MaxQueueSize);
+            int currentCount = Interlocked.Increment(ref _alertCount);
+            if (currentCount > capacity && !TryMakeRoom(alert, capacity))
+            {
+                Interlocked.Decrement(ref _alertCount);
+                RecordDrop();
+                return;
+            }
 
-        _alerts.Enqueue(alert);
+            _alerts.Enqueue(alert);
+        }
     }
 
     /// <summary>

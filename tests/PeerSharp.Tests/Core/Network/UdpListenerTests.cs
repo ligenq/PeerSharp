@@ -79,6 +79,25 @@ public class UdpListenerTests
         }
     }
 
+    [Fact]
+    public async Task SocksDatagramsAreAcceptedOnlyFromTheConfiguredRelay()
+    {
+        var factory = new MockUdpSocketFactory();
+        await using var listener = new UdpListener(0, factory, new Settings());
+        var receiver = new MockReceiver(); listener.RegisterReceiver(receiver);
+        await listener.StartAsync();
+        var relay = new IPEndPoint(IPAddress.Parse("198.51.100.1"), 1080);
+        typeof(UdpListener).GetField("_proxyUdpEndPoint", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(listener, relay);
+        var source = new IPEndPoint(IPAddress.Parse("192.0.2.1"), 6000);
+        var datagram = PeerSharp.Internals.Utilities.ProxyHelper.GetSocks5UdpPacket([1, 2, 3], source);
+        factory.LastSocket.EnqueueReceive(datagram, new IPEndPoint(IPAddress.Parse("198.51.100.2"), 1080));
+        factory.LastSocket.EnqueueReceive(datagram, relay);
+        await TorrentTestUtility.WaitUntilAsync(() => receiver.Received.Count > 0);
+        var accepted = Assert.Single(receiver.Received);
+        Assert.Equal(source, accepted.Remote);
+        Assert.Equal(new byte[] { 1, 2, 3 }, accepted.Data);
+    }
+
     [Fact(Timeout = 30000)]
     public async Task StartAsync_DispatchesToReceiver()
     {

@@ -43,7 +43,7 @@ internal static class UdpProxyPolicy
     {
         ArgumentNullException.ThrowIfNull(proxy);
 
-        if (!proxyTraffic)
+        if (!proxyTraffic && !proxy.ForceProxy)
         {
             return Decision.BindDirectly;
         }
@@ -53,7 +53,7 @@ internal static class UdpProxyPolicy
         bool configured = proxy.Type != ProxyType.None && !string.IsNullOrEmpty(proxy.Host);
         if (!configured)
         {
-            return Decision.BindDirectly;
+            return proxy.ForceProxy ? Decision.Refuse : Decision.BindDirectly;
         }
 
         return proxy.Type == ProxyType.Socks5 ? Decision.TunnelThroughSocks5 : Decision.Refuse;

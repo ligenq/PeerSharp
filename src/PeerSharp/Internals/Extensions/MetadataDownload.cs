@@ -554,8 +554,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     private void FireMetadataReceivedEvent()
     {
         // Fire callback
-        try { _torrent.Events?.MetadataReceived?.Invoke(_torrent); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Metadata received callback failed"); }
+        TorrentEventDispatcher.Invoke(_torrent.Events?.MetadataReceived, _torrent, _logger);
 
         // Fire alert
         _torrent.Alerts.MetadataAlert(AlertId.MetadataInitialized, _torrent);
@@ -592,8 +591,7 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
         };
 
         // Fire callback
-        try { _torrent.Events?.MetadataProgress?.Invoke(_torrent, progressInfo); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Metadata progress callback failed"); }
+        TorrentEventDispatcher.Invoke(_torrent.Events?.MetadataProgress, _torrent, progressInfo, _logger);
 
         // Fire alert
         _torrent.Alerts.MetadataProgressAlert(_torrent, currentProgress, received, total);

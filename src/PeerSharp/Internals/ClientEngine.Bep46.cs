@@ -23,6 +23,7 @@ internal sealed partial class ClientEngine
     private static readonly TimeSpan RepublishInterval = TimeSpan.FromMinutes(30);
 
     private readonly Lock _publishedRecordsLock = new();
+    private readonly SemaphoreSlim _publishGate = new(1, 1);
 
     /// <summary>Signed records this engine has published, keyed by DHT address.</summary>
     private readonly Dictionary<DhtTarget, DhtMutableItem> _publishedRecords = [];
@@ -133,39 +134,48 @@ internal sealed partial class ClientEngine
                 "This identity holds no private key, so it cannot publish. Use TorrentPublisherKey.Create, FromSeed or FromExpandedKey.");
         }
 
-        byte[]? saltBytes = salt.IsEmpty ? null : salt.ToArray();
-        var target = Bep46Resolver.ComputeTarget(publisher.PublicKey.Span, salt.Span);
-
-        var dht = RequireDhtForBep46();
-        await dht.WaitForUsableItemRoutingTableAsync(target, cancellationToken).ConfigureAwait(false);
-
-        var resolver = new Bep46Resolver(dht, _loggerFactory);
-
-        var current = await resolver.ResolveAsync(publisher.PublicKey.ToArray(), saltBytes, cancellationToken)
-            .ConfigureAwait(false);
-
-        long next = (current?.SequenceNumber ?? -1) + 1;
-
-        var item = DhtItemCodec.CreateSigned(publisher, salt.Span, next, Bep46Resolver.BuildRecord(infoHash));
-
-        int accepted = await resolver
-            .PublishAsync(publisher, infoHash, next, saltBytes, current?.SequenceNumber, cancellationToken)
-            .ConfigureAwait(false);
-
-        // Remembered regardless of how many nodes took it: the republish loop is also the retry
-        // path when a publish landed on too few nodes.
-        lock (_publishedRecordsLock)
+        await _publishGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            _publishedRecords[item.Target] = item;
+            byte[]? saltBytes = salt.IsEmpty ? null : salt.ToArray();
+            var target = Bep46Resolver.ComputeTarget(publisher.PublicKey.Span, salt.Span);
+
+            var dht = RequireDhtForBep46();
+            await dht.WaitForUsableItemRoutingTableAsync(target, cancellationToken).ConfigureAwait(false);
+
+            var resolver = new Bep46Resolver(dht, _loggerFactory);
+
+            var current = await resolver.ResolveAsync(publisher.PublicKey.ToArray(), saltBytes, cancellationToken)
+                .ConfigureAwait(false);
+
+            long previous = current?.SequenceNumber ?? -1;
+            lock (_publishedRecordsLock)
+                if (_publishedRecords.TryGetValue(target, out var maintained)) previous = Math.Max(previous, maintained.SequenceNumber);
+            long next = checked(previous + 1);
+
+            var item = DhtItemCodec.CreateSigned(publisher, salt.Span, next, Bep46Resolver.BuildRecord(infoHash));
+
+            int accepted = await resolver
+                .PublishAsync(publisher, infoHash, next, saltBytes, current?.SequenceNumber, cancellationToken)
+                .ConfigureAwait(false);
+
+            // Remembered regardless of how many nodes took it: the republish loop is also the retry
+            // path when a publish landed on too few nodes.
+            lock (_publishedRecordsLock)
+            {
+                if (!_publishedRecords.TryGetValue(item.Target, out var existing) || existing.SequenceNumber < item.SequenceNumber)
+                    _publishedRecords[item.Target] = item;
+            }
+
+            _logger.LogInformation(
+                "Published self-updating torrent version {Version} pointing at {InfoHash}; accepted by {Accepted} node(s)",
+                next,
+                infoHash,
+                accepted);
+
+            return (accepted, next);
         }
-
-        _logger.LogInformation(
-            "Published self-updating torrent version {Version} pointing at {InfoHash}; accepted by {Accepted} node(s)",
-            next,
-            infoHash,
-            accepted);
-
-        return (accepted, next);
+        finally { _publishGate.Release(); }
     }
 
     /// <summary>

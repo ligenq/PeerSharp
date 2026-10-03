@@ -376,6 +376,7 @@ internal class UdpListener : IUdpListener
 
                 if (_proxyUdpEndPoint != null)
                 {
+                    if (!NetworkUtils.NormalizeEndPoint(remoteEndPoint).Equals(NetworkUtils.NormalizeEndPoint(_proxyUdpEndPoint))) continue;
                     var (Payload, RemoteEndPoint) = ProxyHelper.UnwrapSocks5UdpPacket(data);
                     if (Payload.IsEmpty)
                     {

@@ -47,6 +47,25 @@ public class UploadQueueManagerTests
         => new(execute, NullLogger<UploadQueueManager>.Instance, stopToken);
 
     [Fact]
+    public async Task ConcurrentFirstRequestsUseOnePumpAndDisposedManagerRejectsNewWork()
+    {
+        using var cts = new CancellationTokenSource();
+        var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int started = 0;
+        var manager = CreateManager(async (_, _, ct) => { Interlocked.Increment(ref started); first.TrySetResult(); await release.Task.WaitAsync(ct); }, cts.Token);
+        var peer = CreateUnchockedPeer();
+        Parallel.For(0, 50, i => manager.TryEnqueue(peer, new UploadQueueItem(i, 0, 16384)));
+        await first.Task.WaitAsync(PumpStart, TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.Equal(1, Volatile.Read(ref started));
+        await manager.DisposeAsync();
+        Assert.False(manager.TryEnqueue(peer, new UploadQueueItem(100, 0, 16384)));
+        release.TrySetResult();
+        await peer.DisposeAsync();
+    }
+
+    [Fact]
     public async Task TryEnqueue_ExecutesItemViaCallback()
     {
         using var cts = new CancellationTokenSource();

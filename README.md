@@ -28,7 +28,7 @@ polling statistics, and proxy capability reporting.
 - **Protocol Encryption:** MSE (Message Stream Encryption) with configurable enforcement modes.
 - **NAT Traversal:** UPnP, NAT-PMP, and Holepunch (BEP 55) for connectivity behind NATs.
 - **Bandwidth Control:** Per-torrent and global upload/download/disk I/O rate limiting.
-- **Proxy Support:** SOCKS5 and HTTP proxy support with authentication. Only SOCKS5 can carry UDP, so an HTTP proxy selected for that traffic makes DHT and uTP refuse to start and UDP tracker requests fail rather than send around it.
+- **Proxy Support:** SOCKS5 and HTTP proxy support with authentication. Only SOCKS5 can carry UDP, so an HTTP proxy selected for that traffic makes DHT and uTP refuse to start and UDP tracker requests fail rather than send around it. SOCKS5 resolves UDP tracker names remotely. Proxied DHT bootstrap requires saved nodes or IP addresses in `Dht.BootstrapNodes`; hostname bootstrap is skipped to prevent local DNS leaks. WebTorrent sessions reject peer proxy configurations because the WebRTC adapter does not support proxy routing.
 - **IP Blocklist & GeoIP:** Block peers by IP range and label connected peers by country.
 - **One Error Model:** Everything the library reports as its own failure derives from `PeerSharpException`, so a malformed torrent, a refused tracker and an unwritable disk are told apart by type rather than by message.
 - **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.

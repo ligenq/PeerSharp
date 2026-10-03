@@ -38,6 +38,8 @@ internal sealed class HostAddressCache
     /// <summary>Entries held before expired ones are swept. Trackers number in the tens.</summary>
     internal const int SweepThreshold = 256;
 
+    private readonly Lock _lock = new();
+    internal static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(10);
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);
     private readonly Func<string, CancellationToken, Task<IPAddress[]>> _lookupAsync;
     private readonly TimeProvider _timeProvider;
@@ -64,16 +66,30 @@ internal sealed class HostAddressCache
             return [literal];
         }
 
-        var now = _timeProvider.GetUtcNow();
-        if (!_entries.TryGetValue(host, out var entry) || entry.IsExpired(now))
+        Entry entry;
+        lock (_lock)
         {
-            if (_entries.Count >= SweepThreshold)
+            var now = _timeProvider.GetUtcNow();
+            if (!_entries.TryGetValue(host, out entry!) || entry.IsExpired(now))
             {
-                Sweep(now);
+                if (_entries.Count >= SweepThreshold)
+                {
+                    Sweep(now);
+                    if (_entries.Count >= SweepThreshold)
+                    {
+                        var oldest = _entries.Where(pair => !pair.Value.IsPending).OrderBy(pair => pair.Value.StartedAt).FirstOrDefault();
+                        // Retain in-flight lookups so eviction cannot defeat coalescing and turn
+                        // a burst of distinct names into unbounded concurrent DNS work.
+                        if (oldest.Value == null)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            return [];
+                        }
+                        _entries.TryRemove(oldest.Key, out _);
+                    }
+                }
+                _entries[host] = entry = new Entry(() => LookupAsync(host), now);
             }
-
-            var fresh = new Entry(() => LookupAsync(host), now);
-            entry = _entries.AddOrUpdate(host, fresh, (_, existing) => existing.IsExpired(now) ? fresh : existing);
         }
 
         // The lookup is shared, so one caller giving up must not cancel it for the others.
@@ -82,9 +98,16 @@ internal sealed class HostAddressCache
 
     private async Task<IPAddress[]> LookupAsync(string host)
     {
+        using var timeout = new CancellationTokenSource(LookupTimeout, _timeProvider);
+        Task<IPAddress[]>? lookup = null;
         try
         {
-            return await _lookupAsync(host, CancellationToken.None).ConfigureAwait(false);
+            lookup = _lookupAsync(host, timeout.Token);
+            return await lookup.WaitAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            return [];
         }
         catch (SocketException)
         {
@@ -94,6 +117,11 @@ internal sealed class HostAddressCache
         {
             // Not a well-formed host name at all; it will not become one later.
             return [];
+        }
+        finally
+        {
+            if (lookup != null) _ = lookup.ContinueWith(static task => _ = task.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
 
@@ -121,12 +149,13 @@ internal sealed class HostAddressCache
         public Entry(Func<Task<IPAddress[]>> lookupAsync, DateTimeOffset started)
         {
             _started = started;
-            // Entries can lose the AddOrUpdate race. Only the selected entry starts a lookup,
-            // and concurrent callers of that entry share the same task.
+            // Start only when requested; concurrent callers share the same lookup task.
             _addresses = new Lazy<Task<IPAddress[]>>(() => RecordAsync(lookupAsync));
         }
 
         public Task<IPAddress[]> Addresses => _addresses.Value;
+        public DateTimeOffset StartedAt => _started;
+        public bool IsPending => Volatile.Read(ref _outcome) == Pending;
 
         public bool IsExpired(DateTimeOffset now)
         {
@@ -142,9 +171,17 @@ internal sealed class HostAddressCache
 
         private async Task<IPAddress[]> RecordAsync(Func<Task<IPAddress[]>> lookupAsync)
         {
-            var addresses = await lookupAsync().ConfigureAwait(false);
-            Volatile.Write(ref _outcome, addresses.Length > 0 ? Found : NotFound);
-            return addresses;
+            try
+            {
+                var addresses = await lookupAsync().ConfigureAwait(false);
+                Volatile.Write(ref _outcome, addresses.Length > 0 ? Found : NotFound);
+                return addresses;
+            }
+            catch
+            {
+                Volatile.Write(ref _outcome, NotFound);
+                throw;
+            }
         }
     }
 }

@@ -4,6 +4,7 @@ using PeerSharp.Internals;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Trackers;
+using PeerSharp.Internals.Utilities;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
@@ -14,6 +15,67 @@ namespace PeerSharp.Tests.Core.Trackers;
 
 public class UdpTrackerTests
 {
+    [Theory(Timeout = 30000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Socks5Tracker_ResolvesThroughProxy_AndUsesResolvedPeerFamily(bool ipv6)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var ct = cancellation.Token;
+        using var relay = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        var relayEndpoint = (IPEndPoint)relay.Client.LocalEndPoint!;
+        using var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        _torrent.Settings.Proxy.Type = ProxyType.Socks5;
+        _torrent.Settings.Proxy.Host = "127.0.0.1";
+        _torrent.Settings.Proxy.Port = (ushort)((IPEndPoint)server.LocalEndpoint).Port;
+        _torrent.Settings.Proxy.ProxyTrackers = true;
+        _torrent.Settings.Connection.BindAddress = IPAddress.Loopback;
+        int localLookups = 0;
+        using var tracker = new UdpTracker(TimeProvider.System, _socketFactory, NullLoggerFactory.Instance, (_, _) =>
+        {
+            Interlocked.Increment(ref localLookups);
+            return Task.FromResult(Array.Empty<IPAddress>());
+        });
+        tracker.Init("udp://tracker.invalid:80/announce", _torrent, _callback);
+        var announce = tracker.AnnounceAsync(TrackerEvent.None, ct);
+        using var control = await server.AcceptTcpClientAsync(ct);
+        var stream = control.GetStream();
+        await stream.ReadExactlyAsync(new byte[3], ct);
+        await stream.WriteAsync(new byte[] { 5, 0 }, ct);
+        await stream.ReadExactlyAsync(new byte[10], ct);
+        byte[] associate = [5, 0, 0, 1, 127, 0, 0, 1, (byte)(relayEndpoint.Port >> 8), (byte)relayEndpoint.Port];
+        await stream.WriteAsync(associate, ct);
+
+        var connect = await relay.ReceiveAsync(ct);
+        Assert.Equal(3, connect.Buffer[3]);
+        int hostLength = connect.Buffer[4];
+        Assert.Equal("tracker.invalid", Encoding.ASCII.GetString(connect.Buffer, 5, hostLength));
+        var (connectPayload, _) = ProxyHelper.UnwrapSocks5UdpPacket(connect.Buffer);
+        int transId = BinaryPrimitives.ReadInt32BigEndian(connectPayload.Span[12..]);
+        var remote = new IPEndPoint(IPAddress.Parse(ipv6 ? "2001:db8::1" : "192.0.2.1"), 80);
+        byte[] connectResponse = new byte[16];
+        BinaryPrimitives.WriteInt32BigEndian(connectResponse.AsSpan(4), transId);
+        BinaryPrimitives.WriteInt64BigEndian(connectResponse.AsSpan(8), 1234);
+        await relay.SendAsync(ProxyHelper.GetSocks5UdpPacket(connectResponse, remote), connect.RemoteEndPoint, ct);
+
+        var request = await relay.ReceiveAsync(ct);
+        var (requestPayload, target) = ProxyHelper.UnwrapSocks5UdpPacket(request.Buffer);
+        Assert.Equal(remote, target);
+        var peer = IPAddress.Parse(ipv6 ? "2001:db8::2" : "192.0.2.2");
+        byte[] response = new byte[20 + peer.GetAddressBytes().Length + 2];
+        BinaryPrimitives.WriteInt32BigEndian(response, 1);
+        requestPayload.Span.Slice(12, 4).CopyTo(response.AsSpan(4));
+        BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(8), 60);
+        peer.GetAddressBytes().CopyTo(response, 20);
+        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(response.Length - 2), 6881);
+        await relay.SendAsync(ProxyHelper.GetSocks5UdpPacket(response, remote), request.RemoteEndPoint, ct);
+        await announce;
+        Assert.True(_callback.Success);
+        Assert.Equal(new IPEndPoint(peer, 6881), Assert.Single(_callback.AnnounceResponse!.Peers));
+        Assert.Equal(0, localLookups);
+    }
+
     [Fact(Timeout = 30000)]
     public async Task ConnectResponse_FromWrongEndpoint_IsIgnored()
     {

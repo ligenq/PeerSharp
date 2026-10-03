@@ -8,6 +8,30 @@ namespace PeerSharp.Tests.Core.Dht;
 
 public class DhtManagerTests
 {
+    private sealed class RejectDnsResolver : IDnsResolver
+    {
+        public int Calls { get; private set; }
+        public Task<IPAddress[]> GetHostAddressesAsync(string hostNameOrAddress, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            throw new InvalidOperationException("DNS must not be used under proxy routing.");
+        }
+    }
+
+    [Fact]
+    public async Task ProxyBootstrap_SkipsHostNames_AndKeepsLiteralNodes()
+    {
+        _settings.Proxy.Type = ProxyType.Socks5;
+        _settings.Proxy.Host = "127.0.0.1";
+        _settings.Dht.BootstrapNodes = [new DhtBootstrapNode("tracker.invalid", 6881), new DhtBootstrapNode("192.0.2.1", 6881)];
+        var dns = new RejectDnsResolver();
+        await using var dht = new DhtManager(_localId, _listener, _settings, _timeProvider, _callback, dns);
+        await dht.StartAsync();
+        Assert.Equal(0, dns.Calls);
+        Assert.Equal(2, _listener.SentPackets.Count);
+        Assert.All(_listener.SentPackets, packet => Assert.Equal(IPAddress.Parse("192.0.2.1"), packet.EndPoint.Address));
+    }
+
     [Fact]
     public async Task UnknownQuery_ReturnsMethodUnknownError()
     {
