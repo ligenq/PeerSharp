@@ -177,7 +177,7 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
             MaxConnectionsPerServer = maxConnectionsPerServer,
             ConnectTimeout = TimeSpan.FromSeconds(10),
-            AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+            AutomaticDecompression = isTracker ? DecompressionMethods.GZip | DecompressionMethods.Deflate : DecompressionMethods.None,
             AllowAutoRedirect = followRedirects
         };
 

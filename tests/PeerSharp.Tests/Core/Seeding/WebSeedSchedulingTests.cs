@@ -275,7 +275,71 @@ public class WebSeedSchedulingTests
         return torrent;
     }
 
-    private sealed record Pending(int Piece, TaskCompletionSource<HttpResponseMessage> Completion, string Host, Task<HttpResponseMessage> Request);
+    [Fact(Timeout = 10000)]
+    public async Task RepeatedStartDoesNotCreateAnotherWorker()
+    {
+        await using var torrent = CreateTorrent();
+        var clock = new FakeTimeProvider();
+        var client = new ControlledClient();
+        torrent.Settings.Transfer.WebSeedMaxConnections = 1;
+        torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource = 1;
+        await using var manager = new WebSeedManager(torrent, ["http://seed.test/file"], clock);
+        manager.SetTestClient(client);
+        manager.Start();
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == 1);
+        manager.Start();
+        Assert.Single(client.Requests);
+        await manager.StopAsync();
+        Assert.Equal(0, manager.GetStats().ActiveDownloads);
+        await manager.DisposeAsync();
+        Assert.Throws<ObjectDisposedException>(manager.Start);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task ASourceSupplyingAKnownBadPieceIsRetired()
+    {
+        await using var torrent = CreateTorrent();
+        var clock = new FakeTimeProvider();
+        torrent.Settings.Transfer.WebSeedMaxConnections = 1;
+        var client = new ControlledClient();
+        await using var manager = new WebSeedManager(torrent, ["http://seed.test/file"], clock);
+        manager.SetTestClient(client);
+        manager.Start();
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == 1);
+        client.Requests.Single().Completion.SetResult(new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(new byte[16384]) });
+        await TorrentTestUtility.WaitUntilAsync(() => manager.GetStats().ActiveDownloads == 0);
+        clock.Advance(TimeSpan.FromMinutes(1));
+        Assert.Equal(0, manager.GetStats().AvailableSources);
+        Assert.Single(client.Requests);
+        Assert.False(torrent.Pieces.HasPiece(0));
+        await manager.StopAsync();
+    }
+
+    [Theory(Timeout = 10000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task V2DownloadsOnlyTheContentBytesOfAnUnalignedFile(bool multipleFiles)
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Version = TorrentVersion.V2;
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = multipleFiles ? 32768 : 16384;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "a.bin", Offset = 0, Size = 1000, FirstPieceIndex = 0, PieceCount = 1, PiecesRoot = new byte[32] });
+        if (multipleFiles) metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "b.bin", Offset = 16384, Size = 2000, FirstPieceIndex = 1, PieceCount = 1, PiecesRoot = new byte[32] });
+        await using var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        ((TorrentTestUtility.MockFileSelectionManager)typeof(Torrent).GetField("_fileSelectionManager", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(torrent)!).IsSelectionFinished = false;
+        var clock = new FakeTimeProvider();
+        var client = new ControlledClient();
+        await using var manager = new WebSeedManager(torrent, ["http://seed.test/root"], clock);
+        manager.SetTestClient(client);
+        manager.Start();
+        await TorrentTestUtility.WaitUntilAsync(() => client.Requests.Count == (multipleFiles ? 2 : 1));
+        Assert.Equal(999, client.Requests.First().To);
+        if (multipleFiles) Assert.Equal(1999, client.Requests.Last().To);
+        await manager.StopAsync();
+    }
+
+    private sealed record Pending(int Piece, TaskCompletionSource<HttpResponseMessage> Completion, string Host, Task<HttpResponseMessage> Request, long To);
 
     private sealed class FailingClient : IHttpClient
     {
@@ -296,9 +360,20 @@ public class WebSeedSchedulingTests
         public Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, HttpCompletionOption completionOption, CancellationToken cancellationToken)
         {
             var completion = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var answer = completion.Task.WaitAsync(cancellationToken);
-            Requests.Enqueue(new Pending((int)(request.Headers.Range!.Ranges.Single().From!.Value / 16384), completion, request.RequestUri!.Host, answer));
+            var range = request.Headers.Range!.Ranges.Single();
+            var answer = AnswerAsync(completion, range.From!.Value, range.To!.Value, cancellationToken);
+            Requests.Enqueue(new Pending((int)(request.Headers.Range!.Ranges.Single().From!.Value / 16384), completion, request.RequestUri!.Host, answer, range.To.Value));
             return answer;
+        }
+
+        private static async Task<HttpResponseMessage> AnswerAsync(TaskCompletionSource<HttpResponseMessage> completion, long from, long to, CancellationToken ct)
+        {
+            var response = await completion.Task.WaitAsync(ct);
+            if (response.StatusCode == HttpStatusCode.PartialContent)
+            {
+                response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(from, to);
+            }
+            return response;
         }
     }
 }

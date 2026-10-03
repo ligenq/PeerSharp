@@ -30,6 +30,10 @@ internal class TorrentStateData
     // rebuilding paths from the metadata alone would silently undo every rename on the next start.
     public List<RenamedFileData> RenamedFiles { get; set; } = [];
 
+    // Null for legacy resume data. New snapshots detect replaced or edited files before
+    // trusting their completed-piece bits, including edits that leave the length unchanged.
+    public List<FileSnapshotData>? FileSnapshots { get; set; }
+
     public List<UnfinishedPieceData> UnfinishedPieces { get; set; } = [];
 
     public ulong Uploaded { get; set; }
@@ -48,6 +52,8 @@ internal class TorrentStateData
         public int Index { get; set; }
         public string Path { get; set; } = string.Empty;
     }
+
+    internal sealed record FileSnapshotData(int Index, long Length, long LastWriteTimeUtcTicks);
 
     internal class UnfinishedPieceData
     {

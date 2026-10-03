@@ -71,6 +71,21 @@ internal sealed class Storage : IStorage
     public IReadOnlyDictionary<int, string>? RenamedFiles { get; init; }
 
     internal Func<PiecesProgress>? GetCompletedPieces { get; init; }
+    internal IReadOnlyList<TorrentStateData.FileSnapshotData>? ResumeFileSnapshots { get; init; }
+
+    internal List<TorrentStateData.FileSnapshotData>? GetFileSnapshots()
+    {
+        var files = _files;
+        if (files == null) return null;
+        var result = new List<TorrentStateData.FileSnapshotData>();
+        for (int i = 0; i < files.Length; i++)
+        {
+            if (_info.Info.Files[i].IsPadding) continue;
+            var file = files[i].FullPath is { } path ? new FileInfo(path) : null;
+            result.Add(new(i, file?.Exists == true ? file.Length : -1, file?.Exists == true ? file.LastWriteTimeUtc.Ticks : 0));
+        }
+        return result;
+    }
 
     internal bool IsInitialized => Volatile.Read(ref _initialized) == 1;
 
@@ -641,6 +656,18 @@ internal sealed class Storage : IStorage
         }
         var lengths = _files.Select(entry => entry.FullPath != null && File.Exists(entry.FullPath)
             ? new FileInfo(entry.FullPath).Length : 0).ToArray();
+        var changedFiles = new HashSet<int>();
+        if (ResumeFileSnapshots != null)
+        {
+            var saved = ResumeFileSnapshots.ToDictionary(file => file.Index);
+            foreach (var current in GetFileSnapshots() ?? [])
+            {
+                if (!saved.TryGetValue(current.Index, out var previous) || current != previous)
+                {
+                    changedFiles.Add(current.Index);
+                }
+            }
+        }
         for (int piece = 0; piece < pieces.Count; piece++)
         {
             if (!pieces.HasPiece(piece))
@@ -650,7 +677,7 @@ internal sealed class Storage : IStorage
             foreach (var operation in _fileMapper.MapRange((long)piece * _info.Info.PieceSize, checked((int)_info.Info.GetPieceSize(piece))))
             {
                 if (!_info.Info.Files[operation.FileIndex].IsPadding &&
-                    (_files[operation.FileIndex].FullPath == null || operation.FileOffset + operation.Length > lengths[operation.FileIndex]))
+                    (changedFiles.Contains(operation.FileIndex) || _files[operation.FileIndex].FullPath == null || operation.FileOffset + operation.Length > lengths[operation.FileIndex]))
                 {
                     pieces.RemovePiece(piece);
                     break;

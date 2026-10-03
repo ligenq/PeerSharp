@@ -198,6 +198,11 @@ public sealed class HttpStreamServer : IDisposable
         ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentException.ThrowIfNullOrEmpty(contentType);
         ArgumentNullException.ThrowIfNull(content);
+        _disposal.ThrowIfDisposed(this);
+        if (contentType.Any(c => c < ' ' || c == 0x7F))
+        {
+            throw new ArgumentException("A content type cannot contain control characters.", nameof(contentType));
+        }
         if (!name.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.')
             || name.All(c => c == '.')
             || $"/{name}" == HttpStreamRequestHandler.DefaultPath)

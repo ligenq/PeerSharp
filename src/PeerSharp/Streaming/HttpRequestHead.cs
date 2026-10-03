@@ -1,4 +1,5 @@
 using System.Text;
+using System.Globalization;
 
 namespace PeerSharp.Streaming;
 
@@ -38,7 +39,7 @@ internal sealed class HttpRequestHead : IHttpStreamRequest
     /// </summary>
     public bool HasBody =>
         Headers.ContainsKey("Transfer-Encoding")
-        || (Headers.TryGetValue("Content-Length", out var length) && length.Trim() != "0");
+        || (Headers.TryGetValue("Content-Length", out var length) && long.Parse(length, CultureInfo.InvariantCulture) != 0);
 
     /// <summary>
     /// Whether the client expects the connection to stay open after the response: by default in
@@ -80,6 +81,7 @@ internal sealed class HttpRequestHead : IHttpStreamRequest
         {
             return null;
         }
+        if (!requestLine[0].All(IsTokenCharacter) || requestLine[1].Any(c => c <= ' ' || c == 0x7F)) return null;
 
         bool isHttp11;
         switch (requestLine[2])
@@ -113,16 +115,33 @@ internal sealed class HttpRequestHead : IHttpStreamRequest
             }
 
             int colon = line.IndexOf(':');
-            if (colon <= 0 || line[..colon].Any(char.IsWhiteSpace))
+            if (colon <= 0 || !line[..colon].All(IsTokenCharacter)
+                || line[(colon + 1)..].Any(c => (c < ' ' && c != '\t') || c == 0x7F))
             {
                 return null;
             }
 
-            headers[line[..colon]] = line[(colon + 1)..].Trim(' ', '\t');
+            string name = line[..colon];
+            string value = line[(colon + 1)..].Trim(' ', '\t');
+            if (headers.TryGetValue(name, out string? previous))
+            {
+                if (name.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("Host", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("Range", StringComparison.OrdinalIgnoreCase)) return null;
+                value = previous + "," + value;
+            }
+            headers[name] = value;
         }
+
+        if (headers.TryGetValue("Content-Length", out string? length)
+            && (!long.TryParse(length, NumberStyles.None, CultureInfo.InvariantCulture, out _)
+                || headers.ContainsKey("Transfer-Encoding"))) return null;
 
         return new HttpRequestHead(requestLine[0], path, isHttp11, headers);
     }
+
+    private static bool IsTokenCharacter(char c) => char.IsAsciiLetterOrDigit(c)
+        || c is '!' or '#' or '$' or '%' or '&' or '\'' or '*' or '+' or '-' or '.' or '^' or '_' or '`' or '|' or '~';
 
     /// <summary>The path of a request target, in either origin or absolute form.</summary>
     private static string? PathOf(string target)
