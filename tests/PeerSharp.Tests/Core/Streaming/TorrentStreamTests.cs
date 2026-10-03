@@ -550,6 +550,56 @@ public class TorrentStreamTests : IAsyncLifetime
 
     #region Multi-File Torrent Tests
 
+    [Fact(Timeout = 10000)]
+    public async Task DisposeCancelsAPendingReadAndRejectsFurtherOperations()
+    {
+        var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        var reading = stream.ReadAsync(new byte[100].AsMemory()).AsTask();
+        Assert.False(reading.IsCompleted);
+        stream.Dispose();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => reading);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => stream.ReadAsync(new byte[1].AsMemory()).AsTask());
+        Assert.Throws<ObjectDisposedException>(() => stream.Seek(0, SeekOrigin.Begin));
+        Assert.False(stream.CanRead);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task StoppingTheTorrentCancelsReadsWaitingOnMissingPieces()
+    {
+        await _torrent.StartAsync();
+        await using var stream = await _torrent.OpenStreamAsync(0);
+        var reading = stream.ReadAsync(new byte[100].AsMemory()).AsTask();
+        await _torrent.StopAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => reading);
+        Assert.False(_torrent.Streaming.IsStreaming);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task ReadsUseRecordedOffsetsAcrossImplicitPaddingGaps()
+    {
+        _torrent.InfoFile.Info.Files.Add(new Internals.TorrentFileEntry { Path = "after-gap.bin", Size = 1000, Offset = 12000 });
+        _torrent.InfoFile.Info.FullSize = 13000;
+        for (int i = 0; i < 3; i++) _torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        await _torrent.ReinitializeAfterMetadataAsync();
+        await _torrent.FilesInternal.InitializeAsync([]);
+        byte[] payload = Enumerable.Repeat((byte)0xAB, 1000).ToArray();
+        await _torrent.FilesInternal.WriteAsync(12000, payload, TestContext.Current.CancellationToken);
+        _torrent.Pieces.AddPiece(12);
+        await using var stream = new TorrentStream(_torrent.Streaming, _torrent, 1, _timeProvider);
+        byte[] read = new byte[1000];
+        await stream.ReadExactlyAsync(read, TestContext.Current.CancellationToken);
+        Assert.Equal(payload, read);
+    }
+
+    [Fact]
+    public void RelativeSeekSaturatesInsteadOfWrappingAtLongMaxValue()
+    {
+        using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        stream.Position = 1;
+        Assert.Equal(stream.Length, stream.Seek(long.MaxValue, SeekOrigin.Current));
+        Assert.Equal(stream.Length, stream.Seek(long.MaxValue, SeekOrigin.End));
+    }
+
     [Fact]
     public async Task Constructor_CalculatesCorrectOffset_ForSecondFile()
     {

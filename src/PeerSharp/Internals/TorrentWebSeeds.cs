@@ -16,8 +16,8 @@ internal sealed class TorrentWebSeeds(Torrent torrent) : IWebSeeds
     private readonly Lock _lock = new();
     private readonly Torrent _torrent = torrent;
 
-    private readonly HashSet<string> _added = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _removed = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _added = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _removed = new(StringComparer.Ordinal);
 
     public bool Add(string url)
     {
@@ -33,17 +33,17 @@ internal sealed class TorrentWebSeeds(Torrent torrent) : IWebSeeds
 
         lock (_lock)
         {
-            if (EffectiveListLocked().Any(u => u.Equals(url, StringComparison.OrdinalIgnoreCase)))
+            if (EffectiveListLocked().Any(u => UrlsMatch(u, url)))
             {
                 return false;
             }
 
-            _removed.Remove(url);
+            _removed.RemoveWhere(u => UrlsMatch(u, url));
             _added.Add(url);
         }
 
         // Running torrents get it now; stopped ones pick it up from the configuration at start.
-        _torrent.WebSeedManager?.AddSource(url);
+        _torrent.RefreshWebSeeds();
         return true;
     }
 
@@ -56,16 +56,16 @@ internal sealed class TorrentWebSeeds(Torrent torrent) : IWebSeeds
 
         lock (_lock)
         {
-            if (!EffectiveListLocked().Any(u => u.Equals(url, StringComparison.OrdinalIgnoreCase)))
+            if (!EffectiveListLocked().Any(u => UrlsMatch(u, url)))
             {
                 return false;
             }
 
-            _added.Remove(url);
+            _added.RemoveWhere(u => UrlsMatch(u, url));
             _removed.Add(url);
         }
 
-        _torrent.WebSeedManager?.RemoveSource(url);
+        _torrent.RefreshWebSeeds();
         return true;
     }
 
@@ -83,8 +83,8 @@ internal sealed class TorrentWebSeeds(Torrent torrent) : IWebSeeds
         foreach (string url in _torrent.InfoFile.WebSeedUrls.Concat(_added))
         {
             if (IsSupportedUrl(url) &&
-                !_removed.Contains(url) &&
-                !result.Any(existing => existing.Equals(url, StringComparison.OrdinalIgnoreCase)))
+                !_removed.Any(removed => UrlsMatch(removed, url)) &&
+                !result.Any(existing => UrlsMatch(existing, url)))
             {
                 result.Add(url);
             }
@@ -93,9 +93,13 @@ internal sealed class TorrentWebSeeds(Torrent torrent) : IWebSeeds
         return result;
     }
 
+    private static bool UrlsMatch(string left, string right) =>
+        Uri.TryCreate(left, UriKind.Absolute, out var leftUri) && Uri.TryCreate(right, UriKind.Absolute, out var rightUri)
+        && Seeding.WebSeedManager.WebSeedSource.IsDirectoryUrl(left) == Seeding.WebSeedManager.WebSeedSource.IsDirectoryUrl(right)
+        && leftUri.AbsoluteUri.Equals(rightUri.AbsoluteUri, StringComparison.Ordinal);
+
     private static bool IsSupportedUrl(string url)
         => Uri.TryCreate(url, UriKind.Absolute, out var uri)
             && (uri.Scheme == Uri.UriSchemeHttp
-                || uri.Scheme == Uri.UriSchemeHttps
-                || uri.Scheme == Uri.UriSchemeFtp);
+                || uri.Scheme == Uri.UriSchemeHttps);
 }

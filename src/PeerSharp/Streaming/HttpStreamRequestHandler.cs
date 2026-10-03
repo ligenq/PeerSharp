@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -94,7 +95,7 @@ internal sealed class HttpStreamRequestHandler
         }
 
         long totalLength = fileInfo.Size;
-        var range = HttpRangeParser.Parse(request.RangeHeader, totalLength);
+        var range = HttpRangeParser.Parse(request.Method == "GET" ? request.RangeHeader : null, totalLength);
         if (!range.IsValid)
         {
             response.StatusCode = (int)HttpStatusCode.RequestedRangeNotSatisfiable;
@@ -126,6 +127,7 @@ internal sealed class HttpStreamRequestHandler
 
         _logger.LogDebug("Serving GET request for {File} range {Start}-{End} (Partial: {IsPartial})", fileInfo.Path, range.Start, range.End, range.IsPartial);
 
+        if (contentLength == 0) return;
         await using var stream = await _torrent.OpenStreamAsync(_fileIndex, cancellationToken).ConfigureAwait(false);
         stream.Seek(range.Start, SeekOrigin.Begin);
 
@@ -242,9 +244,9 @@ internal static class HttpRangeParser
     public static HttpByteRange Parse(string? rangeHeader, long totalLength)
     {
         // No range header (or different unit): caller serves the whole file as a 200.
-        if (string.IsNullOrEmpty(rangeHeader) || !rangeHeader.StartsWith("bytes=", StringComparison.Ordinal))
+        if (string.IsNullOrEmpty(rangeHeader) || !rangeHeader.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
         {
-            bool wholeFileValid = totalLength > 0;
+            bool wholeFileValid = totalLength >= 0;
             return new HttpByteRange(wholeFileValid, IsPartial: false, Start: 0, End: totalLength - 1);
         }
 
@@ -270,7 +272,7 @@ internal static class HttpRangeParser
         // RFC 7233 §2.1 suffix-byte-range-spec: "bytes=-N" means the last N bytes.
         if (startSpan.IsEmpty)
         {
-            if (!long.TryParse(endSpan, out long suffix) || suffix <= 0)
+            if (!long.TryParse(endSpan, NumberStyles.None, CultureInfo.InvariantCulture, out long suffix) || suffix <= 0)
             {
                 return new HttpByteRange(IsValid: false, IsPartial: true, Start: 0, End: totalLength - 1);
             }
@@ -280,14 +282,14 @@ internal static class HttpRangeParser
             return new HttpByteRange(suffixValid, IsPartial: true, suffixStart, totalLength - 1);
         }
 
-        if (!long.TryParse(startSpan, out long rangeStart))
+        if (!long.TryParse(startSpan, NumberStyles.None, CultureInfo.InvariantCulture, out long rangeStart))
         {
             return new HttpByteRange(IsValid: false, IsPartial: true, Start: 0, End: totalLength - 1);
         }
 
         long rangeEnd = totalLength - 1;
         bool endPresent = !endSpan.IsEmpty;
-        if (endPresent && !long.TryParse(endSpan, out rangeEnd))
+        if (endPresent && !long.TryParse(endSpan, NumberStyles.None, CultureInfo.InvariantCulture, out rangeEnd))
         {
             return new HttpByteRange(IsValid: false, IsPartial: true, Start: rangeStart, End: totalLength - 1);
         }

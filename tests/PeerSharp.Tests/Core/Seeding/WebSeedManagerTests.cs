@@ -3,6 +3,7 @@ using PeerSharp.Internals.Seeding;
 using PeerSharp.Internals.Framework;
 using Microsoft.Extensions.Time.Testing;
 using System.Net;
+using PeerSharp.BEncoding;
 
 namespace PeerSharp.Tests.Core.Seeding;
 
@@ -14,6 +15,7 @@ public class WebSeedManagerTests
         public byte[]? ResponseBytes { get; set; }
         public HttpStatusCode StatusCode { get; set; } = HttpStatusCode.PartialContent;
         public List<HttpRequestMessage> SentRequests { get; } = [];
+        public bool OmitContentRange { get; set; }
 
         public Task<byte[]> GetByteArrayAsync(string url, CancellationToken cancellationToken)
         {
@@ -25,14 +27,24 @@ public class WebSeedManagerTests
             SentRequests.Add(request);
             if (Handler != null)
             {
-                return Task.FromResult(Handler(request));
+                return Task.FromResult(AddRange(Handler(request), request));
             }
             var response = new HttpResponseMessage(StatusCode);
             if (ResponseBytes != null)
             {
                 response.Content = new ByteArrayContent(ResponseBytes);
             }
-            return Task.FromResult(response);
+            return Task.FromResult(AddRange(response, request));
+        }
+
+        private HttpResponseMessage AddRange(HttpResponseMessage response, HttpRequestMessage request)
+        {
+            if (!OmitContentRange && response.StatusCode == HttpStatusCode.PartialContent && response.Content.Headers.ContentRange == null)
+            {
+                var range = request.Headers.Range!.Ranges.Single();
+                response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(range.From!.Value, range.To!.Value);
+            }
+            return response;
         }
     }
 
@@ -445,6 +457,150 @@ public class WebSeedManagerTests
 
         await manager.DisposeAsync();
         await manager.DisposeAsync(); // Second call must not throw
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("bytes 0-15/32")]
+    [InlineData("bytes 8-22/32")]
+    [InlineData("items 8-23/32")]
+    public async Task PartialContentMustDescribeTheRequestedRange(string? contentRange)
+    {
+        await using var manager = new WebSeedManager(_torrent, ["http://seed.com/file"], _timeProvider);
+        var client = new MockHttpClient { OmitContentRange = true };
+        client.Handler = _ =>
+        {
+            var content = new ByteArrayContent(new byte[16]);
+            if (contentRange != null) content.Headers.TryAddWithoutValidation("Content-Range", contentRange);
+            return new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = content };
+        };
+        manager.SetTestClient(client);
+        Assert.Null(await manager.DownloadSingleFilePieceAsync(new("http://seed.com/file", false), 8, 16, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PartialContentCannotUseAClaimedLengthToHideExtraBodyBytes()
+    {
+        await using var manager = new WebSeedManager(_torrent, [], _timeProvider);
+        var client = new MockHttpClient
+        {
+            Handler = _ =>
+        {
+            var content = new StreamContent(new MemoryStream(new byte[17]));
+            content.Headers.ContentLength = 16;
+            return new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = content };
+        }
+        };
+        manager.SetTestClient(client);
+        Assert.Null(await manager.DownloadSingleFilePieceAsync(new("http://seed.com/file", false), 0, 16, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SingleFileDirectoryUrlAppendsTheEscapedFileNameAndPreservesTheQuery()
+    {
+        _torrent.InfoFile.Info.Name = "movie name.bin";
+        await using var manager = new WebSeedManager(_torrent, [], _timeProvider);
+        var client = new MockHttpClient { ResponseBytes = new byte[16] };
+        manager.SetTestClient(client);
+        Assert.NotNull(await manager.DownloadSingleFilePieceAsync(new("http://seed.com/root/?token=a%2Fb", false), 0, 16, CancellationToken.None));
+        Assert.Equal("http://seed.com/root/movie%20name.bin?token=a%2Fb", client.SentRequests.Single().RequestUri!.AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task MissingFilesDoNotPreventDownloadingOtherPiecesFromASource()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 4;
+        metadata.Info.FullSize = 8;
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "a.bin", Offset = 0, Size = 4 });
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "b.bin", Offset = 4, Size = 4 });
+        metadata.Info.Pieces = [new byte[20], new byte[20]];
+        await using var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        await using var manager = new WebSeedManager(torrent, ["http://seed.com/root"], _timeProvider);
+        manager.SetTestClient(new MockHttpClient { StatusCode = HttpStatusCode.NotFound });
+        var source = (WebSeedManager.WebSeedSource)((System.Collections.IList)typeof(WebSeedManager).GetField("_sources", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(manager)!)[0]!;
+        Assert.Null(await manager.DownloadMultiFilePieceAsync(source, 0, 0, 4, CancellationToken.None));
+        Assert.Equal(new[] { 1 }, manager.GetNeededPieces(maxPieces: 1));
+    }
+
+    [Fact]
+    public void SourcesRespectCaseSensitivePathsAndRejectUnsupportedFtpUrls()
+    {
+        var manager = new WebSeedManager(_torrent, ["http://seed.com/FILE"], _timeProvider);
+        Assert.True(manager.AddSource("http://seed.com/file"));
+        Assert.False(manager.AddSource("ftp://seed.com/file"));
+        Assert.True(_torrent.WebSeeds.Add("http://seed.com/FILE"));
+        Assert.True(_torrent.WebSeeds.Add("http://seed.com/file"));
+        Assert.False(_torrent.WebSeeds.Add("ftp://seed.com/file"));
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task AStalledResponseBodyIsCancelledByTheRequestDeadline()
+    {
+        await using var manager = new WebSeedManager(_torrent, [], _timeProvider);
+        using var body = new StalledBody();
+        var client = new MockHttpClient
+        {
+            Handler = _ =>
+        {
+            var content = new StreamContent(body);
+            content.Headers.ContentLength = 16;
+            return new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = content };
+        }
+        };
+        manager.SetTestClient(client);
+        var downloading = manager.DownloadSingleFilePieceAsync(new("http://seed.com/file", false), 0, 16, CancellationToken.None);
+        await body.Reading.Task;
+        _timeProvider.Advance(WebSeedManager.RequestTimeout + TimeSpan.FromSeconds(1));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => downloading);
+    }
+
+    private sealed class StalledBody : MemoryStream
+    {
+        public TaskCompletionSource Reading { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            Reading.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+    }
+
+    [Fact]
+    public async Task AMultiFileTorrentWithOneFileUsesItsFilePath()
+    {
+        var info = new BDict();
+        info.Dict["name"] = new BString("folder"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(16384);
+        info.Dict["pieces"] = new BString(System.Security.Cryptography.SHA1.HashData(new byte[4]));
+        var file = new BDict();
+        file.Dict["length"] = new BNumber(4);
+        file.Dict["path"] = new BList { List = { new BString("file.bin"u8.ToArray()) } };
+        info.Dict["files"] = new BList { List = { file } };
+        var root = new BDict { Dict = { ["info"] = info } };
+        var parsed = TorrentFile.Parse(BencodeWriter.Write(root));
+        await using var torrent = TorrentTestUtility.CreateMinimal(parsed.Metadata);
+        await using var manager = new WebSeedManager(torrent, ["http://seed.test/root/"], _timeProvider);
+        var client = new MockHttpClient { ResponseBytes = new byte[4] };
+        manager.SetTestClient(client);
+        var source = (WebSeedManager.WebSeedSource)((System.Collections.IList)typeof(WebSeedManager).GetField("_sources", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(manager)!)[0]!;
+        Assert.True(source.IsMultiFile);
+        Assert.NotNull(await manager.DownloadMultiFilePieceAsync(source, 0, 0, 4, CancellationToken.None));
+        Assert.Equal("http://seed.test/root/folder/file.bin", client.SentRequests.Single().RequestUri!.AbsoluteUri);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task AddingTheFirstWebSeedToARunningTorrentCreatesItsWorker()
+    {
+        await _torrent.StartAsync();
+        Assert.Null(_torrent.WebSeedManager);
+        Assert.True(_torrent.WebSeeds.Add("http://seed.invalid/file"));
+        Assert.NotNull(_torrent.WebSeedManager);
+        Assert.Equal(new[] { "http://seed.invalid/file" }, _torrent.WebSeedManager.GetSourceUrls());
+        Assert.True(_torrent.WebSeeds.Remove("http://seed.invalid/file"));
+        Assert.Empty(_torrent.WebSeedManager.GetSourceUrls());
+        await _torrent.StopAsync();
+        Assert.Null(_torrent.WebSeedManager);
     }
 }
 

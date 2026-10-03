@@ -113,7 +113,7 @@ internal class StreamingController : IDisposable
     }
 
     /// <summary>
-    /// Forgets the open streams. Does not dispose them, as each belongs to whoever opened it.
+    /// Forgets open streams. Each stream belongs to whoever opened it.
     /// </summary>
     public void Dispose()
     {
@@ -142,6 +142,8 @@ internal class StreamingController : IDisposable
 
     public async Task<Stream> OpenStreamAsync(int fileIndex, CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
+        cancellationToken.ThrowIfCancellationRequested();
         if (_torrent.State == TorrentState.Stopped)
         {
             throw new InvalidOperationException("Torrent must be running to open a stream.");
@@ -150,6 +152,13 @@ internal class StreamingController : IDisposable
         if (!_torrent.HasMetadata)
         {
             await WaitForMetadataAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        _disposal.ThrowIfDisposed(this);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_torrent.State == TorrentState.Stopped)
+        {
+            throw new InvalidOperationException("Torrent must be running to open a stream.");
         }
 
         int internalIndex = _torrent.InfoFile.Info.MapVisibleIndexToInternal(fileIndex);
@@ -161,6 +170,7 @@ internal class StreamingController : IDisposable
     {
         lock (_streamsLock)
         {
+            _disposal.ThrowIfDisposed(this);
             _streams.Insert(0, new StreamPriorities(stream));
             PublishLocked();
         }
@@ -215,11 +225,22 @@ internal class StreamingController : IDisposable
     {
         if (_disposal.MarkDisposed() && disposing)
         {
-            lock (_streamsLock)
-            {
-                _streams.Clear();
-                PublishLocked();
-            }
+            CloseStreams(closeReaders: false);
+        }
+    }
+
+    internal void CloseStreams(bool closeReaders = true)
+    {
+        TorrentStream[] streams;
+        lock (_streamsLock)
+        {
+            streams = [.. _streams.Select(entry => entry.Stream)];
+            _streams.Clear();
+            PublishLocked();
+        }
+        if (closeReaders)
+        {
+            foreach (var stream in streams) stream.Dispose();
         }
     }
 

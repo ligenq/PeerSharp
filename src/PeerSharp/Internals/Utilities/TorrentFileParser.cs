@@ -446,6 +446,7 @@ internal static class TorrentFileParser
         }
 
         // Parse files based on version
+        metadata.Info.IsMultiFile = info.Get("files") is BList;
         if (metadata.Info.IsV2 && hasV2FileTree && info.Get("file tree") is BDict fileTree)
         {
             long endOffset = ParseFileTree(metadata, fileTree, "", 0);

@@ -461,7 +461,7 @@ public class HttpRangeParserTests
     [Fact]
     public void NothingIsSatisfiableInAnEmptyFile()
     {
-        Assert.False(HttpRangeParser.Parse(null, 0).IsValid);
+        Assert.True(HttpRangeParser.Parse(null, 0).IsValid);
         Assert.False(HttpRangeParser.Parse("bytes=0-10", 0).IsValid);
         Assert.False(HttpRangeParser.Parse("bytes=-10", 0).IsValid);
     }
@@ -643,6 +643,27 @@ public class HttpRequestHeadTests
     }
 
     private static HttpRequestHead? Parse(string head) => HttpRequestHead.TryParse(Encoding.ASCII.GetBytes(head));
+
+    [Theory]
+    [InlineData("GET /stream HTTP/1.1\r\nContent-Length: 12\r\nContent-Length: 0")]
+    [InlineData("GET /stream HTTP/1.1\r\nContent-Length: +0")]
+    [InlineData("GET /stream HTTP/1.1\r\nContent-Length: 0\r\nTransfer-Encoding: chunked")]
+    [InlineData("GET /stream HTTP/1.1\r\nRange: bytes=0-1\r\nRange: bytes=2-3")]
+    [InlineData("GET /stream HTTP/1.1\r\nBad(Name: value")]
+    [InlineData("GET /stream HTTP/1.1\r\nX-Header: value\0tail")]
+    [InlineData("GET /stream\0 HTTP/1.1")]
+    public void AmbiguousFramingAndControlCharactersAreRejected(string head)
+    {
+        Assert.Null(Parse(head));
+    }
+
+    [Fact]
+    public void RepeatedConnectionHeadersPreserveTheCloseDirective()
+    {
+        var request = Parse("GET /stream HTTP/1.1\r\nConnection: close\r\nConnection: keep-alive");
+        Assert.NotNull(request);
+        Assert.False(request.WantsKeepAlive);
+    }
 }
 
 /// <summary>

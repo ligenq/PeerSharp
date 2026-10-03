@@ -16,6 +16,10 @@ public class ResumeStateValidationRegressionTests
     [InlineData("{\"SeedTimeSeconds\":9223372036854775807}")]
     [InlineData("{\"SeedTimeSeconds\":-1}")]
     [InlineData("{\"Pieces\":\"AAE=\"}")]
+    [InlineData("{\"FileSnapshots\":[null]}")]
+    [InlineData("{\"FileSnapshots\":[{\"Index\":-1}]}")]
+    [InlineData("{\"FileSnapshots\":[{\"Index\":0},{\"Index\":0}]}")]
+    [InlineData("{\"FileSnapshots\":[{\"Index\":0,\"LastWriteTimeUtcTicks\":9223372036854775807}]}")]
     public async Task MalformedResumeFieldsAreRejectedWithoutReplacingUsableState(string json)
     {
         var metadata = new TorrentFileMetadata();

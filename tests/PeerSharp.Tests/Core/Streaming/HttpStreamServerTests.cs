@@ -304,6 +304,33 @@ public class HttpStreamRequestHandlerTests
 
     internal sealed record FakeRequest(string Method, string Path, string? RangeHeader = null) : IHttpStreamRequest;
 
+    [Theory]
+    [InlineData("bytes=1-2")]
+    [InlineData("bytes=500-")]
+    public async Task HeadIgnoresRangeAndDescribesTheWholeFile(string range)
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("clip.mp4", [1, 2, 3, 4]), 0);
+        var response = new FakeResponse();
+        await handler.ProcessAsync(new FakeRequest("HEAD", "/stream", range), response);
+        Assert.Equal(200, response.StatusCode);
+        Assert.Equal(4, response.ContentLength);
+        Assert.False(response.Headers.ContainsKey("Content-Range"));
+        Assert.Empty(response.BodyBytes);
+    }
+
+    [Theory]
+    [InlineData("GET")]
+    [InlineData("HEAD")]
+    public async Task AnEmptyFileIsServedWithoutOpeningATorrentStream(string method)
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("empty.bin", [], () => throw new InvalidOperationException("must not open")), 0);
+        var response = new FakeResponse();
+        await handler.ProcessAsync(new FakeRequest(method, "/stream"), response);
+        Assert.Equal(200, response.StatusCode);
+        Assert.Equal(0, response.ContentLength);
+        Assert.Empty(response.BodyBytes);
+    }
+
     /// <summary>
     /// Serves <paramref name="stallAfter"/> bytes and then behaves like a torrent stream whose
     /// pieces never arrive.

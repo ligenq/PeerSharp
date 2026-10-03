@@ -10,6 +10,7 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
     private readonly BlockCache _blockCache;
     private readonly IStorage _storage;
     private AtomicDisposal _disposal = new();
+    private List<TorrentStateData.FileSnapshotData>? _lastFileSnapshots;
 
     private Files(
         TorrentFileMetadata metadata,
@@ -24,6 +25,7 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
         string torrentHash,
         ILoggerFactory loggerFactory,
         IReadOnlyDictionary<int, string>? renamedFiles,
+        IReadOnlyList<TorrentStateData.FileSnapshotData>? resumeFileSnapshots,
         Func<PiecesProgress> getCompletedPieces)
     {
         DownloadPath = path;
@@ -31,6 +33,7 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
         _storage = new Storage(metadata, path, new PathValidator(path), handleCache, enableSparseFiles, diskLimiter, loggerFactory)
         {
             RenamedFiles = renamedFiles,
+            ResumeFileSnapshots = resumeFileSnapshots,
             GetCompletedPieces = getCompletedPieces
         };
         _blockCache = new BlockCache(cacheSizeBytes, readAheadBlocks, enableReadAhead, totalSize);
@@ -85,6 +88,7 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
             torrent.Hash.ToHexStringUpper(),
             loggerFactory,
             torrent.GetRenamedFileMap(),
+            torrent.LocalState.FileSnapshots,
             () => torrent.Pieces);
     }
 
@@ -107,11 +111,15 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
     {
         if (_disposal.MarkDisposed())
         {
+            _lastFileSnapshots = GetFileSnapshots();
             _blockCache.Dispose();
             await _storage.DisposeAsync().ConfigureAwait(false);
         }
         GC.SuppressFinalize(this);
     }
+
+    internal List<TorrentStateData.FileSnapshotData>? GetFileSnapshots() =>
+        _storage is Storage storage && storage.IsInitialized ? storage.GetFileSnapshots() : _lastFileSnapshots;
 
     public Task<bool> FlushAsync(CancellationToken ct = default)
     {

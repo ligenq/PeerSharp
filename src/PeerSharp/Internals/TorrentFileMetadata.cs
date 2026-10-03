@@ -85,6 +85,7 @@ internal class TorrentFileEntry
 internal class TorrentFileInfo
 {
     public List<TorrentFileEntry> Files { get; set; } = [];
+    public bool IsMultiFile { get; set; }
 
     public long FullSize { get; set; }
 

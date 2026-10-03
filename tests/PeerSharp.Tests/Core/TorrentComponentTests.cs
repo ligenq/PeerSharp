@@ -107,7 +107,7 @@ public class TorrentWebSeedsTests
     }
 
     [Fact]
-    public void TheSameUrlIsNotAddedTwiceEvenInADifferentCase()
+    public void UrlIdentityIgnoresHostCaseAndPreservesPathCase()
     {
         // A duplicate source would be dialled as a separate seed, doubling the requests sent to one
         // server for no extra throughput.
@@ -115,9 +115,10 @@ public class TorrentWebSeedsTests
 
         Assert.True(seeds.Add("http://example.com/file"));
         Assert.False(seeds.Add("http://example.com/file"));
-        Assert.False(seeds.Add("HTTP://EXAMPLE.COM/FILE"));
+        Assert.False(seeds.Add("HTTP://EXAMPLE.COM/file"));
+        Assert.True(seeds.Add("HTTP://EXAMPLE.COM/FILE"));
 
-        Assert.Single(seeds.GetAll());
+        Assert.Equal(2, seeds.GetAll().Count);
     }
 
     [Theory]
@@ -126,6 +127,7 @@ public class TorrentWebSeedsTests
     [InlineData("not a url")]
     [InlineData("/relative/path")]
     [InlineData("magnet:?xt=urn:btih:0000")]
+    [InlineData("ftp://example.com/file")]
     public void AUrlTheSeedCannotFetchIsRefused(string url)
     {
         // Accepting one would produce a source that fails on every request while taking its share
@@ -139,11 +141,10 @@ public class TorrentWebSeedsTests
     [Theory]
     [InlineData("http://example.com/file")]
     [InlineData("https://example.com/file")]
-    [InlineData("ftp://example.com/file")]
-    public void TheThreeSchemesBep19AllowsAreAccepted(string url)
+    public void TheSchemesTheDownloadClientSupportsAreAccepted(string url)
     {
-        // BEP 19 names HTTP and FTP, and HTTPS follows from HTTP. FTP in particular is easy to
-        // exclude by accident when the fetching code only ever speaks HTTP.
+        // The HTTP client supports HTTP and HTTPS. Accepting FTP would repeatedly occupy a
+        // download slot with requests that can never be sent.
         var seeds = new TorrentWebSeeds(TorrentTestUtility.CreateMinimal());
 
         Assert.True(seeds.Add(url));
@@ -162,12 +163,13 @@ public class TorrentWebSeedsTests
     }
 
     [Fact]
-    public void RemovingIsCaseInsensitiveTheSameWayAddingIs()
+    public void RemovingRespectsPathCaseAndIgnoresHostCase()
     {
         var seeds = new TorrentWebSeeds(TorrentTestUtility.CreateMinimal());
         seeds.Add("http://example.com/file");
 
-        Assert.True(seeds.Remove("HTTP://EXAMPLE.COM/FILE"));
+        Assert.False(seeds.Remove("HTTP://EXAMPLE.COM/FILE"));
+        Assert.True(seeds.Remove("HTTP://EXAMPLE.COM/file"));
         Assert.Empty(seeds.GetAll());
     }
 

@@ -411,6 +411,34 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         dht.ReportExternalIp(parsed);
     }
     public WebSeedManager? WebSeedManager { get; private set; }
+    private readonly Lock _webSeedLock = new();
+
+    internal void RefreshWebSeeds()
+    {
+        lock (_webSeedLock)
+        {
+            if (!Started || !HasMetadata || _disposal.IsDisposed || Volatile.Read(ref _stopping) == 1 || !Settings.Connection.EnableWebSeeds) return;
+            var urls = _webSeeds.GetAll();
+            if (WebSeedManager == null && urls.Count == 0) return;
+            WebSeedManager ??= new WebSeedManager(this, urls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
+            foreach (string existing in WebSeedManager.GetSourceUrls())
+            {
+                if (!urls.Contains(existing, StringComparer.Ordinal)) WebSeedManager.RemoveSource(existing);
+            }
+            foreach (string url in urls) WebSeedManager.AddSource(url);
+            WebSeedManager.Start();
+        }
+    }
+
+    private WebSeedManager? TakeWebSeedManager()
+    {
+        lock (_webSeedLock)
+        {
+            var manager = WebSeedManager;
+            WebSeedManager = null;
+            return manager;
+        }
+    }
 
     // Internal Modules
     internal Files FilesInternal { get; private set; } = null!;
@@ -580,7 +608,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return Pieces?.ToBitfield() ?? [];
     }
 
-    public TorrentResumeData GetResumeData()
+    public TorrentResumeData GetResumeData() => SerializeResumeState(GetResumeState());
+
+    internal TorrentStateData GetResumeState()
     {
         var state = new TorrentStateData
         {
@@ -595,6 +625,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             DownloadPath = FilesInternal?.DownloadPath ?? Settings.Files.DefaultDownloadPath,
             Selection = [.. _fileSelectionManager.GetAllFileSelections()],
             RenamedFiles = [.. LocalState.RenamedFiles],
+            FileSnapshots = FilesInternal?.GetFileSnapshots() ?? LocalState.FileSnapshots,
             Info =
             {
                 Name = Name,
@@ -603,6 +634,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             }
         };
 
+        return state;
+    }
+
+    internal TorrentResumeData SerializeResumeState(TorrentStateData state)
+    {
         // Use MemoryStream instead of SerializeToUtf8Bytes to avoid
         // ArrayPool<byte>.Shared retention of large intermediate buffers
         using var ms = new MemoryStream();
@@ -1207,8 +1243,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 var webSeedUrls = _webSeeds.GetAll();
                 if (Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
                 {
-                    WebSeedManager ??= new WebSeedManager(this, webSeedUrls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
-                    WebSeedManager.Start();
+                    RefreshWebSeeds();
                     _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", webSeedUrls.Count);
                 }
                 else if (!Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
@@ -1260,11 +1295,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         complete &= await TryTeardownAsync(() => TrackerManager?.StopAsync() ?? Task.CompletedTask, "trackers").ConfigureAwait(false);
         complete &= await TryTeardownAsync(() => PeersInternal?.StopAsync() ?? Task.CompletedTask, "peers").ConfigureAwait(false);
 
-        if (WebSeedManager is { } webSeeds)
+        if (TakeWebSeedManager() is { } webSeeds)
         {
             // Cleared as well as disposed: StartAsync only creates one when the field is null,
             // so leaving a disposed instance behind would break the next start.
-            WebSeedManager = null;
             complete &= await TryTeardownAsync(() => webSeeds.DisposeAsync().AsTask(), "web seeds").ConfigureAwait(false);
         }
 
@@ -1488,6 +1522,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             state.SeedTimeSeconds < 0 || state.SeedTimeSeconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerSecond)
         {
             reason = "it contains invalid or missing state fields";
+            return false;
+        }
+        if (state.FileSnapshots != null && (state.FileSnapshots.Contains(null!)
+            || state.FileSnapshots.Any(file => file.Index < 0 || file.Length < -1 || file.LastWriteTimeUtcTicks < 0 || file.LastWriteTimeUtcTicks > DateTime.MaxValue.Ticks)
+            || state.FileSnapshots.Select(file => file.Index).Distinct().Count() != state.FileSnapshots.Count))
+        {
+            reason = "it contains invalid file snapshots";
             return false;
         }
         if (state.Version > SupportedResumeVersion)
@@ -2043,6 +2084,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             Interlocked.Exchange(ref _started, 0);
             MetadataDownloadInternal?.Stop();
+            Streaming?.CloseStreams();
 
             List<Exception> failures = [];
             try
@@ -2062,12 +2104,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                     disposing,
                     throwOnFailure: true,
                     cancellationToken: CancellationToken.None), "peer transports", failures).ConfigureAwait(false);
-                if (WebSeedManager is { } webSeeds)
+                if (TakeWebSeedManager() is { } webSeeds)
                 {
                     // A disposed manager cannot own the next start: restarting it would create a
                     // worker whose later DisposeAsync is a no-op because its disposal flag is already
                     // set. Clear it so StartAsync rebuilds from the durable effective URL list.
-                    WebSeedManager = null;
                     await TryTeardownAsync(() => webSeeds.DisposeAsync().AsTask(), "web seeds", failures).ConfigureAwait(false);
                 }
                 if (FileTransferInternal != null)

@@ -207,9 +207,11 @@ public class WebSeedPieceAssemblyPropertyTests
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.RequestedRangeNotSatisfiable));
             }
 
+            var content = new ByteArrayContent(entry.Value.AsSpan((int)from, length).ToArray());
+            content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(from, to, entry.Value.Length);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.PartialContent)
             {
-                Content = new ByteArrayContent(entry.Value.AsSpan((int)from, length).ToArray())
+                Content = content
             });
         }
     }

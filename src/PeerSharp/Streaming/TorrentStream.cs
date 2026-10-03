@@ -45,6 +45,10 @@ internal class TorrentStream : Stream
 
     private readonly StreamingController _controller;
     private readonly SemaphoreSlim _dataSignal = new(0);
+    private readonly Lock _lifetimeLock = new();
+    private readonly CancellationTokenSource _lifetimeCts = new();
+    private readonly CancellationToken _lifetimeToken;
+    private int _readers;
 
     /// <summary>
     /// How long a read waits for the swarm to supply the pieces it needs before giving up, or null
@@ -93,6 +97,7 @@ internal class TorrentStream : Stream
         _torrent = torrent;
         _logger = logger;
         _timeProvider = timeProvider;
+        _lifetimeToken = _lifetimeCts.Token;
 
         // Validate file index
         if (fileIndex < 0 || fileIndex >= torrent.InfoFile.Info.Files.Count)
@@ -103,21 +108,16 @@ internal class TorrentStream : Stream
         var file = torrent.InfoFile.Info.Files[fileIndex];
         _fileSize = file.Size;
 
-        // Calculate absolute file offset in the torrent
-        long offset = 0;
-        for (int i = 0; i < fileIndex; i++)
-        {
-            offset += torrent.InfoFile.Info.Files[i].Size;
-        }
-        _fileStartOffset = offset;
+        // Offsets include the implicit gaps between v2 files; summing sizes does not.
+        _fileStartOffset = file.Offset;
 
         // Calculate piece range
         int pieceSize = (int)torrent.InfoFile.Info.PieceSize;
         _firstPieceIndex = (int)(_fileStartOffset / pieceSize);
-        _lastPieceIndex = (int)((_fileStartOffset + _fileSize - 1) / pieceSize);
+        _lastPieceIndex = _fileSize == 0 ? _firstPieceIndex - 1 : (int)((_fileStartOffset + _fileSize - 1) / pieceSize);
 
         var settings = torrent.Settings.Streaming;
-        _readAheadBytes = Math.Max(0, settings.ReadAheadBytes);
+        _readAheadBytes = Math.Clamp(settings.ReadAheadBytes, 0, MaxReadAheadBytes);
         _readAheadTime = TimeSpan.FromSeconds(Math.Max(0, settings.ReadAheadSeconds));
         _dataWaitTimeout = settings.DataWaitTimeoutSeconds > 0
             ? TimeSpan.FromSeconds(settings.DataWaitTimeoutSeconds)
@@ -137,8 +137,8 @@ internal class TorrentStream : Stream
     /// </summary>
     internal bool IsBuffering => Volatile.Read(ref _buffering) == 1;
 
-    public override bool CanRead => true;
-    public override bool CanSeek => true;
+    public override bool CanRead => !_disposal.IsDisposed;
+    public override bool CanSeek => !_disposal.IsDisposed;
     public override bool CanWrite => false;
     public override long Length => _fileSize;
 
@@ -166,16 +166,12 @@ internal class TorrentStream : Stream
             return;
         }
 
-        // Signal that relevant data is available
-        if (_dataSignal.CurrentCount == 0)
+        // Notification and resource disposal share a lock so a late notification is harmless.
+        lock (_lifetimeLock)
         {
-            try
+            if (!_disposal.IsDisposed && _dataSignal.CurrentCount == 0)
             {
                 _dataSignal.Release();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Ignore if semaphore is already disposed during shutdown
             }
         }
     }
@@ -192,46 +188,66 @@ internal class TorrentStream : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-
-        // A zero return is reserved for genuine end-of-file. Cancellation and stalled
-        // downloads throw instead, so callers such as Stream.CopyToAsync cannot mistake
-        // either one for a completely read file.
-        if (_position >= _fileSize)
+        lock (_lifetimeLock)
         {
-            return 0;
+            _disposal.ThrowIfDisposed(this);
+            if (_readers != 0) throw new InvalidOperationException("A read is already in progress on this stream.");
+            _readers++;
         }
-
-        int requested = (int)Math.Min(buffer.Length, _fileSize - _position);
-        if (requested <= 0)
+        try
         {
-            return 0;
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeToken);
+            cancellationToken = linked.Token;
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // A zero return is reserved for genuine end-of-file. Cancellation and stalled
+            // downloads throw instead, so callers such as Stream.CopyToAsync cannot mistake
+            // either one for a completely read file.
+            if (_position >= _fileSize)
+            {
+                return 0;
+            }
+
+            int requested = (int)Math.Min(buffer.Length, _fileSize - _position);
+            if (requested <= 0)
+            {
+                return 0;
+            }
+
+            // Wait for at least some data to be available, get how much we can read
+            int available = await WaitForDataAsync(_position, requested, cancellationToken).ConfigureAwait(false);
+            long absoluteOffset = _fileStartOffset + _position;
+            await _torrent.FilesInternal.ReadAsync(absoluteOffset, buffer[..available], cancellationToken).ConfigureAwait(false);
+
+            _position += available;
+            RecordRead(available);
+
+            // Look-ahead update: periodically update priorities as we read forward
+            if (_position - _lastPriorityUpdatePosition >= PriorityUpdateIntervalBytes)
+            {
+                UpdatePriorities(_position);
+            }
+
+            return available;
         }
-
-        // Wait for at least some data to be available, get how much we can read
-        int available = await WaitForDataAsync(_position, requested, cancellationToken).ConfigureAwait(false);
-        long absoluteOffset = _fileStartOffset + _position;
-        await _torrent.FilesInternal.ReadAsync(absoluteOffset, buffer[..available], cancellationToken).ConfigureAwait(false);
-
-        _position += available;
-        RecordRead(available);
-
-        // Look-ahead update: periodically update priorities as we read forward
-        if (_position - _lastPriorityUpdatePosition >= PriorityUpdateIntervalBytes)
+        finally
         {
-            UpdatePriorities(_position);
+            lock (_lifetimeLock)
+            {
+                _readers--;
+                if (_disposal.IsDisposed) DisposeReadResources();
+            }
         }
-
-        return available;
     }
 
     public override long Seek(long offset, SeekOrigin origin)
     {
+        _disposal.ThrowIfDisposed(this);
         long newPos = origin switch
         {
             SeekOrigin.Begin => offset,
-            SeekOrigin.Current => _position + offset,
-            SeekOrigin.End => _fileSize + offset,
+            SeekOrigin.Current => SaturatingAdd(_position, offset),
+            SeekOrigin.End => SaturatingAdd(_fileSize, offset),
             _ => throw new ArgumentOutOfRangeException(nameof(origin))
         };
 
@@ -255,6 +271,9 @@ internal class TorrentStream : Stream
         return _position;
     }
 
+    private static long SaturatingAdd(long position, long offset) =>
+        offset > long.MaxValue - position ? long.MaxValue : position + offset;
+
     public override void SetLength(long value)
     {
         throw new NotSupportedException();
@@ -267,13 +286,24 @@ internal class TorrentStream : Stream
 
     protected override void Dispose(bool disposing)
     {
-        if (_disposal.MarkDisposed() && disposing)
+        bool closed;
+        lock (_lifetimeLock)
         {
-            // The torrent leaves streaming mode once its last stream is gone.
-            _controller.OnStreamDisposed(this);
-            _dataSignal.Dispose();
+            closed = _disposal.MarkDisposed();
+            if (closed && disposing)
+            {
+                _lifetimeCts.Cancel();
+                if (_readers == 0) DisposeReadResources();
+            }
         }
+        if (closed && disposing) _controller.OnStreamDisposed(this);
         base.Dispose(disposing);
+    }
+
+    private void DisposeReadResources()
+    {
+        _dataSignal.Dispose();
+        _lifetimeCts.Dispose();
     }
 
     /// <summary>
@@ -403,10 +433,15 @@ internal class TorrentStream : Stream
     {
         UpdateBuffering();
         _lastPriorityUpdatePosition = playheadPosition;
+        if (_fileSize == 0)
+        {
+            _controller.UpdatePriorities(this, []);
+            return;
+        }
 
         int pieceSize = (int)_torrent.InfoFile.Info.PieceSize;
         long absolutePlayhead = _fileStartOffset + playheadPosition;
-        long bufferEnd = absolutePlayhead + ReadAheadBytes();
+        long bufferEnd = absolutePlayhead + Math.Min(_fileSize - playheadPosition, ReadAheadBytes());
 
         int playheadPiece = (int)(absolutePlayhead / pieceSize);
         int bufferEndPiece = (int)(bufferEnd / pieceSize);

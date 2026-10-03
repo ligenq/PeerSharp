@@ -1452,14 +1452,25 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // Restore path: suppress the redundant disk write-back (the entry was just read from
         // disk) and defer queue rebalancing to a single pass after the whole batch loads.
         ITorrent torrent;
-        if (entry.TorrentFileData is { Length: > 0 })
+        TorrentFile? savedFile = null;
+        if (entry.TorrentFileData is { Length: > 0 }
+            && (!TorrentFile.TryParse(entry.TorrentFileData, out savedFile)
+                || (!savedFile.Metadata.Info.Hash.Matches(entry.Hash) && !savedFile.Metadata.Info.HashV2.Matches(entry.Hash))))
         {
-            var torrentFile = TorrentFile.Parse(entry.TorrentFileData);
-            torrent = await AddTorrentCoreAsync(torrentFile, options, persistToDisk: false, rebalanceQueue: false, entry.Options?.PeerPreferences, entry.Hash, cancellationToken).ConfigureAwait(false);
+            _logger.LogWarning("Persisted metadata for {Hash} is corrupt or has a different identity; trying its magnet link", entry.Hash);
+            savedFile = null;
+        }
+        if (savedFile != null)
+        {
+            torrent = await AddTorrentCoreAsync(savedFile, options, persistToDisk: false, rebalanceQueue: false, entry.Options?.PeerPreferences, entry.Hash, cancellationToken).ConfigureAwait(false);
         }
         else if (!string.IsNullOrEmpty(entry.MagnetLink))
         {
             var magnet = MagnetLink.Parse(entry.MagnetLink);
+            if (!magnet.InfoHash.Matches(entry.Hash) && !magnet.InfoHashV2.Matches(entry.Hash))
+            {
+                throw new InvalidDataException("Persisted magnet does not match its session hash.");
+            }
             torrent = await AddMagnetCoreAsync(magnet, options, persistToDisk: false, rebalanceQueue: false, transient: false, entry.Options?.PeerPreferences, entry.Hash, cancellationToken).ConfigureAwait(false);
         }
         else
@@ -2233,7 +2244,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             {
                 try
                 {
-                    await _sessionManager.DeleteAsync(t.SessionHash, CancellationToken.None).ConfigureAwait(false);
+                    await _sessionManager.DeleteAsync(t, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
