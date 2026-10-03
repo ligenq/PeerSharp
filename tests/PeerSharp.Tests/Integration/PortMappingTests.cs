@@ -2,12 +2,59 @@ using System.Net;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utp;
+using Microsoft.Extensions.Time.Testing;
+using Microsoft.Extensions.Logging.Abstractions;
+using System.Collections.Concurrent;
 
 namespace PeerSharp.Tests.Integration;
 
 [Collection("Integration")]
 public class PortMappingTests
 {
+    [Fact(Timeout = 30000)]
+    public async Task NetworkManager_AdvertisesExternalPortAndNotifiesWhenItChanges()
+    {
+        var clock = new FakeTimeProvider();
+        var settings = new Settings { Connection = { UpnpPortMapping = true, TcpPort = 6881 } };
+        _upnpMapper.ExternalPortOverride = 5555;
+        int changes = 0;
+        await using var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory),
+            NullLoggerFactory.Instance, clock, () => Interlocked.Increment(ref changes));
+        await manager.StartAsync();
+        await TorrentTestUtility.WaitUntilAsync(() => changes == 1);
+        Assert.Equal(6881, manager.BoundTcpPort);
+        Assert.Equal(5555, manager.AdvertisedPeerPort);
+        _upnpMapper.ExternalPortOverride = 6666;
+        await TorrentTestUtility.AdvanceUntilAsync(clock, () => changes == 2, TimeSpan.FromMinutes(5));
+        Assert.Equal(6666, manager.AdvertisedPeerPort);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task NetworkManager_RenewsMappingsAndStopsRenewingAfterShutdown()
+    {
+        var clock = new FakeTimeProvider();
+        var settings = new Settings { Connection = { UpnpPortMapping = true, TcpPort = 6881 } };
+        await using var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory), NullLoggerFactory.Instance, clock);
+        await manager.StartAsync();
+        await TorrentTestUtility.AdvanceUntilAsync(clock, () => _upnpMapper.MapCallCount >= 4, TimeSpan.FromMinutes(5));
+        Assert.True(_upnpMapper.StartCallCount >= 2);
+        await manager.StopAsync();
+        int calls = _upnpMapper.MapCallCount;
+        clock.Advance(TimeSpan.FromHours(2));
+        Assert.Equal(calls, _upnpMapper.MapCallCount);
+        Assert.Equal(1, _upnpMapper.UnmapCallCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task NetworkManager_DoesNotMapTcpWhenItsListenerIsDisabled()
+    {
+        var settings = new Settings { Connection = { UpnpPortMapping = true, EnableTcpIn = false } };
+        await using var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
+        await manager.StartAsync();
+        await TorrentTestUtility.WaitUntilAsync(() => _upnpMapper.MapCallCount > 0);
+        Assert.All(_upnpMapper.MappedProtocols, protocol => Assert.Equal("UDP", protocol));
+    }
+
     private readonly MockPortMapperFactory _mapperFactory;
     private readonly MockPortMapper _upnpMapper;
     private readonly MockPortMapper _natPmpMapper;
@@ -30,7 +77,7 @@ public class PortMappingTests
         settings.Connection.UdpPort = 6881;
 
         var services = CreateMockServices(_mapperFactory);
-        var manager = new NetworkManager(
+        await using var manager = new NetworkManager(
             settings,
             _ => { },
             services
@@ -60,7 +107,7 @@ public class PortMappingTests
         var settings = new Settings();
         settings.Connection.UpnpPortMapping = true;
         var services = CreateMockServices(_mapperFactory);
-        var manager = new NetworkManager(
+        await using var manager = new NetworkManager(
             settings,
             _ => { },
             services
@@ -85,7 +132,7 @@ public class PortMappingTests
     public async Task NetworkManager_StopAndDispose_UnmapsPortsOnlyOnce()
     {
         var settings = new Settings { Connection = { UpnpPortMapping = true } };
-        var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
+        await using var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
         await manager.StartAsync();
         await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
 
@@ -99,7 +146,7 @@ public class PortMappingTests
     public async Task NetworkManager_CanBeStoppedAgainAfterRestart()
     {
         var settings = new Settings { Connection = { UpnpPortMapping = true } };
-        var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
+        await using var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
 
         await manager.StartAsync();
         await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
@@ -117,7 +164,7 @@ public class PortMappingTests
     {
         _upnpMapper.BlockUnmapUntilCancelled = true;
         var settings = new Settings { Connection = { UpnpPortMapping = true } };
-        var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
+        await using var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
         await manager.StartAsync();
         await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
@@ -135,7 +182,7 @@ public class PortMappingTests
     {
         _upnpMapper.BlockUnmapUntilCancelled = true;
         var settings = new Settings { Connection = { UpnpPortMapping = true } };
-        var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
+        await using var manager = new NetworkManager(settings, _ => { }, CreateMockServices(_mapperFactory));
         await manager.StartAsync();
         await Task.Delay(50, cancellationToken: TestContext.Current.CancellationToken);
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -154,7 +201,7 @@ public class PortMappingTests
         var settings = new Settings { Connection = { UpnpPortMapping = true } };
 
         var services = CreateMockServices(_mapperFactory);
-        var manager = new NetworkManager(
+        await using var manager = new NetworkManager(
             settings,
             _ => { },
             services
@@ -218,12 +265,18 @@ public class PortMappingTests
         public int MappedPort { get; private set; }
         public bool ShouldThrow { get; set; }
         public bool BlockUnmapUntilCancelled { get; set; }
+        public int MapCallCount;
+        public int StartCallCount;
+        public ConcurrentQueue<string> MappedProtocols { get; } = new();
+        public int? ExternalPortOverride { get; set; }
+        public int? GetExternalPort(int internalPort, string protocol) => MapCalled ? ExternalPortOverride : null;
 
         public MockPortMapper(string name) => Name = name;
 
         public Task StartAsync(CancellationToken ct = default)
         {
             StartCalled = true;
+            Interlocked.Increment(ref StartCallCount);
             if (ShouldThrow)
             {
                 throw new Exception("Simulated Failure");
@@ -235,6 +288,8 @@ public class PortMappingTests
         public Task<bool> MapPortAsync(int port, string protocol, string description, CancellationToken ct = default)
         {
             MapCalled = true;
+            MappedProtocols.Enqueue(protocol);
+            Interlocked.Increment(ref MapCallCount);
             MappedPort = port;
             if (ShouldThrow)
             {

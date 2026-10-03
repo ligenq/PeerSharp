@@ -342,6 +342,19 @@ public class HttpTrackerTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_UsesTheMappedExternalPort()
+    {
+        _torrent.PortListener = new TestPortListener(23456);
+        _torrent.Network.GetAdvertisedPeerPort = () => 34567;
+        var tracker = CreateTracker();
+        tracker.Init("http://tracker.com/announce", _torrent, _callback);
+        tracker.SetTestClient(_mockHttp);
+        _mockHttp.ResponseBytes = BencodeWriter.Write(new BDict());
+        await tracker.AnnounceAsync(TrackerEvent.None, CancellationToken.None);
+        Assert.Contains("port=34567", _mockHttp.LastUrl);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task AnnounceAsync_EchoesTrackerIdOnTheNextAnnounce()
     {
         // BEP 3: a tracker that issues a session token expects to see it again. One that never gets it

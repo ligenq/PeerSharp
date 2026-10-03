@@ -1021,7 +1021,8 @@ internal sealed class Storage : IStorage
                             _fileDirty[fileIdx] = true;
                             Interlocked.Exchange(ref _consecutiveErrors, 0);
                         }
-                        catch (IOException ex) when (ex.HResult == unchecked((int)0x80070070)) // ERROR_DISK_FULL
+                        // Unix IOException.HResult carries raw errno (ENOSPC=28).
+                        catch (IOException ex) when (ex.HResult is 28 or unchecked((int)0x80070070) or unchecked((int)0x80070027))
                         {
                             HandleDiskFull(fileIdx, ex);
                             throw new StorageException("Disk full", ex, isRecoverable: false);

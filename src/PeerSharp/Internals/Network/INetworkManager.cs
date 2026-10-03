@@ -20,6 +20,8 @@ internal interface INetworkManager : IAsyncDisposable
     /// </summary>
     int BoundUdpPort { get; }
 
+    int AdvertisedPeerPort => BoundTcpPort > 0 ? BoundTcpPort : BoundUdpPort;
+
     IDhtManager Dht { get; }
     ILsdManager Lsd { get; }
     IPortListener PortListener { get; }

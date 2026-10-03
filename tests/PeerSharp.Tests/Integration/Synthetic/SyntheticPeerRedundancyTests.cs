@@ -125,6 +125,17 @@ public class SyntheticPeerRedundancyTests : IDisposable
         var refresh = SyntheticBencode.DecodeDictionary(
             refreshFrame.ExtendedPayload, "The refreshed BEP 10 handshake");
         Assert.Equal(1, SyntheticBencode.TryGetInteger(refresh, "upload_only"));
+
+        int previousHandshakes = connection.ExtendedFrames.Count(static frame => frame.ExtendedId == 0);
+        await torrent.SetFilePriorityAsync(1, Priority.Normal, cancellationToken);
+        Assert.False(torrent.SelectionFinished);
+        Assert.True(await SyntheticPeer.WaitForAsync(
+            () => connection.ExtendedFrames.Count(static frame => frame.ExtendedId == 0) > previousHandshakes,
+            TimeSpan.FromSeconds(20), cancellationToken));
+        var downloadingAgain = SyntheticBencode.DecodeDictionary(
+            connection.ExtendedFrames.Last(static frame => frame.ExtendedId == 0).ExtendedPayload,
+            "The handshake after expanding the selection");
+        Assert.Equal(0, SyntheticBencode.TryGetInteger(downloadingAgain, "upload_only"));
     }
 
     private ClientEngine CreateEngine()

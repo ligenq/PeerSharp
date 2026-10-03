@@ -8,6 +8,60 @@ namespace PeerSharp.Tests.Core.Utilities;
 
 public sealed class UpnpTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ParseDescription_FindsNestedWanServiceAndResolvesRelativeUrl(bool useUrlBase)
+    {
+        await using var server = new TestHttpServer(_ => TestHttpResponse.Ok(
+            "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">" +
+            (useUrlBase ? "<URLBase>http://[::1]:1234/base/</URLBase>" : "") +
+            "<device><friendlyName>Router</friendlyName><serviceList><service><serviceType>Other</serviceType></service></serviceList>" +
+            "<deviceList><device><serviceList><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:2</serviceType>" +
+            "<controlURL>control</controlURL></service></serviceList></device></deviceList></device></root>"));
+        var gateway = await UpnpDiscovery.ParseDescriptionAsync(server.BaseUri + "descriptions/router.xml", IPAddress.Loopback, TestContext.Current.CancellationToken);
+        Assert.NotNull(gateway);
+        Assert.Equal(useUrlBase ? "http://[::1]:1234/base/control" : server.BaseUri + "descriptions/control", gateway.ControlUrl);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ParseDescription_RejectsOversizedXmlAndExternalEntities(bool oversized)
+    {
+        string xml = oversized ? new string('x', 1024 * 1024 + 1) :
+            "<!DOCTYPE root [<!ENTITY x SYSTEM 'file:///C:/Windows/win.ini'>]><root><device><friendlyName>&x;</friendlyName></device></root>";
+        await using var server = new TestHttpServer(_ => TestHttpResponse.Ok(xml));
+        Assert.Null(await UpnpDiscovery.ParseDescriptionAsync(server.BaseUri + "router.xml", IPAddress.Loopback, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task MapPort_RejectsSoapFaultEvenWithSuccessfulHttpStatus()
+    {
+        await using var server = new TestHttpServer(_ => TestHttpResponse.Ok(
+            "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><s:Fault><faultcode>Conflict</faultcode></s:Fault></s:Body></s:Envelope>"));
+        var mapper = new UpnpPortMapping(_ => Task.FromResult(new List<UpnpGateway> { CreateGateway("Router", server.BaseUri + "control") }));
+        await mapper.StartAsync(CancellationToken.None);
+        Assert.False(await mapper.MapPortAsync(1234, "TCP", "test", TestContext.Current.CancellationToken));
+        var status = Assert.Single(mapper.GetStatus());
+        Assert.Equal(PortMappingResult.Failed, status.Result);
+        Assert.Null(status.ExternalPort);
+    }
+
+    [Fact]
+    public async Task MapPort_EscapesXmlAndRenewalDoesNotDuplicateDeletion()
+    {
+        var requests = new ConcurrentQueue<TestHttpRequest>();
+        await using var server = new TestHttpServer(request => { requests.Enqueue(request); return TestHttpResponse.Ok("<xml/>"); });
+        var mapper = new UpnpPortMapping(_ => Task.FromResult(new List<UpnpGateway> { CreateGateway("Router", server.BaseUri + "control") }));
+        await mapper.StartAsync(CancellationToken.None);
+        Assert.True(await mapper.MapPortAsync(1234, "TCP", "A&B <test>", TestContext.Current.CancellationToken));
+        Assert.True(await mapper.MapPortAsync(1234, "TCP", "A&B <test>", TestContext.Current.CancellationToken));
+        await mapper.UnmapAllAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(3, requests.Count);
+        Assert.Contains("A&amp;B &lt;test&gt;", requests.First().Body);
+    }
+
     [Fact]
     public async Task DiscoverAsync_FindsGatewayFromSsdpResponse()
     {

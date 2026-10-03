@@ -40,9 +40,18 @@ internal class ExtensionHandshake
             : null;
     }
 
-    public static ExtensionHandshake Parse(BDict dict)
+    public static ExtensionHandshake Parse(BDict dict, ExtensionHandshake? previous = null)
     {
-        var handshake = new ExtensionHandshake();
+        var handshake = new ExtensionHandshake
+        {
+            MessageIds = previous == null ? [] : new Dictionary<string, int>(previous.MessageIds),
+            Client = previous?.Client ?? string.Empty,
+            MetadataSize = previous?.MetadataSize,
+            YourIp = previous?.YourIp?.ToArray(),
+            ListenPort = previous?.ListenPort,
+            RequestQueueDepth = previous?.RequestQueueDepth,
+            IsUploadOnly = previous?.IsUploadOnly ?? false
+        };
         if (dict.Get("m") is BDict m)
         {
             foreach (var kvp in m.Dict)
@@ -54,13 +63,13 @@ internal class ExtensionHandshake
             }
         }
 
-        handshake.Client = dict.GetString("v") ?? string.Empty;
-        handshake.MetadataSize = (int?)dict.GetLong("metadata_size");
-        handshake.YourIp = dict.GetBytes("yourip")?.ToArray();
+        handshake.Client = dict.GetString("v") ?? handshake.Client;
+        if (dict.GetLong("metadata_size") is >= 0 and <= int.MaxValue and var metadataSize) handshake.MetadataSize = (int)metadataSize;
+        handshake.YourIp = dict.GetBytes("yourip")?.ToArray() ?? handshake.YourIp;
 
         // BEP 21 specifies the value 1. Anything else non-zero is treated the same rather than
         // ignored - the intent is unambiguous and this is a hint, not a security boundary.
-        handshake.IsUploadOnly = (dict.GetLong("upload_only") ?? 0) != 0;
+        if (dict.GetLong("upload_only") is { } uploadOnly) handshake.IsUploadOnly = uploadOnly != 0;
 
         // A port of zero means "not listening", which is legitimate for a peer behind a NAT it cannot
         // map, and is not the same as a peer that told us nothing.

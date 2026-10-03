@@ -683,6 +683,24 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
     }
 
+    private void AnnounceChangedPeerPort()
+    {
+        foreach (var torrent in _registry.GetAllIncludingTransient())
+        {
+            if (!torrent.Started) continue;
+            try
+            {
+                _ = torrent.TrackerManager.AnnounceAsync(cancellationToken: CancellationToken.None); // Scheduling completes synchronously.
+                torrent.PeersInternal.AnnounceListenPort();
+                if (!torrent.InfoFile.Info.IsPrivate)
+                {
+                    torrent.DhtManager?.Announce(torrent.InfoFile.Info.GetTrackerInfoHash(), torrent.AdvertisedPeerPort);
+                }
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "Could not refresh network advertisements for {TorrentName}", torrent.Name); }
+        }
+    }
+
     public void OnScrapeResult(InfoHash infoHash, int estimatedSeeds, int estimatedPeers)
     {
         var torrent = ResolveTorrentForBackgroundWork(infoHash);
@@ -921,6 +939,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
         torrent.PortListener = _networkManager?.PortListener;
+        torrent.Network.GetAdvertisedPeerPort = () => _networkManager?.AdvertisedPeerPort ?? Settings.Connection.TcpPort;
         torrent.Blocklist = Blocklist;
         torrent.MetadataDownload = new MetadataDownload(torrent, _loggerFactory);
         torrent.MetadataDownload.Start();
@@ -965,6 +984,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
         torrent.PortListener = _networkManager?.PortListener;
+        torrent.Network.GetAdvertisedPeerPort = () => _networkManager?.AdvertisedPeerPort ?? Settings.Connection.TcpPort;
         torrent.Blocklist = Blocklist;
 
         await RegisterAsync(torrent, transient).ConfigureAwait(false);
@@ -1266,7 +1286,9 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 Settings,
                 HandleUtpConnection,
                 networkServices,
-                _loggerFactory);
+                _loggerFactory,
+                _timeProvider,
+                AnnounceChangedPeerPort);
         }
 
         await _networkManager.StartAsync(cancellationToken).ConfigureAwait(false);

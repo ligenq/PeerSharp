@@ -16,6 +16,17 @@ namespace PeerSharp.Tests.Core.Dht;
 /// </summary>
 public class DhtBep51WireTests
 {
+    [Fact]
+    public void SampleReply_WithoutSamplesIsNotMistakenForSamplingSupport()
+    {
+        var reply = new BDict();
+        reply.Dict["id"] = new BString(InfoHash.CreateRandom().ToArray());
+        reply.Dict["nodes"] = new BString(Array.Empty<byte>());
+        Assert.Null(DhtManager.ParseSampleReply(reply));
+        reply.Dict["samples"] = new BString(Array.Empty<byte>());
+        Assert.NotNull(DhtManager.ParseSampleReply(reply));
+    }
+
     private static InfoHash[] SeedServerStore(DhtLoopbackFixture fixture, int count)
     {
         var hashes = new InfoHash[count];

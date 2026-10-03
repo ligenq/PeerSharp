@@ -53,7 +53,15 @@ internal sealed class DhtInfoHashCrawler
         ILoggerFactory loggerFactory)
     {
         _dht = dht;
-        _options = options;
+        options.Validate(nameof(options));
+        _options = new DhtIndexerOptions
+        {
+            MaxConcurrency = options.MaxConcurrency,
+            MaxInfoHashes = options.MaxInfoHashes,
+            MaxTrackedNodes = options.MaxTrackedNodes,
+            MinNodeRequeryInterval = options.MinNodeRequeryInterval,
+            ReturnDuplicateSightings = options.ReturnDuplicateSightings
+        };
         _timeProvider = timeProvider;
         _logger = loggerFactory.CreateLogger<DhtInfoHashCrawler>();
     }
@@ -61,6 +69,8 @@ internal sealed class DhtInfoHashCrawler
     public async IAsyncEnumerable<DiscoveredInfoHash> CrawlAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _dht.GetCrawlToken());
+        cancellationToken = lifetime.Token;
         var seen = new HashSet<InfoHash>();
         var known = new HashSet<IPEndPoint>();
 
@@ -70,6 +80,7 @@ internal sealed class DhtInfoHashCrawler
 
         // Asked recently; the value is when it may be asked again.
         var cooldown = new Dictionary<IPEndPoint, DateTimeOffset>();
+        var failed = new Dictionary<IPEndPoint, DateTimeOffset>();
 
         foreach (var endpoint in await WaitForStartingNodesAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -82,6 +93,7 @@ internal sealed class DhtInfoHashCrawler
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            foreach (var endpoint in failed.Where(entry => entry.Value <= _timeProvider.GetUtcNow()).Select(entry => entry.Key).ToArray()) failed.Remove(endpoint);
 
             PromoteExpiredCooldowns(pending, cooldown);
 
@@ -106,14 +118,21 @@ internal sealed class DhtInfoHashCrawler
                 .ConfigureAwait(false);
 
             var now = _timeProvider.GetUtcNow();
+            cancellationToken.ThrowIfCancellationRequested();
 
             for (int i = 0; i < batch.Length; i++)
             {
+                if (results[i].Sample == null)
+                {
+                    known.Remove(batch[i]);
+                    if (failed.Count >= _options.MaxTrackedNodes) failed.Remove(failed.MinBy(entry => entry.Value).Key);
+                    failed[batch[i]] = RequeryAt(now, TimeSpan.FromSeconds(1));
+                }
                 // Nodes without BEP 51 support are still worth their neighbours, so a result carries
                 // nodes either way and only the sample may be absent.
                 foreach (var discovered in results[i].Nodes)
                 {
-                    if (known.Count < _options.MaxTrackedNodes && known.Add(discovered))
+                    if (!failed.ContainsKey(discovered) && known.Count < _options.MaxTrackedNodes && known.Add(discovered))
                     {
                         pending.Enqueue(discovered);
                     }
@@ -121,18 +140,12 @@ internal sealed class DhtInfoHashCrawler
 
                 if (results[i].Sample is not { } reply)
                 {
-                    // Nothing to sample now or later: drop it rather than cooling it down. Its
-                    // neighbours, if it gave any, are already queued above.
-                    //
-                    // Dropped rather than remembered-as-dead deliberately. Remembering would avoid the
-                    // occasional re-query when another node names it again, at the cost of letting
-                    // dead entries accumulate against MaxTrackedNodes until the frontier could no
-                    // longer grow at all. A wasted packet now and then is the cheaper failure.
-                    known.Remove(batch[i]);
+                    // Keep a bounded, separate retry history so unsupported nodes referring to
+                    // each other cannot form a tight query loop or fill the live frontier.
                     continue;
                 }
 
-                cooldown[batch[i]] = now + ClampRequeryInterval(reply.Interval);
+                cooldown[batch[i]] = RequeryAt(now, reply.Interval);
 
                 foreach (var hash in reply.Samples)
                 {
@@ -186,10 +199,11 @@ internal sealed class DhtInfoHashCrawler
             var nodes = await _dht.FindNodeAsync(endpoint, target, cancellationToken).ConfigureAwait(false);
             return new NodeResult(null, nodes);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return NodeResult.Empty;
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             // One unreachable or misbehaving node must not end a crawl.
@@ -258,6 +272,12 @@ internal sealed class DhtInfoHashCrawler
     private TimeSpan ClampRequeryInterval(TimeSpan requested)
     {
         return requested > _options.MinNodeRequeryInterval ? requested : _options.MinNodeRequeryInterval;
+    }
+
+    private DateTimeOffset RequeryAt(DateTimeOffset now, TimeSpan requested)
+    {
+        var delay = ClampRequeryInterval(requested);
+        return delay >= DateTimeOffset.MaxValue - now ? DateTimeOffset.MaxValue : now + delay;
     }
 
     private static DhtTarget RandomTarget()

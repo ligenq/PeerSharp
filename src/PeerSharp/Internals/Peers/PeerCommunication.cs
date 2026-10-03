@@ -338,7 +338,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         PeerPieces = new PiecesProgress(torrent.Pieces.Count);
         UtPex = new UtPex(this);
         UtMetadata = new UtMetadata(this);
-        UtHolepunch = new UtHolepunch(this);
+        UtHolepunch = new UtHolepunch(this, loggerFactory);
         LtDontHave = new LtDontHave(this, loggerFactory.CreateLogger<LtDontHave>());
 
         // BEP 30: Initialize ut_hash_piece extension for Merkle hash torrents
@@ -582,7 +582,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     }
 
     internal Task RefreshExtendedHandshakeAfterMetadataAsync() =>
-        RemoteSupportsExtensions ? SendExtendedHandshakeAsync() : Task.CompletedTask;
+        RemoteSupportsExtensions ? SendExtendedHandshakeAsync(isUpdate: true) : Task.CompletedTask;
 
     /// <summary>
     /// BEP 40: Canonical peer priority. Higher values indicate more preferred peers.
@@ -1959,7 +1959,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             if (dict is not null)
             {
-                RemoteExtensions = ExtensionHandshake.Parse(dict);
+                RemoteExtensions = ExtensionHandshake.Parse(dict, RemoteExtensions);
                 UtMetadata.Init(RemoteExtensions);
                 UtPex.Init(RemoteExtensions);
                 UtHolepunch.Init(RemoteExtensions);
@@ -1992,9 +1992,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // BEP 10 'yourip': one peer's opinion of our external address. Treated as a vote rather
                 // than an answer - any single peer can be wrong or lying, and the tracker already
                 // resolves this by agreement.
-                if (RemoteExtensions.YourIp is { Length: 4 or 16 } reportedIp)
+                if (dict.GetBytes("yourip") is { Length: 4 or 16 } reportedIp)
                 {
-                    _torrent.ReportExternalAddress(reportedIp);
+                    _torrent.ReportExternalAddress(reportedIp.ToArray());
                 }
 
                 _logger.LogDebug("{PeerName} supports extensions: {Extensions}", Name, string.Join(", ", RemoteExtensions.MessageIds.Keys));
@@ -3040,7 +3040,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
     }
 
-    private async Task SendExtendedHandshakeAsync()
+    private async Task SendExtendedHandshakeAsync(bool isUpdate = false)
     {
         try
         {
@@ -3057,7 +3057,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // the listener that knows what was actually bound. Without it a peer we dialled sees
                 // only our ephemeral source port and can neither reconnect to us nor tell anyone else
                 // how to reach us.
-                ListenPort = _torrent.PortListener?.Port is > 0 and var bound ? bound : null,
+                ListenPort = _torrent.AdvertisedPeerPort is > 0 and var bound ? bound : null,
 
                 // BEP 10 'yourip'. The peer cannot see its own external address; we can, and telling it
                 // is how it learns. Costs four bytes and is the same courtesy we want in return.
@@ -3073,8 +3073,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 UtPex.SetLocalMessageId(2);
             }
 
-            handshake.MessageIds[UtHolepunch.Name] = 3;
-            UtHolepunch.SetLocalMessageId(3);
+            if (!_torrent.InfoFile.Info.IsPrivate && _torrent.Settings.Connection.EnableUtpOut && !_torrent.Settings.Proxy.ForceProxy)
+            {
+                handshake.MessageIds[UtHolepunch.Name] = 3;
+                UtHolepunch.SetLocalMessageId(3);
+            }
 
             // BEP 30: Advertise ut_hash_piece support for Merkle hash torrents
             if (UtHashPiece != null)
@@ -3100,7 +3103,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 handshake.MetadataSize = _torrent.InfoFile.InfoBytes.Length;
             }
 
-            using var result = BencodeWriter.WriteToResult(handshake.ToBencode());
+            var encodedHandshake = handshake.ToBencode();
+            // Updates must explicitly clear upload_only when the selection starts needing data again.
+            if (isUpdate) encodedHandshake.Dict["upload_only"] = new BNumber(handshake.IsUploadOnly ? 1 : 0);
+            using var result = BencodeWriter.WriteToResult(encodedHandshake);
 
             var msg = new PeerMessage(MessageId.Extended)
             {

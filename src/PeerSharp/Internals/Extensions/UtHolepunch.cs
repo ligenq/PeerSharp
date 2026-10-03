@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Net;
 using PeerSharp.Messages;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace PeerSharp.Internals.Extensions;
 
@@ -9,12 +11,18 @@ internal class UtHolepunch : IUtHolepunch, IDisposable
     public const string Name = "ut_holepunch";
 
     private readonly IPeerCommunication _peer;
+    private readonly ILogger<UtHolepunch> _logger;
 
     private AtomicDisposal _disposal = new();
 
-    public UtHolepunch(IPeerCommunication peer)
+    public UtHolepunch(IPeerCommunication peer) : this(peer, NullLoggerFactory.Instance)
+    {
+    }
+
+    public UtHolepunch(IPeerCommunication peer, ILoggerFactory loggerFactory)
     {
         _peer = peer;
+        _logger = loggerFactory.CreateLogger<UtHolepunch>();
     }
 
     internal enum ErrorCode
@@ -47,7 +55,7 @@ internal class UtHolepunch : IUtHolepunch, IDisposable
         // Data starts after the ExtId (which was consumed by PeerCommunication)
         // Format: [MsgId][Type][Addr...][Port][Error?]
 
-        if (data.Length < 2)
+        if (_disposal.IsDisposed || data.Length < 2 || data[0] > (byte)MsgId.Error || data[1] > 1)
         {
             return;
         }
@@ -56,7 +64,10 @@ internal class UtHolepunch : IUtHolepunch, IDisposable
         bool ipv6 = data[1] == 1;
         int addrLen = ipv6 ? 16 : 4;
 
-        if (data.Length < 2 + addrLen + 2)
+        int endpointLength = 2 + addrLen + 2;
+        // Older implementations omit the zero error code on non-error messages.
+        if (id == MsgId.Error ? data.Length != endpointLength + 4
+            : data.Length != endpointLength && data.Length != endpointLength + 4)
         {
             return;
         }
@@ -64,12 +75,14 @@ internal class UtHolepunch : IUtHolepunch, IDisposable
         var ipSpan = new ReadOnlySpan<byte>(data, 2, addrLen);
         var ip = new IPAddress(ipSpan.ToArray());
         var port = BinaryPrimitives.ReadUInt16BigEndian(new ReadOnlySpan<byte>(data, 2 + addrLen, 2));
+        if (port == 0) return;
         var endpoint = new IPEndPoint(ip, port);
 
         ErrorCode error = ErrorCode.None;
-        if (id == MsgId.Error && data.Length >= 2 + addrLen + 2 + 4)
+        if (data.Length == endpointLength + 4)
         {
             error = (ErrorCode)BinaryPrimitives.ReadInt32BigEndian(new ReadOnlySpan<byte>(data, 2 + addrLen + 2, 4));
+            if (id != MsgId.Error && error != ErrorCode.None) return;
         }
 
         // Notify listener
@@ -114,7 +127,7 @@ internal class UtHolepunch : IUtHolepunch, IDisposable
 
     private void Send(MsgId id, IPEndPoint endpoint, ErrorCode error)
     {
-        if (!RemoteMessageId.HasValue)
+        if (_disposal.IsDisposed || !RemoteMessageId.HasValue)
         {
             return;
         }
@@ -123,11 +136,7 @@ internal class UtHolepunch : IUtHolepunch, IDisposable
         byte[] addrBytes = endpoint.Address.GetAddressBytes();
 
         // Length: 1 (ExtId) + 1 (MsgId) + 1 (Type: 0=ipv4, 1=ipv6) + AddrLen + 2 (Port) + [4 Error]
-        int packetLen = 1 + 1 + 1 + addrBytes.Length + 2;
-        if (id == MsgId.Error)
-        {
-            packetLen += 4;
-        }
+        int packetLen = 1 + 1 + 1 + addrBytes.Length + 2 + 4;
 
         var msg = new PeerMessage(MessageId.Extended)
         {
@@ -147,6 +156,12 @@ internal class UtHolepunch : IUtHolepunch, IDisposable
             BinaryPrimitives.WriteInt32BigEndian(span[(3 + addrBytes.Length + 2)..], (int)error);
         }
 
-        _ = _peer.SendMessageAsync(msg);
+        _ = SendSafeAsync(msg); // fire-and-forget: the helper catches and logs send failures.
+    }
+
+    private async Task SendSafeAsync(PeerMessage message)
+    {
+        try { await _peer.SendMessageAsync(message).ConfigureAwait(false); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Holepunch send failed"); }
     }
 }

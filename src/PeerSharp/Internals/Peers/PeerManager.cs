@@ -124,6 +124,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private int _utpEverSucceeded;
 
     private int _holepunchCount = 0;
+    private readonly Lock _holepunchLock = new();
 
     private long _holepunchWindowStart = Environment.TickCount64;
 
@@ -742,66 +743,26 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         int currentConnecting = Interlocked.CompareExchange(ref _connectingPeersCount, 0, 0);
 
         // Limit active connections
-        if (currentConnections >= MaxPeersForThisTorrent && !forceUtp)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
             return;
         }
 
         // Limit pending/half-open connections (prevents router saturation)
-        if (currentConnecting >= MaxPendingConnectionsNow(currentConnections) && !forceUtp)
+        if (currentConnecting >= MaxPendingConnectionsNow(currentConnections))
         {
             return;
         }
 
-        // Check global governor limits (unless forceUtp/holepunch)
-        if (!forceUtp)
-        {
-            if (_governor.ActiveConnections >= _settings.Connection.MaxConnections)
-            {
-                return;
-            }
-
-            if (_governor.PendingConnections >= _settings.Connection.MaxPendingConnections)
-            {
-                return;
-            }
-        }
+        // Holepunch dials are immediate, but still count against resource limits.
+        if (_governor.ActiveConnections >= _settings.Connection.MaxConnections
+            || _governor.PendingConnections >= _settings.Connection.MaxPendingConnections) return;
 
         // For holepunch (forceUtp=true), connect immediately - it's time-sensitive
         if (forceUtp)
         {
-            // Rate limit holepunch attempts to prevent DoS via Relay
-            long tickCount = Environment.TickCount64;
-            long windowStart = Interlocked.Read(ref _holepunchWindowStart);
-            if (tickCount - windowStart > 60000)
-            {
-                int refused = Interlocked.Exchange(ref _holepunchRefused, 0);
-                if (refused > 1)
-                {
-                    _logger.LogDebug(
-                        "Refused {Count} further holepunch requests over the last minute", refused - 1);
-                }
-
-                Interlocked.Exchange(ref _holepunchWindowStart, tickCount);
-                Interlocked.Exchange(ref _holepunchCount, 0);
-            }
-
-            if (Interlocked.Increment(ref _holepunchCount) > _settings.Connection.MaxHolepunchPerMinute)
-            {
-                // One line per window, not per refusal. A relay that has hit the limit goes on asking,
-                // so this reported every rejection: several hundred warnings in a few minutes, all
-                // saying the same thing about a limit that was doing its job. The rest are counted and
-                // summarised when the window rolls over.
-                if (Interlocked.Increment(ref _holepunchRefused) == 1)
-                {
-                    _logger.LogWarning(
-                        "Holepunch rate limit of {Limit}/minute reached; refusing further rendezvous this minute (first was {Ip}:{Port})",
-                        _settings.Connection.MaxHolepunchPerMinute,
-                        ip,
-                        port);
-                }
-                return;
-            }
+            if (IPAddress.TryParse(ip, out var address) && _connectedEndpoints.ContainsKey(new IPEndPoint(address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address, port))) return;
+            if (!TryConsumeHolepunchBudget(ip, port)) return;
 
             ConnectToInternal(ip, port, forceUtp);
             return;
@@ -1249,16 +1210,59 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     public Task HolepunchMessageReceivedAsync(IPeerCommunication peer, UtHolepunch.MsgId id, IPEndPoint endpoint, UtHolepunch.ErrorCode error)
     {
+        if (_torrent.InfoFile.Info.IsPrivate || !_settings.Connection.EnableUtpOut || _settings.Proxy.ForceProxy || !peer.UtHolepunch.RemoteMessageId.HasValue) return Task.CompletedTask;
+        endpoint = NetworkUtils.NormalizeEndPoint(endpoint);
         var p = (PeerCommunication)peer;
+        if (!NetworkUtils.IsDeliverableUnicast(endpoint)) return Task.CompletedTask;
+        bool targetLocal = NetworkUtils.IsLocalAddress(endpoint.Address);
+        bool sourceLocal = p.RemoteEndPoint != null && NetworkUtils.IsLocalAddress(p.RemoteEndPoint.Address);
+        if (targetLocal && !sourceLocal) return Task.CompletedTask;
         _logger.LogDebug("Holepunch msg from {RemoteEndPoint}: {MsgId} {Endpoint} {ErrorCode}", p.RemoteEndPoint, id, endpoint, error);
 
-        if (id == UtHolepunch.MsgId.Connect)
+        if (id == UtHolepunch.MsgId.Rendezvous)
+        {
+            if (targetLocal != sourceLocal || p.RemoteEndPoint == null || !TryConsumeHolepunchBudget(endpoint.Address.ToString(), endpoint.Port)) return Task.CompletedTask;
+            var target = _connectedPeers.Keys.FirstOrDefault(candidate => endpoint.Equals(candidate.RemoteEndPoint) || endpoint.Equals(candidate.RemoteListenEndPoint));
+            if (ReferenceEquals(target, p)) p.UtHolepunch.SendError(endpoint, UtHolepunch.ErrorCode.NoSelf);
+            else if (target == null) p.UtHolepunch.SendError(endpoint, UtHolepunch.ErrorCode.NotConnected);
+            else if (!target.UtHolepunch.RemoteMessageId.HasValue) p.UtHolepunch.SendError(endpoint, UtHolepunch.ErrorCode.NoSupport);
+            else
+            {
+                p.UtHolepunch.SendConnect(endpoint);
+                target.UtHolepunch.SendConnect(p.RemoteEndPoint);
+            }
+        }
+        else if (id == UtHolepunch.MsgId.Connect)
         {
             // Relay told us to connect to 'endpoint' via uTP to punch a hole
             _logger.LogDebug("Initiating holepunch connection to {Endpoint}", endpoint);
             ConnectTo(endpoint.Address.ToString(), endpoint.Port, true);
         }
         return Task.CompletedTask;
+    }
+
+    private bool TryConsumeHolepunchBudget(string ip, int port)
+    {
+        lock (_holepunchLock)
+        {
+            long now = Environment.TickCount64;
+            if (now - _holepunchWindowStart > 60000)
+            {
+                if (_holepunchRefused > 1) _logger.LogDebug("Refused {Count} further holepunch requests over the last minute", _holepunchRefused - 1);
+                _holepunchWindowStart = now;
+                _holepunchCount = 0;
+                _holepunchRefused = 0;
+            }
+            if (_holepunchCount >= _settings.Connection.MaxHolepunchPerMinute)
+            {
+                // Saturating counters keep a hostile long-running relay from overflowing the limit.
+                if (_holepunchRefused < int.MaxValue) _holepunchRefused++;
+                if (_holepunchRefused == 1) _logger.LogWarning("Holepunch rate limit of {Limit}/minute reached; refusing further rendezvous this minute (first was {Ip}:{Port})", _settings.Connection.MaxHolepunchPerMinute, ip, port);
+                return false;
+            }
+            _holepunchCount++;
+            return true;
+        }
     }
 
     public async Task MessageReceivedAsync(IPeerCommunication peer, PeerMessage msg)
@@ -1426,7 +1430,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     public Task PortReceivedAsync(IPeerCommunication peer, ushort dhtPort)
     {
         var p = (PeerCommunication)peer;
-        if (p.RemoteEndPoint == null || _torrent.DhtManager == null)
+        if (_torrent.InfoFile.Info.IsPrivate || dhtPort == 0 || p.RemoteEndPoint == null || _torrent.DhtManager == null)
         {
             return Task.CompletedTask;
         }
@@ -1716,6 +1720,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private void AddPeersInternal(IEnumerable<IPEndPoint> peers, PeerSourceKind sourceKind, PeerCommunication? source, List<byte>? flags)
     {
+        if (_torrent.InfoFile.Info.IsPrivate && sourceKind is PeerSourceKind.Dht or PeerSourceKind.Pex or PeerSourceKind.Lpd) return;
         if (peers == null)
         {
             return;
@@ -1847,6 +1852,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // before it has served the peers downloading from us - so the swarm lost its seeds while
         // uploads were still in flight. The periodic sweep costs at most five seconds of one
         // connection slot, against the two minutes this replaced, and leaves the uploads alone.
+    }
+
+    internal void AnnounceListenPort()
+    {
+        foreach (var peer in _connectedPeers.Keys)
+        {
+            FireAndForget(peer.RefreshExtendedHandshakeAfterMetadataAsync(), "Announce changed listen port");
+        }
     }
     private void ReleasePendingConnection(ConnectionRequest request)
     {
@@ -2158,7 +2171,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 var ep = endpoint ?? new IPEndPoint(IPAddress.Parse(ip), port);
                 if (!isHolepunch
                     && _peerSources.TryGetValue(ep, out var source)
-                    && source.RemoteExtensions?.MessageIds.ContainsKey(UtHolepunch.Name) == true)
+                    && source.RemoteExtensions?.GetEnabledMessageId(UtHolepunch.Name) != null)
                 {
                     _logger.LogDebug("Connection failed to {Endpoint}, attempting holepunch via {Via}", ep, source.RemoteEndPoint);
                     source.UtHolepunch.SendRendezvous(ep);
@@ -2308,11 +2321,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             }
 
             // Acquire global pending slot
-            if (!forceUtp && !_governor.TryAcquirePendingSlot())
+            if (!_governor.TryAcquirePendingSlot())
             {
                 return;
             }
-            pendingSlotHeld = !forceUtp;
+            pendingSlotHeld = true;
 
             var peer = _peerFactory.Create(_torrent, this, _timeProvider);
 
@@ -2325,7 +2338,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _logger.LogDebug("Initiating connection to {Ip}:{Port} (plan={Plan}), connecting={Connecting}, connected={Connected}", ip, port, string.Join("->", transportPlan), _connectingPeersCount, _connectedPeersCount);
 
             // Track the connection task
-            var task = ConnectAndHandleAsync(peer, ip, port, transportPlan, !forceUtp, isHolepunch: forceUtp,
+            var task = ConnectAndHandleAsync(peer, ip, port, transportPlan, true, isHolepunch: forceUtp,
                 pendingRequest, _mainLoopCts?.Token ?? CancellationToken.None);
             handedOff = true;
             _activeConnectionTasks.TryAdd(task, 0);
@@ -2774,7 +2787,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     /// <summary>
     /// Revalidates a normal queued dial immediately before it becomes a half-open connection.
-    /// Holepunch requests do not use the queue and deliberately bypass these limits.
+    /// Holepunch requests bypass the queue but still obey the connection and pending-slot limits.
     /// </summary>
     private bool CanStartQueuedConnection(ConnectionRequest request)
     {

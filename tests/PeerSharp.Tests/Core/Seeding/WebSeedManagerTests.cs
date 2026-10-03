@@ -9,6 +9,19 @@ namespace PeerSharp.Tests.Core.Seeding;
 
 public class WebSeedManagerTests
 {
+    [Fact]
+    public async Task DownloadSpeed_CountsHttpBytesAndReturnsToZeroWhenIdle()
+    {
+        await using var manager = new WebSeedManager(_torrent, ["http://seed.com/content"], _timeProvider);
+        manager.SetTestClient(_mockHttp);
+        _mockHttp.ResponseBytes = new byte[16384];
+        var source = new WebSeedManager.WebSeedSource("http://seed.com/content", false);
+        Assert.NotNull(await manager.DownloadSingleFilePieceAsync(source, 0, 16384, TestContext.Current.CancellationToken));
+        _timeProvider.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(16384, manager.SampleDownloadSpeed());
+        _timeProvider.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(0, manager.SampleDownloadSpeed());
+    }
     private class MockHttpClient : IHttpClient
     {
         public Func<HttpRequestMessage, HttpResponseMessage>? Handler { get; set; }

@@ -4,6 +4,7 @@ using PeerSharp.Internals.Network;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Buffers.Binary;
 
 namespace PeerSharp.Internals.Utilities;
 
@@ -21,6 +22,19 @@ internal class NatPmpPortMapping : IPortMapper
     private readonly int _natPmpPort;
     private readonly Dictionary<IPAddress, (PortMappingResult MappingResult, string? Error, int? ExternalPort)> _status = [];
     private readonly TimeProvider _timeProvider;
+    private readonly Dictionary<(IPAddress Gateway, int Port, string Protocol), (int ExternalPort, uint Lifetime)> _leases = [];
+
+    public TimeSpan RenewalInterval
+    {
+        get
+        {
+            lock (_status)
+            {
+                return _leases.Count == 0 ? TimeSpan.FromMinutes(5)
+                    : TimeSpan.FromSeconds(Math.Min(300, _leases.Values.Min(lease => lease.Lifetime) / 2.0));
+            }
+        }
+    }
 
     public NatPmpPortMapping()
         : this(GetDefaultGateways, NatPmpPort, TimeProvider.System, NullLoggerFactory.Instance)
@@ -52,6 +66,15 @@ internal class NatPmpPortMapping : IPortMapper
 
     public string Name => "NAT-PMP";
 
+    public int? GetExternalPort(int internalPort, string protocol)
+    {
+        lock (_status)
+        {
+            return _leases.Where(entry => entry.Key.Port == internalPort && entry.Key.Protocol == protocol)
+                .Select(entry => (int?)entry.Value.ExternalPort).FirstOrDefault();
+        }
+    }
+
     public IReadOnlyList<PortMappingStatus> GetStatus()
     {
         var result = new List<PortMappingStatus>();
@@ -78,16 +101,26 @@ internal class NatPmpPortMapping : IPortMapper
 
     public async Task<bool> MapPortAsync(int port, string protocol, string description, CancellationToken ct)
     {
-        if (_gateways.Count == 0)
+        ArgumentOutOfRangeException.ThrowIfLessThan(port, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(port, ushort.MaxValue);
+        protocol = protocol.ToUpperInvariant();
+        if (protocol is not ("TCP" or "UDP")) throw new ArgumentException("Expected TCP or UDP.", nameof(protocol));
+        IPAddress[] gateways;
+        lock (_status) gateways = [.. _gateways];
+        if (gateways.Length == 0)
         {
             return false;
         }
 
-        var results = await Task.WhenAll(_gateways.Select(async gateway =>
+        var results = await Task.WhenAll(gateways.Select(async gateway =>
         {
-            var result = await MapOnGatewayAsync(gateway, port, protocol, _natPmpPort, _timeProvider, _logger, ct).ConfigureAwait(false);
+            int suggestedPort;
+            lock (_status) suggestedPort = _leases.TryGetValue((gateway, port, protocol), out var lease) ? lease.ExternalPort : port;
+            var result = await MapOnGatewayAsync(gateway, port, suggestedPort, protocol, _natPmpPort, _timeProvider, _logger, ct).ConfigureAwait(false);
             lock (_status)
             {
+                if (result.Success) _leases[(gateway, port, protocol)] = (result.ExternalPort!.Value, result.Lifetime);
+                else _leases.Remove((gateway, port, protocol));
                 _status[gateway] = result.Success
                     ? (PortMappingResult.Success, null, result.ExternalPort)
                     : (PortMappingResult.Failed, "Mapping failed", null);
@@ -100,7 +133,7 @@ internal class NatPmpPortMapping : IPortMapper
         {
             lock (_mappings)
             {
-                _mappings.Add((port, protocol));
+                if (!_mappings.Contains((port, protocol))) _mappings.Add((port, protocol));
             }
         }
 
@@ -110,33 +143,29 @@ internal class NatPmpPortMapping : IPortMapper
     public Task StartAsync(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        _gateways.Clear();
+        var gateways = _gatewayProvider().ToArray();
         lock (_status)
         {
+            _gateways.Clear();
+            _gateways.AddRange(gateways);
             _status.Clear();
+            foreach (var key in _leases.Keys.Where(key => !gateways.Contains(key.Gateway)).ToArray()) _leases.Remove(key);
+            foreach (var gateway in gateways) _status[gateway] = (PortMappingResult.Pending, null, null);
         }
 
         // NAT-PMP protocol dictates we should send requests to the default gateway
-        var gateways = _gatewayProvider();
-
         foreach (var g in gateways)
         {
-            _gateways.Add(g);
-            lock (_status)
-            {
-                _status[g] = (PortMappingResult.Pending, null, null);
-            }
-
             _logger.LogInformation("NAT-PMP: Found gateway at {GatewayAddress}", g);
         }
 
-        if (_gateways.Count == 0)
+        if (gateways.Length == 0)
         {
             _logger.LogInformation("NAT-PMP: No default gateways found");
         }
-        else if (_gateways.Count > 1)
+        else if (gateways.Length > 1)
         {
-            _logger.LogWarning("NAT-PMP: Multiple gateways detected ({Count}). This may indicate a VPN or double-NAT configuration which can cause connectivity issues", _gateways.Count);
+            _logger.LogWarning("NAT-PMP: Multiple gateways detected ({Count}). This may indicate a VPN or double-NAT configuration which can cause connectivity issues", gateways.Length);
         }
 
         return Task.CompletedTask;
@@ -144,11 +173,6 @@ internal class NatPmpPortMapping : IPortMapper
 
     public async Task UnmapAllAsync(CancellationToken ct)
     {
-        if (_gateways.Count == 0)
-        {
-            return;
-        }
-
         List<(int Port, string Protocol)> toRemove;
         lock (_mappings)
         {
@@ -160,7 +184,13 @@ internal class NatPmpPortMapping : IPortMapper
         // single gateway sequential. A flat mappings x gateways fan-out is exactly the burst
         // that consumer routers rate-limit or silently drop, turning a slow-but-reliable
         // teardown into a flaky one.
-        IPAddress[] gateways = [.. _gateways];
+        IPAddress[] gateways;
+        lock (_status)
+        {
+            gateways = [.. _gateways];
+            _leases.Clear();
+            foreach (var gateway in gateways) _status[gateway] = (PortMappingResult.NotAttempted, null, null);
+        }
         await Task.WhenAll(gateways.Select(async gateway =>
         {
             foreach (var (port, protocol) in toRemove)
@@ -180,7 +210,7 @@ internal class NatPmpPortMapping : IPortMapper
             .Distinct();
     }
 
-    private static async Task<(bool Success, int? ExternalPort)> MapOnGatewayAsync(IPAddress gateway, int port, string protocol, int natPmpPort, TimeProvider timeProvider, ILogger logger, CancellationToken ct)
+    private static async Task<(bool Success, int? ExternalPort, uint Lifetime)> MapOnGatewayAsync(IPAddress gateway, int port, int suggestedPort, string protocol, int natPmpPort, TimeProvider timeProvider, ILogger logger, CancellationToken ct)
     {
         try
         {
@@ -198,25 +228,25 @@ internal class NatPmpPortMapping : IPortMapper
             // Reserved 2-3 are 0
             request[4] = (byte)(port >> 8);
             request[5] = (byte)(port & 0xFF);
-            request[6] = (byte)(port >> 8);
-            request[7] = (byte)(port & 0xFF);
+            request[6] = (byte)(suggestedPort >> 8);
+            request[7] = (byte)(suggestedPort & 0xFF);
             // Lifetime: 3600 seconds (1 hour)
             request[8] = 0; request[9] = 0; request[10] = 0x0E; request[11] = 0x10;
 
             var endpoint = new IPEndPoint(gateway, natPmpPort);
-            await client.SendAsync(request, endpoint, ct).ConfigureAwait(false);
-
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(2), timeProvider);
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ct);
-            var response = await client.ReceiveAsync(linkedCts.Token).ConfigureAwait(false);
-            if (response.Buffer.Length >= 12 && response.Buffer[0] == 0 && response.Buffer[1] == (128 + opCode))
+            client.Connect(endpoint); // The socket rejects replies from other endpoints.
+            var response = await SendMappingRequestAsync(client, request, timeProvider, ct).ConfigureAwait(false);
+            if (response.RemoteEndPoint.Equals(endpoint) && response.Buffer.Length == 16 && response.Buffer[0] == 0 && response.Buffer[1] == (128 + opCode)
+                && BinaryPrimitives.ReadUInt16BigEndian(response.Buffer.AsSpan(8)) == port)
             {
                 int resultCode = (response.Buffer[2] << 8) | response.Buffer[3];
                 if (resultCode == 0)
                 {
-                    int extPort = (response.Buffer[8] << 8) | response.Buffer[9];
+                    int extPort = BinaryPrimitives.ReadUInt16BigEndian(response.Buffer.AsSpan(10));
+                    uint lifetime = BinaryPrimitives.ReadUInt32BigEndian(response.Buffer.AsSpan(12));
+                    if (extPort == 0 || lifetime == 0) return (false, null, 0);
                     logger.LogInformation("NAT-PMP: Mapped {Protocol} port {Internal}->{External} on {Gateway}", protocol, port, extPort, gateway);
-                    return (true, extPort);
+                    return (true, extPort, lifetime);
                 }
                 logger.LogWarning("NAT-PMP: Gateway {Gateway} returned error code {Result}", gateway, resultCode);
             }
@@ -247,13 +277,28 @@ internal class NatPmpPortMapping : IPortMapper
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Caller-requested shutdown.
+            throw;
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "NAT-PMP: unexpected mapping failure on {Gateway}", gateway);
         }
-        return (false, null);
+        return (false, null, 0);
+    }
+
+    private static async Task<UdpReceiveResult> SendMappingRequestAsync(UdpClient client, byte[] request, TimeProvider timeProvider, CancellationToken ct)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(2), timeProvider);
+        using var scope = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            await client.SendAsync(request, scope.Token).ConfigureAwait(false);
+            using var retry = new CancellationTokenSource(TimeSpan.FromMilliseconds(250 * (1 << attempt)), timeProvider);
+            using var receive = CancellationTokenSource.CreateLinkedTokenSource(scope.Token, retry.Token);
+            try { return await client.ReceiveAsync(receive.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (!scope.IsCancellationRequested) { /* Retry a lost datagram with exponential backoff. */ }
+        }
+        throw new OperationCanceledException(scope.Token);
     }
 
     private static async Task UnmapOnGatewayAsync(IPAddress gateway, int port, string protocol, int natPmpPort, ILogger logger, CancellationToken ct)
