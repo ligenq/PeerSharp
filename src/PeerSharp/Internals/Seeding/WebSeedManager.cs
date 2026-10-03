@@ -43,6 +43,11 @@ internal sealed class WebSeedManager : IAsyncDisposable
     }
     private Task? _stopTask;
     private bool _stopping;
+    private long _readBytes;
+    private long _sampledBytes;
+    private long _sampleTimestamp;
+    private long _sampledSpeed;
+    private readonly Lock _rateLock = new();
 
     public WebSeedManager(Torrent torrent, IEnumerable<string> urls, TimeProvider timeProvider)
         : this(torrent, urls, timeProvider, NullLogger<WebSeedManager>.Instance)
@@ -54,6 +59,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         _torrent = torrent;
         _logger = logger;
         _timeProvider = timeProvider;
+        _sampleTimestamp = timeProvider.GetTimestamp();
         bool isMultiFile = torrent.InfoFile.Info.IsMultiFile || torrent.InfoFile.Info.Files.Count > 1;
 
         foreach (var url in urls)
@@ -559,7 +565,24 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         using var timeout = new CancellationTokenSource(RequestTimeout, _timeProvider);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
-        return await stream.ReadAsync(buffer, linked.Token).ConfigureAwait(false);
+        int read = await stream.ReadAsync(buffer, linked.Token).ConfigureAwait(false);
+        Interlocked.Add(ref _readBytes, read);
+        return read;
+    }
+
+    internal long SampleDownloadSpeed()
+    {
+        lock (_rateLock)
+        {
+            long now = _timeProvider.GetTimestamp();
+            double seconds = _timeProvider.GetElapsedTime(_sampleTimestamp, now).TotalSeconds;
+            if (seconds <= 0) return _sampledSpeed;
+            long bytes = Interlocked.Read(ref _readBytes);
+            _sampledSpeed = (long)Math.Min(long.MaxValue, (bytes - _sampledBytes) / seconds);
+            _sampledBytes = bytes;
+            _sampleTimestamp = now;
+            return _sampledSpeed;
+        }
     }
 
     private static string BuildFileUrl(string baseUrl, params string[] paths)

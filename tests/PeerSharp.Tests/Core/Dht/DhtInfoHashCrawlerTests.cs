@@ -14,6 +14,47 @@ namespace PeerSharp.Tests.Core.Dht;
 /// </summary>
 public class DhtInfoHashCrawlerTests
 {
+    [Fact(Timeout = 30000)]
+    public async Task Crawl_IsCancelledWhenDhtStopsDuringCooldown()
+    {
+        await using var fixture = await DhtLoopbackFixture.CreateAsync();
+        SeedServerStore(fixture, 1);
+        var crawler = CreateCrawler(fixture, new DhtIndexerOptions { MaxInfoHashes = null });
+        await using var iterator = crawler.CrawlAsync(TestContext.Current.CancellationToken).GetAsyncEnumerator();
+        Assert.True(await iterator.MoveNextAsync());
+        var next = iterator.MoveNextAsync().AsTask();
+        await fixture.Client.StopAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => next);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Crawl_SnapshotsOptionsAndHandlesVeryLongCooldowns()
+    {
+        await using var fixture = await DhtLoopbackFixture.CreateAsync();
+        SeedServerStore(fixture, 2);
+        var options = new DhtIndexerOptions { MaxInfoHashes = 1, MinNodeRequeryInterval = TimeSpan.MaxValue };
+        var crawler = CreateCrawler(fixture, options);
+        options.MaxConcurrency = 0;
+        options.MaxInfoHashes = null;
+        await using var iterator = crawler.CrawlAsync(TestContext.Current.CancellationToken).GetAsyncEnumerator();
+        Assert.True(await iterator.MoveNextAsync());
+        Assert.False(await iterator.MoveNextAsync());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Crawl_UnsupportedNodesCannotCycleThroughEachOtherForever()
+    {
+        await using var fixture = await DhtLoopbackFixture.CreateAsync(settings => settings.Dht.AnswerInfoHashSampling = false);
+        int queries = 0;
+        fixture.ClientTransport.OnSend = _ => Interlocked.Increment(ref queries);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await foreach (var _ in CreateCrawler(fixture, new DhtIndexerOptions()).CrawlAsync(timeout.Token))
+        {
+            Assert.Fail("Unsupported nodes cannot supply samples.");
+        }
+        Assert.InRange(queries, 1, 8);
+    }
+
     private static DhtInfoHashCrawler CreateCrawler(DhtLoopbackFixture fixture, DhtIndexerOptions options)
     {
         return fixture.Client.CreateInfoHashCrawler(options, NullLoggerFactory.Instance);

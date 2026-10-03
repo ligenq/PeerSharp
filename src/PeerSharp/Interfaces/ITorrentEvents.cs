@@ -165,16 +165,23 @@ public readonly struct TransferStats
     /// <summary>Number of currently connected peers.</summary>
     public int ConnectedPeers { get; init; }
 
-    /// <summary>Total bytes downloaded in this session.</summary>
+    /// <summary>Total downloaded bytes, including restored resume counters.</summary>
     public long Downloaded { get; init; }
 
     /// <summary>Current download speed in bytes per second.</summary>
     public long DownloadSpeed { get; init; }
 
-    /// <summary>Share ratio (Uploaded / Downloaded).</summary>
-    public float Ratio => Downloaded > 0 ? (float)Uploaded / Downloaded : 0f;
+    /// <summary>Share ratio (Uploaded / Downloaded), or positive infinity for an uploading seed with no downloads.</summary>
+    public float Ratio
+    {
+        get
+        {
+            if (Downloaded > 0) return (float)Uploaded / Downloaded;
+            return Uploaded > 0 ? float.PositiveInfinity : 0f;
+        }
+    }
 
-    /// <summary>Total bytes uploaded in this session.</summary>
+    /// <summary>Total uploaded bytes, including restored resume counters.</summary>
     public long Uploaded { get; init; }
 
     /// <summary>Current upload speed in bytes per second.</summary>

@@ -10,6 +10,11 @@ internal interface IPortMapper
     /// </summary>
     string Name { get; }
 
+    // Rediscover periodically even for permanent mappings, which routers lose on restart.
+    TimeSpan RenewalInterval => TimeSpan.FromMinutes(5);
+
+    int? GetExternalPort(int internalPort, string protocol) => null;
+
     /// <summary>
     /// Gets the current status of the port mapper.
     /// </summary>

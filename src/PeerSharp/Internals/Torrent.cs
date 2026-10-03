@@ -22,6 +22,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 {
     internal long _lastReportedDownloadSpeed;
     internal long _lastReportedUploadSpeed;
+    private Interfaces.TransferStats? _lastReportedTransferStats;
     private readonly IFileSelectionManager _fileSelectionManager;
     private readonly ILogger<Torrent> _logger;
 
@@ -381,6 +382,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     /// <summary>Where we accept peer connections, or null when we are not listening.</summary>
     public IPortListener? PortListener { get => Network.PortListener; set => Network.PortListener = value; }
+    internal int AdvertisedPeerPort => Network.GetAdvertisedPeerPort?.Invoke() ?? PortListener?.Port ?? Settings.Connection.TcpPort;
 
     /// <summary>
     /// BEP 10 <c>yourip</c>: one peer's opinion of our external address.
@@ -664,6 +666,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             // between a separate IsDisposed check here and a concurrent shutdown.
             await FilesInternal.UpdateFileSelectionAsync(selection, ct).ConfigureAwait(false);
         }
+        if (Started) await PeersInternal.AnnounceUploadOnlyAsync().ConfigureAwait(false);
     }
 
     public Task<Stream> OpenStreamAsync(int fileIndex, CancellationToken cancellationToken = default)
@@ -742,7 +745,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
             // Only preserve peers when the torrent will resume. Preview mode intentionally leaves the
             // torrent stopped, so keeping live sockets there would violate its public state contract.
-            bool preservePeers = wasStarted && !StopAfterMetadata;
+            bool preservePeers = wasStarted && !StopAfterMetadata && !InfoFile.Info.IsPrivate;
             if (preservePeers)
             {
                 retainedPeers = await PeersInternal.DetachConnectedPeersForMetadataRebuildAsync().ConfigureAwait(false);
@@ -767,7 +770,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             MetadataDownloadInternal?.Dispose();
             _disposal.ThrowIfDisposed(this);
             Initialize();
-            PeersInternal.ImportConnectionPreferences(peerPreferences);
+            if (!InfoFile.Info.IsPrivate) PeersInternal.ImportConnectionPreferences(peerPreferences);
             await ApplyPendingSelectOnlyFileIndicesAsync(ct).ConfigureAwait(false);
             await ApplyPendingFileSelectionsAsync(ct).ConfigureAwait(false);
             if (retainedPeers.Count > 0)
@@ -1236,7 +1239,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 {
                     var dhtHash = InfoFile.Info.GetTrackerInfoHash();
                     Network.Dht.FindPeers(dhtHash);
-                    Network.Dht.Announce(dhtHash, Settings.Connection.TcpPort);
+                    Network.Dht.Announce(dhtHash, AdvertisedPeerPort);
                 }
                 else if (InfoFile.Info.IsPrivate)
                 {
@@ -1642,16 +1645,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             downloadSpeed += peer.DownloadSpeed;
             uploadSpeed += peer.UploadSpeed;
         }
-
-        if (downloadSpeed == _lastReportedDownloadSpeed && uploadSpeed == _lastReportedUploadSpeed)
-        {
-            return;
-        }
+        downloadSpeed += WebSeedManager?.SampleDownloadSpeed() ?? 0;
 
         Volatile.Write(ref _lastReportedDownloadSpeed, downloadSpeed);
         Volatile.Write(ref _lastReportedUploadSpeed, uploadSpeed);
 
         var stats = ((ITorrent)this).GetTransferStats();
+        if (_lastReportedTransferStats is { } previous && previous.Equals(stats)) return;
+        _lastReportedTransferStats = stats;
         NotifyEvent(Events?.TransferStats, stats);
         Alerts.TransferStatsAlert(this, stats.Downloaded, stats.Uploaded, stats.DownloadSpeed, stats.UploadSpeed, stats.ConnectedPeers);
     }
@@ -2130,6 +2131,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             }
             finally
             {
+                Volatile.Write(ref _lastReportedDownloadSpeed, 0);
+                Volatile.Write(ref _lastReportedUploadSpeed, 0);
                 Interlocked.Exchange(ref _stopping, 0);
                 Interlocked.Exchange(ref _activityTimeTicks, Services.TimeProvider.GetUtcNow().Ticks);
             }

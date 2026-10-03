@@ -8,6 +8,17 @@ namespace PeerSharp.Internals.Utilities;
 /// </summary>
 internal static class NetworkUtils
 {
+    internal static bool IsLocalAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        if (IPAddress.IsLoopback(address)) return true;
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+            return address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6UniqueLocal;
+        byte[] bytes = address.GetAddressBytes();
+        return bytes[0] == 10 || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31)
+            || (bytes[0] == 192 && bytes[1] == 168) || (bytes[0] == 169 && bytes[1] == 254);
+    }
+
     /// <summary>
     /// This machine's own globally routable IPv6 address, or null when it has none.
     ///

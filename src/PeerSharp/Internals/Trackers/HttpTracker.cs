@@ -663,7 +663,7 @@ internal class HttpTracker : TrackerBase, IDisposable
 
         AppendParam("info_hash", UrlEncoding.Encode(Torrent.InfoFile.Info.GetTrackerInfoHash().Span));
         AppendParam("peer_id", UrlEncoding.Encode(Torrent.Settings.PeerId));
-        int listenPort = Torrent.PortListener?.Port ?? Torrent.Settings.Connection.TcpPort;
+        int listenPort = Torrent.AdvertisedPeerPort;
         AppendParam("port", listenPort.ToString(CultureInfo.InvariantCulture));
         AppendParam("uploaded", Torrent.FileTransfer.Uploaded.ToString(CultureInfo.InvariantCulture));
         AppendParam("downloaded", Torrent.FileTransfer.Downloaded.ToString(CultureInfo.InvariantCulture));

@@ -365,11 +365,14 @@ public class StorageTests : IAsyncLifetime
         }
     }
 
-    [Fact]
-    public async Task WriteAsync_DiskFull_ThrowsStorageException()
+    [Theory]
+    [InlineData(unchecked((int)0x80070070))]
+    [InlineData(unchecked((int)0x80070027))]
+    [InlineData(28)]
+    public async Task WriteAsync_DiskFull_ThrowsStorageException(int errorCode)
     {
         var ioException = new IOException("Disk full");
-        ioException.HResult = unchecked((int)0x80070070); // ERROR_DISK_FULL
+        ioException.HResult = errorCode;
         using var handleCache = new ThrowingHandleCache { ToThrow = ioException };
         var validator = new PathValidator(_tempDir);
         var storage = new Storage(_metadata, _tempDir, validator, handleCache, enableSparseFiles: false);
@@ -378,6 +381,38 @@ public class StorageTests : IAsyncLifetime
         var ex = await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
         Assert.Equal("Disk full", ex.Message);
         Assert.False(ex.IsRecoverable);
+    }
+
+    [Fact]
+    public async Task WriteAsync_LinuxFullDevice_ReportsNonRecoverableDiskFull()
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Requires the Linux /dev/full device.");
+        using var handleCache = new FullDeviceHandleCache();
+        await using var storage = new Storage(_metadata, _tempDir, new PathValidator(_tempDir), handleCache, enableSparseFiles: false);
+        await storage.InitAsync();
+
+        var ex = await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
+        Assert.Equal("Disk full", ex.Message);
+        Assert.False(ex.IsRecoverable);
+        Assert.Equal(28, Assert.IsType<IOException>(ex.InnerException).HResult);
+    }
+
+    private sealed class FullDeviceHandleCache : IFileHandleCache
+    {
+        public void CloseTorrentHandles(string rootPath) { }
+        public void Dispose() { }
+        public ValueTask<IFileHandleLease> GetHandleAsync(string path, bool writable, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<IFileHandleLease>(new FullDeviceLease(File.OpenHandle("/dev/full", FileMode.Open, FileAccess.Write)));
+        }
+
+        private sealed class FullDeviceLease(SafeFileHandle handle) : IFileHandleLease
+        {
+            public SafeFileHandle Handle { get; } = handle;
+            public string Path => "/dev/full";
+            public void Dispose() => Handle.Dispose();
+        }
     }
 
     [Fact]

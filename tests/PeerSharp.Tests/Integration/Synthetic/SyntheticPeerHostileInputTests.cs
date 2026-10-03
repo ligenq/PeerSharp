@@ -38,6 +38,35 @@ namespace PeerSharp.Tests.Integration.Synthetic;
 [Collection("Integration")]
 public class SyntheticPeerHostileInputTests : IDisposable
 {
+    [Fact(Timeout = 120000)]
+    public async Task MalformedExtensionSequenceDoesNotTakeTheEngineDown()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var options = new SyntheticPeerOptions();
+        options.Extensions["ut_holepunch"] = 9;
+        options.Extensions["lt_donthave"] = 10;
+        await using var peer = SyntheticPeer.Start(options);
+        await using var engine = CreateEngine();
+        var torrent = await AddLeechingTorrentAsync(engine, ct);
+        var connection = await DialAsync(engine, torrent, peer, ct);
+        await connection.Ready;
+        var handshake = await connection.WaitForExtensionHandshakeAsync(TimeSpan.FromSeconds(10), ct);
+        var extensions = (Dictionary<string, object>)handshake["m"];
+        var random = new Random(55051);
+        foreach (string name in new[] { "ut_holepunch", "lt_donthave" })
+        {
+            if (!extensions.TryGetValue(name, out var id)) continue;
+            for (int index = 0; index < 100; index++)
+            {
+                byte[] payload = new byte[1 + random.Next(1, 40)];
+                random.NextBytes(payload);
+                payload[0] = (byte)(long)id;
+                await connection.SendFrameAsync(WireFrame.Extended, payload, ct);
+            }
+        }
+        await AssertEngineStillServesPeersAsync(engine, torrent, ct);
+    }
+
     private const int PieceLength = 16 * 1024;
     private const int PieceCount = 8;
 

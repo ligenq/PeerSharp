@@ -30,7 +30,8 @@ public class EventModelTests
         var zeroDownloaded = new TransferStats { Downloaded = 0, Uploaded = 10 };
         var nonZero = new TransferStats { Downloaded = 100, Uploaded = 25 };
 
-        Assert.Equal(0f, zeroDownloaded.Ratio);
+        Assert.Equal(float.PositiveInfinity, zeroDownloaded.Ratio);
+        Assert.Equal(0f, new TransferStats().Ratio);
         Assert.Equal(0.25f, nonZero.Ratio);
     }
 
