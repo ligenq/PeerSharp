@@ -7,6 +7,7 @@ internal sealed class PendingPeer : IDisposable
 {
     public PendingPeer(string offerId, IWebRtcConnection connection, IWebRtcDataChannel? channel, bool initiator, TrackerRuntime runtime, DateTimeOffset expiresAt)
     {
+        _lifetimeToken = _lifetimeCts.Token;
         OfferId = offerId;
         Connection = connection;
         Channel = channel;
@@ -17,6 +18,8 @@ internal sealed class PendingPeer : IDisposable
 
     private readonly CancellationTokenSource _lifetimeCts = new();
     private int _attached;
+    private readonly CancellationToken _lifetimeToken;
+    internal bool AnswerReceived { get; set; }
 
     public List<WebRtcIceCandidateDescription> BufferedLocalCandidates { get; } = [];
     public List<string> BufferedRemoteCandidates { get; } = [];
@@ -27,7 +30,7 @@ internal sealed class PendingPeer : IDisposable
     public DateTimeOffset ExpiresAt { get; set; }
     public string OfferId { get; }
     public bool LocalCandidateSignalingReady { get; set; }
-    public CancellationToken LifetimeToken => _lifetimeCts.Token;
+    public CancellationToken LifetimeToken => _lifetimeToken;
     public bool RemoteDescriptionSet { get; set; }
     public string? RemotePeerId { get; set; }
     public TrackerRuntime Runtime { get; }

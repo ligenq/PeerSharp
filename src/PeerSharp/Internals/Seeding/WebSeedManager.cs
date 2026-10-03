@@ -6,6 +6,8 @@ using System.Buffers;
 using System.Net;
 using System.Net.Http.Headers;
 using PeerSharp.PiecePicking;
+using PeerSharp.Internals.Bandwidth;
+using PeerSharp.Internals.Peers;
 
 namespace PeerSharp.Internals.Seeding;
 
@@ -34,6 +36,11 @@ internal sealed class WebSeedManager : IAsyncDisposable
     private AtomicDisposal _disposal = new();
     private IHttpClient? _testClient;
     private Task? _workerTask;
+    private sealed class DownloadUser : IBandwidthUser
+    {
+        public string Name => "WebSeed";
+        public void AssignBandwidth(int amount) { /* Requests complete through their tasks. */ }
+    }
     private Task? _stopTask;
     private bool _stopping;
 
@@ -305,13 +312,12 @@ internal sealed class WebSeedManager : IAsyncDisposable
         string url = source.IsDirectory ? BuildFileUrl(source.Url, _torrent.InfoFile.Info.Name) : source.Url;
         using var timeout = new CancellationTokenSource(RequestTimeout, _timeProvider);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
-        ct = linked.Token;
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new RangeHeaderValue(offset, offset + length - 1);
         request.Headers.AcceptEncoding.ParseAdd("identity");
 
         var client = GetClient();
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
 
         if (response.StatusCode == HttpStatusCode.PartialContent)
         {
@@ -436,13 +442,12 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         using var timeout = new CancellationTokenSource(RequestTimeout, _timeProvider);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
-        ct = linked.Token;
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new RangeHeaderValue(offset, offset + length - 1);
         request.Headers.AcceptEncoding.ParseAdd("identity");
 
         var client = GetClient();
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
 
         if (response.StatusCode == HttpStatusCode.PartialContent)
         {
@@ -459,7 +464,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         return (null, response.StatusCode);
     }
 
-    private static async Task<byte[]?> ReadExactContentAsync(HttpContent content, int length, CancellationToken ct)
+    private async Task<byte[]?> ReadExactContentAsync(HttpContent content, int length, CancellationToken ct)
     {
         if (length < 0)
         {
@@ -469,11 +474,13 @@ internal sealed class WebSeedManager : IAsyncDisposable
         if (content.Headers.ContentLength is long contentLength && contentLength != length) return null;
 
         var result = new byte[length];
-        await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        await using var stream = new RateLimitedStream(await content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+            new DownloadUser(), _torrent.Bandwidth,
+            [BandwidthManager.GlobalDownload, $"{BandwidthManager.GetTorrentChannelKey(_torrent)}_DL"], []);
         int total = 0;
         while (total < length)
         {
-            int read = await stream.ReadAsync(result.AsMemory(total, length - total), ct).ConfigureAwait(false);
+            int read = await ReadWithDeadlineAsync(stream, result.AsMemory(total, length - total), ct).ConfigureAwait(false);
             if (read == 0)
             {
                 return null;
@@ -484,7 +491,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         byte[] extra = ArrayPool<byte>.Shared.Rent(1);
         try
         {
-            int read = await stream.ReadAsync(extra.AsMemory(0, 1), ct).ConfigureAwait(false);
+            int read = await ReadWithDeadlineAsync(stream, extra.AsMemory(0, 1), ct).ConfigureAwait(false);
             return read == 0 ? result : null;
         }
         finally
@@ -498,7 +505,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     /// Like libtorrent, accept that and stream-slice the requested range without
     /// buffering the full response.
     /// </summary>
-    private static async Task<byte[]?> ReadRangeFromFullContentAsync(HttpContent content, long offset, int length, CancellationToken ct)
+    private async Task<byte[]?> ReadRangeFromFullContentAsync(HttpContent content, long offset, int length, CancellationToken ct)
     {
         if (offset < 0 || length < 0 || content.Headers.ContentEncoding.Any(encoding => !encoding.Equals("identity", StringComparison.OrdinalIgnoreCase)))
         {
@@ -510,7 +517,9 @@ internal sealed class WebSeedManager : IAsyncDisposable
             return null;
         }
 
-        await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        await using var stream = new RateLimitedStream(await content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+            new DownloadUser(), _torrent.Bandwidth,
+            [BandwidthManager.GlobalDownload, $"{BandwidthManager.GetTorrentChannelKey(_torrent)}_DL"], []);
         byte[] scratch = ArrayPool<byte>.Shared.Rent(StreamBufferSize);
         byte[] result = new byte[length];
         try
@@ -519,7 +528,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
             while (skipped < offset)
             {
                 int toRead = (int)Math.Min(scratch.Length, offset - skipped);
-                int read = await stream.ReadAsync(scratch.AsMemory(0, toRead), ct).ConfigureAwait(false);
+                int read = await ReadWithDeadlineAsync(stream, scratch.AsMemory(0, toRead), ct).ConfigureAwait(false);
                 if (read == 0)
                 {
                     return null;
@@ -530,7 +539,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
             int total = 0;
             while (total < length)
             {
-                int read = await stream.ReadAsync(result.AsMemory(total, length - total), ct).ConfigureAwait(false);
+                int read = await ReadWithDeadlineAsync(stream, result.AsMemory(total, length - total), ct).ConfigureAwait(false);
                 if (read == 0)
                 {
                     return null;
@@ -544,6 +553,13 @@ internal sealed class WebSeedManager : IAsyncDisposable
         {
             ArrayPool<byte>.Shared.Return(scratch);
         }
+    }
+
+    private async ValueTask<int> ReadWithDeadlineAsync(Stream stream, Memory<byte> buffer, CancellationToken ct)
+    {
+        using var timeout = new CancellationTokenSource(RequestTimeout, _timeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        return await stream.ReadAsync(buffer, linked.Token).ConfigureAwait(false);
     }
 
     private static string BuildFileUrl(string baseUrl, params string[] paths)

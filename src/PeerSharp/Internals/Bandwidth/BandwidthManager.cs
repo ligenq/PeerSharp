@@ -49,9 +49,6 @@ internal class BandwidthManager : IBandwidthManager
     private readonly Queue<IBandwidthUser> _roundRobinQueue = new();
     private readonly TimeProvider _timeProvider;
 
-    // Lock-free tracking for fast path optimization
-    // Tracks users with pending requests to avoid lock in common case
-    private readonly ConcurrentDictionary<IBandwidthUser, byte> _usersWithPendingRequests = new();
 
     private AtomicDisposal _disposal = new();
     private DateTimeOffset _lastStatusLog = DateTimeOffset.MinValue;
@@ -82,7 +79,7 @@ internal class BandwidthManager : IBandwidthManager
         _channels[GlobalDiskRead] = new BandwidthChannel(_timeProvider);
         _channels[GlobalDiskWrite] = new BandwidthChannel(_timeProvider);
 
-        _lastTick = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
+        _lastTick = _timeProvider.GetTimestamp();
 
         _logger.LogDebug("BandwidthManager initialized with {UpdateInterval}ms update interval", _updateIntervalMs);
     }
@@ -92,21 +89,33 @@ internal class BandwidthManager : IBandwidthManager
     /// </summary>
     public void Configure(int updateIntervalMs)
     {
-        if (_started == 1)
+        lock (_lock)
         {
-            throw new InvalidOperationException("Cannot configure BandwidthManager after Start() has been called");
-        }
+            _disposal.ThrowIfDisposed(this);
+            if (_started == 1)
+            {
+                throw new InvalidOperationException("Cannot configure BandwidthManager after Start() has been called");
+            }
 
-        _updateIntervalMs = Math.Clamp(updateIntervalMs, 1, 100);
-        _logger.LogDebug("BandwidthManager update interval configured to {UpdateInterval}ms", _updateIntervalMs);
+            _updateIntervalMs = Math.Clamp(updateIntervalMs, 1, 100);
+            _logger.LogDebug("BandwidthManager update interval configured to {UpdateInterval}ms", _updateIntervalMs);
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposal.MarkDisposed() && _timer != null)
+        ITimer? timer;
+        lock (_lock)
         {
-            await _timer.DisposeAsync().ConfigureAwait(false);
+            if (!_disposal.MarkDisposed()) return;
+            timer = _timer;
+            foreach (var request in _pendingRequests.Values.SelectMany(queue => queue))
+                request.Tcs.TrySetException(new ObjectDisposedException(nameof(BandwidthManager)));
+            _pendingRequests.Clear();
+            _roundRobinQueue.Clear();
+            _activeUsers.Clear();
         }
+        if (timer != null) await timer.DisposeAsync().ConfigureAwait(false);
         GC.SuppressFinalize(this);
     }
 
@@ -115,9 +124,15 @@ internal class BandwidthManager : IBandwidthManager
         return _channels.GetOrAdd(name, _ => new BandwidthChannel(_timeProvider));
     }
 
+    internal static string GetTorrentChannelKey(ITorrent torrent)
+    {
+        if (torrent is Torrent owned) return owned.SessionHash.ToHexStringUpper();
+        return (torrent.Hash.IsEmpty ? torrent.HashV2 : torrent.Hash).ToHexStringUpper();
+    }
+
     public (long DownloadLimit, long UploadLimit) GetTorrentLimits(ITorrent torrent)
     {
-        string hash = torrent.Hash.ToHexStringUpper();
+        string hash = GetTorrentChannelKey(torrent);
         return (
             GetChannel($"{hash}_DL").GetLimit(),
             GetChannel($"{hash}_UL").GetLimit()
@@ -126,7 +141,7 @@ internal class BandwidthManager : IBandwidthManager
 
     public (long ReadLimit, long WriteLimit) GetTorrentDiskLimits(ITorrent torrent)
     {
-        string hash = torrent.Hash.ToHexStringUpper();
+        string hash = GetTorrentChannelKey(torrent);
         return (
             GetChannel($"{hash}_DR").GetLimit(),
             GetChannel($"{hash}_DW").GetLimit()
@@ -135,127 +150,74 @@ internal class BandwidthManager : IBandwidthManager
 
     public Task<int> RequestBandwidthAsync(IBandwidthUser user, int amount, int priority, string[] channelNames, CancellationToken ct = default)
     {
-        if (ct.IsCancellationRequested)
-        {
-            return Task.FromCanceled<int>(ct);
-        }
-
-        var channels = channelNames.Select(GetChannel).ToArray();
-
-        // LOCK-FREE FAST PATH: Check without lock first
-        // If user has no pending requests and all channels have quota, we can skip the lock entirely
-        // This dramatically reduces contention under high load (100+ peers)
-        if (!_usersWithPendingRequests.ContainsKey(user))
-        {
-            bool fastPath = true;
-            foreach (var ch in channels)
-            {
-                if (ch.AvailableQuota < amount)
-                {
-                    fastPath = false;
-                    break;
-                }
-            }
-
-            if (fastPath)
-            {
-                // Use quota (lock-free Interlocked operations in BandwidthChannel)
-                foreach (var ch in channels)
-                {
-                    ch.UseQuota(amount);
-                }
-                return Task.FromResult(amount);
-            }
-        }
-
-        // Slow path - need to queue (requires lock for fairness structures)
+        ArgumentNullException.ThrowIfNull(user);
+        ArgumentNullException.ThrowIfNull(channelNames);
+        ArgumentOutOfRangeException.ThrowIfNegative(amount);
+        if (ct.IsCancellationRequested) return Task.FromCanceled<int>(ct);
+        BandwidthRequest request;
         lock (_lock)
         {
-            // Double-check: user might have been cleared while we waited for lock
-            bool hasQueued = _pendingRequests.TryGetValue(user, out var pendingQueue) && pendingQueue.Count > 0;
-
-            if (!hasQueued)
-            {
-                // Retry fast path check under lock (quota might have replenished)
-                bool fastPath = true;
-                foreach (var ch in channels)
-                {
-                    if (ch.AvailableQuota < amount)
-                    {
-                        fastPath = false;
-                        break;
-                    }
-                }
-
-                if (fastPath)
-                {
-                    foreach (var ch in channels)
-                    {
-                        ch.UseQuota(amount);
-                    }
-                    return Task.FromResult(amount);
-                }
-            }
-
-            // Queue the request
-            if (!_pendingRequests.TryGetValue(user, out var queue))
-            {
-                queue = new Queue<BandwidthRequest>();
-                _pendingRequests[user] = queue;
-            }
-
-            // Mark user as having pending requests (lock-free visibility)
-            _usersWithPendingRequests.TryAdd(user, 0);
-
-            var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var request = new BandwidthRequest
+            _disposal.ThrowIfDisposed(this);
+            if (amount == 0) return Task.FromResult(0);
+            var channels = channelNames.Distinct().Select(GetChannel).ToArray();
+            // Check and reserve as one manager operation. New callers must not spend quota
+            // ahead of users already waiting, even when they belong to a different peer.
+            bool competing = _pendingRequests.Values.SelectMany(queue => queue)
+                .Any(waiter => waiter.Channels.Any(channel => channel.GetLimit() > 0 && channels.Contains(channel)));
+            if (!competing && TryReserve(channels, amount)) return Task.FromResult(amount);
+            request = new BandwidthRequest
             {
                 User = user,
                 Amount = amount,
                 Priority = priority,
                 Channels = channels,
-                Tcs = tcs
+                Tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously)
             };
-
-            if (ct.CanBeCanceled)
-            {
-                ct.Register(() =>
-                {
-                    lock (_lock)
-                    {
-                        if (_pendingRequests.TryGetValue(user, out var queue))
-                        {
-                            // Note: This is O(N) but queue should be very small per user
-                            // Use a more efficient way if needed, but for now this is safe
-                            var list = queue.ToList();
-                            if (list.Remove(request))
-                            {
-                                if (list.Count == 0)
-                                {
-                                    _pendingRequests.Remove(user);
-                                    _usersWithPendingRequests.TryRemove(user, out _);
-                                }
-                                else
-                                {
-                                    _pendingRequests[user] = new Queue<BandwidthRequest>(list);
-                                }
-                                tcs.TrySetCanceled(ct);
-                            }
-                        }
-                    }
-                });
-            }
-
+            if (!_pendingRequests.TryGetValue(user, out var queue))
+                _pendingRequests[user] = queue = new Queue<BandwidthRequest>();
             queue.Enqueue(request);
-
-            // Add to RR queue if not already pending processing
-            if (_activeUsers.Add(user))
-            {
-                _roundRobinQueue.Enqueue(user);
-            }
-
-            return tcs.Task;
+            if (_activeUsers.Add(user)) _roundRobinQueue.Enqueue(user);
         }
+        // Register after enqueueing, outside the accounting lock: an already-cancelled
+        // token invokes its callback inline, and unregistering may wait for that callback.
+        return WaitForRequestAsync(request, ct);
+    }
+
+    private Task<int> WaitForRequestAsync(BandwidthRequest request, CancellationToken ct)
+    {
+        var registration = ct.Register(() =>
+        {
+            lock (_lock)
+            {
+                if (!_pendingRequests.TryGetValue(request.User, out var queue)) return;
+                var remaining = queue.Where(item => !ReferenceEquals(item, request)).ToArray();
+                if (remaining.Length == queue.Count) return;
+                if (remaining.Length == 0)
+                {
+                    _pendingRequests.Remove(request.User);
+                    _activeUsers.Remove(request.User);
+                    var users = _roundRobinQueue.Where(user => !ReferenceEquals(user, request.User)).ToArray();
+                    _roundRobinQueue.Clear();
+                    foreach (var user in users) _roundRobinQueue.Enqueue(user);
+                }
+                else _pendingRequests[request.User] = new Queue<BandwidthRequest>(remaining);
+                request.Tcs.TrySetCanceled(ct);
+            }
+        });
+        _ = request.Tcs.Task.ContinueWith(static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+            registration, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+        return request.Tcs.Task;
+    }
+
+    private static bool TryReserve(BandwidthChannel[] channels, int amount)
+    {
+        for (int i = 0; i < channels.Length; i++)
+        {
+            if (channels[i].TryUseQuota(amount)) continue;
+            for (int previous = 0; previous < i; previous++) channels[previous].ReturnQuota(amount);
+            return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -268,20 +230,32 @@ internal class BandwidthManager : IBandwidthManager
             return;
         }
 
-        foreach (var name in channelNames)
+        foreach (var name in channelNames.Distinct())
         {
-            var channel = GetChannel(name);
-            channel.ReturnQuota(amount);
+            if (_channels.TryGetValue(name, out var channel)) channel.ReturnQuota(amount);
         }
     }
 
     public void RemoveTorrentChannels(ITorrent torrent)
     {
-        string hash = torrent.Hash.ToHexStringUpper();
-        _channels.TryRemove($"{hash}_DL", out _);
-        _channels.TryRemove($"{hash}_UL", out _);
-        _channels.TryRemove($"{hash}_DR", out _);
-        _channels.TryRemove($"{hash}_DW", out _);
+        string hash = GetTorrentChannelKey(torrent);
+        lock (_lock)
+        {
+            var removed = new HashSet<BandwidthChannel>();
+            foreach (string suffix in new[] { "DL", "UL", "DR", "DW" })
+                if (_channels.TryRemove($"{hash}_{suffix}", out var channel)) removed.Add(channel);
+            foreach (var (user, queue) in _pendingRequests.ToArray())
+            {
+                var retained = new Queue<BandwidthRequest>();
+                foreach (var request in queue)
+                {
+                    if (request.Channels.Any(removed.Contains)) request.Tcs.TrySetException(new ObjectDisposedException("Torrent bandwidth channels"));
+                    else retained.Enqueue(request);
+                }
+                if (retained.Count == 0) _pendingRequests.Remove(user);
+                else _pendingRequests[user] = retained;
+            }
+        }
     }
 
     public void SetGlobalLimits(long downloadLimit, long uploadLimit)
@@ -304,7 +278,7 @@ internal class BandwidthManager : IBandwidthManager
     {
         ArgumentOutOfRangeException.ThrowIfNegative(downloadLimit);
         ArgumentOutOfRangeException.ThrowIfNegative(uploadLimit);
-        string hash = torrent.Hash.ToHexStringUpper();
+        string hash = GetTorrentChannelKey(torrent);
         GetChannel($"{hash}_DL").SetLimit(downloadLimit);
         GetChannel($"{hash}_UL").SetLimit(uploadLimit);
     }
@@ -313,15 +287,18 @@ internal class BandwidthManager : IBandwidthManager
     {
         ArgumentOutOfRangeException.ThrowIfNegative(readLimit);
         ArgumentOutOfRangeException.ThrowIfNegative(writeLimit);
-        string hash = torrent.Hash.ToHexStringUpper();
+        string hash = GetTorrentChannelKey(torrent);
         GetChannel($"{hash}_DR").SetLimit(readLimit);
         GetChannel($"{hash}_DW").SetLimit(writeLimit);
     }
 
     public void Start()
     {
-        if (Interlocked.CompareExchange(ref _started, 1, 0) == 0)
+        lock (_lock)
         {
+            _disposal.ThrowIfDisposed(this);
+            if (_started == 1) return;
+            _started = 1;
             _timer = _timeProvider.CreateTimer(Update, null, TimeSpan.FromMilliseconds(_updateIntervalMs), TimeSpan.FromMilliseconds(_updateIntervalMs));
         }
     }
@@ -360,121 +337,66 @@ internal class BandwidthManager : IBandwidthManager
 
     private void UpdateCore()
     {
-        long now = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
-        int dt = (int)(now - _lastTick);
-        if (dt <= 0)
+        lock (_lock)
         {
-            return;
-        }
+            if (_disposal.IsDisposed) return;
+            long now = _timeProvider.GetTimestamp();
+            int dt = (int)Math.Clamp(_timeProvider.GetElapsedTime(_lastTick, now).TotalMilliseconds, 0, int.MaxValue);
+            if (dt <= 0) return;
+            _lastTick = now;
+            foreach (var channel in _channels.Values) channel.UpdateQuota(dt);
 
-        _lastTick = now;
-
-        // Update quotas
-        foreach (var ch in _channels.Values)
-        {
-            ch.UpdateQuota(dt);
+            while (_roundRobinQueue.Count > 0)
+            {
+                int roundSize = _roundRobinQueue.Count;
+                var grantedUsers = new List<IBandwidthUser>();
+                for (int i = 0; i < roundSize; i++)
+                {
+                    var user = _roundRobinQueue.Dequeue();
+                    _activeUsers.Remove(user);
+                    if (!_pendingRequests.TryGetValue(user, out var queue) || queue.Count == 0) continue;
+                    var request = queue.Peek();
+                    int grant = request.Amount;
+                    foreach (var channel in request.Channels) grant = Math.Min(grant, channel.AvailableQuota);
+                    if (grant > 0 && TryReserve(request.Channels, grant))
+                    {
+                        queue.Dequeue();
+                        request.Tcs.TrySetResult(grant);
+                        _totalGranted++;
+                        if (queue.Count == 0) _pendingRequests.Remove(user);
+                        else grantedUsers.Add(user);
+                    }
+                    else
+                    {
+                        _activeUsers.Add(user);
+                        _roundRobinQueue.Enqueue(user);
+                    }
+                }
+                // Users that got quota go behind blocked users. Keeping the original order
+                // after an unsuccessful pass starves other peers at low refill rates.
+                foreach (var user in grantedUsers)
+                    if (_activeUsers.Add(user)) _roundRobinQueue.Enqueue(user);
+                if (grantedUsers.Count == 0) break;
+            }
         }
 
         lock (_lock)
         {
-            int initialQueueCount = _roundRobinQueue.Count;
-            int cycles = 0;
-            int grantsInCycle = 0;
-
-            // Process in rounds until no bandwidth left or no requests pending
-            while (_roundRobinQueue.Count > 0)
+            // Log periodic status every 5 seconds
+            var nowTime = _timeProvider.GetUtcNow();
+            if ((nowTime - _lastStatusLog).TotalSeconds >= 5)
             {
-                var user = _roundRobinQueue.Dequeue();
-                _activeUsers.Remove(user); // Temporarily remove, will re-add if re-queued
+                _lastStatusLog = nowTime;
+                var dlChannel = GetChannel(GlobalDownload);
+                var ulChannel = GetChannel(GlobalUpload);
 
-                if (!_pendingRequests.TryGetValue(user, out var queue) || queue.Count == 0)
+                if (dlChannel.GetLimit() > 0 || ulChannel.GetLimit() > 0 || _activeUsers.Count > 0)
                 {
-                    // No requests for this user, drop them
-                    continue;
+                    _logger.LogTrace("Bandwidth status: active_users={ActiveUsers}, pending_users={PendingUsers}, granted={Granted}, DL quota={DLQuota}/{DLLimit}, UL quota={ULQuota}/{ULLimit}",
+                        _activeUsers.Count, _roundRobinQueue.Count, _totalGranted, dlChannel.AvailableQuota, dlChannel.GetLimit(), ulChannel.AvailableQuota, ulChannel.GetLimit());
                 }
-
-                var req = queue.Peek();
-
-                // Check satisfaction
-                int grant = req.Amount;
-                foreach (var ch in req.Channels)
-                {
-                    if (ch.AvailableQuota < grant)
-                    {
-                        grant = ch.AvailableQuota;
-                    }
-                }
-
-                if (grant > 0)
-                {
-                    // Satisfied (fully or partially)
-                    foreach (var ch in req.Channels)
-                    {
-                        ch.UseQuota(grant);
-                    }
-
-                    req.Tcs.TrySetResult(grant);
-
-                    queue.Dequeue(); // Remove the satisfied request
-                    grantsInCycle++;
-                    _totalGranted++;
-
-                    // User still has active requests?
-                    if (queue.Count > 0)
-                    {
-                        if (_activeUsers.Add(user))
-                        {
-                            _roundRobinQueue.Enqueue(user);
-                        }
-                    }
-                    else
-                    {
-                        _pendingRequests.Remove(user);
-                        // Clear lock-free tracking so fast path works for this user again
-                        _usersWithPendingRequests.TryRemove(user, out _);
-                    }
-                }
-                else
-                {
-                    // Not satisfied (0 bandwidth)
-                    // Must re-enqueue user to back of line to allow others to try
-                    if (_activeUsers.Add(user))
-                    {
-                        _roundRobinQueue.Enqueue(user);
-                    }
-                }
-
-                // Safety break for single pass logic or if we are spinning
-                // If we cycled through everyone and gave nothing, stop to wait for next tick
-                cycles++;
-                if (cycles >= initialQueueCount + 10) // +10 buffer
-                {
-                    if (grantsInCycle == 0)
-                    {
-                        break; // All blocked
-                    }
-
-                    cycles = 0;
-                    grantsInCycle = 0;
-                    initialQueueCount = _roundRobinQueue.Count;
-                }
+                _totalGranted = 0;
             }
-        }
-
-        // Log periodic status every 5 seconds
-        var nowTime = _timeProvider.GetUtcNow();
-        if ((nowTime - _lastStatusLog).TotalSeconds >= 5)
-        {
-            _lastStatusLog = nowTime;
-            var dlChannel = GetChannel(GlobalDownload);
-            var ulChannel = GetChannel(GlobalUpload);
-
-            if (dlChannel.GetLimit() > 0 || ulChannel.GetLimit() > 0 || _activeUsers.Count > 0)
-            {
-                _logger.LogTrace("Bandwidth status: active_users={ActiveUsers}, pending_users={PendingUsers}, granted={Granted}, DL quota={DLQuota}/{DLLimit}, UL quota={ULQuota}/{ULLimit}",
-                    _activeUsers.Count, _roundRobinQueue.Count, _totalGranted, dlChannel.AvailableQuota, dlChannel.GetLimit(), ulChannel.AvailableQuota, ulChannel.GetLimit());
-            }
-            _totalGranted = 0;
         }
     }
 

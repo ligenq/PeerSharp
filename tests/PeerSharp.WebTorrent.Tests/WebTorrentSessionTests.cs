@@ -1158,6 +1158,134 @@ public class WebTorrentSessionTests
         Assert.True(secondSocket.Disposed);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task AttachedConnectionLivesUntilItsStreamIsDisposed()
+    {
+        var host = new FakePeerTransportHost();
+        var factory = new FakeWebRtcConnectionFactory();
+        var socket = new FakeWebSocketConnection();
+        await using var session = new WebTorrentSession(host, host, new WebTorrentSessionOptions { OffersPerTracker = 1 }, factory, new FakeWebSocketConnectionFactory(socket));
+        await session.StartAsync();
+        var connection = Assert.Single(factory.Created);
+        ((FakeWebRtcDataChannel)connection.LastCreatedChannel!).EmitOpened();
+        await AssertEventuallyAsync(() => host.AttachedStreams.Count == 1, TimeSpan.FromSeconds(2));
+        Assert.False(connection.Disposed);
+        await host.AttachedStreams[0].Stream.DisposeAsync();
+        Assert.True(connection.Disposed);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task FailedOfferCreationDisposesTheUnpublishedPeer()
+    {
+        var host = new FakePeerTransportHost();
+        var factory = new FakeWebRtcConnectionFactory { ThrowOnCreateOffer = true };
+        await using var session = new WebTorrentSession(host, host, new WebTorrentSessionOptions { OffersPerTracker = 1 }, factory, new FakeWebSocketConnectionFactory(new FakeWebSocketConnection()));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.StartAsync());
+        Assert.True(Assert.Single(factory.Created).Disposed);
+        Assert.Equal(0, session.GetDiagnostics().PendingPeerCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task DuplicateAnswersCannotNegotiateTheSamePeerTwice()
+    {
+        var host = new FakePeerTransportHost();
+        var factory = new FakeWebRtcConnectionFactory();
+        var socket = new FakeWebSocketConnection();
+        await using var session = new WebTorrentSession(host, host, new WebTorrentSessionOptions { OffersPerTracker = 1 }, factory, new FakeWebSocketConnectionFactory(socket));
+        await session.StartAsync();
+        var announce = JsonNode.Parse(socket.SentMessages[0])!;
+        string answer = new JsonObject
+        {
+            ["info_hash"] = announce["info_hash"]!.GetValue<string>(),
+            ["peer_id"] = "remote",
+            ["offer_id"] = announce["offers"]![0]!["offer_id"]!.GetValue<string>(),
+            ["answer"] = new JsonObject { ["type"] = "answer", ["sdp"] = factory.AnswerSdp }
+        }.ToJsonString();
+        socket.EnqueueReceive(answer);
+        socket.EnqueueReceive(answer);
+        await AssertEventuallyAsync(() => Assert.Single(factory.Created).ConnectCalls == 1, TimeSpan.FromSeconds(2));
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.Equal(1, Assert.Single(factory.Created).ConnectCalls);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task SessionDisposalIsIdempotentAndPreventsRestart()
+    {
+        var host = new FakePeerTransportHost();
+        var session = new WebTorrentSession(host, host, new WebTorrentSessionOptions { OffersPerTracker = 1 }, new FakeWebRtcConnectionFactory(), new FakeWebSocketConnectionFactory(new FakeWebSocketConnection()));
+        await session.StartAsync();
+        await Task.WhenAll(session.DisposeAsync().AsTask(), session.DisposeAsync().AsTask());
+        await session.DisposeAsync();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => session.StartAsync());
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task NegotiationDeadlineCleansUpEvenWhenTheRtcOperationIgnoresCancellation()
+    {
+        var clock = new FakeTimeProvider();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stalled = new TaskCompletionSource<WebRtcSessionDescription>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var factory = new FakeWebRtcConnectionFactory { CreateOfferStep = _ => { entered.TrySetResult(); return stalled.Task; } };
+        var host = new FakePeerTransportHost();
+        await using var session = new WebTorrentSession(host, host, new WebTorrentSessionOptions { OffersPerTracker = 1, TimeProvider = clock }, factory, new FakeWebSocketConnectionFactory(new FakeWebSocketConnection()));
+        var starting = session.StartAsync();
+        await entered.Task;
+        clock.Advance(TimeSpan.FromSeconds(31));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => starting);
+        Assert.True(Assert.Single(factory.Created).Disposed);
+        Assert.Equal(0, session.GetDiagnostics().PendingPeerCount);
+        stalled.SetResult(new WebRtcSessionDescription(WebRtcSessionDescriptionType.Offer, "v=0"));
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task DisposalCancelsStartupAndDrainsItBeforeCleaningTrackers()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stalled = new TaskCompletionSource<WebRtcSessionDescription>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var factory = new FakeWebRtcConnectionFactory { CreateOfferStep = _ => { entered.TrySetResult(); return stalled.Task; } };
+        var host = new FakePeerTransportHost();
+        var socket = new FakeWebSocketConnection();
+        var session = new WebTorrentSession(host, host, new WebTorrentSessionOptions { OffersPerTracker = 1 }, factory, new FakeWebSocketConnectionFactory(socket));
+        var starting = session.StartAsync();
+        await entered.Task;
+        await session.DisposeAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => starting);
+        Assert.True(socket.Disposed);
+        Assert.True(Assert.Single(factory.Created).Disposed);
+        stalled.SetResult(new WebRtcSessionDescription(WebRtcSessionDescriptionType.Offer, "v=0"));
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task ConcurrentTrackerSendsAreSerialized()
+    {
+        var host = new FakePeerTransportHost();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int active = 0;
+        int peak = 0;
+        var socket = new FakeWebSocketConnection
+        {
+            SendStep = async ct =>
+            {
+                int count = Interlocked.Increment(ref active);
+                peak = Math.Max(peak, count);
+                entered.TrySetResult();
+                await release.Task.WaitAsync(ct);
+                Interlocked.Decrement(ref active);
+            }
+        };
+        await using var client = new WebTorrentTrackerClient("wss://tracker.example", host, new FakeWebSocketConnectionFactory(socket),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, TimeProvider.System, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30), 0, 0, _ => { }, _ => { });
+        await client.StartAsync();
+        var first = client.SendAnnounceAsync(null, null, TestContext.Current.CancellationToken);
+        await entered.Task;
+        var second = client.SendAnnounceAsync(null, null, TestContext.Current.CancellationToken);
+        Assert.Equal(1, Volatile.Read(ref active));
+        release.TrySetResult();
+        await Task.WhenAll(first, second);
+        Assert.Equal(1, peak);
+    }
+
     private static async Task AssertEventuallyAsync(Func<bool> predicate, TimeSpan timeout)
     {
         DateTimeOffset deadline = DateTimeOffset.UtcNow.Add(timeout);
@@ -1311,13 +1439,17 @@ public class WebTorrentSessionTests
         public string AnswerSdp { get; set; } = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=fake\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\n";
         public IReadOnlyList<string> AnswerIceCandidates { get; set; } = [];
         public bool ThrowOnSetRemoteDescription { get; set; }
+        public bool ThrowOnCreateOffer { get; set; }
+        public Func<CancellationToken, Task<WebRtcSessionDescription>>? CreateOfferStep { get; set; }
 
         public IWebRtcConnection Create()
         {
             var connection = new FakeWebRtcConnection(OfferSdp, AnswerSdp)
             {
                 ConnectResult = ConnectResult,
-                ThrowOnSetRemoteDescription = ThrowOnSetRemoteDescription
+                ThrowOnSetRemoteDescription = ThrowOnSetRemoteDescription,
+                ThrowOnCreateOffer = ThrowOnCreateOffer,
+                CreateOfferStep = CreateOfferStep
             };
             foreach (var candidate in AnswerIceCandidates)
             {
@@ -1358,6 +1490,8 @@ public class WebTorrentSessionTests
         public List<string> RemoteCandidates { get; } = [];
         public WebRtcSessionDescription? RemoteDescription { get; private set; }
         public bool ThrowOnSetRemoteDescription { get; set; }
+        public bool ThrowOnCreateOffer { get; set; }
+        public Func<CancellationToken, Task<WebRtcSessionDescription>>? CreateOfferStep { get; set; }
 
         public IWebRtcDataChannel CreateDataChannel(string label)
         {
@@ -1369,7 +1503,7 @@ public class WebTorrentSessionTests
             => throw new NotSupportedException();
 
         public Task<WebRtcSessionDescription> CreateOfferAsync(CancellationToken cancellationToken = default)
-            => Task.FromResult(new WebRtcSessionDescription(WebRtcSessionDescriptionType.Offer, _offerSdp));
+            => ThrowOnCreateOffer ? throw new InvalidOperationException("Offer failed") : CreateOfferStep?.Invoke(cancellationToken) ?? Task.FromResult(new WebRtcSessionDescription(WebRtcSessionDescriptionType.Offer, _offerSdp));
 
         public Task<WebRtcSessionDescription> CreateAnswerAsync(CancellationToken cancellationToken = default)
         {
@@ -1434,6 +1568,7 @@ public class WebTorrentSessionTests
         public ValueTask DisposeAsync()
         {
             Disposed = true;
+            _ = LastCreatedChannel?.DisposeAsync().AsTask();
             _iceCandidates.Writer.TryComplete();
             _dataChannels.Writer.TryComplete();
             _connectionStates.Writer.TryComplete();
@@ -1513,6 +1648,7 @@ public class WebTorrentSessionTests
         public Func<CancellationToken, Task>? ConnectStep { get; set; }
         public Exception? DisposeException { get; set; }
         public Func<Task>? DisposeStep { get; set; }
+        public Func<CancellationToken, Task>? SendStep { get; set; }
         public bool Disposed { get; private set; }
         public int ThrowOnSendCallNumber { get; set; }
 
@@ -1538,7 +1674,7 @@ public class WebTorrentSessionTests
             }
 
             SentMessages.Add(text);
-            return Task.CompletedTask;
+            return SendStep?.Invoke(cancellationToken) ?? Task.CompletedTask;
         }
 
         public async Task<string> ReceiveTextAsync(CancellationToken cancellationToken)
