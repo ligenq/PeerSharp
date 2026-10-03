@@ -160,6 +160,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public ulong FinishedSelectedBytes => _fileSelectionManager.CalculateFinishedSelectedBytes();
 
     public InfoHash Hash => InfoFile.Info.Hash;
+    InfoHash IPeerTransportHost.Hash => InfoFile.Info.GetTrackerInfoHash();
 
     public InfoHash HashV2 => InfoFile.Info.HashV2;
 

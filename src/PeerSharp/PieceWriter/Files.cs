@@ -85,7 +85,7 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
             torrent.Settings.Files.EnableReadAhead,
             torrent.InfoFile.Info.FullSize,
             torrent.Bandwidth,
-            torrent.Hash.ToHexStringUpper(),
+            BandwidthManager.GetTorrentChannelKey(torrent),
             loggerFactory,
             torrent.GetRenamedFileMap(),
             torrent.LocalState.FileSnapshots,

@@ -555,6 +555,26 @@ public class WebSeedManagerTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => downloading);
     }
 
+    [Fact(Timeout = 10000)]
+    public async Task WebSeedReadsRespectLimitsAndCanMakeProgressForLongerThanTheIdleDeadline()
+    {
+        await using var bandwidth = new PeerSharp.Internals.Bandwidth.BandwidthManager(10, _timeProvider);
+        bandwidth.SetGlobalLimits(1, 0);
+        await using var torrent = TorrentTestUtility.CreateMinimal(_torrent.InfoFile, timeProvider: _timeProvider, bandwidth: bandwidth);
+        await using var manager = new WebSeedManager(torrent, [], _timeProvider);
+        manager.SetTestClient(new MockHttpClient { ResponseBytes = new byte[64] });
+        var downloading = manager.DownloadSingleFilePieceAsync(new("http://seed.com/file", false), 0, 64, TestContext.Current.CancellationToken);
+        Assert.False(downloading.IsCompleted);
+        var started = _timeProvider.GetUtcNow();
+        await TorrentTestUtility.AdvanceUntilAsync(_timeProvider, () =>
+        {
+            bandwidth.Update(null);
+            return downloading.IsCompleted;
+        }, TimeSpan.FromSeconds(1));
+        Assert.Equal(new byte[64], await downloading);
+        Assert.True(_timeProvider.GetUtcNow() - started >= TimeSpan.FromSeconds(64));
+    }
+
     private sealed class StalledBody : MemoryStream
     {
         public TaskCompletionSource Reading { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

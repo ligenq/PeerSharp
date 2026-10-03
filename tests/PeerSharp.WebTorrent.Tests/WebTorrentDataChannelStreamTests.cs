@@ -87,6 +87,46 @@ public class WebTorrentDataChannelStreamTests
             await stream.WriteAsync(new byte[1], TestContext.Current.CancellationToken));
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task EmptyFramesDoNotReportEndOfStream()
+    {
+        var channel = new FakeWebRtcDataChannel("bittorrent");
+        await using var stream = new WebTorrentDataChannelStream(channel);
+        stream.Start();
+        channel.EmitMessage([]);
+        channel.EmitMessage([1, 2]);
+        var buffer = new byte[2];
+        Assert.Equal(2, await stream.ReadAsync(buffer, TestContext.Current.CancellationToken));
+        Assert.Equal(new byte[] { 1, 2 }, buffer);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ConcurrentStartsUseOnePumpAndDisposalEndsAPendingRead()
+    {
+        var channel = new FakeWebRtcDataChannel("bittorrent");
+        var stream = new WebTorrentDataChannelStream(channel);
+        Parallel.For(0, 50, _ => stream.Start());
+        channel.EmitMessage([1]);
+        Assert.Equal(1, await stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken));
+        Assert.Equal(1, channel.MessageEnumerations);
+        var read = stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken).AsTask();
+        await Task.WhenAll(stream.DisposeAsync().AsTask(), stream.DisposeAsync().AsTask());
+        Assert.Equal(0, await read);
+        Assert.True(channel.Disposed);
+        Assert.Throws<ObjectDisposedException>(stream.Start);
+    }
+
+    [Fact]
+    public async Task LargeWritesAreSplitIntoBoundedMessages()
+    {
+        var channel = new FakeWebRtcDataChannel("bittorrent");
+        await using var stream = new WebTorrentDataChannelStream(channel);
+        var bytes = Enumerable.Range(0, 100000).Select(i => (byte)i).ToArray();
+        await stream.WriteAsync(bytes, TestContext.Current.CancellationToken);
+        Assert.All(channel.SentPayloads, payload => Assert.InRange(payload.Length, 1, 16384));
+        Assert.Equal(bytes, channel.SentPayloads.SelectMany(payload => payload));
+    }
+
     private sealed class FakeWebRtcDataChannel : IWebRtcDataChannel
     {
         private readonly Channel<ReadOnlyMemory<byte>> _messages = Channel.CreateUnbounded<ReadOnlyMemory<byte>>();
@@ -100,7 +140,11 @@ public class WebTorrentDataChannelStreamTests
         public string Label { get; }
         public bool Disposed { get; private set; }
         public RTCDataChannelState ReadyState => RTCDataChannelState.Open;
-        public IAsyncEnumerable<ReadOnlyMemory<byte>> Messages => _messages.Reader.ReadAllAsync();
+        public int MessageEnumerations;
+        public IAsyncEnumerable<ReadOnlyMemory<byte>> Messages
+        {
+            get { Interlocked.Increment(ref MessageEnumerations); return _messages.Reader.ReadAllAsync(); }
+        }
         public List<byte[]> SentPayloads { get; } = [];
 
         public Task WaitUntilOpenAsync(CancellationToken cancellationToken = default) =>

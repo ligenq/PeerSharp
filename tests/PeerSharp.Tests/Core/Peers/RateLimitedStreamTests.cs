@@ -192,6 +192,39 @@ public class RateLimitedStreamTests
         Assert.Equal(0, read);
     }
 
+    [Fact(Timeout = 10000)]
+    public async Task DisposingWhileQuotaIsPendingCancelsTheWait()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var manager = new TestBandwidthManager
+        {
+            RequestStep = async ct =>
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                return 1;
+            }
+        };
+        using var stream = Create(new MemoryStream([1]), manager);
+        var read = stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken).AsTask();
+        await entered.Task;
+        stream.Dispose();
+        Assert.Equal(0, await read);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task AGrantArrivingAfterDisposalIsRefunded()
+    {
+        var quota = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var manager = new TestBandwidthManager { RequestStep = _ => quota.Task };
+        using var stream = Create(new MemoryStream(), manager);
+        var write = stream.WriteAsync(new byte[1], TestContext.Current.CancellationToken).AsTask();
+        stream.Dispose();
+        quota.SetResult(100);
+        await Assert.ThrowsAsync<IOException>(() => write);
+        Assert.Equal(100, manager.ReturnedUpload);
+    }
+
     private sealed class ResettingStream : Stream
     {
         public override bool CanRead => true;

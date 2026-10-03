@@ -26,6 +26,7 @@ internal static class BandwidthTestDoubles
 
         /// <summary>Bytes granted per request, or null to grant whatever was asked for.</summary>
         public int? GrantAmount { get; set; }
+        public Func<CancellationToken, Task<int>>? RequestStep { get; set; }
 
         public void Configure(int updateIntervalMs)
         {
@@ -48,7 +49,7 @@ internal static class BandwidthTestDoubles
 
         public Task<int> RequestBandwidthAsync(IBandwidthUser user, int amount, int priority, string[] channelNames, CancellationToken ct = default)
         {
-            return Task.FromResult(GrantAmount ?? amount);
+            return RequestStep?.Invoke(ct) ?? Task.FromResult(GrantAmount ?? amount);
         }
 
         public void ReturnBandwidth(int amount, string[] channelNames)

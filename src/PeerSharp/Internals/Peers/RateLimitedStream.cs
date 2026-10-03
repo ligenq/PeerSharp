@@ -29,8 +29,14 @@ internal sealed class RateLimitedStream : Stream
     private readonly Stream _inner;
     private readonly bool _leaveInnerOpen;
     private readonly string[] _uploadChannels;
-    private readonly IBandwidthUser _user;
+    private readonly IBandwidthUser _downloadUser;
+    private readonly IBandwidthUser _uploadUser;
     private AtomicDisposal _disposal = new();
+    private readonly Lock _reservationLock = new();
+    private readonly CancellationTokenSource _lifetimeCts = new();
+    private readonly SemaphoreSlim _readGate = new(1, 1);
+    private readonly SemaphoreSlim _writeGate = new(1, 1);
+    private int _operations;
 
     // Returned to the bandwidth manager on disposal so a dropped connection cannot leak quota.
     private int _reservedDownloadBandwidth;
@@ -45,7 +51,8 @@ internal sealed class RateLimitedStream : Stream
         bool leaveInnerOpen = false)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
-        _user = user;
+        _downloadUser = new DirectionUser(user, "download");
+        _uploadUser = new DirectionUser(user, "upload");
         _bandwidthManager = bandwidthManager;
         _downloadChannels = downloadChannels;
         _uploadChannels = uploadChannels;
@@ -80,12 +87,37 @@ internal sealed class RateLimitedStream : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        lock (_reservationLock)
+        {
+            if (_disposal.IsDisposed) return 0;
+            _operations++;
+        }
+        try
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeCts.Token);
+            await _readGate.WaitAsync(linked.Token).ConfigureAwait(false);
+            try { return await ReadCoreAsync(buffer, linked, cancellationToken).ConfigureAwait(false); }
+            finally { _readGate.Release(); }
+        }
+        catch (OperationCanceledException) when (_disposal.IsDisposed && !cancellationToken.IsCancellationRequested) { return 0; }
+        finally { EndOperation(); }
+    }
+
+    public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    {
+        return ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+    }
+
+    private async ValueTask<int> ReadCoreAsync(Memory<byte> buffer, CancellationTokenSource quotaLifetime, CancellationToken ioCancellationToken)
+    {
+        var cancellationToken = quotaLifetime.Token;
         if (_disposal.IsDisposed)
         {
             return 0;
         }
 
         int toRead = Math.Min(buffer.Length, ChunkSize);
+        if (toRead == 0) return 0;
 
         if (_reservedDownloadBandwidth < toRead)
         {
@@ -95,43 +127,37 @@ internal sealed class RateLimitedStream : Stream
             int requestAmount = Math.Max(needed, ProtocolConstants.DownloadBatchSize);
 
             int granted = await _bandwidthManager.RequestBandwidthAsync(
-                _user,
+                _downloadUser,
                 requestAmount,
                 1,
                 _downloadChannels,
                 cancellationToken).ConfigureAwait(false);
 
-            if (_disposal.IsDisposed)
+            if (granted <= 0) throw new IOException("No download bandwidth was granted, so this read cannot proceed.");
+            lock (_reservationLock)
             {
-                // Closed while waiting for quota - the way the receive loop's reads end, since they are
-                // not cancelled. Disposal has already returned the reservation, so this grant goes back
-                // on its own rather than being held by a stream nobody reads.
-                if (granted > 0)
+                if (_disposal.IsDisposed)
                 {
                     _bandwidthManager.ReturnBandwidth(granted, _downloadChannels);
+                    return 0;
                 }
-
-                return 0;
+                _reservedDownloadBandwidth += granted;
             }
-
-            if (granted <= 0)
-            {
-                // Zero from a read means end of input, and this is not that - the socket is fine, we
-                // just have no quota. Reporting EOF here ends the receive loop and drops a healthy
-                // peer for a reason the user cannot see.
-                throw new IOException("No download bandwidth was granted, so this read cannot proceed.");
-            }
-
-            _reservedDownloadBandwidth += granted;
         }
-
-        int canRead = Math.Min(toRead, _reservedDownloadBandwidth);
+        int canRead;
+        lock (_reservationLock)
+        {
+            if (_disposal.IsDisposed) return 0;
+            canRead = Math.Min(toRead, _reservedDownloadBandwidth);
+            // In-flight I/O owns this quota. Disposal may refund only the unused remainder.
+            _reservedDownloadBandwidth -= canRead;
+        }
 
         int read;
         try
         {
-            // Cancellation is not caught here: the reservation stays tracked and is returned on disposal.
-            read = await _inner.ReadAsync(buffer[..canRead], cancellationToken).ConfigureAwait(false);
+            // A failed read may already have consumed bytes, so its in-flight quota is not refunded.
+            read = await _inner.ReadAsync(buffer[..canRead], ioCancellationToken).ConfigureAwait(false);
         }
         catch (ObjectDisposedException)
         {
@@ -149,18 +175,17 @@ internal sealed class RateLimitedStream : Stream
             return 0;
         }
 
-        if (read > 0)
+        lock (_reservationLock)
         {
-            _reservedDownloadBandwidth -= read;
+            int unused = canRead - read;
+            if (_disposal.IsDisposed) _bandwidthManager.ReturnBandwidth(unused, _downloadChannels);
+            else _reservedDownloadBandwidth += unused;
         }
 
         return read;
     }
 
-    public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-    {
-        return ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
-    }
+
 
     [System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
@@ -193,6 +218,28 @@ internal sealed class RateLimitedStream : Stream
     /// </summary>
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
+        lock (_reservationLock)
+        {
+            if (_disposal.IsDisposed) throw new IOException("The connection was disposed before the write.");
+            _operations++;
+        }
+        try
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeCts.Token);
+            await _writeGate.WaitAsync(linked.Token).ConfigureAwait(false);
+            try { await WriteCoreAsync(buffer, linked.Token).ConfigureAwait(false); }
+            finally { _writeGate.Release(); }
+        }
+        finally { EndOperation(); }
+    }
+
+    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    {
+        return WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+    }
+
+    private async ValueTask WriteCoreAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
+    {
         int sent = 0;
         while (sent < buffer.Length)
         {
@@ -204,7 +251,7 @@ internal sealed class RateLimitedStream : Stream
                     "The connection was closed part way through a write. See the note on partial writes below.");
             }
 
-            int remaining = buffer.Length - sent;
+            int remaining = Math.Min(buffer.Length - sent, ChunkSize);
 
             if (_reservedUploadBandwidth < remaining)
             {
@@ -212,7 +259,7 @@ internal sealed class RateLimitedStream : Stream
                 int requestAmount = Math.Max(needed, ProtocolConstants.UploadBatchSize);
 
                 int granted = await _bandwidthManager.RequestBandwidthAsync(
-                    _user,
+                    _uploadUser,
                     requestAmount,
                     1,
                     _uploadChannels,
@@ -226,11 +273,24 @@ internal sealed class RateLimitedStream : Stream
                     throw new IOException("No upload bandwidth was granted, so this write cannot complete.");
                 }
 
-                _reservedUploadBandwidth += granted;
+                lock (_reservationLock)
+                {
+                    if (_disposal.IsDisposed)
+                    {
+                        _bandwidthManager.ReturnBandwidth(granted, _uploadChannels);
+                        throw new IOException("The connection was disposed while waiting for upload quota.");
+                    }
+                    _reservedUploadBandwidth += granted;
+                }
             }
 
-            int canSend = Math.Min(remaining, _reservedUploadBandwidth);
-            int toSend = Math.Min(canSend, ChunkSize);
+            int toSend;
+            lock (_reservationLock)
+            {
+                if (_disposal.IsDisposed) throw new IOException("The connection was disposed part way through a write.");
+                toSend = Math.Min(remaining, _reservedUploadBandwidth);
+                _reservedUploadBandwidth -= toSend;
+            }
 
             try
             {
@@ -247,38 +307,42 @@ internal sealed class RateLimitedStream : Stream
                 throw new IOException("The connection was disposed part way through a write.", ex);
             }
 
-            _reservedUploadBandwidth -= toSend;
             sent += toSend;
         }
     }
 
-    public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+
+
+    private sealed class DirectionUser(IBandwidthUser user, string direction) : IBandwidthUser
     {
-        return WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+        public string Name => $"{user.Name}/{direction}";
+        public void AssignBandwidth(int amount) { /* Requests complete through their tasks. */ }
+    }
+
+    private void EndOperation()
+    {
+        lock (_reservationLock)
+        {
+            _operations--;
+            if (_operations == 0 && _disposal.IsDisposed) _lifetimeCts.Dispose();
+        }
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (_disposal.MarkDisposed())
+        lock (_reservationLock)
         {
-            if (_reservedDownloadBandwidth > 0)
+            if (_disposal.MarkDisposed())
             {
+                _lifetimeCts.Cancel();
                 _bandwidthManager.ReturnBandwidth(_reservedDownloadBandwidth, _downloadChannels);
-                _reservedDownloadBandwidth = 0;
-            }
-
-            if (_reservedUploadBandwidth > 0)
-            {
                 _bandwidthManager.ReturnBandwidth(_reservedUploadBandwidth, _uploadChannels);
+                _reservedDownloadBandwidth = 0;
                 _reservedUploadBandwidth = 0;
-            }
-
-            if (disposing && !_leaveInnerOpen)
-            {
-                _inner.Dispose();
+                if (_operations == 0) _lifetimeCts.Dispose();
+                if (disposing && !_leaveInnerOpen) _inner.Dispose();
             }
         }
-
         base.Dispose(disposing);
     }
 }

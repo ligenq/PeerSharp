@@ -794,7 +794,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return stream;
         }
 
-        string hash = _torrent.Hash.ToHexStringUpper();
+        string hash = BandwidthManager.GetTorrentChannelKey(_torrent);
 
         return new RateLimitedStream(
             stream,

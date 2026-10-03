@@ -35,6 +35,10 @@ public sealed class WebTorrentSession : IAsyncDisposable
     private readonly WebTorrentTrackerManager _trackerManager;
     private readonly WebRtcPeerManager _peerManager;
     private int _started;
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+    private readonly CancellationToken _shutdownToken;
+    private bool _disposed;
+    private Task? _disposeTask;
 
     /// <summary>
     /// Creates a session for <paramref name="torrent"/> without starting it. Prefer
@@ -68,6 +72,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     internal WebTorrentSession(ITorrent torrent, IPeerTransportHost host, WebTorrentSessionOptions options, IWebRtcConnectionFactory rtcFactory, IWebSocketConnectionFactory socketFactory, ILoggerFactory? loggerFactory = null)
     {
+        _shutdownToken = _cts.Token;
         _torrent = torrent;
         _host = host;
         _options = options;
@@ -91,9 +96,9 @@ public sealed class WebTorrentSession : IAsyncDisposable
             actualLoggerFactory.CreateLogger<WebRtcPeerManager>(),
             RemoteSdpReachability.EnumerateLocalSubnets(),
             AttachChannelAsync,
-            (pending, candidate) => TrackBackgroundTask(SendCandidateAsync(pending, candidate, _cts.Token)),
+            (pending, candidate) => TrackBackgroundTask(SendCandidateAsync(pending, candidate, _shutdownToken)),
             TrackBackgroundTask,
-            _cts.Token
+            _shutdownToken
         );
     }
 
@@ -135,18 +140,20 @@ public sealed class WebTorrentSession : IAsyncDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        if (Interlocked.Exchange(ref _started, 1) == 1)
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            return;
+            lock (_backgroundTasksLock) { ObjectDisposedException.ThrowIf(_disposed, this); }
+            if (_started == 1) return;
+            _started = 1;
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdownToken);
+            await _trackerManager.StartAsync(linked.Token).ConfigureAwait(false);
+            var connected = _trackerManager.GetRuntimes().Where(static runtime => runtime.IsConnected).ToArray();
+            await Task.WhenAll(connected.Select(runtime => SendInitialOffersAsync(runtime, linked.Token))).ConfigureAwait(false);
+            linked.Token.ThrowIfCancellationRequested();
+            TrackBackgroundTask(RunBackgroundLoopAsync(_shutdownToken));
         }
-
-        await _trackerManager.StartAsync(cancellationToken).ConfigureAwait(false);
-
-        // Trackers are independent; announce to all connected runtimes concurrently.
-        var connected = _trackerManager.GetRuntimes().Where(static runtime => runtime.IsConnected).ToArray();
-        await Task.WhenAll(connected.Select(runtime => SendInitialOffersAsync(runtime, cancellationToken))).ConfigureAwait(false);
-
-        TrackBackgroundTask(RunBackgroundLoopAsync(_cts.Token));
+        finally { _lifecycleGate.Release(); }
     }
 
     private async Task SendInitialOffersAsync(TrackerRuntime runtime, CancellationToken cancellationToken)
@@ -343,20 +350,20 @@ public sealed class WebTorrentSession : IAsyncDisposable
         {
             if (signal.AnswerSdp != null && signal.OfferId != null && signal.AnswerType?.Equals("offer", StringComparison.OrdinalIgnoreCase) == true)
             {
-                await _peerManager.HandleOfferAsync(signal.OfferId, signal.PeerId, signal.AnswerSdp, runtime, SendAnswerAsync, _cts.Token).ConfigureAwait(false);
+                await _peerManager.HandleOfferAsync(signal.OfferId, signal.PeerId, signal.AnswerSdp, runtime, SendAnswerAsync, _shutdownToken).ConfigureAwait(false);
             }
             else if (signal.AnswerSdp != null && signal.OfferId != null && (signal.AnswerType?.Equals("answer", StringComparison.OrdinalIgnoreCase) != false))
             {
-                await _peerManager.HandleAnswerAsync(signal, _cts.Token).ConfigureAwait(false);
+                await _peerManager.HandleAnswerAsync(signal, runtime, _shutdownToken).ConfigureAwait(false);
             }
             else if (signal.OfferSdp != null && signal.OfferId != null)
             {
-                await _peerManager.HandleOfferAsync(signal.OfferId, signal.PeerId, signal.OfferSdp, runtime, SendAnswerAsync, _cts.Token).ConfigureAwait(false);
+                await _peerManager.HandleOfferAsync(signal.OfferId, signal.PeerId, signal.OfferSdp, runtime, SendAnswerAsync, _shutdownToken).ConfigureAwait(false);
             }
 
             if (signal.Candidate != null && signal.OfferId != null)
             {
-                await _peerManager.HandleCandidateAsync(signal, _cts.Token).ConfigureAwait(false);
+                await _peerManager.HandleCandidateAsync(signal, runtime, _shutdownToken).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
@@ -367,7 +374,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     private async Task SendOffersAsync(TrackerRuntime runtime, string? @event, CancellationToken cancellationToken)
     {
-        int offerCount = Math.Max(1, _options.OffersPerTracker);
+        int offerCount = Math.Clamp(_options.OffersPerTracker, 1, 256);
         var offers = new JsonArray();
 
         for (int i = 0; i < offerCount; i++)
@@ -462,22 +469,27 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     private void AttachChannelAsync(PendingPeer pending, IWebRtcDataChannel channel)
     {
-        TrackBackgroundTask(AttachChannelInternalAsync(pending, channel, _cts.Token));
+        TrackBackgroundTask(AttachChannelInternalAsync(pending, channel, _shutdownToken));
     }
 
     private async Task AttachChannelInternalAsync(PendingPeer pending, IWebRtcDataChannel channel, CancellationToken cancellationToken)
     {
         if (!pending.TryMarkAttached())
         {
+            if (!ReferenceEquals(channel, pending.Channel)) await channel.DisposeAsync().ConfigureAwait(false);
+            return;
+        }
+        if (pending.LifetimeToken.IsCancellationRequested || cancellationToken.IsCancellationRequested)
+        {
+            await channel.DisposeAsync().ConfigureAwait(false);
             return;
         }
 
-        var stream = new WebTorrentDataChannelStream(channel);
+        var stream = new WebTorrentDataChannelStream(channel, () => new ValueTask(_peerManager.RemovePendingAsync(pending)));
         stream.Start();
         try
         {
             await _host.AttachPeerTransportAsync(stream, pending.Initiator, cancellationToken).ConfigureAwait(false);
-            await _peerManager.RemovePendingAsync(pending.OfferId).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -488,6 +500,8 @@ public sealed class WebTorrentSession : IAsyncDisposable
 
     private void TrackBackgroundTask(Task task)
     {
+        _ = task.ContinueWith(static completed => _ = completed.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         lock (_backgroundTasksLock)
         {
             _backgroundTasks.RemoveAll(t => t.IsCompleted);
@@ -499,36 +513,51 @@ public sealed class WebTorrentSession : IAsyncDisposable
     /// Sends a stopped announce to every connected tracker, then tears down the trackers, peers
     /// and background tasks.
     /// </summary>
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        lock (_backgroundTasksLock)
+        {
+            _disposed = true;
+            _disposeTask ??= DisposeCoreAsync();
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
     {
         if (!_cts.IsCancellationRequested)
         {
             await _cts.CancelAsync().ConfigureAwait(false);
         }
 
-        // Send "stopped" announces concurrently; one slow tracker must not delay every other one.
-        var connected = _trackerManager.GetRuntimes().Where(static runtime => runtime.IsConnected).ToArray();
-        await Task.WhenAll(connected.Select(SendStoppedAnnounceAsync)).ConfigureAwait(false);
-
-        await _trackerManager.DisposeAsync().ConfigureAwait(false);
-        await _peerManager.DisposeAsync().ConfigureAwait(false);
-
-        Task[] pendingTasks;
-        lock (_backgroundTasksLock)
-        {
-            pendingTasks = [.. _backgroundTasks];
-            _backgroundTasks.Clear();
-        }
+        await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            await Task.WhenAll(pendingTasks).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Ignored error while awaiting WebTorrent background tasks during shutdown.");
-        }
+            // Send "stopped" announces concurrently; one slow tracker must not delay every other one.
+            var connected = _trackerManager.GetRuntimes().Where(static runtime => runtime.IsConnected).ToArray();
+            await Task.WhenAll(connected.Select(SendStoppedAnnounceAsync)).ConfigureAwait(false);
 
-        _cts.Dispose();
+            await _trackerManager.DisposeAsync().ConfigureAwait(false);
+            await _peerManager.DisposeAsync().ConfigureAwait(false);
+
+            Task[] pendingTasks;
+            lock (_backgroundTasksLock)
+            {
+                pendingTasks = [.. _backgroundTasks];
+                _backgroundTasks.Clear();
+            }
+            try
+            {
+                await Task.WhenAll(pendingTasks).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Ignored error while awaiting WebTorrent background tasks during shutdown.");
+            }
+
+            _cts.Dispose();
+        }
+        finally { _lifecycleGate.Release(); }
     }
 
     private async Task SendStoppedAnnounceAsync(TrackerRuntime runtime)
