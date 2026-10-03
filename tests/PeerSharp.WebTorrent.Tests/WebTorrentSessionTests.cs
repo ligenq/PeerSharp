@@ -13,6 +13,17 @@ namespace PeerSharp.WebTorrent.Tests;
 public class WebTorrentSessionTests
 {
     [Fact]
+    public async Task HostProxyPolicyIsCheckedBeforeOpeningTrackerOrRtcConnections()
+    {
+        var host = new FakePeerTransportHost("wss://tracker.example") { AllowsDirectConnections = false };
+        var rtc = new FakeWebRtcConnectionFactory();
+        var sockets = new FakeWebSocketConnectionFactory(new FakeWebSocketConnection());
+        await using var session = new WebTorrentSession(host, host, new WebTorrentSessionOptions(), rtc, sockets);
+        await Assert.ThrowsAsync<NotSupportedException>(() => session.StartAsync(TestContext.Current.CancellationToken));
+        Assert.Empty(rtc.Created);
+    }
+
+    [Fact]
     public void WebTorrentTrackerUrls_CollectsWebSocketTrackersFromMetadataAndSettings()
     {
         var urls = WebTorrentTrackerUrls.Collect(
@@ -1306,6 +1317,7 @@ public class WebTorrentSessionTests
 
     private sealed class FakePeerTransportHost : ITorrent, IPeerTransportHost
     {
+        public bool AllowsDirectConnections { get; set; } = true;
         public bool SuperSeeding { get; set; }
 
         public int MaxConnections { get; set; }

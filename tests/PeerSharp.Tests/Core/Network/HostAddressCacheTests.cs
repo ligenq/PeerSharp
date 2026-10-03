@@ -7,6 +7,26 @@ namespace PeerSharp.Tests.Core.Network;
 
 public class HostAddressCacheTests
 {
+    [Fact]
+    public async Task AFullCacheOfPendingLookups_DoesNotEvictOrStartMoreWork()
+    {
+        var answer = new TaskCompletionSource<IPAddress[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cache = new HostAddressCache(_clock, (_, _) =>
+        {
+            Interlocked.Increment(ref _lookups);
+            return answer.Task;
+        });
+        var pending = Enumerable.Range(0, HostAddressCache.SweepThreshold)
+            .Select(index => cache.ResolveAsync($"tracker{index}.example", TestContext.Current.CancellationToken)).ToArray();
+        var duplicate = cache.ResolveAsync("tracker0.example", TestContext.Current.CancellationToken);
+        Assert.Empty(await cache.ResolveAsync("overflow.example", TestContext.Current.CancellationToken));
+        Assert.Equal(HostAddressCache.SweepThreshold, _lookups);
+        answer.SetResult(TrackerAddresses);
+        Assert.All(await Task.WhenAll(pending.Append(duplicate)), addresses => Assert.Equal(TrackerAddresses, addresses));
+        Assert.Equal(TrackerAddresses, await cache.ResolveAsync("overflow.example", TestContext.Current.CancellationToken));
+        Assert.Equal(HostAddressCache.SweepThreshold + 1, _lookups);
+    }
+
     private static readonly IPAddress[] TrackerAddresses = [IPAddress.Parse("198.51.100.7")];
 
     private readonly FakeTimeProvider _clock = new();

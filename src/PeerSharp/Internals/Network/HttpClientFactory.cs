@@ -89,6 +89,8 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
         bool followRedirects = true,
         int maxConnectionsPerServer = IHttpClientFactory.DefaultMaxConnectionsPerServer)
     {
+        if (proxy.ForceProxy && (proxy.Type == ProxyType.None || string.IsNullOrWhiteSpace(proxy.Host) || proxy.Port == 0))
+            throw new InvalidOperationException("ForceProxy requires a usable proxy configuration.");
         int perServer = Math.Clamp(maxConnectionsPerServer, 1, 256);
 
         // Structured, not interpolated. The old string key joined the fields with a separator the
@@ -178,7 +180,8 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             MaxConnectionsPerServer = maxConnectionsPerServer,
             ConnectTimeout = TimeSpan.FromSeconds(10),
             AutomaticDecompression = isTracker ? DecompressionMethods.GZip | DecompressionMethods.Deflate : DecompressionMethods.None,
-            AllowAutoRedirect = followRedirects
+            AllowAutoRedirect = followRedirects,
+            UseProxy = proxy.Type != ProxyType.None && !string.IsNullOrEmpty(proxy.Host)
         };
 
         // Only for a bind address, which the default connect path has no way to apply. A callback can
@@ -194,10 +197,11 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
 
         if (proxy.Type != ProxyType.None && !string.IsNullOrEmpty(proxy.Host))
         {
+            string proxyHost = proxy.Host.Contains(':') && !proxy.Host.StartsWith('[') ? $"[{proxy.Host}]" : proxy.Host;
             string proxyUri = proxy.Type switch
             {
-                ProxyType.Socks5 => $"socks5://{proxy.Host}:{proxy.Port}",
-                ProxyType.Http => $"http://{proxy.Host}:{proxy.Port}",
+                ProxyType.Socks5 => $"socks5://{proxyHost}:{proxy.Port}",
+                ProxyType.Http => $"http://{proxyHost}:{proxy.Port}",
                 _ => string.Empty
             };
 

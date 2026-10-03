@@ -15,6 +15,8 @@ internal sealed class UploadQueueManager : IAsyncDisposable
     internal const int MaxQueueDepthPerPeer = ProtocolConstants.MaxOutstandingRequestsPerPeer;
 
     private readonly ConcurrentDictionary<PeerCommunication, PeerUploadQueue> _queues = new();
+    private readonly Lock _queuesLock = new();
+    private bool _disposed;
     private readonly Func<PeerCommunication, UploadQueueItem, CancellationToken, Task> _execute;
     private readonly CancellationToken _stopToken;
     private readonly ILogger<UploadQueueManager> _logger;
@@ -31,8 +33,13 @@ internal sealed class UploadQueueManager : IAsyncDisposable
 
     public bool TryEnqueue(PeerCommunication peer, UploadQueueItem item)
     {
-        var queue = _queues.GetOrAdd(peer, CreateQueue);
-        return queue.TryEnqueue(item);
+        lock (_queuesLock)
+        {
+            if (_disposed || _stopToken.IsCancellationRequested) return false;
+            if (!_queues.TryGetValue(peer, out var queue))
+                _queues[peer] = queue = CreateQueue(peer);
+            return queue.TryEnqueue(item);
+        }
     }
 
     public void Cancel(PeerCommunication peer, int piece, int offset)
@@ -45,16 +52,22 @@ internal sealed class UploadQueueManager : IAsyncDisposable
 
     public void RemovePeer(PeerCommunication peer)
     {
-        if (_queues.TryRemove(peer, out var queue))
+        lock (_queuesLock)
         {
-            queue.Dispose();
+            if (_queues.TryRemove(peer, out var queue)) queue.Dispose();
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        var pumpTasks = _queues.Values.Select(q => { q.Dispose(); return q.PumpTask; }).ToArray();
-        _queues.Clear();
+        Task[] pumpTasks;
+        lock (_queuesLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            pumpTasks = _queues.Values.Select(q => { q.Dispose(); return q.PumpTask; }).ToArray();
+            _queues.Clear();
+        }
 
         if (pumpTasks.Length > 0)
         {

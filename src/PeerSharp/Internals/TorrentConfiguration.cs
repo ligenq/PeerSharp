@@ -11,6 +11,7 @@ internal sealed class TorrentConfiguration
     private readonly IBandwidthManager _bandwidth;
     private readonly ITorrent _torrent; // Back-reference needed for BandwidthManager calls
 
+    private readonly Lock _limitsLock = new();
     private long _downloadLimitBytesPerSecond;
     private long _diskReadLimitBytesPerSecond;
     private long _diskWriteLimitBytesPerSecond;
@@ -26,34 +27,43 @@ internal sealed class TorrentConfiguration
 
     public long DownloadLimitBytesPerSecond
     {
-        get => _downloadLimitBytesPerSecond;
+        get => Interlocked.Read(ref _downloadLimitBytesPerSecond);
         set
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value);
-            _downloadLimitBytesPerSecond = value;
-            _bandwidth.SetTorrentLimits(_torrent, _downloadLimitBytesPerSecond, _uploadLimitBytesPerSecond);
+            lock (_limitsLock)
+            {
+                _downloadLimitBytesPerSecond = value;
+                _bandwidth.SetTorrentLimits(_torrent, _downloadLimitBytesPerSecond, _uploadLimitBytesPerSecond);
+            }
         }
     }
 
     public long DiskReadLimitBytesPerSecond
     {
-        get => _diskReadLimitBytesPerSecond;
+        get => Interlocked.Read(ref _diskReadLimitBytesPerSecond);
         set
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value);
-            _diskReadLimitBytesPerSecond = value;
-            _bandwidth.SetTorrentDiskLimits(_torrent, _diskReadLimitBytesPerSecond, _diskWriteLimitBytesPerSecond);
+            lock (_limitsLock)
+            {
+                _diskReadLimitBytesPerSecond = value;
+                _bandwidth.SetTorrentDiskLimits(_torrent, _diskReadLimitBytesPerSecond, _diskWriteLimitBytesPerSecond);
+            }
         }
     }
 
     public long DiskWriteLimitBytesPerSecond
     {
-        get => _diskWriteLimitBytesPerSecond;
+        get => Interlocked.Read(ref _diskWriteLimitBytesPerSecond);
         set
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value);
-            _diskWriteLimitBytesPerSecond = value;
-            _bandwidth.SetTorrentDiskLimits(_torrent, _diskReadLimitBytesPerSecond, _diskWriteLimitBytesPerSecond);
+            lock (_limitsLock)
+            {
+                _diskWriteLimitBytesPerSecond = value;
+                _bandwidth.SetTorrentDiskLimits(_torrent, _diskReadLimitBytesPerSecond, _diskWriteLimitBytesPerSecond);
+            }
         }
     }
 
@@ -90,12 +100,15 @@ internal sealed class TorrentConfiguration
 
     public long UploadLimitBytesPerSecond
     {
-        get => _uploadLimitBytesPerSecond;
+        get => Interlocked.Read(ref _uploadLimitBytesPerSecond);
         set
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value);
-            _uploadLimitBytesPerSecond = value;
-            _bandwidth.SetTorrentLimits(_torrent, _downloadLimitBytesPerSecond, _uploadLimitBytesPerSecond);
+            lock (_limitsLock)
+            {
+                _uploadLimitBytesPerSecond = value;
+                _bandwidth.SetTorrentLimits(_torrent, _downloadLimitBytesPerSecond, _uploadLimitBytesPerSecond);
+            }
         }
     }
 }

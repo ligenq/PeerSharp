@@ -733,7 +733,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
 
         var settings = _torrent.Settings.Proxy;
-        if (!settings.ProxyPeers)
+        if (!settings.ProxyPeers && !settings.ForceProxy)
         {
             // Direct connection if proxying peers is disabled
             var directSettings = new ProxySettings { Type = ProxyType.None };

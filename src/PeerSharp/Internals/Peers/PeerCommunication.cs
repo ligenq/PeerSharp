@@ -1025,7 +1025,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             {
                 var proxy = _torrent.Settings.Proxy;
                 var bindAddress = _torrent.Settings.Connection.BindAddress;
-                if (proxy.Type != ProxyType.None && proxy.ProxyPeers && !string.IsNullOrEmpty(proxy.Host))
+                if (proxy.Type != ProxyType.None && (proxy.ProxyPeers || proxy.ForceProxy) && !string.IsNullOrEmpty(proxy.Host))
                 {
                     _logger.LogDebug("Connecting to {Ip}:{Port} via {ProxyType} proxy {ProxyHost}:{ProxyPort}", ip, port, proxy.Type, proxy.Host, proxy.Port);
                     var result = proxy.Type switch
@@ -1043,6 +1043,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     // will be the proxy endpoint, not the peer endpoint.
                     // We set it manually here.
                     RemoteEndPoint = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(ip), port);
+                }
+                else if (proxy.ForceProxy)
+                {
+                    throw new IOException("ForceProxy requires a usable proxy configuration.");
                 }
                 else if (System.Net.IPAddress.TryParse(ip, out var peerAddress))
                 {
@@ -1814,6 +1818,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     internal static bool CanUseUtpWithProxy(Settings settings)
     {
         var proxy = settings.Proxy;
+        if (proxy.ForceProxy) return proxy.Type == ProxyType.Socks5 && !string.IsNullOrEmpty(proxy.Host);
         if (proxy.Type == ProxyType.None || !proxy.ProxyPeers || string.IsNullOrEmpty(proxy.Host))
         {
             return true;

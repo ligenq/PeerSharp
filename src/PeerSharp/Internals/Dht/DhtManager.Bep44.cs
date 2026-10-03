@@ -184,6 +184,7 @@ internal partial class DhtManager
     {
         ArgumentNullException.ThrowIfNull(item);
 
+        item = DhtItemCodec.Snapshot(item);
         var validation = DhtItemCodec.Validate(item);
         if (validation != DhtPutError.None)
         {
@@ -227,6 +228,7 @@ internal partial class DhtManager
     /// </summary>
     private async Task<ItemLookupResult> RunItemLookupAsync(DhtTarget target, byte[]? salt, CancellationToken cancellationToken)
     {
+        if (salt is { Length: > DhtItem.MaxSaltLength }) throw new ArgumentException("DHT salt exceeds 64 bytes.", nameof(salt));
         var queried = new HashSet<IPEndPoint>();
         var writeTargets = new List<(IPEndPoint Endpoint, byte[] Token)>();
         DhtItem? best = null;
@@ -293,7 +295,7 @@ internal partial class DhtManager
                 discovered.AddRange(ReadNodeEndpoints(reply));
             }
 
-            candidates = discovered.Where(endpoint => !queried.Contains(endpoint)).Distinct().ToList();
+            candidates = candidates.Concat(discovered).Where(endpoint => !queried.Contains(endpoint)).Distinct().Take(MaxLookupRounds * LookupConcurrency).ToList();
         }
 
         var stats = new DhtItemLookupStats(
@@ -342,7 +344,7 @@ internal partial class DhtManager
         if (publicKey is null)
         {
             var immutable = new DhtImmutableItem { Value = value };
-            return immutable.Target == target ? immutable : null;
+            return DhtItemCodec.Validate(immutable) == DhtPutError.None && immutable.Target == target ? immutable : null;
         }
 
         var signature = reply.GetBytes("sig");
@@ -360,15 +362,10 @@ internal partial class DhtManager
             Salt = salt is { Length: > 0 } ? salt : null,
         };
 
+        if (DhtItemCodec.Validate(mutable) != DhtPutError.None) return null;
         if (mutable.Target != target)
         {
             _logger.LogDebug("Discarded a BEP 44 reply whose key and salt address {Actual}, not {Requested}", mutable.Target, target);
-            return null;
-        }
-
-        if (!mutable.VerifySignature())
-        {
-            _logger.LogDebug("Discarded a BEP 44 reply for {Target} with an invalid signature", target);
             return null;
         }
 

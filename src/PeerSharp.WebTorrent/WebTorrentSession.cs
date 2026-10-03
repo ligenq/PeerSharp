@@ -140,6 +140,7 @@ public sealed class WebTorrentSession : IAsyncDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        if (!_host.AllowsDirectConnections) throw new NotSupportedException("WebTorrent cannot honor the host's proxy policy.");
         await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {

@@ -11,6 +11,16 @@ namespace PeerSharp.Tests.Core.Network;
 public class LsdManagerTests
 {
     [Fact]
+    public async Task ForceProxyDoesNotOpenMulticastSockets()
+    {
+        _settings.Proxy.ForceProxy = true;
+        await using var lsd = new LsdManager(_settings, _resolver, _timeProvider, _socketFactory);
+        lsd.Start();
+        Assert.False(_socketFactory.IPv4Socket.JoinedMulticast);
+        Assert.False(_socketFactory.IPv6Socket.JoinedMulticast);
+    }
+
+    [Fact]
     public async Task PrivateTorrent_AnnounceAndReceive_DoNotExposeOrDiscoverPeers()
     {
         await using var torrent = TorrentTestUtility.CreateMinimal(new TorrentFileMetadata { Info = { Hash = InfoHash.CreateRandom(), IsPrivate = true } });

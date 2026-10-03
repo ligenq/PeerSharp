@@ -196,6 +196,7 @@ internal static class Ed25519
             return false;
         }
 
+        if (HasSmallOrder(aPoint) || HasSmallOrder(rPoint)) return false;
         var k = HashToScalar(signature[..32], publicKey, message);
 
         // Check [S]B == R + [k]A by comparing encodings, which is canonical.
@@ -208,6 +209,12 @@ internal static class Ed25519
         var right = Add(rPoint, ScalarMultiply(aPoint, kBytes));
 
         return Encode(left).AsSpan().SequenceEqual(Encode(right));
+    }
+
+    private static bool HasSmallOrder(Point point)
+    {
+        var multiplied = Double(Double(Double(point)));
+        return Encode(multiplied).AsSpan().SequenceEqual(Encode(Identity));
     }
 
     private static BigInteger HashToScalar(ReadOnlySpan<byte> rPoint, ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> message)

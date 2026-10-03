@@ -602,9 +602,23 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var ips = await _dnsResolver
-                    .GetHostAddressesAsync(node.Host, cancellationToken)
-                    .ConfigureAwait(false);
+                IPAddress[] ips;
+                if (IPAddress.TryParse(node.Host, out var literal))
+                {
+                    ips = [literal];
+                }
+                else if (UdpProxyPolicy.Decide(_settings.Proxy, proxyTraffic: true) != UdpProxyPolicy.Decision.BindDirectly)
+                {
+                    // DHT transactions bind replies to concrete endpoints. Until the shared UDP
+                    // transport supports resolving names through the proxy, bootstrap from saved
+                    // nodes or configured IP literals rather than leaking DNS outside that route.
+                    _logger.LogWarning("Skipping DHT bootstrap host {Host} under proxy routing; configure an IP address or restore saved DHT nodes", node.Host);
+                    continue;
+                }
+                else
+                {
+                    ips = await _dnsResolver.GetHostAddressesAsync(node.Host, cancellationToken).ConfigureAwait(false);
+                }
                 // One address of each family, not merely the first the resolver happened to list.
                 // BEP 32 describes two overlaid DHTs, and a node is only in the one it can be reached
                 // over: bootstrapping into whichever family DNS returned first left the routing table

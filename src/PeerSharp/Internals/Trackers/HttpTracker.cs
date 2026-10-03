@@ -732,7 +732,7 @@ internal class HttpTracker : TrackerBase, IDisposable
     private IReadOnlyList<AddressFamily?> GetAnnounceAddressFamilies()
     {
         var proxy = Torrent.Settings.Proxy;
-        bool proxyIsActive = proxy.ProxyTrackers
+        bool proxyIsActive = proxy.ForceProxy || proxy.ProxyTrackers
             && proxy.Type != ProxyType.None
             && !string.IsNullOrEmpty(proxy.Host);
         if (_testClient != null || proxyIsActive)
@@ -802,7 +802,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         }
 
         var settings = Torrent.Settings.Proxy;
-        if (!settings.ProxyTrackers)
+        if (!settings.ProxyTrackers && !settings.ForceProxy)
         {
             // Create a temporary settings object for "None" proxy to force direct connection
             // We can't modify the global settings object as it might be used elsewhere

@@ -867,6 +867,7 @@ interface PeerSharp.Interfaces.IPeerTransport
     Task StartAsync(CancellationToken cancellationToken = default)
     Task StopAsync(CancellationToken cancellationToken = default)
 interface PeerSharp.Interfaces.IPeerTransportHost
+    Boolean AllowsDirectConnections { get; }
     Int64 DataDownloaded { get; }
     Int64 DataLeft { get; }
     Int64 DataUploaded { get; }

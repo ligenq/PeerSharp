@@ -1017,7 +1017,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                     _logger.LogError(t.Exception.GetBaseException(), "Unhandled exception persisting magnet metadata");
                 }
             }, TaskScheduler.Default);
-        });
+        }, _logger);
     }
 
     private async Task PersistMagnetMetadataAsync(Torrent torrent)
@@ -1047,11 +1047,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         private readonly ITorrentEvents _inner;
         private readonly Action<Torrent> _onMetadataReceived;
+        private readonly ILogger _eventsLogger;
 
-        public TorrentEventsProxy(ITorrentEvents inner, Action<Torrent> onMetadataReceived)
+        public TorrentEventsProxy(ITorrentEvents inner, Action<Torrent> onMetadataReceived, ILogger logger)
         {
             _inner = inner;
             _onMetadataReceived = onMetadataReceived;
+            _eventsLogger = logger;
         }
 
         public Action<ITorrent, Exception>? Error => _inner?.Error;
@@ -1059,7 +1061,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         public Action<ITorrent, MetadataProgress>? MetadataProgress => _inner?.MetadataProgress;
         public Action<ITorrent>? MetadataReceived => t =>
         {
-            try { _inner?.MetadataReceived?.Invoke(t); }
+            try { TorrentEventDispatcher.Invoke(_inner.MetadataReceived, t, _eventsLogger); }
             finally
             {
                 if (t is Torrent torrent)
@@ -1205,10 +1207,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
 
         // Disable UPnP if ForceProxy is enabled
-        if (Settings.Proxy.ForceProxy && Settings.Proxy.Type != ProxyType.None)
+        if (Settings.Proxy.ForceProxy)
         {
             _logger.LogInformation("ForceProxy is enabled, disabling UPnP port mapping");
             Settings.Connection.UpnpPortMapping = false;
+            Settings.Connection.NatPmpPortMapping = false;
         }
 
         if (Settings.PeerId.All(b => b == 0))
@@ -1573,7 +1576,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             return;
         }
 
-        var byHash = torrents.ToDictionary(t => t.Hash, t => t);
+        var byHash = torrents.ToDictionary(t => t.SessionHash, t => t);
 
         foreach (var hash in plan.Stop)
         {
@@ -1922,7 +1925,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     private IHttpClient GetMagnetHttpClient()
     {
         var settings = Settings.Proxy;
-        if (!settings.ProxyTrackers || settings.Type == ProxyType.None)
+        if (!settings.ProxyTrackers && !settings.ForceProxy)
         {
             settings = NoProxy;
         }
