@@ -10,8 +10,8 @@ The unit and integration tests need no setup and run on every build; everything 
 | Local counterpart-client interop | real client binaries; nightly in CI | `tests/PeerSharp.Tests/Interop` |
 | Live DHT probes | `PEERSHARP_INTEROP=1` | `tests/PeerSharp.Tests/Interop` |
 | Real-swarm soak | `PEERSHARP_SOAK=1` plus content you choose | `tests/PeerSharp.Tests/Interop` |
-| Real-swarm streaming with longer and shorter request queues | `PEERSHARP_SOAK=1` plus content you choose; `PEERSHARP_STREAMING_QUEUES`, `_ROUNDS`, `_BITRATE`, `_REPORT` | `tests/PeerSharp.Tests/Interop/RealSwarmStreamingTests.cs` |
-| Streaming from a mixed local swarm: first byte and stalls, from the start and after a seek | `PEERSHARP_STREAMING=1`; `PEERSHARP_STREAMING_REPORT` names a file the numbers are appended to, `PEERSHARP_STREAMING_LOG` one the player's engine logs to in detail | `tests/PeerSharp.Tests/Integration/StreamingSwarmTests.cs` |
+| Real-swarm streaming with longer and shorter request queues | `PEERSHARP_SOAK=1` plus content you choose; `PEERSHARP_STREAMING_QUEUES`, `_ROUNDS`, `_BITRATE`, `_SECONDS`, `_REPORT`; `_PLAYERS` (`strict`, `exoplayer`) the player profiles; `_FROM_START=1` plays from the file's start, as a film is watched, uncapped, and reports every stall | `tests/PeerSharp.Tests/Interop/RealSwarmStreamingTests.cs` |
+| Streaming from a mixed local swarm: first byte and stalls, from the start and after a seek | `PEERSHARP_STREAMING=1`; `PEERSHARP_STREAMING_REPORT` names a file the numbers are appended to, `PEERSHARP_STREAMING_LOG` one the player's engine logs to in detail, `PEERSHARP_STREAMING_SWARM` the big-piece test's seeders, as `24x384` (two dozen at 384 KiB/s) or several such groups separated by commas | `tests/PeerSharp.Tests/Integration/StreamingSwarmTests.cs` |
 
 ## Real-Swarm Interop and Soak Testing
 
