@@ -32,6 +32,29 @@ internal sealed class RequestScheduler
     /// </remarks>
     internal const int UrgentStreamingPieces = 2;
 
+    /// <summary>
+    /// How long a peer may take, at the rate it has been delivering, over the blocks of streamed pieces
+    /// it holds. More of them go to other peers, and the rest of its queue to pieces nobody waits on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A stream hands its reader only whole, verified pieces, so a piece is as late as its slowest block.
+    /// A peer whose rate is not known yet was given a queue sized for a fast one - five hundred requests,
+    /// all of a 4 MiB piece and then some - and a peer delivering 384 KiB/s kept that piece eleven seconds
+    /// while twenty-three others had none of it to send. A Cast receiver gives up on a read that waits
+    /// that long: it drops the connection and reloads the film, which a viewer sees as a stall. Starting
+    /// a 4K film in 4 MiB pieces, one did so about once a minute.
+    /// </para>
+    /// <para>
+    /// With 256 KiB pieces a whole piece is a fraction of a second at any rate, so the cap seldom binds;
+    /// it is pieces sixteen times that size, as 4K releases use, that it spreads across the swarm.
+    /// </para>
+    /// </remarks>
+    internal static readonly TimeSpan StreamingBlockDeadline = TimeSpan.FromSeconds(2);
+
+    /// <summary>Blocks of streamed pieces a peer may hold before its rate is known: 256 KiB.</summary>
+    internal const int MinStreamingBlocksPerPeer = 16;
+
     private readonly PieceStateManager _pieceStateManager;
     private readonly int _blockSize;
     private readonly ILogger<RequestScheduler> _logger;
@@ -105,23 +128,28 @@ internal sealed class RequestScheduler
         int sent = 0;
 
         // The pieces streams need come first, in the order they need them - started here if they have
-        // not been, rather than after every piece already under way has had its turn.
-        var streamingIndices = new HashSet<int>();
+        // not been, rather than after every piece already under way has had its turn - but only as many
+        // of their blocks as this peer can deliver soon. See StreamingBlockDeadline.
+        var streamingIndices = streaming is null ? [] : new HashSet<int>(streaming);
+        int streamingAllowance = StreamingAllowance(peer, streamingIndices, existingReqs);
         foreach (int index in streaming ?? [])
         {
-            if (sent >= needed)
+            int allowance = Math.Min(needed - sent, streamingAllowance);
+            if (allowance <= 0)
             {
                 break;
             }
 
-            if (!streamingIndices.Add(index) || (isChoked && !peer.IsAllowedFast(index)) || !peer.PeerPieces.HasPiece(index))
+            if ((isChoked && !peer.IsAllowedFast(index)) || !peer.PeerPieces.HasPiece(index))
             {
                 continue;
             }
 
             if (ActiveOrStarted(index) is { } state)
             {
-                sent += await ProcessPieceForRequestsAsync(state, peer, needed - sent, StrategyFor(index, endGameMode, urgent)).ConfigureAwait(false);
+                int requested = await ProcessPieceForRequestsAsync(state, peer, allowance, StrategyFor(index, endGameMode, urgent)).ConfigureAwait(false);
+                sent += requested;
+                streamingAllowance -= requested;
             }
         }
 
@@ -133,6 +161,7 @@ internal sealed class RequestScheduler
                 break;
             }
 
+            // Streamed pieces had their turn above, within this peer's allowance for them.
             if (streamingIndices.Contains(state.Index) || (isChoked && !peer.IsAllowedFast(state.Index)) || !peer.PeerPieces.HasPiece(state.Index))
             {
                 continue;
@@ -153,6 +182,13 @@ internal sealed class RequestScheduler
             {
                 if (_piecePicker.PickNextPiece(peer, out int pieceIndex))
                 {
+                    // A streamed piece is started above, where this peer's share of it is capped.
+                    if (streamingIndices.Contains(pieceIndex))
+                    {
+                        loopLimit--;
+                        continue;
+                    }
+
                     long pieceSize = _torrent.InfoFile.Info.GetPieceSize(pieceIndex);
                     int blocksCount = (int)((pieceSize + _blockSize - 1) / _blockSize);
 
@@ -175,6 +211,34 @@ internal sealed class RequestScheduler
         {
             _logger.LogTrace("Sent {SentCount} requests to {RemoteEndPoint}", sent, peer.RemoteEndPoint);
         }
+    }
+
+    /// <summary>
+    /// How many more blocks of streamed pieces <paramref name="peer"/> may be asked for: what it can
+    /// deliver within <see cref="StreamingBlockDeadline"/> at the rate it has shown, or
+    /// <see cref="MinStreamingBlocksPerPeer"/> before it has shown one, less those it already holds.
+    /// </summary>
+    private int StreamingAllowance(PeerCommunication peer, HashSet<int> streaming, PeerRequestCollection? existing)
+    {
+        if (streaming.Count == 0)
+        {
+            return int.MaxValue;
+        }
+
+        long rate = Math.Max(peer.DownloadSpeed, peer.SmoothedDownloadSpeed);
+        long deliverable = (long)(rate * StreamingBlockDeadline.TotalSeconds) / _blockSize;
+        int allowance = (int)Math.Clamp(deliverable, MinStreamingBlocksPerPeer, int.MaxValue);
+
+        int held = 0;
+        foreach (var key in existing?.Keys ?? [])
+        {
+            if (streaming.Contains(key.Piece))
+            {
+                held++;
+            }
+        }
+
+        return Math.Max(0, allowance - held);
     }
 
     private IBlockRequestStrategy StrategyFor(int pieceIndex, bool endGameMode, HashSet<int>? urgent)
@@ -241,9 +305,14 @@ internal sealed class RequestScheduler
         return _pieceStateManager.ActivePieces.TryGetValue(index, out state) ? state : null;
     }
 
+    /// <summary>
+    /// Whether a piece a stream needs can be started: one it lacks and wants, while fewer than twice
+    /// the usual number are under way. A stream's pieces may open beyond the cap, by as many again: it
+    /// is a byte budget, so 4 MiB pieces leave eight slots, and a slot frees only when a whole piece lands.
+    /// </summary>
     private bool CanStart(int index) =>
         !_torrent.Pieces.HasPiece(index)
-        && _pieceStateManager.Count < _pieceStateManager.MaxActivePieces
+        && _pieceStateManager.Count < 2 * _pieceStateManager.MaxActivePieces
         && _piecePicker.IsPieceNeeded(index);
 
     private int GetTypicalBlocksPerPiece()

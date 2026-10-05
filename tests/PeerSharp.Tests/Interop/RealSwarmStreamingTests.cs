@@ -31,6 +31,9 @@ namespace PeerSharp.Tests.Interop;
 /// <c>PEERSHARP_STREAMING_BITRATE</c> sets the player's rate in bytes a second (default 1 MiB/s),
 /// <c>PEERSHARP_STREAMING_QUEUES</c> the queue lengths to compare (default <c>3;1</c>; <c>3/1</c> is three
 /// seconds ordinarily and one while the stream buffers) and
+/// <c>PEERSHARP_STREAMING_FROM_START=1</c> plays the file from its start instead, as a film is watched, for
+/// <c>PEERSHARP_STREAMING_SECONDS</c> of film, with no download cap unless the rate is set, and reports
+/// every stall: where in the film it came, how long it lasted, and the offset it waited on.
 /// <c>PEERSHARP_STREAMING_ROUNDS</c> how many times each is run (default 3). Every run pulls some
 /// hundreds of megabytes.
 /// </para>
@@ -50,7 +53,11 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
         var ct = TestContext.Current.CancellationToken;
         var source = await ResolveTorrentAsync(ct);
         int bitrate = FromEnvironment("PEERSHARP_STREAMING_BITRATE", 1024 * 1024);
-        int rate = FromEnvironment("PEERSHARP_SOAK_RATE_BYTES", 4 * 1024 * 1024);
+        bool fromStart = Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_FROM_START") == "1";
+        // Zero is no cap, which is what the from-the-start runs default to, as a streaming app runs.
+        int rate = int.TryParse(Environment.GetEnvironmentVariable("PEERSHARP_SOAK_RATE_BYTES"), out int configuredRate) && configuredRate >= 0
+            ? configuredRate
+            : fromStart ? 0 : 4 * 1024 * 1024;
         int rounds = FromEnvironment("PEERSHARP_STREAMING_ROUNDS", 3);
         int seconds = FromEnvironment("PEERSHARP_STREAMING_SECONDS", 20);
         var queues = (Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_QUEUES") ?? "3;1")
@@ -71,6 +78,12 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
                     string? log = Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_LOG") is { Length: > 0 } logBase
                         ? $"{logBase}-{round}-{queueSeconds.Replace('/', '-')}s-{player.Name.Replace(' ', '-')}.log"
                         : null;
+                    if (fromStart)
+                    {
+                        await RunFromStartAsync(source, queueSeconds, bitrate, rate, seconds, player, log, $"round {round}, queue {queueSeconds}s, {player.Name}", ct);
+                        continue;
+                    }
+
                     var run = await RunAsync(source, queueSeconds, bitrate, rate, seconds, player, log, ct);
                     Report($"round {round}, queue {queueSeconds}s, {player.Name}", run);
                 }
@@ -124,6 +137,74 @@ public sealed class RealSwarmStreamingTests(ITestOutputHelper output)
             double throughput = ((long)torrent.FinishedBytes - before) / clock.Elapsed.TotalSeconds;
             await torrent.StopAsync(ct);
             return new Run(peers, resumed, afterSeek, throughput);
+        }
+        finally
+        {
+            await engine.DisposeAsync();
+            try
+            {
+                Directory.Delete(downloadPath, recursive: true);
+            }
+            catch (IOException) { /* Best effort. */ }
+            catch (UnauthorizedAccessException) { /* Best effort. */ }
+        }
+    }
+
+    /// <summary>
+    /// Plays the largest file from its start for <paramref name="seconds"/> of film, as it is watched, and
+    /// reports each stall. The engine is the one streaming apps use: no rate cap unless one is given.
+    /// </summary>
+    private async Task RunFromStartAsync(
+        TorrentFile source, string queueSeconds, int bitrate, int rate, int seconds, StreamingSwarmTests.Player player, string? log, string what, CancellationToken ct)
+    {
+        var settings = new Settings();
+        settings.Transfer.MaxDownloadSpeed = (uint)rate;
+        var queue = queueSeconds.Split('/');
+        settings.Transfer.RequestQueueTimeSeconds = int.Parse(queue[0], System.Globalization.CultureInfo.InvariantCulture);
+        settings.Streaming.RequestQueueSecondsWhileBuffering = queue.Length > 1 ? int.Parse(queue[1], System.Globalization.CultureInfo.InvariantCulture) : 0;
+        string downloadPath = Path.Combine(Path.GetTempPath(), "peersharp-streaming", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(downloadPath);
+        settings.Files.DefaultDownloadPath = downloadPath;
+
+        using var logging = log is null
+            ? null
+            : LoggerFactory.Create(builder => builder.SetMinimumLevel(LogLevel.Trace).AddProvider(new TimestampedFileLoggerProvider(log)));
+        var logger = logging?.CreateLogger("Harness");
+        var engine = ClientEngineFactory.Create(new TorrentClientOptions { Settings = settings, LoggerFactory = logging ?? NullLoggerFactory.Instance });
+        try
+        {
+            await engine.InitializeAsync(ct);
+            var torrent = await engine.AddTorrentAsync(source, new AddTorrentOptions(), ct);
+            if (torrent.State == TorrentState.Stopped)
+            {
+                await torrent.StartAsync(ct);
+            }
+
+            await Task.Delay(JoinTime, ct);
+            int peers = torrent.Peers.ConnectedCount;
+            var largest = torrent.GetAllFileInfo().MaxBy(info => info.Size)!;
+            long length = Math.Min(largest.Size, (long)seconds * bitrate);
+            var stalls = new List<string>();
+            var clock = Stopwatch.StartNew();
+            await using var stream = await torrent.OpenStreamAsync(largest.Index, ct);
+            var played = await StreamingSwarmTests.PlayAsync(stream, null, 0, ct, bitrate, length, player, (at, lasted, offset) =>
+            {
+                stalls.Add($"{(int)at.TotalMinutes}:{at.Seconds:00} ({lasted.TotalSeconds:F1}s, offset {offset})");
+                logger?.LogWarning("HARNESS STALL at film {FilmTime} for {Seconds:F1}s waiting on offset {Offset} with {Peers} peers, {Speed} B/s",
+                    at, lasted.TotalSeconds, offset, torrent.Peers.ConnectedCount, torrent.GetTransferStats().DownloadSpeed);
+            });
+
+            string line = $"{what}, from the start: {peers} peers; playing after {played.StartedPlaying.TotalSeconds:F2}s, " +
+                $"{played.Stalls} stalls ({played.Stalled.TotalSeconds:F1}s) over {length / bitrate}s of film" +
+                (stalls.Count > 0 ? ": " + string.Join(", ", stalls) : string.Empty) +
+                $"; downloaded {(long)torrent.FinishedBytes / clock.Elapsed.TotalSeconds / 1024 / 1024:F1} MiB/s";
+            output.WriteLine(line);
+            if (Environment.GetEnvironmentVariable("PEERSHARP_STREAMING_REPORT") is { Length: > 0 } report)
+            {
+                File.AppendAllText(report, line + Environment.NewLine);
+            }
+
+            await torrent.StopAsync(ct);
         }
         finally
         {

@@ -251,16 +251,54 @@ public class RequestSchedulerTests
     }
 
     [Fact]
-    public async Task EvaluateNextRequestsAsync_StartsNoPieceForAStream_WhenEverySlotIsTaken()
+    public async Task EvaluateNextRequestsAsync_StartsAPieceForAStream_BeyondTheSlotsTaken_ButNotTwiceOver()
     {
+        // One slot, taken: a stream's piece opens anyway, as many again as the cap allows.
         var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 4, maxActivePieces: 1, maxRequestsPerPeer: 8, streaming: [5]);
         fixture.PieceStateManager.TryAddPiece(new PieceState(2, 4));
 
         await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
 
-        Assert.False(fixture.PieceStateManager.ContainsPiece(5));
+        Assert.True(fixture.PieceStateManager.ContainsPiece(5));
+
+        // Twice the cap under way: nothing more opens, even for a stream.
+        var full = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 4, maxActivePieces: 1, maxRequestsPerPeer: 8, streaming: [5]);
+        full.PieceStateManager.TryAddPiece(new PieceState(2, 4));
+        full.PieceStateManager.TryAddPiece(new PieceState(3, 4));
+
+        await full.Scheduler.EvaluateNextRequestsAsync(full.Peer, endGameMode: false, isQueueFull: () => false);
+
+        Assert.False(full.PieceStateManager.ContainsPiece(5));
+        Assert.True(full.RequestTracker.TryGetPeerRequests(full.Peer, out var requests));
+        Assert.All(requests.Keys, key => Assert.NotEqual(5, key.Piece));
+    }
+
+    [Fact]
+    public async Task EvaluateNextRequestsAsync_GivesAPeerOfUnknownRate_OnlyAFewBlocksOfAStreamedPiece()
+    {
+        // A 64-block piece the stream waits on, and a queue of a hundred: a peer that has shown no rate
+        // gets a small share of the piece, so others can have the rest, and the rest of its queue elsewhere.
+        var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 64, maxActivePieces: 8, maxRequestsPerPeer: 100, streaming: [5]);
+        fixture.PieceStateManager.TryAddPiece(new PieceState(2, 64));
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
         Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
-        Assert.All(requests.Keys, key => Assert.Equal(2, key.Piece));
+        Assert.Equal(RequestScheduler.MinStreamingBlocksPerPeer, requests.Keys.Count(key => key.Piece == 5));
+        Assert.Contains(requests.Keys, key => key.Piece == 2);
+    }
+
+    [Fact]
+    public async Task EvaluateNextRequestsAsync_GivesAFastPeer_AsManyBlocksOfAStreamedPiece_AsItCanSoonDeliver()
+    {
+        // 512 KiB/s for two seconds is 64 blocks: the whole piece.
+        var fixture = CreateSchedulerFixture(pieceCount: 8, blocksPerPiece: 64, maxActivePieces: 8, maxRequestsPerPeer: 100, streaming: [5]);
+        fixture.Peer.SetSmoothedDownloadSpeedForTesting(512 * 1024);
+
+        await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
+        Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
+        Assert.Equal(64, requests.Keys.Count(key => key.Piece == 5));
     }
 
     [Fact]

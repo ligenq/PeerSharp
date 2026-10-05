@@ -14,6 +14,9 @@ namespace PeerSharp.Streaming;
 /// </summary>
 internal sealed class HttpStreamRequestHandler
 {
+    /// <summary>A read of the torrent this slow is logged: long enough to matter to a player.</summary>
+    private static readonly TimeSpan SlowStep = TimeSpan.FromMilliseconds(500);
+
     /// <summary>The path a server with no access token answers on.</summary>
     public const string DefaultPath = "/stream";
 
@@ -135,6 +138,9 @@ internal sealed class HttpStreamRequestHandler
         long started = System.Diagnostics.Stopwatch.GetTimestamp();
         TimeSpan? firstByte = null;
         long bytesRemaining = contentLength;
+        var longestRead = TimeSpan.Zero;
+        var longestWrite = TimeSpan.Zero;
+        long lastSent = started;
         try
         {
             while (bytesRemaining > 0)
@@ -142,8 +148,17 @@ internal sealed class HttpStreamRequestHandler
                 cancellationToken.ThrowIfCancellationRequested();
 
                 int toRead = (int)Math.Min(buffer.Length, bytesRemaining);
+                long readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 int read = await stream.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken).ConfigureAwait(false);
+                var readTook = System.Diagnostics.Stopwatch.GetElapsedTime(readStarted);
                 firstByte ??= System.Diagnostics.Stopwatch.GetElapsedTime(started);
+                longestRead = readTook > longestRead ? readTook : longestRead;
+                if (readTook >= SlowStep)
+                {
+                    // The torrent kept the player waiting: what it waits on, and for how long.
+                    _logger.LogDebug("Range {Start}-{End}: waited {Ms}ms for data at {Offset}",
+                        range.Start, range.End, (int)readTook.TotalMilliseconds, range.Start + contentLength - bytesRemaining);
+                }
                 if (read == 0)
                 {
                     // Content-Length was already announced from the file size, so a short read
@@ -155,7 +170,11 @@ internal sealed class HttpStreamRequestHandler
 
                 // A client that has gone away surfaces here as an IOException, which the server
                 // treats as the end of the connection rather than as a failure.
+                long writeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
                 await response.Body.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                var writeTook = System.Diagnostics.Stopwatch.GetElapsedTime(writeStarted);
+                longestWrite = writeTook > longestWrite ? writeTook : longestWrite;
+                lastSent = System.Diagnostics.Stopwatch.GetTimestamp();
                 bytesRemaining -= read;
             }
         }
@@ -163,14 +182,19 @@ internal sealed class HttpStreamRequestHandler
         {
             ArrayPool<byte>.Shared.Return(buffer);
 
-            // How long the player waited for this range, and how much of it it took before moving on.
+            // How long the player waited for this range, and how much of it it took before moving on;
+            // the longest the torrent kept a read waiting, the longest the player left a write unread,
+            // and how long nothing had been sent when the range ended.
             _logger.LogDebug(
-                "Range {Start}-{End}: first byte after {FirstByteMs}ms, {Sent} bytes sent in {Ms}ms",
+                "Range {Start}-{End}: first byte after {FirstByteMs}ms, {Sent} bytes sent in {Ms}ms; longest read {ReadMs}ms, longest write {WriteMs}ms, last byte {SilentMs}ms before the end",
                 range.Start,
                 range.End,
                 (int?)firstByte?.TotalMilliseconds,
                 contentLength - bytesRemaining,
-                (int)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                (int)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds,
+                (int)longestRead.TotalMilliseconds,
+                (int)longestWrite.TotalMilliseconds,
+                (int)System.Diagnostics.Stopwatch.GetElapsedTime(lastSent).TotalMilliseconds);
         }
     }
 
