@@ -157,7 +157,7 @@ internal static class Ed25519
         BigIntegerToLittleEndian(r, rBytes);
         var rPoint = Encode(ScalarMultiplyBase(rBytes));
 
-        // k = SHA512(encode(R) || publicKey || message) mod L
+        // k = SHA512(encode(R) || publicKey || message) mod L, the challenge the signature answers.
         var k = HashToScalar(rPoint, publicKey, message);
 
         var s = Mod(r + (k * scalar), L);
