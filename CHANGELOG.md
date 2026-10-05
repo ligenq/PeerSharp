@@ -3,7 +3,10 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
-## Unreleased
+## 5.1.0 — 2026-10-05
+
+Streaming to other devices - a TV, a cast receiver - and a broad hardening pass. No binary breaks
+against 5.0.0; one source break, noted under Changed.
 
 ### Added
 
@@ -104,9 +107,79 @@ history has the reasoning and the measurements behind each one.
     addresses are tried, and redirects are followed by the tracker itself, each location resolved
     again; like HttpClient, an https tracker is not followed to plain http. The connect callback
     remains only for a configured bind address.
+- **A stream's pieces are spread across the swarm.** A stream hands its reader only whole, verified
+  pieces, so a piece is as late as its slowest block. A peer whose rate was not yet known was given a
+  queue sized for a fast one - often all of a 4 MiB piece - and a slow peer could keep a whole streamed
+  piece for many seconds while others had none of it to send. Each peer now gets only as many blocks
+  of streamed pieces as it can deliver within two seconds at the rate it has shown (16 before it has
+  shown one), the rest of its queue going to pieces nobody waits on; and a stream's pieces may open
+  beyond the active-piece limit, up to twice it, since with 4 MiB pieces that byte budget leaves only
+  eight. In a local swarm with 4 MiB pieces, a player's first read waited under 0.6 seconds instead of
+  7 to 20, and no read waited more than 4; against Debian's swarm, a seek played after 3.3 seconds
+  instead of 7.4.
+- **Web seeds fetch what streams need first, and race slow sources.** They took pieces in index order,
+  skipping any peers were fetching; they now take the pieces open streams need, in order - the two a
+  stream waits on most even when peers have them. Each source's time per piece is measured, the most
+  wanted piece goes to the fastest free source, and a piece a slower source has held as long as a faster
+  one takes for a whole piece is asked of the faster one too.
+- The HTTP stream server logs, for each range, how long its reads of the torrent and its writes to the
+  player took and how long the connection had been silent when it ended, and every read that waits
+  half a second or more: enough to tell a torrent that kept a player waiting from a player whose buffer
+  was full.
 
 ### Fixed
 
+- **`AddTorrentOptions.FileSelections` is applied**, and adding a torrent file applies
+  `AdditionalTrackers` and `AdditionalWebSeeds`, which only the magnet path did. The selection is
+  applied before the torrent starts and over resume data and a magnet's `so=`; for a magnet it waits
+  for the metadata. A list of the wrong length is an `ArgumentException` for a torrent file, and is
+  ignored with a warning for a magnet.
+- **Handshakes and encryption.** An incoming MSE connection reads the rest of a handshake its first
+  payload did not hold and keeps the bytes after it; a plaintext reply to an outgoing MSE attempt is
+  handled, and refused when encryption is required; incoming connections honour `Require` and
+  `Refuse`; MSE uses the truncated v2 hash for v2 and hybrid torrents (BEP 52). One deadline bounds a
+  whole handshake attempt, and connection slots cannot be over-subscribed by concurrent callers.
+- **uTP.** An incoming SYN is ignored when incoming uTP is disabled; a disposed stream keeps retrying
+  its FIN until it closes or times out; SACK loss evidence counts only packets that were sent; each UDP
+  send owns its packet buffer; a FIN drained from the reorder buffer always delivers its end of stream.
+- **Verification and storage.** BEP 30 proofs are authenticated against the trusted root before any
+  peer-supplied hash is stored; hybrid torrents verify each piece against both its v2 and v1 hashes;
+  pieces are checked for complete blocks before hashing. Bytes of a verified piece in a deselected file
+  are written rather than dropped; reads of missing or short files fail instead of returning zeros.
+  Resume data records each file's length and modification time and is not trusted for a file changed
+  since; invalid resume data is rejected. A full disk is reported as such.
+- **Requests and peer input.** Request bookkeeping removes only the request it was given; uploads to a
+  choked peer honour the allowed-fast set, computed per BEP 6. Fixed-length messages, bitfields, Have
+  indices, fast-extension, `ut_metadata` and extension handshake messages are validated, and a peer
+  that breaks them is disconnected. Web seed blocks cancel peers' requests for them, and web seed
+  downloads stop once their piece is verified however it was won.
+- **Web seeds (BEP 19)** are HTTP and HTTPS only, requested as identity with a 30-second timeout; a 206
+  must carry the range asked for; each piece is verified before it is handed over, and a source whose
+  piece fails is retired.
+- **Streaming.** A stream starts at its file's recorded offset, so v2 files after padding read the right
+  bytes; reads are single-flight and disposing a stream cancels the read in progress; stopping a torrent
+  closes its streams. The HTTP server rejects malformed requests - bad tokens, control characters,
+  conflicting or duplicate length, host or range headers.
+- **Lifecycles.** Engine initialize, stop, remove and dispose are serialized, and dispose waits for
+  every torrent to drain; stopping a torrent attempts every component and reports the failures
+  together; the metadata rebuild settles before `MetadataReceived` fires; one event subscriber that
+  throws no longer keeps the others from hearing.
+- **DHT, trackers and discovery.** DHT replies must come from the queried endpoint, and node IDs,
+  targets, info hashes and ports are validated; BEP 44 items are stored as snapshots with bounded salts
+  and put counters, and Ed25519 rejects small-order points; BEP 51 crawling cannot cycle forever or
+  outlive the DHT. UDP tracker replies must come from the tracker. Private torrents take no peers from
+  DHT or LSD (BEP 27), and hole-punching cannot bridge public peers into a local network or bypass
+  connection limits.
+- **Proxies.** `ForceProxy` is honoured by peers, web seeds, HTTP trackers and magnet fetches, disables
+  NAT-PMP and LSD as well as UPnP, and fails rather than connecting directly; SOCKS5 resolves tracker
+  names remotely and accepts UDP replies only from the relay.
+- **NAT mappings.** UPnP and NAT-PMP mappings retry lost datagrams, reject malformed or unrelated
+  replies, renew at the granted lifetime and port, and announce the mapped external port. UPnP
+  descriptions are parsed without external entities or oversized documents.
+- **Bandwidth limiting** is fair and exact: requests are checked and reserved as one operation, a new
+  request cannot spend quota ahead of waiters, and granted users go behind blocked ones each round.
+  Web seed downloads are metered. v2 file trees and hybrid layouts are validated, and v2-only torrents
+  get bandwidth channels of their own.
 - Blocklists distinguish IPv4 and IPv6 ranges and normalize mapped IPv4 addresses, closing a filter
   bypass. IPv6 text ranges are parsed correctly; reversed or mixed-family ranges are ignored.
 - GeoIP reloads replace the entire database atomically. Invalid, truncated or cancelled loads keep

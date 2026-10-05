@@ -21,7 +21,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp 5.0.0 is a major release. Breaking: Settings sub-objects are get-only; mutate their properties instead of replacing them. ConnectionSettings.PreferUtpRatioPercent and UtpWarmupSeconds were removed. Custom IAlerts implementations must provide DroppedAlertCount. Adds torrent identity and magnet helpers, transfer and lifetime statistics, proxy capability reporting, and configurable transfer and alert policies. Fixes uTP SACK emission, congestion and timeout recovery, transport fallback, request limits, and web-seed retries. See https://github.com/ligenq/PeerSharp/blob/v5.0.0/CHANGELOG.md for migration notes.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp 5.1.0 makes streaming to other devices work well: HttpStreamServer is socket-based and can serve a TV or cast receiver on the network, with an access token, CORS and files served beside the stream; Settings.Streaming tunes read-ahead and waits; a stream's pieces are fetched first, from every peer and web seed that has them, and spread across the swarm. It fixes uTP connections that stopped receiving, and hardens handshakes and encryption, piece verification, peer and DHT input, proxies, NAT mappings, bandwidth limiting, resume data and engine lifecycles. Passing a bare null as HttpStreamServer's third constructor argument is now ambiguous. See https://github.com/ligenq/PeerSharp/blob/v5.1.0/CHANGELOG.md.</PackageReleaseNotes>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<IsTrimmable>true</IsTrimmable>
 		<!-- iOS allows no code generation at run time, so an app there is compiled ahead of time in
@@ -29,7 +29,7 @@
 		     dynamic code that would fail under AOT fails the build instead. -->
 		<IsAotCompatible>true</IsAotCompatible>
 		<EnablePackageValidation>true</EnablePackageValidation>
-		<PackageValidationBaselineVersion>4.0.0</PackageValidationBaselineVersion>
+		<PackageValidationBaselineVersion>5.0.0</PackageValidationBaselineVersion>
 	</PropertyGroup>
 
 	<ItemGroup>
