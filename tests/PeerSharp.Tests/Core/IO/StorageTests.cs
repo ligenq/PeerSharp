@@ -365,11 +365,14 @@ public class StorageTests : IAsyncLifetime
         }
     }
 
-    [Fact]
-    public async Task WriteAsync_DiskFull_ThrowsStorageException()
+    [Theory]
+    [InlineData(unchecked((int)0x80070070))]
+    [InlineData(unchecked((int)0x80070027))]
+    [InlineData(28)]
+    public async Task WriteAsync_DiskFull_ThrowsStorageException(int errorCode)
     {
         var ioException = new IOException("Disk full");
-        ioException.HResult = unchecked((int)0x80070070); // ERROR_DISK_FULL
+        ioException.HResult = errorCode;
         using var handleCache = new ThrowingHandleCache { ToThrow = ioException };
         var validator = new PathValidator(_tempDir);
         var storage = new Storage(_metadata, _tempDir, validator, handleCache, enableSparseFiles: false);
@@ -378,6 +381,38 @@ public class StorageTests : IAsyncLifetime
         var ex = await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
         Assert.Equal("Disk full", ex.Message);
         Assert.False(ex.IsRecoverable);
+    }
+
+    [Fact]
+    public async Task WriteAsync_LinuxFullDevice_ReportsNonRecoverableDiskFull()
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Requires the Linux /dev/full device.");
+        using var handleCache = new FullDeviceHandleCache();
+        await using var storage = new Storage(_metadata, _tempDir, new PathValidator(_tempDir), handleCache, enableSparseFiles: false);
+        await storage.InitAsync();
+
+        var ex = await Assert.ThrowsAsync<StorageException>(() => storage.WriteAsync(0, new byte[10]).AsTask());
+        Assert.Equal("Disk full", ex.Message);
+        Assert.False(ex.IsRecoverable);
+        Assert.Equal(28, Assert.IsType<IOException>(ex.InnerException).HResult);
+    }
+
+    private sealed class FullDeviceHandleCache : IFileHandleCache
+    {
+        public void CloseTorrentHandles(string rootPath) { }
+        public void Dispose() { }
+        public ValueTask<IFileHandleLease> GetHandleAsync(string path, bool writable, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<IFileHandleLease>(new FullDeviceLease(File.OpenHandle("/dev/full", FileMode.Open, FileAccess.Write)));
+        }
+
+        private sealed class FullDeviceLease(SafeFileHandle handle) : IFileHandleLease
+        {
+            public SafeFileHandle Handle { get; } = handle;
+            public string Path => "/dev/full";
+            public void Dispose() => Handle.Dispose();
+        }
     }
 
     [Fact]
@@ -454,7 +489,7 @@ public class StorageTests : IAsyncLifetime
     }
 
     [Fact(Timeout = 30000)]
-    public async Task Read_SkippedFile_ReturnsZeros()
+    public async Task Read_MissingSkippedFile_ReportsMissingData()
     {
         var selection = new List<FileSelection>
         {
@@ -465,9 +500,7 @@ public class StorageTests : IAsyncLifetime
         await _storage.InitAsync(selection);
 
         // Read from file2 which is skipped
-        byte[] data = await _storage.ReadAsync(1500, 100);
-
-        Assert.All(data, b => Assert.Equal(0, b));
+        await Assert.ThrowsAsync<StorageException>(() => _storage.ReadAsync(1500, 100));
     }
 
     [Fact(Timeout = 30000)]
@@ -504,7 +537,7 @@ public class StorageTests : IAsyncLifetime
     }
 
     [Fact(Timeout = 30000)]
-    public async Task UpdateFileSelection_DisablesWrites()
+    public async Task UpdateFileSelection_PreservesInFlightWrites()
     {
         var selection = new List<FileSelection>
         {
@@ -523,7 +556,7 @@ public class StorageTests : IAsyncLifetime
         _handleCache.CloseTorrentHandles(_tempDir);
 
         byte[] file2Data = File.ReadAllBytes(Path.Combine(_tempDir, "folder", "file2.txt"));
-        Assert.All(file2Data.Take(100), b => Assert.Equal(0, b));
+        Assert.Equal(data, file2Data.AsSpan(0, data.Length).ToArray());
     }
 
     private static byte[] BuildTorrentWithAttrPaddingPath(string paddingPath)

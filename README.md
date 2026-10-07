@@ -28,7 +28,7 @@ polling statistics, and proxy capability reporting.
 - **Protocol Encryption:** MSE (Message Stream Encryption) with configurable enforcement modes.
 - **NAT Traversal:** UPnP, NAT-PMP, and Holepunch (BEP 55) for connectivity behind NATs.
 - **Bandwidth Control:** Per-torrent and global upload/download/disk I/O rate limiting.
-- **Proxy Support:** SOCKS5 and HTTP proxy support with authentication. Only SOCKS5 can carry UDP, so an HTTP proxy selected for that traffic makes DHT and uTP refuse to start and UDP tracker requests fail rather than send around it.
+- **Proxy Support:** SOCKS5 and HTTP proxy support with authentication. Only SOCKS5 can carry UDP, so an HTTP proxy selected for that traffic makes DHT and uTP refuse to start and UDP tracker requests fail rather than send around it. SOCKS5 resolves UDP tracker names remotely. Proxied DHT bootstrap requires saved nodes or IP addresses in `Dht.BootstrapNodes`; hostname bootstrap is skipped to prevent local DNS leaks. WebTorrent sessions reject peer proxy configurations because the WebRTC adapter does not support proxy routing.
 - **IP Blocklist & GeoIP:** Block peers by IP range and label connected peers by country.
 - **One Error Model:** Everything the library reports as its own failure derives from `PeerSharpException`, so a malformed torrent, a refused tracker and an unwritable disk are told apart by type rather than by message.
 - **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.
@@ -39,7 +39,7 @@ polling statistics, and proxy capability reporting.
 ### Installation
 
 ```bash
-dotnet add package PeerSharp --version 5.0.0
+dotnet add package PeerSharp --version 5.1.0
 ```
 
 Requires .NET 10.0 or later.
@@ -49,7 +49,7 @@ Requires .NET 10.0 or later.
 Each GitHub release includes SPDX SBOMs for `PeerSharp` and `PeerSharp.WebTorrent` alongside the NuGet and symbol packages. Release packages have signed GitHub build-provenance and SBOM attestations. After downloading a package, verify its origin with the GitHub CLI:
 
 ```bash
-gh attestation verify PeerSharp.5.0.0.nupkg --repo ligenq/PeerSharp
+gh attestation verify PeerSharp.5.1.0.nupkg --repo ligenq/PeerSharp
 ```
 
 ### Basic Usage
@@ -348,6 +348,25 @@ await engine.ResumeAsync();
 var stream = await torrent.OpenStreamAsync(fileIndex: 0);
 ```
 
+A stream fetches the pieces ahead of its read position first, along with the start and end of the
+file where containers keep their indexes. Several streams can be open at once, which is what a player
+seeking or fetching an index does; the torrent returns to its configured strategy when the last one
+closes. How far ahead to fetch and how long to wait are in `settings.Streaming`.
+
+To hand a file to a player, serve it over HTTP. By default the server listens on loopback for a player
+on the same device. To stream to a Chromecast, a TV or another computer, bind it to this device's
+address on that network; the URL then carries a generated access token.
+
+```csharp
+using var server = new HttpStreamServer(torrent, fileIndex: 0, new HttpStreamServerOptions
+{
+    BindAddress = IPAddress.Parse("192.168.1.20"),
+});
+server.Start();
+
+// Give the player server.Url, and a cast receiver server.ContentType as well.
+```
+
 ### Adding Peers Directly
 
 Discovery finds peers on its own, but some are only reachable if you say so — a machine on the same
@@ -382,7 +401,7 @@ magnet's metadata fetch and stop, `--run-for <s>` for an unattended run that exi
 PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
 
 ```bash
-dotnet add package PeerSharp.WebTorrent --version 5.0.0
+dotnet add package PeerSharp.WebTorrent --version 5.1.0
 ```
 
 ```csharp

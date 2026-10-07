@@ -76,24 +76,29 @@ internal class SuperSeedManager
             return;
         }
 
-        int pieceToGive = SelectPieceForPeer(peer);
-        if (pieceToGive < 0)
-        {
-            _logger.LogDebug("SuperSeed: No suitable piece to give to {RemoteEndPoint}", peer.RemoteEndPoint);
-            return;
-        }
-
+        int pieceToGive;
         lock (_lock)
         {
+            if (!_assignedPieces.TryGetValue(peer, out int current)) return;
+            if (current >= 0) return;
+            pieceToGive = SelectPieceForPeer(peer);
+            if (pieceToGive < 0) return;
             _assignedPieces[peer] = pieceToGive;
-
-            // Only track origin if this is the first peer to get this piece
             _pieceOrigin.TryAdd(pieceToGive, peer);
         }
 
         // Send HAVE for this piece
         var msg = new PeerMessage(MessageId.Have) { HavePieceIndex = pieceToGive };
-        await peer.SendMessageAsync(msg).ConfigureAwait(false);
+        try { await peer.SendMessageAsync(msg).ConfigureAwait(false); }
+        catch
+        {
+            lock (_lock)
+            {
+                if (_assignedPieces.TryGetValue(peer, out int assigned) && assigned == pieceToGive) _assignedPieces[peer] = -1;
+                if (_pieceOrigin.TryGetValue(pieceToGive, out var origin) && ReferenceEquals(origin, peer)) _pieceOrigin.TryRemove(pieceToGive, out _);
+            }
+            throw;
+        }
 
         _logger.LogDebug("SuperSeed: Assigned piece {PieceIndex} to {RemoteEndPoint}", pieceToGive, peer.RemoteEndPoint);
     }
@@ -120,29 +125,18 @@ internal class SuperSeedManager
             return;
         }
 
-        if (!_peerPieces.TryGetValue(peer, out var peerHas))
-        {
-            peerHas = [];
-            _peerPieces[peer] = peerHas;
-        }
-
+        var released = new HashSet<IPeerCommunication>();
         lock (_lock)
         {
-            for (int i = 0; i < peerPieces.Count; i++)
-            {
-                if (peerPieces.HasPiece(i))
+            if (!_peerPieces.TryGetValue(peer, out var peerHas)) return;
+            for (int i = 0; i < Math.Min(peerPieces.Count, _pieceSightings.Length); i++)
+                if (peerPieces.HasPiece(i) && peerHas.Add(i))
                 {
-                    peerHas.Add(i);
-
-                    // Check if this piece was distributed
-                    if (_pieceOrigin.TryGetValue(i, out var originalPeer) && originalPeer != peer)
-                    {
-                        _pieceSightings[i]++;
-                        _distributedPieces.Add(i);
-                    }
+                    var original = RecordDistributionLocked(peer, i);
+                    if (original != null) released.Add(original);
                 }
-            }
         }
+        _ = ReassignAfterBitfieldAsync(released).ContinueWith(static task => _ = task.Exception, TaskScheduler.Default);
     }
 
     /// <summary>
@@ -158,8 +152,11 @@ internal class SuperSeedManager
         }
 
         // Track this peer
-        _peerPieces.TryAdd(peer, []);
-        _assignedPieces.TryAdd(peer, -1);
+        lock (_lock)
+        {
+            _peerPieces.TryAdd(peer, []);
+            _assignedPieces.TryAdd(peer, -1);
+        }
 
         // After handshake, give them their first piece
         // This is done asynchronously after HaveNone is sent
@@ -171,10 +168,13 @@ internal class SuperSeedManager
     /// </summary>
     public void HandlePeerDisconnected(IPeerCommunication peer)
     {
-        _assignedPieces.TryRemove(peer, out _);
-        _peerPieces.TryRemove(peer, out _);
-
-        // Don't remove from _pieceOrigin - we still want to track piece distribution
+        lock (_lock)
+        {
+            _assignedPieces.TryRemove(peer, out _);
+            _peerPieces.TryRemove(peer, out _);
+            foreach (var piece in _pieceOrigin.Where(pair => ReferenceEquals(pair.Value, peer)).Select(pair => pair.Key).ToArray())
+                _pieceOrigin.TryRemove(piece, out _);
+        }
     }
 
     /// <summary>
@@ -194,36 +194,36 @@ internal class SuperSeedManager
             return;
         }
 
-        // Track that this peer has this piece
-        if (_peerPieces.TryGetValue(peer, out var peerHas))
+        IPeerCommunication? original;
+        lock (_lock)
         {
-            lock (_lock)
-            {
-                peerHas.Add(pieceIndex);
-            }
+            if (!_peerPieces.TryGetValue(peer, out var peerHas) || !peerHas.Add(pieceIndex)) return;
+            original = RecordDistributionLocked(peer, pieceIndex);
         }
+        if (original != null) await AssignPieceToPeerAsync(original).ConfigureAwait(false);
+    }
 
-        // Check if we gave this piece to a different peer
-        if (_pieceOrigin.TryGetValue(pieceIndex, out var originalPeer) && originalPeer != peer)
+    private IPeerCommunication? RecordDistributionLocked(IPeerCommunication peer, int pieceIndex)
+    {
+        if (!_pieceOrigin.TryGetValue(pieceIndex, out var original) || ReferenceEquals(original, peer)) return null;
+        _pieceSightings[pieceIndex]++;
+        _distributedPieces.Add(pieceIndex);
+        if (_assignedPieces.TryGetValue(original, out int assigned) && assigned == pieceIndex)
         {
-            // This piece has been distributed! Increment sighting count
-            int newSightings;
-            lock (_lock)
-            {
-                _pieceSightings[pieceIndex]++;
-                newSightings = _pieceSightings[pieceIndex];
-                _distributedPieces.Add(pieceIndex);
-            }
-
-            _logger.LogInformation("SuperSeed: Piece {PieceIndex} distributed! Seen by {RemoteEndPoint} (sightings: {Sightings})", pieceIndex, peer.RemoteEndPoint, newSightings);
-
-            // Check if the original peer's assigned piece was this one
-            if (_assignedPieces.TryGetValue(originalPeer, out var assignedPiece) && assignedPiece == pieceIndex)
-            {
-                // Give the original peer a new piece
-                await AssignPieceToPeerAsync(originalPeer).ConfigureAwait(false);
-            }
+            if (_peerPieces.TryGetValue(original, out var pieces)) pieces.Add(pieceIndex);
+            _assignedPieces[original] = -1;
+            return original;
         }
+        return null;
+    }
+
+    private async Task ReassignAfterBitfieldAsync(IEnumerable<IPeerCommunication> peers)
+    {
+        try
+        {
+            foreach (var peer in peers) await AssignPieceToPeerAsync(peer).ConfigureAwait(false);
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "SuperSeed: Failed to advertise the next piece"); }
     }
 
     /// <summary>

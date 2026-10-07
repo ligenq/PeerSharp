@@ -7,6 +7,40 @@ namespace PeerSharp.Tests.Core.Extensions;
 
 public class UtHolepunchTests
 {
+    [Theory]
+    [InlineData(9, 0, 1234, 8)]
+    [InlineData(1, 2, 1234, 8)]
+    [InlineData(1, 0, 0, 8)]
+    [InlineData(1, 0, 1234, 9)]
+    [InlineData(2, 0, 1234, 11)]
+    public async Task HandleMessage_InvalidFieldsAreIgnored(int id, int addressType, int port, int length)
+    {
+        var listener = new MockPeerListener();
+        var handler = new UtHolepunch(new MockPeerCommunication { Listener = listener });
+        byte[] message = new byte[length];
+        message[0] = (byte)id;
+        message[1] = (byte)addressType;
+        message[2] = 1;
+        message[6] = (byte)(port >> 8);
+        message[7] = (byte)port;
+        await handler.HandleMessageAsync(message);
+        Assert.Null(listener.LastHolepunchId);
+    }
+
+    [Fact]
+    public void SendConnect_IncludesZeroErrorFieldRequiredByBep55()
+    {
+        var peer = new MockPeerCommunication();
+        var handler = new UtHolepunch(peer);
+        var handshake = new ExtensionHandshake();
+        handshake.MessageIds[UtHolepunch.Name] = 4;
+        handler.Init(handshake);
+        handler.SendConnect(new IPEndPoint(IPAddress.Parse("1.2.3.4"), 1234));
+        byte[] payload = Assert.Single(peer.SentMessages).Data;
+        Assert.Equal(13, payload.Length);
+        Assert.Equal(new byte[4], payload[9..]);
+    }
+
     private class MockPeerListener : IPeerListener
     {
         public UtHolepunch.MsgId? LastHolepunchId { get; private set; }
@@ -329,7 +363,7 @@ public class UtHolepunchTests
     }
 
     [Fact]
-    public async Task HandleMessage_ErrorWithTruncatedErrorCode_StillNotifiesWithNoneError()
+    public async Task HandleMessage_ErrorWithTruncatedErrorCode_DoesNotNotify()
     {
         // Arrange
         var listener = new MockPeerListener();
@@ -342,9 +376,8 @@ public class UtHolepunchTests
         // Act
         await utHolepunch.HandleMessageAsync(data);
 
-        // Assert - should still notify with ErrorCode.None since error bytes are missing
-        Assert.Equal(UtHolepunch.MsgId.Error, listener.LastHolepunchId);
-        Assert.Equal(UtHolepunch.ErrorCode.None, listener.LastHolepunchError);
+        Assert.Null(listener.LastHolepunchId);
+        Assert.Null(listener.LastHolepunchError);
     }
 
     [Fact]

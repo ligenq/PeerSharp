@@ -373,6 +373,78 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
         Assert.Equal(nodes[1].Id, loaded.Nodes[1].Id);
         Assert.Equal(nodes[1].EndPoint, loaded.Nodes[1].EndPoint);
     }
+
+    [Fact]
+    public async Task FailedSaveLeavesThePreviousCompleteSnapshot()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        var hash = InfoHash.CreateRandom();
+        await persistence.SaveAsync(new SavedTorrentEntry(hash, [1], "magnet:old", Options: new SavedTorrentOptions(DownloadPath: "old")));
+        await Assert.ThrowsAsync<ArgumentException>(() => persistence.SaveAsync(
+            new SavedTorrentEntry(hash, [2], "magnet:new", Options: new SavedTorrentOptions(RatioLimit: float.NaN))));
+        var loaded = Assert.Single(await persistence.LoadAllAsync());
+        Assert.Equal(new byte[] { 1 }, loaded.TorrentFileData);
+        Assert.Equal("magnet:old", loaded.MagnetLink);
+        Assert.Equal("old", loaded.Options!.DownloadPath);
+        Assert.Single(Directory.GetDirectories(Path.Combine(_tempDir, "torrents", hash.ToHexStringUpper())));
+    }
+
+    [Fact]
+    public async Task AnUnpublishedSnapshotFromAnInterruptedSaveIsIgnored()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        var hash = InfoHash.CreateRandom();
+        await persistence.SaveAsync(new SavedTorrentEntry(hash, [1], "magnet:old"));
+        string orphan = Path.Combine(_tempDir, "torrents", hash.ToHexStringUpper(), "snapshot-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(orphan);
+        await File.WriteAllBytesAsync(Path.Combine(orphan, "torrent.torrent"), [2]);
+        var loaded = Assert.Single(await persistence.LoadAllAsync());
+        Assert.Equal(new byte[] { 1 }, loaded.TorrentFileData);
+        Assert.Equal("magnet:old", loaded.MagnetLink);
+        await persistence.SaveAsync(new SavedTorrentEntry(hash, MagnetLink: "magnet:updated"));
+        Assert.False(Directory.Exists(orphan));
+        Assert.Equal(new byte[] { 1 }, Assert.Single(await persistence.LoadAllAsync()).TorrentFileData);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ConcurrentReadersAlwaysSeeMatchingSnapshotFiles()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        var hash = InfoHash.CreateRandom();
+        await persistence.SaveAsync(new SavedTorrentEntry(hash, [0], "0"));
+        var writes = Task.Run(async () =>
+        {
+            for (byte i = 1; i < 20; i++) await persistence.SaveAsync(new SavedTorrentEntry(hash, [i], i.ToString()));
+        });
+        do
+        {
+            var loaded = Assert.Single(await persistence.LoadAllAsync());
+            Assert.Equal(loaded.TorrentFileData![0].ToString(), loaded.MagnetLink);
+        } while (!writes.IsCompleted);
+        await writes;
+    }
+
+    [Fact]
+    public async Task CancelledDhtLoadPropagatesCancellationEvenWhenTheFileIsAbsent()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => persistence.LoadDhtStateAsync(cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => persistence.LoadAllAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task DhtLoadSkipsMalformedNodesWithoutDiscardingHealthyOnes()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "dht.json"),
+            "{\"NodeId\":\"AA\",\"Nodes\":[null,{\"Id\":\"AA\",\"Ip\":\"192.0.2.1\",\"Port\":1},{\"Id\":\"" + new string('A', 40) + "\",\"Ip\":\"192.0.2.2\",\"Port\":2}]}");
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        var state = await persistence.LoadDhtStateAsync();
+        Assert.NotNull(state);
+        Assert.Null(state.NodeId);
+        Assert.Equal(2, Assert.Single(state.Nodes).EndPoint.Port);
+    }
 }
 
 

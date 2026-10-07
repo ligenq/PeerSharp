@@ -9,58 +9,58 @@ on:
         default: false
 
 permissions:
-  contents: write
-  id-token: write # required for Trusted Publishing: enables GitHub OIDC token issuance
-  attestations: write
+  contents: read
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact-id: ${{ steps.candidates.outputs.artifact-id }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
           dotnet-version: 10.0.400
 
-      - name: Read version from Directory.Build.props
+      - name: Read and validate version
         id: version
         run: |
           VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' Directory.Build.props)
-          if [ -z "$VERSION" ]; then
-            echo "::error::Could not read <Version> from Directory.Build.props"
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "::error::Invalid release version in Directory.Build.props"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Releasing version $VERSION"
 
-      - name: Verify release branch
+      - name: Verify release branch and tag
         if: ${{ !inputs.dry_run }}
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then
             echo "::error::Releases must run from main. Current ref is $GITHUB_REF."
             exit 1
           fi
-
-      - name: Verify release tag
-        if: ${{ !inputs.dry_run }}
-        run: |
           git fetch --tags --quiet
-          TAG="v${{ steps.version.outputs.version }}"
+          TAG="v$RELEASE_VERSION"
           if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
             TAG_COMMIT=$(git rev-list -n 1 "$TAG")
             if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
               echo "::error::Tag $TAG points to $TAG_COMMIT, not the release commit $GITHUB_SHA."
               exit 1
             fi
-            echo "Tag $TAG already points to this release commit; the GitHub release will reuse it."
           fi
 
       - name: Restore
@@ -75,29 +75,59 @@ jobs:
         run: dotnet build PeerSharp.slnx --no-restore --configuration Release -warnaserror
 
       - name: Test
-        # The repository uses Microsoft.Testing.Platform. Its .NET 10 CLI requires an explicit
-        # solution option and does not support VSTest's --logger argument.
+        # Microsoft.Testing.Platform requires the explicit solution option.
         run: dotnet test --solution PeerSharp.slnx --no-build --configuration Release --no-ansi --output Normal
 
       - name: Pack
         run: |
           dotnet pack src/PeerSharp/PeerSharp.csproj --no-build --configuration Release --output packages
           dotnet pack src/PeerSharp.WebTorrent/PeerSharp.WebTorrent.csproj --no-build --configuration Release --output packages
-          ls -l packages
 
       - name: Generate and validate release SBOMs
         shell: pwsh
-        run: ./tools/generate-release-sboms.ps1 -Version '${{ steps.version.outputs.version }}'
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: ./tools/generate-release-sboms.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Hash release candidates
+        run: sha256sum packages/*.nupkg packages/*.snupkg packages/*.spdx.json > packages/SHA256SUMS
 
       - name: Upload release candidates
+        id: candidates
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: PeerSharp-${{ steps.version.outputs.version }}-release
           path: packages/*
           if-no-files-found: error
 
+  publish:
+    needs: build
+    if: ${{ !inputs.dry_run && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write # NuGet Trusted Publishing and attestations
+      attestations: write
+    env:
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: 10.0.400
+
+      - name: Download this run's release candidates
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: packages
+          merge-multiple: true
+
+      - name: Verify release candidate hashes
+        run: sha256sum --check packages/SHA256SUMS
+
       - name: Attest release provenance
-        if: ${{ !inputs.dry_run }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
@@ -106,54 +136,43 @@ jobs:
             packages/*.spdx.json
 
       - name: Attest PeerSharp SBOM
-        if: ${{ !inputs.dry_run }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
-            packages/PeerSharp.${{ steps.version.outputs.version }}.nupkg
-            packages/PeerSharp.${{ steps.version.outputs.version }}.snupkg
-          sbom-path: packages/PeerSharp.${{ steps.version.outputs.version }}.spdx.json
+            packages/PeerSharp.${{ needs.build.outputs.version }}.nupkg
+            packages/PeerSharp.${{ needs.build.outputs.version }}.snupkg
+          sbom-path: packages/PeerSharp.${{ needs.build.outputs.version }}.spdx.json
 
       - name: Attest PeerSharp.WebTorrent SBOM
-        if: ${{ !inputs.dry_run }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
-            packages/PeerSharp.WebTorrent.${{ steps.version.outputs.version }}.nupkg
-            packages/PeerSharp.WebTorrent.${{ steps.version.outputs.version }}.snupkg
-          sbom-path: packages/PeerSharp.WebTorrent.${{ steps.version.outputs.version }}.spdx.json
+            packages/PeerSharp.WebTorrent.${{ needs.build.outputs.version }}.nupkg
+            packages/PeerSharp.WebTorrent.${{ needs.build.outputs.version }}.snupkg
+          sbom-path: packages/PeerSharp.WebTorrent.${{ needs.build.outputs.version }}.spdx.json
 
-      # Trusted Publishing: exchange the GitHub OIDC token for a short-lived (1h) NuGet API
-      # key. No stored secrets; nuget.org validates this workflow against the trusted
-      # publishing policy configured for the account. Runs right before the push because
-      # the temporary key expires.
       - name: NuGet login (OIDC -> temp API key)
-        if: ${{ !inputs.dry_run }}
         uses: NuGet/login@ebc737b6fc418a6ca0073cf116ec8dc156d8b81e # v1
         id: nuget-login
         with:
-          user: ligenq # nuget.org profile name (not email)
+          user: ligenq
 
-      # The glob matches .nupkg only, but `dotnet nuget push` also uploads the matching .snupkg
-      # when one sits beside it - that is the default, and --no-symbols is what opts out. Do not
-      # add a separate *.snupkg push: it would be rejected as a duplicate.
+      # dotnet nuget push also uploads the matching symbol package.
       - name: Push to NuGet
-        if: ${{ !inputs.dry_run }}
-        run: >
-          dotnet nuget push "packages/*.nupkg"
-          --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
-          --source https://api.nuget.org/v3/index.json
-          --skip-duplicate
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push "packages/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
-      - name: Create git tag and GitHub release
-        if: ${{ !inputs.dry_run }}
+      - name: Create or complete GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "v${{ steps.version.outputs.version }}"
-          packages/*.nupkg
-          packages/*.snupkg
-          packages/*.spdx.json
-          --title "v${{ steps.version.outputs.version }}"
-          --generate-notes
-          --target "${{ github.sha }}"
+        run: |
+          TAG="v$RELEASE_VERSION"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # A retry after a partially successful upload completes the same verified release tag.
+            gh release upload "$TAG" packages/*.nupkg packages/*.snupkg packages/*.spdx.json \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" packages/*.nupkg packages/*.snupkg packages/*.spdx.json \
+              --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --target "$GITHUB_SHA"
+          fi

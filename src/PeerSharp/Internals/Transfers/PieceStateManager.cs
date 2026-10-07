@@ -142,9 +142,9 @@ internal sealed class PieceStateManager : IDisposable
 
         foreach (var state in toRemove)
         {
-            if (TryRemovePiece(state.Index, out _))
+            if (state.TryDisposeIfInactive() && _activePieces.TryRemove(new KeyValuePair<int, PieceState>(state.Index, state)))
             {
-                state.Dispose();
+                Interlocked.Decrement(ref _activePiecesCount);
                 _logger.LogDebug("Pruned stale piece {PieceIndex} (no active peers)", state.Index);
             }
         }

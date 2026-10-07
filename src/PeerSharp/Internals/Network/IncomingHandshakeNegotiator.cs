@@ -140,7 +140,28 @@ internal static class IncomingHandshakeNegotiator
 
             if (pe.IsComplete && pe.MatchedInfoHash != null && pe.Encryption != null)
             {
-                return new Result(true, pe.ReceivedPayload ?? [], pe.Encryption, new InfoHash(pe.MatchedInfoHash));
+                // IA need not contain a complete handshake. Bytes following it may already have
+                // arrived in the negotiation read and must advance the cipher exactly once.
+                byte[] trailing = pe.TrailingData;
+                pe.Encryption.Decrypt(trailing);
+                byte[] payload = pe.ReceivedPayload ?? [];
+                byte[] handshake = new byte[Math.Max(HandshakeLength, payload.Length + trailing.Length)];
+                payload.CopyTo(handshake, 0);
+                trailing.CopyTo(handshake, payload.Length);
+                int received = payload.Length + trailing.Length;
+                while (received < HandshakeLength)
+                {
+                    int read = await stream.ReadAsync(handshake.AsMemory(received, HandshakeLength - received), cancellationToken).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        return Failed;
+                    }
+
+                    pe.Encryption.Decrypt(handshake.AsSpan(received, read));
+                    received += read;
+                }
+
+                return new Result(true, handshake, pe.Encryption, new InfoHash(pe.MatchedInfoHash));
             }
 
             return Failed;

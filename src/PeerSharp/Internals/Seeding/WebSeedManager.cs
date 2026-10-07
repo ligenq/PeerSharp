@@ -5,12 +5,15 @@ using PeerSharp.Internals.Network;
 using System.Buffers;
 using System.Net;
 using System.Net.Http.Headers;
+using PeerSharp.PiecePicking;
+using PeerSharp.Internals.Bandwidth;
+using PeerSharp.Internals.Peers;
 
 namespace PeerSharp.Internals.Seeding;
 
 /// <summary>
-/// BEP 19: Manages HTTP/FTP web seed downloads for a torrent.
-/// Web seeds allow downloading torrent data from regular HTTP/FTP servers,
+/// BEP 19: Manages HTTP web seed downloads for a torrent.
+/// Web seeds allow downloading torrent data from regular HTTP servers,
 /// providing an alternative to peer-to-peer downloads.
 /// </summary>
 internal sealed class WebSeedManager : IAsyncDisposable
@@ -18,6 +21,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     private const int MaxRetries = 3;
     private const int RetryDelayMs = 5000;
     private const int StreamBufferSize = 8192;
+    internal static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
 
     // Configuration
     private const int WorkerIntervalMs = 1000;
@@ -32,6 +36,18 @@ internal sealed class WebSeedManager : IAsyncDisposable
     private AtomicDisposal _disposal = new();
     private IHttpClient? _testClient;
     private Task? _workerTask;
+    private sealed class DownloadUser : IBandwidthUser
+    {
+        public string Name => "WebSeed";
+        public void AssignBandwidth(int amount) { /* Requests complete through their tasks. */ }
+    }
+    private Task? _stopTask;
+    private bool _stopping;
+    private long _readBytes;
+    private long _sampledBytes;
+    private long _sampleTimestamp;
+    private long _sampledSpeed;
+    private readonly Lock _rateLock = new();
 
     public WebSeedManager(Torrent torrent, IEnumerable<string> urls, TimeProvider timeProvider)
         : this(torrent, urls, timeProvider, NullLogger<WebSeedManager>.Instance)
@@ -43,14 +59,15 @@ internal sealed class WebSeedManager : IAsyncDisposable
         _torrent = torrent;
         _logger = logger;
         _timeProvider = timeProvider;
-        bool isMultiFile = torrent.InfoFile.Info.Files.Count > 1;
+        _sampleTimestamp = timeProvider.GetTimestamp();
+        bool isMultiFile = torrent.InfoFile.Info.IsMultiFile || torrent.InfoFile.Info.Files.Count > 1;
 
         foreach (var url in urls)
         {
             if (Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
-                (uri.Scheme == "http" || uri.Scheme == "https" || uri.Scheme == "ftp"))
+                (uri.Scheme == "http" || uri.Scheme == "https"))
             {
-                _sources.Add(new WebSeedSource(url, isMultiFile));
+                if (!_sources.Any(source => Matches(source, url))) _sources.Add(new WebSeedSource(url, isMultiFile));
                 _logger.LogInformation("Added web seed: {Url}", url);
             }
             else
@@ -66,15 +83,16 @@ internal sealed class WebSeedManager : IAsyncDisposable
     public bool AddSource(string url)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-            (uri.Scheme != "http" && uri.Scheme != "https" && uri.Scheme != "ftp"))
+            (uri.Scheme != "http" && uri.Scheme != "https"))
         {
             return false;
         }
 
-        bool isMultiFile = _torrent.InfoFile.Info.Files.Count > 1;
+        bool isMultiFile = _torrent.InfoFile.Info.IsMultiFile || _torrent.InfoFile.Info.Files.Count > 1;
 
         lock (_lock)
         {
+            _disposal.ThrowIfDisposed(this);
             if (_sources.Any(source => Matches(source, url)))
             {
                 return false;
@@ -108,15 +126,16 @@ internal sealed class WebSeedManager : IAsyncDisposable
     }
 
     private static bool Matches(WebSeedSource source, string url)
-        => source.IsDirectory == url.EndsWith('/')
-            && source.Url.Equals(url.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+        => Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            && source.IsDirectory == WebSeedSource.IsDirectoryUrl(url)
+            && source.Url.Equals(uri.AbsoluteUri, StringComparison.Ordinal);
 
     /// <summary>The URLs currently in use.</summary>
     public IReadOnlyList<string> GetSourceUrls()
     {
         lock (_lock)
         {
-            return [.. _sources.Select(source => source.IsDirectory ? source.Url + "/" : source.Url)];
+            return [.. _sources.Select(source => source.OriginalUrl)];
         }
     }
 
@@ -124,8 +143,16 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         if (_disposal.MarkDisposed())
         {
-            await StopAsync().ConfigureAwait(false);
-            _cts.Dispose();
+            try { await StopAsync().ConfigureAwait(false); }
+            finally
+            {
+                if (_workerTask?.IsCompleted == false)
+                {
+                    var source = _cts;
+                    _ = _workerTask.ContinueWith(_ => source.Dispose(), TaskScheduler.Default);
+                }
+                else _cts.Dispose();
+            }
         }
         GC.SuppressFinalize(this);
     }
@@ -147,36 +174,54 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
     public void Start()
     {
-        if (_sources.Count == 0)
+        lock (_lock)
         {
-            _logger.LogInformation("No valid web seeds configured, WebSeedManager not starting");
-            return;
-        }
+            _disposal.ThrowIfDisposed(this);
+            if (_stopping || (_cts.IsCancellationRequested && _workerTask?.IsCompleted == false))
+            {
+                throw new InvalidOperationException("Web seed downloads are still stopping.");
+            }
+            if (_workerTask?.IsCompleted == false) return;
+            if (_sources.Count == 0)
+            {
+                _logger.LogInformation("No valid web seeds configured, WebSeedManager not starting");
+                return;
+            }
 
-        if (_cts.IsCancellationRequested)
-        {
-            _cts.Dispose();
-            _cts = new CancellationTokenSource();
-        }
+            if (_cts.IsCancellationRequested)
+            {
+                _cts.Dispose();
+                _cts = new CancellationTokenSource();
+            }
 
-        _workerTask = WorkerLoopAsync(_cts.Token);
-        _logger.LogInformation("WebSeedManager started with {Count} sources", _sources.Count);
+            _workerTask = WorkerLoopAsync(_cts.Token);
+            _stopTask = null;
+            _logger.LogInformation("WebSeedManager started with {Count} sources", _sources.Count);
+        }
     }
 
-    public async Task StopAsync()
+    public Task StopAsync()
     {
-        await _cts.CancelAsync().ConfigureAwait(false);
-        if (_workerTask != null)
+        lock (_lock)
         {
-            try
+            if (_stopTask != null) return _stopTask;
+            _stopping = true;
+            _stopTask = StopCoreAsync();
+            return _stopTask;
+        }
+    }
+
+    private async Task StopCoreAsync()
+    {
+        try
+        {
+            await _cts.CancelAsync().ConfigureAwait(false);
+            if (_workerTask != null)
             {
                 await _workerTask.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
             }
-            catch (Exception)
-            {
-                // Expected during cancellation
-            }
         }
+        finally { lock (_lock) { _stopping = false; } }
     }
 
     internal async Task<byte[]> DownloadMultiFilePieceAsync(WebSeedSource source, int pieceIndex, long pieceOffset, int pieceLength, CancellationToken ct)
@@ -236,7 +281,9 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
             // Already known absent from this source, so the piece cannot come from here and the
             // request would only earn another 404.
-            if (source.MissingFiles.Contains(file.Path))
+            bool missing;
+            lock (_lock) { missing = source.MissingFiles.Contains(file.Path); }
+            if (missing)
             {
                 return null!;
             }
@@ -268,14 +315,19 @@ internal sealed class WebSeedManager : IAsyncDisposable
     internal async Task<byte[]?> DownloadSingleFilePieceAsync(WebSeedSource source, long offset, int length, CancellationToken ct)
     {
         // For single-file torrents, the URL points directly to the file
-        var request = new HttpRequestMessage(HttpMethod.Get, source.Url);
+        string url = source.IsDirectory ? BuildFileUrl(source.Url, _torrent.InfoFile.Info.Name) : source.Url;
+        using var timeout = new CancellationTokenSource(RequestTimeout, _timeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new RangeHeaderValue(offset, offset + length - 1);
+        request.Headers.AcceptEncoding.ParseAdd("identity");
 
         var client = GetClient();
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
 
         if (response.StatusCode == HttpStatusCode.PartialContent)
         {
+            if (!MatchesRange(response.Content, offset, length)) return null;
             return await ReadExactContentAsync(response.Content, length, ct).ConfigureAwait(false);
         }
         else if (response.StatusCode == HttpStatusCode.OK)
@@ -300,43 +352,88 @@ internal sealed class WebSeedManager : IAsyncDisposable
         return null!;
     }
 
+    /// <summary>
+    /// The pieces to fetch next, most wanted first: those streams need, in the order they need them,
+    /// then the rest in order.
+    /// </summary>
+    /// <remarks>
+    /// A piece peers are fetching is left to them - except the first
+    /// <see cref="Transfers.RequestScheduler.UrgentStreamingPieces"/> a stream is waiting on, which are
+    /// fetched here too. The first peer to unchoke a stream's torrent is given every block the stream
+    /// wants, and a slow one kept Big Buck Bunny's first megabyte two seconds; whichever answers first
+    /// fills the piece. Before streams were consulted, a torrent's web seeds spent their first seconds
+    /// on the files at its start while a stream waited on a piece hundreds further on.
+    /// </remarks>
     internal List<int> GetNeededPieces(int maxPieces = 10, ICollection<int>? inFlightPieces = null)
     {
         var result = new List<int>();
+        var considered = new HashSet<int>();
         var selection = _torrent.GetFileSelectionSnapshot();
         var fileTransfer = _torrent.FileTransferInternal;
 
-        for (int i = 0; i < _torrent.Pieces.Count; i++)
+        int urgent = 0;
+        foreach (int i in _torrent.StreamingPriorityPieces ?? [])
         {
-            if (inFlightPieces?.Contains(i) == true) continue;
-            // Skip if we already have this piece
-            if (_torrent.Pieces.HasPiece(i))
+            if (result.Count >= maxPieces)
+            {
+                return result;
+            }
+
+            if (!considered.Add(i) || i < 0 || i >= _torrent.Pieces.Count || _torrent.Pieces.HasPiece(i))
             {
                 continue;
             }
 
-            // Skip if piece is not needed based on file selection
-            if (!_torrent.InfoFile.Info.IsPieceNeeded(i, selection))
+            bool isUrgent = urgent++ < Transfers.RequestScheduler.UrgentStreamingPieces;
+            if (inFlightPieces?.Contains(i) != true
+                && _torrent.InfoFile.Info.IsPieceNeeded(i, selection) && CanServePiece(i)
+                && (isUrgent || fileTransfer?.IsPieceActive(i) != true))
+            {
+                result.Add(i);
+            }
+        }
+
+        for (int i = 0; i < _torrent.Pieces.Count && result.Count < maxPieces; i++)
+        {
+            if (considered.Contains(i) || inFlightPieces?.Contains(i) == true || _torrent.Pieces.HasPiece(i))
             {
                 continue;
             }
 
-            // Skip if piece is already being downloaded by peers
-            if (fileTransfer?.IsPieceActive(i) == true)
+            // Not wanted, or peers are already fetching it.
+            if (!_torrent.InfoFile.Info.IsPieceNeeded(i, selection) || fileTransfer?.IsPieceActive(i) == true || !CanServePiece(i))
             {
                 continue;
             }
 
             result.Add(i);
-
-            // Limit the number of pieces to process per iteration
-            if (result.Count >= maxPieces)
-            {
-                break;
-            }
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The pieces streams are waiting on most - the first
+    /// <see cref="Transfers.RequestScheduler.UrgentStreamingPieces"/> not here yet - in the order they
+    /// need them; empty when nothing streams.
+    /// </summary>
+    internal List<int> GetUrgentPieces()
+    {
+        var urgent = new List<int>();
+        foreach (int i in _torrent.StreamingPriorityPieces ?? [])
+        {
+            if (urgent.Count == Transfers.RequestScheduler.UrgentStreamingPieces)
+            {
+                break;
+            }
+
+            if (i >= 0 && i < _torrent.Pieces.Count && !_torrent.Pieces.HasPiece(i) && !urgent.Contains(i))
+            {
+                urgent.Add(i);
+            }
+        }
+
+        return urgent;
     }
 
     internal void SetTestClient(IHttpClient client)
@@ -349,14 +446,18 @@ internal sealed class WebSeedManager : IAsyncDisposable
     private async Task<(byte[]? Data, HttpStatusCode Status)> DownloadFileRangeAsync(
         string url, long offset, int length, CancellationToken ct)
     {
-        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        using var timeout = new CancellationTokenSource(RequestTimeout, _timeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Range = new RangeHeaderValue(offset, offset + length - 1);
+        request.Headers.AcceptEncoding.ParseAdd("identity");
 
         var client = GetClient();
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
 
         if (response.StatusCode == HttpStatusCode.PartialContent)
         {
+            if (!MatchesRange(response.Content, offset, length)) return (null, response.StatusCode);
             return (await ReadExactContentAsync(response.Content, length, ct).ConfigureAwait(false), response.StatusCode);
         }
         else if (response.StatusCode == HttpStatusCode.OK)
@@ -369,32 +470,23 @@ internal sealed class WebSeedManager : IAsyncDisposable
         return (null, response.StatusCode);
     }
 
-    private static async Task<byte[]?> ReadExactContentAsync(HttpContent content, int length, CancellationToken ct)
+    private async Task<byte[]?> ReadExactContentAsync(HttpContent content, int length, CancellationToken ct)
     {
         if (length < 0)
         {
             return null;
         }
 
-        if (content.Headers.ContentLength is long contentLength)
-        {
-            if (contentLength > length)
-            {
-                return null;
-            }
-
-            if (contentLength == length)
-            {
-                return await content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-            }
-        }
+        if (content.Headers.ContentLength is long contentLength && contentLength != length) return null;
 
         var result = new byte[length];
-        await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        await using var stream = new RateLimitedStream(await content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+            new DownloadUser(), _torrent.Bandwidth,
+            [BandwidthManager.GlobalDownload, $"{BandwidthManager.GetTorrentChannelKey(_torrent)}_DL"], []);
         int total = 0;
         while (total < length)
         {
-            int read = await stream.ReadAsync(result.AsMemory(total, length - total), ct).ConfigureAwait(false);
+            int read = await ReadWithDeadlineAsync(stream, result.AsMemory(total, length - total), ct).ConfigureAwait(false);
             if (read == 0)
             {
                 return null;
@@ -405,7 +497,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         byte[] extra = ArrayPool<byte>.Shared.Rent(1);
         try
         {
-            int read = await stream.ReadAsync(extra.AsMemory(0, 1), ct).ConfigureAwait(false);
+            int read = await ReadWithDeadlineAsync(stream, extra.AsMemory(0, 1), ct).ConfigureAwait(false);
             return read == 0 ? result : null;
         }
         finally
@@ -419,9 +511,9 @@ internal sealed class WebSeedManager : IAsyncDisposable
     /// Like libtorrent, accept that and stream-slice the requested range without
     /// buffering the full response.
     /// </summary>
-    private static async Task<byte[]?> ReadRangeFromFullContentAsync(HttpContent content, long offset, int length, CancellationToken ct)
+    private async Task<byte[]?> ReadRangeFromFullContentAsync(HttpContent content, long offset, int length, CancellationToken ct)
     {
-        if (offset < 0 || length < 0)
+        if (offset < 0 || length < 0 || content.Headers.ContentEncoding.Any(encoding => !encoding.Equals("identity", StringComparison.OrdinalIgnoreCase)))
         {
             return null;
         }
@@ -431,7 +523,9 @@ internal sealed class WebSeedManager : IAsyncDisposable
             return null;
         }
 
-        await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        await using var stream = new RateLimitedStream(await content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+            new DownloadUser(), _torrent.Bandwidth,
+            [BandwidthManager.GlobalDownload, $"{BandwidthManager.GetTorrentChannelKey(_torrent)}_DL"], []);
         byte[] scratch = ArrayPool<byte>.Shared.Rent(StreamBufferSize);
         byte[] result = new byte[length];
         try
@@ -440,7 +534,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
             while (skipped < offset)
             {
                 int toRead = (int)Math.Min(scratch.Length, offset - skipped);
-                int read = await stream.ReadAsync(scratch.AsMemory(0, toRead), ct).ConfigureAwait(false);
+                int read = await ReadWithDeadlineAsync(stream, scratch.AsMemory(0, toRead), ct).ConfigureAwait(false);
                 if (read == 0)
                 {
                     return null;
@@ -451,7 +545,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
             int total = 0;
             while (total < length)
             {
-                int read = await stream.ReadAsync(result.AsMemory(total, length - total), ct).ConfigureAwait(false);
+                int read = await ReadWithDeadlineAsync(stream, result.AsMemory(total, length - total), ct).ConfigureAwait(false);
                 if (read == 0)
                 {
                     return null;
@@ -467,31 +561,60 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 
+    private async ValueTask<int> ReadWithDeadlineAsync(Stream stream, Memory<byte> buffer, CancellationToken ct)
+    {
+        using var timeout = new CancellationTokenSource(RequestTimeout, _timeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        int read = await stream.ReadAsync(buffer, linked.Token).ConfigureAwait(false);
+        Interlocked.Add(ref _readBytes, read);
+        return read;
+    }
+
+    internal long SampleDownloadSpeed()
+    {
+        lock (_rateLock)
+        {
+            long now = _timeProvider.GetTimestamp();
+            double seconds = _timeProvider.GetElapsedTime(_sampleTimestamp, now).TotalSeconds;
+            if (seconds <= 0) return _sampledSpeed;
+            long bytes = Interlocked.Read(ref _readBytes);
+            _sampledSpeed = (long)Math.Min(long.MaxValue, (bytes - _sampledBytes) / seconds);
+            _sampledBytes = bytes;
+            _sampleTimestamp = now;
+            return _sampledSpeed;
+        }
+    }
+
     private static string BuildFileUrl(string baseUrl, params string[] paths)
     {
         var segments = paths
             .SelectMany(path => path
                 .Replace('\\', '/')
-                .Split('/', StringSplitOptions.RemoveEmptyEntries));
+                .Split('/', StringSplitOptions.RemoveEmptyEntries)).ToArray();
+        if (segments.Any(segment => segment is "." or "..")) throw new InvalidDataException("Invalid web seed file path.");
 
-        return $"{baseUrl}/{string.Join("/", segments.Select(Uri.EscapeDataString))}";
+        var uri = new UriBuilder(baseUrl);
+        uri.Path = string.Join('/', new[] { uri.Path.TrimEnd('/') }.Concat(segments.Select(Uri.EscapeDataString)));
+        return uri.Uri.AbsoluteUri;
+    }
+
+    private static bool MatchesRange(HttpContent content, long offset, int length)
+    {
+        var range = content.Headers.ContentRange;
+        return range != null && range.Unit.Equals("bytes", StringComparison.OrdinalIgnoreCase)
+            && range.From == offset && range.To == offset + length - 1
+            && (!range.HasLength || range.Length > range.To)
+            && !content.Headers.ContentEncoding.Any(encoding => !encoding.Equals("identity", StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task DownloadPieceAsync(WebSeedSource source, int pieceIndex, CancellationToken ct)
     {
         try
         {
+            long started = _timeProvider.GetTimestamp();
             long pieceSize = _torrent.InfoFile.Info.PieceSize;
             long pieceStart = pieceIndex * pieceSize;
-            long pieceEnd = pieceStart + pieceSize;
-
-            // Handle last piece being smaller
-            if (pieceEnd > _torrent.InfoFile.Info.FullSize)
-            {
-                pieceEnd = _torrent.InfoFile.Info.FullSize;
-            }
-
-            long actualPieceSize = pieceEnd - pieceStart;
+            long actualPieceSize = _torrent.InfoFile.Info.GetPieceSize(pieceIndex);
 
             _logger.LogDebug("Downloading piece {PieceIndex} ({Size} bytes) from {Url}", pieceIndex, actualPieceSize, source.Url);
 
@@ -520,12 +643,46 @@ internal sealed class WebSeedManager : IAsyncDisposable
                 return;
             }
 
+            // Fetched from peers, or from another source racing this one, while this was on its way:
+            // fed in again it would start the piece over.
+            if (_torrent.Pieces.HasPiece(pieceIndex))
+            {
+                RecordSuccess(source, _timeProvider.GetElapsedTime(started));
+                return;
+            }
+
+            var info = _torrent.InfoFile.Info;
+            bool? valid = null;
+            if (info.IsMerkle && _torrent.MerkleTree?.CanVerifyPiece(pieceIndex) == true)
+            {
+                valid = _torrent.MerkleTree.VerifyPiece(pieceIndex, data);
+            }
+            else if (info.IsV2 && info.GetV2ExpectedPieceHash(pieceIndex) != null)
+            {
+                valid = new TorrentPieceCheckerContext(_torrent).VerifyPiece(pieceIndex, data);
+            }
+            else if (info.IsV1 && !info.IsMerkle && info.Pieces.Count > pieceIndex)
+            {
+                valid = info.VerifyV1PieceHash(pieceIndex, data);
+            }
+            if (valid == false)
+            {
+                lock (_lock) { source.IsRetired = true; }
+                RecordFailure(source);
+                _logger.LogWarning("Discarding web seed {Url}: piece {PieceIndex} failed verification", source.Url, pieceIndex);
+                return;
+            }
+            // Missing Merkle proofs are handled by FileTransfer, which keeps the piece pending.
+            RecordSuccess(source, _timeProvider.GetElapsedTime(started));
+
             // Feed blocks to FileTransfer
             const int blockSize = ProtocolConstants.BlockSize;
             int offset = 0;
 
             while (offset < data.Length)
             {
+                ct.ThrowIfCancellationRequested();
+                if (_torrent.Pieces.HasPiece(pieceIndex)) break;
                 int blockLen = Math.Min(blockSize, data.Length - offset);
                 var block = new Block(pieceIndex, offset, blockLen);
                 data.AsSpan(offset, blockLen).CopyTo(block.Buffer);
@@ -536,12 +693,16 @@ internal sealed class WebSeedManager : IAsyncDisposable
                 offset += blockLen;
             }
 
-            RecordSuccess(source);
             _logger.LogDebug("Successfully downloaded piece {PieceIndex} from {Url}", pieceIndex, source.Url);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             // Shutdown - don't count as failure
+        }
+        catch (OperationCanceledException ex)
+        {
+            _logger.LogWarning(ex, "Web seed request timed out for piece {PieceIndex} from {Url}", pieceIndex, source.Url);
+            RecordFailure(source);
         }
         catch (HttpRequestException ex)
         {
@@ -555,12 +716,19 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 
-    private WebSeedSource? GetAvailableSource(int perSourceLimit)
+    /// <summary>
+    /// A source free to take another piece, reserved for it: the least busy, and of those the fastest -
+    /// one not measured yet counting as fastest, so that it is measured. Pieces are handed out most
+    /// wanted first, so the most wanted goes to the fastest.
+    /// </summary>
+    private WebSeedSource? GetAvailableSource(int perSourceLimit, int piece, WebSeedSource? except = null)
     {
         lock (_lock)
         {
-            var source = _sources.Where(source => source.IsAvailable(_timeProvider, perSourceLimit))
-                .MinBy(source => source.ActiveDownloads);
+            var source = _sources.Where(source => source != except && source.IsAvailable(_timeProvider, perSourceLimit) && CanServePieceLocked(source, piece))
+                .OrderBy(source => source.ActiveDownloads)
+                .ThenBy(source => source.PieceSeconds ?? 0)
+                .FirstOrDefault();
             if (source != null)
             {
                 // Reserved here, under the same lock that chose it, so two fills cannot both take the
@@ -572,6 +740,14 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 
+    private bool CanServePiece(int piece)
+    {
+        lock (_lock) { return _sources.Any(source => CanServePieceLocked(source, piece)); }
+    }
+
+    private bool CanServePieceLocked(WebSeedSource source, int piece) => !source.IsRetired
+        && _torrent.InfoFile.Info.GetFilesForPiece(piece).All(index => !source.MissingFiles.Contains(_torrent.InfoFile.Info.Files[index].Path));
+
     private IHttpClient GetClient()
     {
         if (_testClient != null)
@@ -580,7 +756,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
 
         var settings = _torrent.Settings.Proxy;
-        if (!settings.ProxyPeers)
+        if (!settings.ProxyPeers && !settings.ForceProxy)
         {
             // Direct connection if proxying peers is disabled
             var directSettings = new ProxySettings { Type = ProxyType.None };
@@ -686,46 +862,51 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
     }
 
-    private void RecordSuccess(WebSeedSource source)
+    private void RecordSuccess(WebSeedSource source, TimeSpan took)
     {
         lock (_lock)
         {
             source.FailureCount = 0;
             source.LastSuccess = _timeProvider.GetUtcNow();
+            source.PieceSeconds = source.PieceSeconds is { } before
+                ? (before * 0.7) + (took.TotalSeconds * 0.3)
+                : took.TotalSeconds;
         }
     }
 
     private async Task WorkerLoopAsync(CancellationToken ct)
     {
-        var active = new Dictionary<int, Task>();
+        using var workerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        ct = workerCts.Token;
+        var active = new Dictionary<int, Download>();
+        var racing = new Dictionary<int, Download>();
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                foreach (int piece in active.Where(pair => pair.Value.IsCompleted).Select(pair => pair.Key).ToArray())
-                {
-                    await active[piece].ConfigureAwait(false);
-                    active.Remove(piece);
-                }
+                await ReapAsync(active).ConfigureAwait(false);
+                await ReapAsync(racing).ConfigureAwait(false);
 
                 int limit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnections, 1, 64);
                 int sourceLimit = Math.Clamp(_torrent.Settings.Transfer.WebSeedMaxConnectionsPerSource, 1, limit);
-                if (CanStartMoreDownloads() && active.Count < limit)
+                if (CanStartMoreDownloads() && active.Count + racing.Count < limit)
                 {
-                    foreach (int piece in GetNeededPieces(limit - active.Count, active.Keys))
+                    // A piece a stream is waiting on comes before one it is not.
+                    RaceSlowSources(active, racing, limit, sourceLimit, ct);
+                    foreach (int piece in GetNeededPieces(limit - active.Count - racing.Count, active.Keys.Concat(racing.Keys).ToHashSet()))
                     {
                         ct.ThrowIfCancellationRequested();
-                        var source = GetAvailableSource(sourceLimit);
-                        if (source == null) break;
-                        active.Add(piece, DownloadAndReleaseAsync(source, piece, ct));
+                        var source = GetAvailableSource(sourceLimit, piece);
+                        if (source == null) continue;
+                        active.Add(piece, Begin(source, piece, ct));
                     }
                 }
 
                 // Completion replenishes a slot immediately. The timer is only for idle work,
-                // retries and live settings/source changes while all HTTP requests are blocked.
+                // retries, races and live settings/source changes while all HTTP requests are blocked.
                 using var pollCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 Task poll = Task.Delay(TimeSpan.FromMilliseconds(WorkerIntervalMs), _timeProvider, pollCts.Token);
-                await Task.WhenAny(active.Values.Append(poll)).ConfigureAwait(false);
+                await Task.WhenAny(active.Values.Concat(racing.Values).Select(download => download.Task).Append(poll)).ConfigureAwait(false);
                 await pollCts.CancelAsync().ConfigureAwait(false);
             }
         }
@@ -735,7 +916,113 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
         finally
         {
-            await Task.WhenAll(active.Values).ConfigureAwait(false);
+            await workerCts.CancelAsync().ConfigureAwait(false);
+            await Task.WhenAll(active.Values.Concat(racing.Values).Select(download => download.Task)).ConfigureAwait(false);
+            foreach (var download in active.Values.Concat(racing.Values))
+            {
+                download.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gives up downloads whose pieces have been verified, and forgets downloads that have finished.
+    /// Verification can happen after an HTTP task has been reaped, or peers can win the race, so
+    /// cancellation depends on the piece's state rather than another HTTP task finishing.
+    /// </summary>
+    private async Task ReapAsync(Dictionary<int, Download> downloads)
+    {
+        foreach (var (piece, download) in downloads.ToArray())
+        {
+            if (!download.Task.IsCompleted && _torrent.Pieces.HasPiece(piece) && !download.Cancel.IsCancellationRequested)
+            {
+                await download.Cancel.CancelAsync().ConfigureAwait(false);
+            }
+
+            if (!download.Task.IsCompleted)
+            {
+                continue;
+            }
+
+            await download.Task.ConfigureAwait(false);
+            download.Dispose();
+            downloads.Remove(piece);
+        }
+    }
+
+    /// <summary>
+    /// Asks a faster source for a piece a stream is waiting on that a slower one has had for as long as
+    /// the faster takes for a whole piece, and keeps whichever arrives first.
+    /// </summary>
+    /// <remarks>
+    /// Sources differ: archive.org's redirector took three seconds for a piece its own servers sent in
+    /// half of one, and starting Big Buck Bunny, it had the stream's first piece while the fast server
+    /// fetched the next four.
+    /// </remarks>
+    private void RaceSlowSources(Dictionary<int, Download> active, Dictionary<int, Download> racing, int limit, int sourceLimit, CancellationToken ct)
+    {
+        foreach (int piece in GetUrgentPieces())
+        {
+            if (active.Count + racing.Count >= limit)
+            {
+                return;
+            }
+
+            if (racing.ContainsKey(piece) || !active.TryGetValue(piece, out var slow))
+            {
+                continue;
+            }
+
+            var faster = GetAvailableSource(sourceLimit, piece, except: slow.Source);
+            if (faster == null)
+            {
+                return;
+            }
+
+            double held = _timeProvider.GetElapsedTime(slow.Started).TotalSeconds;
+            double? fasterSeconds;
+            lock (_lock) { fasterSeconds = faster.PieceSeconds; }
+            if (fasterSeconds is { } takes && takes <= held)
+            {
+                _logger.LogDebug("Racing piece {PieceIndex}: {Slow} has had it {Held:F1}s, {Fast} takes {Takes:F1}s", piece, slow.Source.Url, held, faster.Url, takes);
+                racing.Add(piece, Begin(faster, piece, ct));
+            }
+            else
+            {
+                lock (_lock)
+                {
+                    faster.ActiveDownloads--;
+                }
+            }
+        }
+    }
+
+    private Download Begin(WebSeedSource source, int piece, CancellationToken ct)
+    {
+        var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        return new Download(source, _timeProvider.GetTimestamp(), DownloadAndReleaseAsync(source, piece, cancel.Token), cancel);
+    }
+
+    /// <summary>A piece being fetched from one source, and how to give it up.</summary>
+    private sealed class Download(WebSeedSource source, long started, Task task, CancellationTokenSource cancel) : IDisposable
+    {
+        private AtomicDisposal _disposal = new();
+
+        public WebSeedSource Source => source;
+
+        /// <summary>When it began, as a <see cref="TimeProvider"/> timestamp.</summary>
+        public long Started => started;
+
+        public Task Task => task;
+
+        public CancellationTokenSource Cancel => cancel;
+
+        public void Dispose()
+        {
+            if (_disposal.MarkDisposed())
+            {
+                cancel.Dispose();
+            }
         }
     }
 
@@ -771,13 +1058,24 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         public WebSeedSource(string url, bool isMultiFile)
         {
-            IsDirectory = url.EndsWith('/');
-            Url = url.TrimEnd('/');
+            var uri = new Uri(url);
+            OriginalUrl = url;
+            IsDirectory = IsDirectoryUrl(url);
+            Url = uri.AbsoluteUri;
             IsMultiFile = isMultiFile;
+        }
+
+        internal static bool IsDirectoryUrl(string url)
+        {
+            int query = url.IndexOfAny(['?', '#']);
+            return (query < 0 ? url : url[..query]).EndsWith('/');
         }
 
         public int ActiveDownloads { get; set; }
         public int FailureCount { get; set; }
+
+        /// <summary>How long a piece takes to arrive from this source, smoothed; null until one has.</summary>
+        public double? PieceSeconds { get; set; }
 
         /// <summary>
         /// The files this source has answered for with a status that says the resource is not
@@ -795,6 +1093,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         public DateTimeOffset LastFailure { get; set; }
         public DateTimeOffset LastSuccess { get; set; }
         public string Url { get; }
+        public string OriginalUrl { get; }
 
         public bool IsAvailable(TimeProvider timeProvider, int maxDownloads = 1)
         {

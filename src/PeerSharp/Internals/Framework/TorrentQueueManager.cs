@@ -19,7 +19,7 @@ internal sealed class TorrentQueueManager
         {
             items.Add(new QueueItem
             {
-                Hash = torrent.Hash,
+                Hash = torrent.SessionHash,
                 Started = torrent.Started,
                 Finished = torrent.Finished,
                 QueueAutoStart = torrent.QueueAutoStart,
@@ -129,7 +129,7 @@ internal sealed class TorrentQueueManager
 
         if (seedSlots > 0)
         {
-            foreach (var item in OrderForStart(items.Where(i => !i.Started && i.Finished && i.QueueAutoStart)))
+            foreach (var item in OrderForStart(items.Where(i => !i.Started && i.Finished && i.QueueAutoStart && (!_settings.EnforceAutoStop || !HasReachedSeedLimit(i)))))
             {
                 plan.Start.Add(item.Hash);
                 if (--seedSlots == 0)
@@ -141,6 +141,10 @@ internal sealed class TorrentQueueManager
 
         return plan;
     }
+
+    private static bool HasReachedSeedLimit(QueueItem item) =>
+        (item.RatioLimit.HasValue && item.Ratio >= item.RatioLimit.Value) ||
+        (item.SeedTimeLimit.HasValue && item.SeedingTime >= item.SeedTimeLimit.Value);
 
     private static IEnumerable<QueueItem> OrderForStart(IEnumerable<QueueItem> items)
     {

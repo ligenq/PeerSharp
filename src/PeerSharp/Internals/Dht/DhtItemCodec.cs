@@ -38,6 +38,7 @@ internal static class DhtItemCodec
             throw new ArgumentException($"A public key must be {Ed25519.PublicKeySize} bytes.", nameof(publicKey));
         }
 
+        if (salt.Length > DhtItem.MaxSaltLength) throw new ArgumentException("DHT salt exceeds 64 bytes.", nameof(salt));
         Span<byte> buffer = stackalloc byte[Ed25519.PublicKeySize + DhtItem.MaxSaltLength];
         publicKey.CopyTo(buffer);
         salt.CopyTo(buffer[Ed25519.PublicKeySize..]);
@@ -147,6 +148,21 @@ internal static class DhtItemCodec
             Signature = signature,
             Salt = salt.Length > 0 ? salt.ToArray() : null,
         };
+    }
+
+    internal static DhtItem Snapshot(DhtItem item)
+    {
+        var value = BencodeParser.Parse(BencodeWriter.Write(item.Value), requireCanonical: true);
+        return item is DhtMutableItem mutable
+            ? new DhtMutableItem
+            {
+                Value = value,
+                PublicKey = mutable.PublicKey.ToArray(),
+                Signature = mutable.Signature.ToArray(),
+                SequenceNumber = mutable.SequenceNumber,
+                Salt = mutable.Salt?.ToArray()
+            }
+            : new DhtImmutableItem { Value = value };
     }
 
     /// <summary>Verifies a mutable item's signature.</summary>

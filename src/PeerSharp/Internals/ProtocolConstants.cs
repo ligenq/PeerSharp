@@ -323,12 +323,12 @@ internal static class ProtocolConstants
     /// <c>ProtocolVersionTests</c> now compares it against the assembly version, so bumping one
     /// without the other fails the build's tests rather than shipping.
     /// </remarks>
-    public const string ClientVersion = "0500";
+    public const string ClientVersion = "0501";
 
     /// <summary>
     /// Generates a BEP 20 compliant peer ID using Azureus-style format.
     /// Format: -XXYYYY-xxxxxxxxxxxx (20 bytes total)
-    /// - First 8 bytes: "-PS0500-" (client identifier and version)
+    /// - First 8 bytes: "-PS0501-" (client identifier and version)
     /// - Last 12 bytes: Random bytes for uniqueness
     /// </summary>
     public static byte[] GeneratePeerId()

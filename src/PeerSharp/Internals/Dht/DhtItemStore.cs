@@ -21,6 +21,7 @@ internal sealed class DhtItemStore
 
     /// <summary>Maximum number of items held at once.</summary>
     public const int DefaultCapacity = 1000;
+    internal const int MaxRateCounters = 4096;
 
     /// <summary>Puts accepted from a single address per <see cref="RateLimitWindow"/>.</summary>
     public const int DefaultPutsPerAddress = 20;
@@ -89,6 +90,11 @@ internal sealed class DhtItemStore
         {
             if (!_putRates.TryGetValue(source, out var counter) || now - counter.WindowStart >= RateLimitWindow)
             {
+                if (!_putRates.ContainsKey(source) && _putRates.Count >= MaxRateCounters)
+                {
+                    PruneLocked();
+                    if (_putRates.Count >= MaxRateCounters) return false;
+                }
                 _putRates[source] = new RateCounter(now, 1);
                 return true;
             }
@@ -116,6 +122,7 @@ internal sealed class DhtItemStore
     {
         ArgumentNullException.ThrowIfNull(item);
 
+        item = DhtItemCodec.Snapshot(item);
         var structural = DhtItemCodec.Validate(item);
         if (structural != DhtPutError.None)
         {
@@ -175,7 +182,7 @@ internal sealed class DhtItemStore
                 return null;
             }
 
-            return entry.Item;
+            return DhtItemCodec.Snapshot(entry.Item);
         }
     }
 

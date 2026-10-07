@@ -1,6 +1,7 @@
 ﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
+using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
@@ -15,6 +16,141 @@ namespace PeerSharp.Tests.Core.Peers;
 public class PeerManagerTests
 {
     [Fact]
+    public async Task HolepunchRendezvousIntroducesBothConnectedPeersAndIsRateLimited()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            ctx.Torrent.Settings.Connection.MaxHolepunchPerMinute = 1;
+            var initiator = new RecordingHolepunchPeer(ctx.Torrent, ctx.Manager, "203.0.113.60");
+            var target = new RecordingHolepunchPeer(ctx.Torrent, ctx.Manager, "203.0.113.61");
+            ctx.Manager.AddConnectedPeerForTesting(initiator);
+            ctx.Manager.AddConnectedPeerForTesting(target);
+            await ctx.Manager.HolepunchMessageReceivedAsync(initiator, UtHolepunch.MsgId.Rendezvous, target.RemoteEndPoint!, UtHolepunch.ErrorCode.None);
+            var first = Assert.Single(initiator.Sent);
+            var second = Assert.Single(target.Sent);
+            Assert.Equal((byte)UtHolepunch.MsgId.Connect, first.Data[1]);
+            Assert.Equal((byte)UtHolepunch.MsgId.Connect, second.Data[1]);
+            Assert.Equal(target.RemoteEndPoint!.Address.GetAddressBytes(), first.Data[3..7]);
+            Assert.Equal(initiator.RemoteEndPoint!.Address.GetAddressBytes(), second.Data[3..7]);
+            await ctx.Manager.HolepunchMessageReceivedAsync(initiator, UtHolepunch.MsgId.Rendezvous, target.RemoteEndPoint!, UtHolepunch.ErrorCode.None);
+            Assert.Single(initiator.Sent);
+            Assert.Single(target.Sent);
+        }
+        finally { await CleanupAsync(ctx); }
+    }
+
+    [Fact]
+    public async Task HolepunchDoesNotBridgePublicPeersIntoLocalNetworks()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            var source = new RecordingHolepunchPeer(ctx.Torrent, ctx.Manager, "203.0.113.60");
+            var target = new RecordingHolepunchPeer(ctx.Torrent, ctx.Manager, "192.168.1.2");
+            ctx.Manager.AddConnectedPeerForTesting(source);
+            ctx.Manager.AddConnectedPeerForTesting(target);
+            await ctx.Manager.HolepunchMessageReceivedAsync(source, UtHolepunch.MsgId.Rendezvous, target.RemoteEndPoint!, UtHolepunch.ErrorCode.None);
+            await ctx.Manager.HolepunchMessageReceivedAsync(source, UtHolepunch.MsgId.Connect, target.RemoteEndPoint!, UtHolepunch.ErrorCode.None);
+            Assert.Empty(source.Sent);
+            Assert.Empty(target.Sent);
+            Assert.Empty(GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectingPeers"));
+        }
+        finally { await CleanupAsync(ctx); }
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task MetadataRebuild_PrivateMetadataDropsPublicPeersAndConnectionPreferences()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            var old = ctx.Torrent.PeersInternal;
+            var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.62"), 6881);
+            var peer = new PeerCommunication(ctx.Torrent, old, TimeProvider.System) { Connected = 1, RemoteEndPoint = endpoint, Stream = new MemoryStream() };
+            old.AddConnectedPeerForTesting(peer);
+            old.AddPeers([endpoint], PeerSourceKind.Dht);
+            ctx.Torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+            ctx.Torrent.InfoFile.Info.IsPrivate = true;
+            SetPrivateField(ctx.Torrent, "_started", 1);
+            await ctx.Torrent.ReinitializeAfterMetadataAsync();
+            Assert.Equal(0, peer.Connected);
+            Assert.Equal(0, ctx.Torrent.PeersInternal.ConnectedCount);
+            Assert.Empty(GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Torrent.PeersInternal, "_knownPeersCache"));
+        }
+        finally { await CleanupAsync(ctx); }
+    }
+
+    private sealed class RecordingHolepunchPeer : PeerCommunication
+    {
+        public List<PeerMessage> Sent { get; } = [];
+        public RecordingHolepunchPeer(Torrent torrent, IPeerListener listener, string address) : base(torrent, listener, TimeProvider.System)
+        {
+            Connected = 1;
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse(address), 6881);
+            Stream = new MemoryStream();
+            var handshake = new ExtensionHandshake();
+            handshake.MessageIds[UtHolepunch.Name] = 8;
+            UtHolepunch.Init(handshake);
+        }
+        public override Task SendMessageAsync(PeerMessage message) { Sent.Add(message); return Task.CompletedTask; }
+    }
+
+    [Fact]
+    public async Task PrivateTorrent_RejectsPublicDiscoveryButAcceptsItsTracker()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            ctx.Torrent.InfoFile.Info.IsPrivate = true;
+            var endpoint = new IPEndPoint(IPAddress.Parse("203.0.113.55"), 6881);
+            ctx.Manager.AddPeers([endpoint], PeerSourceKind.Dht);
+            ctx.Manager.AddPeers([endpoint], PeerSourceKind.Pex);
+            ctx.Manager.AddPeers([endpoint], PeerSourceKind.Lpd);
+            var cache = GetPrivateField<ConcurrentDictionary<IPEndPoint, PeerHistory>>(ctx.Manager, "_knownPeersCache");
+            Assert.Empty(cache);
+            ctx.Manager.AddPeers([endpoint], PeerSourceKind.Tracker);
+            Assert.Contains(endpoint, cache.Keys);
+        }
+        finally { await CleanupAsync(ctx); }
+    }
+
+    [Fact]
+    public async Task HolepunchCannotBypassConnectionLimits()
+    {
+        var factory = new BlockingPeerFactory();
+        var ctx = CreateContext(factory);
+        try
+        {
+            ctx.Torrent.Settings.Connection.MaxPeersPerTorrent = 1;
+            SetPrivateField(ctx.Manager, "_connectedPeersCount", 1);
+            ctx.Manager.ConnectTo("203.0.113.56", 6881, forceUtp: true);
+            Assert.Empty(factory.Created);
+        }
+        finally { await CleanupAsync(ctx); }
+    }
+    [Theory(Timeout = 30000)]
+    [InlineData(4294967296L, 100L)]
+    [InlineData(0L, 4294967396L)]
+    [InlineData(262144L, 100L)]
+    public async Task MetadataData_OverflowingFields_ClosesPeerBeforeApplyingData(long piece, long size)
+    {
+        var ctx = CreateContext();
+        try
+        {
+            var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System) { Connected = 1, Stream = new MemoryStream() };
+            peer.UtMetadata.SetLocalMessageId(5);
+            var header = new PeerSharp.BEncoding.BDict();
+            header.Dict["msg_type"] = new PeerSharp.BEncoding.BNumber(1);
+            header.Dict["piece"] = new PeerSharp.BEncoding.BNumber(piece);
+            header.Dict["total_size"] = new PeerSharp.BEncoding.BNumber(size);
+            byte[] data = [.. PeerSharp.BEncoding.BencodeWriter.Write(header), .. new byte[100]];
+            await ctx.Manager.ExtendedMessageReceivedAsync(peer, 5, data);
+            Assert.Equal(0, peer.Connected);
+        }
+        finally { await CleanupAsync(ctx); }
+    }
+    [Fact]
     public async Task MetadataRebuild_AdoptsSameLivePeerAndPreservesGovernorSlot()
     {
         var ctx = CreateContext();
@@ -26,6 +162,7 @@ public class PeerManagerTests
         peer.Stream = new MemoryStream();
         Stream retainedStream = peer.Stream;
         SetPrivateProperty(peer, "PeerPieces", new PiecesProgress(0));
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
         await (Task)InvokePrivate(peer, "ProcessMessageAsync", new PeerMessage(MessageId.HaveAll))!;
         Assert.True(ctx.Governor.TryAcquireConnectionSlot());
         ctx.Manager.AddConnectedPeerForTesting(peer);
@@ -772,6 +909,47 @@ public class PeerManagerTests
 
         await ctx.Manager.PortReceivedAsync(peer, 6882);
         await CleanupAsync(ctx);
+    }
+
+    [Fact]
+    public async Task PortReceivedAsync_PrivateTorrentAndZeroPortNeverPingDht()
+    {
+        var ctx = CreateContext();
+        try
+        {
+            var dht = new RecordingDhtManager();
+            ctx.Torrent.DhtManager = dht;
+            var peer = new PeerCommunication(ctx.Torrent, ctx.Manager, TimeProvider.System)
+            {
+                RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 6881)
+            };
+            ctx.Torrent.InfoFile.Info.IsPrivate = true;
+            await ctx.Manager.PortReceivedAsync(peer, 6882);
+            ctx.Torrent.InfoFile.Info.IsPrivate = false;
+            await ctx.Manager.PortReceivedAsync(peer, 0);
+            Assert.Empty(dht.Pings);
+            await ctx.Manager.PortReceivedAsync(peer, 6882);
+            Assert.Equal(new IPEndPoint(IPAddress.Loopback, 6882), Assert.Single(dht.Pings));
+            await peer.DisposeAsync();
+        }
+        finally { await CleanupAsync(ctx); }
+    }
+
+    private sealed class RecordingDhtManager : IDhtManager
+    {
+        public List<IPEndPoint> Pings { get; } = [];
+        public InfoHash NodeId => InfoHash.Empty;
+        public IPAddress? ExternalIp => null;
+        public void Ping(IPEndPoint ep) => Pings.Add(ep);
+        public void Announce(InfoHash infoHash, int port) { }
+        public int FindPeers(InfoHash infoHash) => 0;
+        public void ReportExternalIp(IPAddress address) { }
+        public void ScrapeInfoHash(InfoHash infoHash) { }
+        public void SetCallback(IDhtCallback callback) { }
+        public Task StartAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public DhtState? ConsumeStateSnapshot() => null;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     [Fact(Timeout = 30000)]

@@ -6,6 +6,45 @@ namespace PeerSharp.Tests.Core.Pieces;
 
 public class PieceCheckerTests
 {
+    [Theory(Timeout = 10000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CancellationInsideAReadDoesNotPublishAPartialBitfield(bool range)
+    {
+        using var gate = new SemaphoreSlim(0, 1);
+        var files = new MockFiles { ReadGate = gate };
+        bool published = false;
+        var context = new MockContext
+        {
+            PieceCount = 1,
+            PieceSize = 10,
+            FullSize = 10,
+            BitfieldCallback = _ => published = true
+        };
+        context.ExpectedHashes.Add(SHA1.HashData(new byte[10]));
+        await using var checker = new PieceChecker(files, context);
+        using var cancellation = new CancellationTokenSource();
+        Task<int> check = range ? checker.CheckPieceRangeAsync(0, 0, cancellation.Token) : checker.CheckAllPiecesAsync(cancellation.Token);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => check);
+        Assert.False(published);
+        Assert.Empty(context.VerifiedPieces);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task DisposingDuringAReadCancelsWithoutDisposingTheChecksSourceEarly()
+    {
+        using var gate = new SemaphoreSlim(0, 1);
+        var files = new MockFiles { ReadGate = gate };
+        var context = new MockContext { PieceCount = 1, PieceSize = 10, FullSize = 10 };
+        var checker = new PieceChecker(files, context);
+        Task<int> check = checker.CheckAllPiecesAsync(TestContext.Current.CancellationToken);
+        await checker.DisposeAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => check);
+        Assert.False(checker.IsRunning);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => checker.CheckAllPiecesAsync(TestContext.Current.CancellationToken));
+    }
+
     private class MockFiles : IInternalFiles
     {
         public Task MoveFilesAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;

@@ -14,15 +14,22 @@ internal sealed class WebTorrentDataChannelStream : Stream
         FullMode = BoundedChannelFullMode.Wait
     });
     private readonly CancellationTokenSource _pumpCts = new();
+    private readonly CancellationToken _pumpToken;
+    private readonly Lock _lifetimeLock = new();
+    private readonly Func<ValueTask>? _onDisposed;
+    private Task? _disposeTask;
+    private bool _reading;
     private Task? _pumpTask;
     private IMemoryOwner<byte>? _currentMemoryOwner;
     private ReadOnlyMemory<byte> _currentBuffer;
     private int _currentOffset;
     private int _disposed;
 
-    public WebTorrentDataChannelStream(IWebRtcDataChannel channel)
+    public WebTorrentDataChannelStream(IWebRtcDataChannel channel, Func<ValueTask>? onDisposed = null)
     {
+        _pumpToken = _pumpCts.Token;
         _channel = channel;
+        _onDisposed = onDisposed;
     }
 
     public void Start()
@@ -30,21 +37,27 @@ internal sealed class WebTorrentDataChannelStream : Stream
         // Task.Run, not a bare call: Start is synchronous and its only job is to kick off the
         // background pump. Invoking the async method inline runs its prologue - and up to a
         // full channel's worth of message copies - on the caller's thread before returning.
-        _pumpTask ??= Task.Run(PumpMessagesAsync, CancellationToken.None);
+        lock (_lifetimeLock)
+        {
+            ThrowIfDisposed();
+            _pumpTask ??= Task.Run(PumpMessagesAsync, CancellationToken.None);
+        }
     }
 
     private bool IsDisposed => Volatile.Read(ref _disposed) == 1;
 
-    private bool MarkDisposed() => Interlocked.Exchange(ref _disposed, 1) == 0;
+    private void MarkDisposed() => Interlocked.Exchange(ref _disposed, 1);
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(IsDisposed, this);
 
     private async Task PumpMessagesAsync()
     {
+        Exception? failure = null;
         try
         {
             await foreach (var message in _channel.Messages.WithCancellation(_pumpCts.Token).ConfigureAwait(false))
             {
+                if (message.IsEmpty) continue;
                 var owner = MemoryPool<byte>.Shared.Rent(message.Length);
                 SlicedMemoryOwner? slicedOwner = null;
                 try
@@ -77,9 +90,10 @@ internal sealed class WebTorrentDataChannelStream : Stream
         {
             // Expected if the stream completes while a producer is waiting for capacity.
         }
+        catch (Exception ex) { failure = ex; }
         finally
         {
-            _incomingFrames.Writer.TryComplete();
+            _incomingFrames.Writer.TryComplete(failure);
         }
     }
 
@@ -123,43 +137,46 @@ internal sealed class WebTorrentDataChannelStream : Stream
 
     public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        ThrowIfDisposed();
-        if (buffer.IsEmpty)
+        lock (_lifetimeLock)
         {
-            return 0;
+            ThrowIfDisposed();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (buffer.IsEmpty) return 0;
+            if (_reading) throw new InvalidOperationException("A read is already in progress.");
+            _reading = true;
         }
-
-        while (true)
+        try
         {
-            if (_currentMemoryOwner != null)
+            while (true)
             {
-                int remaining = _currentBuffer.Length - _currentOffset;
-                int toCopy = Math.Min(remaining, buffer.Length);
-                _currentBuffer.Slice(_currentOffset, toCopy).CopyTo(buffer);
-                _currentOffset += toCopy;
-                if (_currentOffset >= _currentBuffer.Length)
+                lock (_lifetimeLock)
                 {
-                    _currentMemoryOwner.Dispose();
-                    _currentMemoryOwner = null;
-                    _currentBuffer = default;
-                    _currentOffset = 0;
+                    if (IsDisposed) return 0;
+                    if (_currentMemoryOwner == null && _incomingFrames.Reader.TryRead(out var next))
+                    {
+                        _currentMemoryOwner = next;
+                        _currentBuffer = next.Memory;
+                        _currentOffset = 0;
+                    }
+                    if (_currentMemoryOwner != null)
+                    {
+                        int toCopy = Math.Min(_currentBuffer.Length - _currentOffset, buffer.Length);
+                        _currentBuffer.Slice(_currentOffset, toCopy).CopyTo(buffer);
+                        _currentOffset += toCopy;
+                        if (_currentOffset == _currentBuffer.Length)
+                        {
+                            _currentMemoryOwner.Dispose();
+                            _currentMemoryOwner = null;
+                            _currentBuffer = default;
+                            _currentOffset = 0;
+                        }
+                        return toCopy;
+                    }
                 }
-
-                return toCopy;
-            }
-
-            if (!await _incomingFrames.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                return 0;
-            }
-
-            if (_incomingFrames.Reader.TryRead(out var next))
-            {
-                _currentMemoryOwner = next;
-                _currentBuffer = next.Memory;
-                _currentOffset = 0;
+                if (!await _incomingFrames.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false)) return 0;
             }
         }
+        finally { lock (_lifetimeLock) { _reading = false; } }
     }
 
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
@@ -178,58 +195,57 @@ internal sealed class WebTorrentDataChannelStream : Stream
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        await _channel.SendAsync(buffer, cancellationToken).ConfigureAwait(false);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _pumpToken);
+        for (int offset = 0; offset < buffer.Length;)
+        {
+            int length = Math.Min(16 * 1024, buffer.Length - offset);
+            await _channel.SendAsync(buffer.Slice(offset, length), linked.Token).ConfigureAwait(false);
+            offset += length;
+        }
+    }
+
+    private Task BeginDispose()
+    {
+        lock (_lifetimeLock)
+        {
+            if (_disposeTask != null) return _disposeTask;
+            MarkDisposed();
+            _pumpCts.Cancel();
+            _incomingFrames.Writer.TryComplete();
+            _currentMemoryOwner?.Dispose();
+            _currentMemoryOwner = null;
+            _currentBuffer = default;
+            while (_incomingFrames.Reader.TryRead(out var owner)) owner.Dispose();
+            _disposeTask = DisposeCoreAsync();
+            return _disposeTask;
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        try
+        {
+            if (_pumpTask != null) await _pumpTask.ConfigureAwait(false);
+            await _channel.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _pumpCts.Dispose();
+            if (_onDisposed != null) await _onDisposed().ConfigureAwait(false);
+        }
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (MarkDisposed())
-        {
-            _pumpCts.Cancel();
-            _incomingFrames.Writer.TryComplete();
-
-            _currentMemoryOwner?.Dispose();
-            while (_incomingFrames.Reader.TryRead(out var owner))
-            {
-                owner.Dispose();
-            }
-
-            _ = _channel.DisposeAsync().AsTask().ContinueWith(static task => _ = task.Exception, TaskScheduler.Default);
-            _pumpCts.Dispose();
-        }
-
+        if (disposing)
+            _ = BeginDispose().ContinueWith(static task => _ = task.Exception, TaskScheduler.Default);
         base.Dispose(disposing);
     }
 
     public override async ValueTask DisposeAsync()
     {
-        if (MarkDisposed())
-        {
-            await _pumpCts.CancelAsync().ConfigureAwait(false);
-            _incomingFrames.Writer.TryComplete();
-
-            if (_pumpTask != null)
-            {
-                try
-                {
-                    await _pumpTask.ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Expected during stream disposal.
-                }
-            }
-
-            _currentMemoryOwner?.Dispose();
-            while (_incomingFrames.Reader.TryRead(out var owner))
-            {
-                owner.Dispose();
-            }
-
-            await _channel.DisposeAsync().ConfigureAwait(false);
-            _pumpCts.Dispose();
-        }
-
-        await base.DisposeAsync().ConfigureAwait(false);
+        try { await BeginDispose().ConfigureAwait(false); }
+        finally { await base.DisposeAsync().ConfigureAwait(false); }
+        GC.SuppressFinalize(this);
     }
 }

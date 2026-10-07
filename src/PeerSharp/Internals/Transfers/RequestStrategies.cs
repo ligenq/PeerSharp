@@ -101,3 +101,73 @@ internal sealed class EndGameBlockRequestStrategy : IBlockRequestStrategy
             && _requestTracker.GetPendingRequestCount(pieceIndex, offset) < MaxConcurrentRequestsPerBlock;
     }
 }
+
+/// <summary>
+/// Blocks of the pieces a stream needs next: asked of any peer first, then of more peers - but only
+/// those delivering well, and never more than a few at once that could still answer in time.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Every peer answers requests in the order they came, behind a queue a few seconds long. Asking more
+/// peers for a block a player is waiting on is how it arrives sooner; asking slow peers is how it does
+/// not. Streaming from Debian's swarm, pieces the player was waiting on had been asked of nine to
+/// seventeen peers and still took up to thirteen seconds: the four requests allowed for each block went
+/// to whichever peers had room first, mostly slow ones, and went on counting against the four until
+/// they were answered or timed out.
+/// </para>
+/// <para>
+/// So a duplicate goes only to a peer delivering well, and a request unanswered for
+/// <see cref="Patience"/> stops counting: another fast peer may then be asked, while the first may yet
+/// answer.
+/// </para>
+/// </remarks>
+internal sealed class UrgentBlockRequestStrategy : IBlockRequestStrategy
+{
+    /// <summary>How many peers may be asked for one block at a time, counting only requests still fresh.</summary>
+    internal const int MaxFreshRequestsPerBlock = 4;
+
+    /// <summary>How long a request for an urgent block counts against <see cref="MaxFreshRequestsPerBlock"/>.</summary>
+    internal static readonly TimeSpan Patience = TimeSpan.FromSeconds(2);
+
+    private readonly BlockRequestTracker _requestTracker;
+    private readonly TimeProvider _timeProvider;
+    private readonly int _blockSize;
+
+    public UrgentBlockRequestStrategy(BlockRequestTracker requestTracker, TimeProvider timeProvider, int blockSize)
+    {
+        _requestTracker = requestTracker;
+        _timeProvider = timeProvider;
+        _blockSize = blockSize;
+    }
+
+    public bool IsBlockRequestable(PieceState state, int pieceIndex, int blockIndex, PeerCommunication peer, bool isPeerFast)
+    {
+        if (state.Blocks[blockIndex])
+        {
+            return false;
+        }
+
+        int offset = blockIndex * _blockSize;
+        if (!_requestTracker.TryGetBlockPeers((pieceIndex, offset), out var owedBy) || owedBy.IsEmpty)
+        {
+            return true;
+        }
+
+        if (!isPeerFast || owedBy.ContainsKey(peer))
+        {
+            return false;
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        int fresh = 0;
+        foreach (var request in owedBy.Values)
+        {
+            if (now - request.Timestamp < Patience)
+            {
+                fresh++;
+            }
+        }
+
+        return fresh < MaxFreshRequestsPerBlock;
+    }
+}

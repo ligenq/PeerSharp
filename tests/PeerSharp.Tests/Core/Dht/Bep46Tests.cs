@@ -134,16 +134,8 @@ public class Bep46Tests
     [Fact(Timeout = 30000)]
     public async Task ClientEngine_PublishesResolvesAndStopsMaintainingARecord()
     {
-        await using var fixture = await DhtLoopbackFixture.CreateAsync(settings =>
-        {
-            settings.Dht.InitialState = new DhtState(
-                InfoHash.CreateRandom().ToArray(),
-                Enumerable.Range(1, 6)
-                    .Select(index => new DhtNode(
-                        NodeId(index),
-                        new IPEndPoint(IPAddress.Parse($"192.0.2.{index + 10}"), 7000 + index)))
-                    .ToArray());
-        });
+        await using var fixture = await DhtLoopbackFixture.CreateAsync();
+        await fixture.AddServersAsync(6);
         await using var engine = ClientEngine.Create(
             new Settings(),
             networkManager: new EngineNetworkManager(fixture.Client),
@@ -153,6 +145,7 @@ public class Bep46Tests
         var publisher = TorrentPublisherKey.Create();
         var infoHash = InfoHash.CreateRandom();
 
+        Assert.True(fixture.Client.KnownNodeCount >= 6, $"Fixture only has {fixture.Client.KnownNodeCount} nodes");
         var published = await engine.PublishSelfUpdatingTorrentAsync(publisher, infoHash);
         var resolved = await engine.ResolveSelfUpdatingTorrentAsync(
             TorrentPublisherKey.FromPublicKey(publisher.PublicKey.Span));
@@ -164,6 +157,12 @@ public class Bep46Tests
         Assert.Equal(0, published.Version);
         Assert.Equal(new SelfUpdatingTorrentInfo(infoHash, 0), resolved);
         Assert.Equal(resolved, magnetResolved);
+        // Concurrent calls on one engine must pick distinct, monotonically increasing versions.
+        var updates = await Task.WhenAll(Enumerable.Range(0, 4)
+            .Select(_ => engine.PublishSelfUpdatingTorrentAsync(publisher, InfoHash.CreateRandom())));
+        Assert.Equal(new long[] { 1, 2, 3, 4 }, updates.Select(update => update.Version).Order());
+        Assert.All(updates, update => Assert.True(update.AcceptedByNodes > 0));
+        Assert.Equal(4, Assert.IsType<SelfUpdatingTorrentInfo>(await engine.ResolveSelfUpdatingTorrentAsync(publisher)).Version);
         Assert.True(engine.StopMaintainingSelfUpdatingTorrent(publisher));
         Assert.False(engine.StopMaintainingSelfUpdatingTorrent(publisher));
     }
@@ -227,13 +226,6 @@ public class Bep46Tests
         Assert.Equal(
             DhtItemCodec.ComputeMutableTarget(publicKey, "salt"u8),
             Bep46Resolver.ComputeTarget(publicKey, "salt"u8));
-    }
-
-    private static byte[] NodeId(int suffix)
-    {
-        var id = new byte[DhtTarget.Length];
-        id[^1] = (byte)suffix;
-        return id;
     }
 
     [Fact]

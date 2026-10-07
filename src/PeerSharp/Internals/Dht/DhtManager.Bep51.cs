@@ -96,20 +96,20 @@ internal partial class DhtManager
         return reply?.Get("r") is BDict r ? [.. ReadNodeEndpoints(r)] : [];
     }
 
-    private static DhtInfoHashSampleReply ParseSampleReply(BDict r)
+    internal static DhtInfoHashSampleReply? ParseSampleReply(BDict r)
     {
+        // Legacy nodes may answer an unknown targeted RPC as find_node. A missing samples
+        // field identifies that response as traversal, not a successful empty sample.
+        if (r.GetBytes("samples") is not { } rawSamples) return null;
         var samples = new List<InfoHash>();
-        if (r.GetBytes("samples") is { } raw)
-        {
-            var span = raw.Span;
+        var span = rawSamples.Span;
 
-            // A trailing partial hash means a broken or truncated peer. Take the whole ones and
-            // ignore the remainder rather than discarding an otherwise good reply.
-            int whole = span.Length / DhtTarget.Length;
-            for (int i = 0; i < whole; i++)
-            {
-                samples.Add(new InfoHash(span.Slice(i * DhtTarget.Length, DhtTarget.Length)));
-            }
+        // A trailing partial hash means a broken or truncated peer. Take the whole ones and
+        // ignore the remainder rather than discarding an otherwise good reply.
+        int whole = span.Length / DhtTarget.Length;
+        for (int i = 0; i < whole; i++)
+        {
+            samples.Add(new InfoHash(span.Slice(i * DhtTarget.Length, DhtTarget.Length)));
         }
 
         // BEP 51 puts the interval in 0..21600. Clamping keeps a node from parking a crawler on it
@@ -133,6 +133,14 @@ internal partial class DhtManager
     internal DhtInfoHashCrawler CreateInfoHashCrawler(DhtIndexerOptions options, ILoggerFactory loggerFactory)
     {
         return new DhtInfoHashCrawler(this, options, _timeProvider, loggerFactory);
+    }
+
+    internal CancellationToken GetCrawlToken()
+    {
+        var source = _cts;
+        if (!Running || source == null) throw new InvalidOperationException("The DHT must be running to crawl info-hashes.");
+        try { return source.Token; }
+        catch (ObjectDisposedException) { return new CancellationToken(true); }
     }
 }
 

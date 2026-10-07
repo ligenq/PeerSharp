@@ -12,8 +12,15 @@ namespace PeerSharp.WebTorrent.Peers;
 
 internal sealed class WebRtcPeerManager : IAsyncDisposable
 {
+    private readonly Lock _connectionsLock = new();
+    private bool _disposed;
     private readonly ConcurrentDictionary<string, PendingPeer> _connections = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, ConcurrentQueue<string>> _earlyRemoteCandidates = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<(TrackerRuntime Runtime, string OfferId, string PeerId), EarlyCandidates> _earlyRemoteCandidates = new();
+    private sealed class EarlyCandidates(DateTimeOffset expiresAt)
+    {
+        public DateTimeOffset ExpiresAt { get; } = expiresAt;
+        public ConcurrentQueue<string> Candidates { get; } = new();
+    }
     private readonly IWebRtcConnectionFactory _rtcFactory;
     private readonly WebTorrentSessionOptions _options;
     private readonly ILogger _logger;
@@ -46,26 +53,49 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
         _shutdownToken = shutdownToken;
     }
 
-    public int PendingConnectionCount => _connections.Count;
+    public int PendingConnectionCount => _connections.Values.Count(peer => !peer.IsAttached);
     public int EarlyCandidateOfferCount => _earlyRemoteCandidates.Count;
-    public IEnumerable<PendingPeer> PendingPeers => _connections.Values;
+    public IEnumerable<PendingPeer> PendingPeers => _connections.Values.Where(peer => !peer.IsAttached);
 
     public async Task<(PendingPeer Peer, WebRtcSessionDescription Offer)> CreateOutgoingPendingPeerAsync(string offerId, TrackerRuntime runtime, CancellationToken cancellationToken)
     {
-        var connection = _rtcFactory.Create();
-        var channel = connection.CreateDataChannel(_options.DataChannelLabel);
-        var pending = new PendingPeer(offerId, connection, channel, initiator: true, runtime, _options.TimeProvider.GetUtcNow() + PendingPeerTimeout);
-
-        ConfigurePendingPeer(pending);
-        _connections[offerId] = pending;
-
-        var offer = await connection.CreateOfferAsync(cancellationToken).ConfigureAwait(false);
-        await connection.SetLocalDescriptionAsync(offer, cancellationToken).ConfigureAwait(false);
-
-        return (pending, offer);
+        cancellationToken.ThrowIfCancellationRequested();
+        PendingPeer pending;
+        lock (_connectionsLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (PendingConnectionCount >= MaxPendingConnections) throw new InvalidOperationException("Too many pending WebRTC peers.");
+            if (_connections.ContainsKey(offerId)) throw new InvalidOperationException("Duplicate WebRTC offer ID.");
+            var connection = _rtcFactory.Create();
+            try
+            {
+                var channel = connection.CreateDataChannel(_options.DataChannelLabel);
+                pending = new PendingPeer(offerId, connection, channel, true, runtime, _options.TimeProvider.GetUtcNow() + PendingPeerTimeout);
+                _connections[offerId] = pending;
+            }
+            catch
+            {
+                _trackBackgroundTask(connection.DisposeAsync().AsTask());
+                throw;
+            }
+        }
+        try
+        {
+            ConfigurePendingPeer(pending);
+            using var timeout = new CancellationTokenSource(PendingPeerTimeout, _options.TimeProvider);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdownToken, pending.LifetimeToken, timeout.Token);
+            var offer = await AwaitNegotiationAsync(pending.Connection.CreateOfferAsync(linked.Token), linked.Token).ConfigureAwait(false);
+            await AwaitNegotiationAsync(pending.Connection.SetLocalDescriptionAsync(offer, linked.Token), linked.Token).ConfigureAwait(false);
+            return (pending, offer);
+        }
+        catch
+        {
+            await RemovePendingAsync(pending).ConfigureAwait(false);
+            throw;
+        }
     }
 
-    public async Task HandleAnswerAsync(WebTorrentSignalMessage signal, CancellationToken cancellationToken)
+    public async Task HandleAnswerAsync(WebTorrentSignalMessage signal, TrackerRuntime runtime, CancellationToken cancellationToken)
     {
         if (!_connections.TryGetValue(signal.OfferId!, out var pending))
         {
@@ -73,43 +103,54 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
             return;
         }
 
-        pending.ExpiresAt = _options.TimeProvider.GetUtcNow() + PendingPeerTimeout;
+        if (!ReferenceEquals(pending.Runtime, runtime) || !pending.Initiator || pending.IsAttached) return;
+        lock (pending.SyncRoot)
+        {
+            if (pending.AnswerReceived) return;
+            pending.AnswerReceived = true;
+        }
+        using var timeout = new CancellationTokenSource(PendingPeerTimeout, _options.TimeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdownToken, pending.LifetimeToken, timeout.Token);
+        cancellationToken = linked.Token;
 
         if (!RemoteSdpReachability.IsLikelyReachable(signal.AnswerSdp!, _localSubnets))
         {
             _logger.LogInformation("Skipping unreachable peer {PeerId}: SDP advertises only private host candidates with no shared subnet", signal.PeerId);
-            await RemovePendingAsync(signal.OfferId!).ConfigureAwait(false);
+            await RemovePendingAsync(pending).ConfigureAwait(false);
             return;
         }
 
         try
         {
-            pending.RemotePeerId = signal.PeerId;
-            pending.LocalCandidateSignalingReady = true;
+            lock (pending.SyncRoot)
+            {
+                pending.RemotePeerId = signal.PeerId;
+                pending.LocalCandidateSignalingReady = true;
+            }
 
             var answer = new WebRtcSessionDescription(WebRtcSessionDescriptionType.Answer, IceCandidateFilter.FilterUnsupportedIceCandidates(signal.AnswerSdp!));
-            await pending.Connection.SetRemoteDescriptionAsync(answer, cancellationToken).ConfigureAwait(false);
-            pending.RemoteDescriptionSet = true;
+            await AwaitNegotiationAsync(pending.Connection.SetRemoteDescriptionAsync(answer, cancellationToken), cancellationToken).ConfigureAwait(false);
+            lock (pending.SyncRoot) { pending.RemoteDescriptionSet = true; }
 
             FlushBufferedLocalCandidates(pending);
             await FlushBufferedRemoteCandidatesAsync(pending, cancellationToken).ConfigureAwait(false);
 
-            bool connected = await pending.Connection.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            bool connected = await AwaitNegotiationAsync(pending.Connection.ConnectAsync(cancellationToken), cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("ConnectAsync returned {Connected} for peer {PeerId}", connected, signal.PeerId);
             if (!connected)
             {
-                await RemovePendingAsync(signal.OfferId!).ConfigureAwait(false);
+                await RemovePendingAsync(pending).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
-            await RemovePendingAsync(signal.OfferId!).ConfigureAwait(false);
+            await RemovePendingAsync(pending).ConfigureAwait(false);
             throw;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to handle answer from peer {PeerId}", signal.PeerId);
-            await RemovePendingAsync(signal.OfferId!).ConfigureAwait(false);
+            await RemovePendingAsync(pending).ConfigureAwait(false);
         }
     }
 
@@ -121,37 +162,42 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
             return;
         }
 
-        if (_connections.Count >= MaxPendingConnections)
+        PendingPeer pending;
+        PendingPeer? replaced = null;
+        lock (_connectionsLock)
         {
-            _logger.LogWarning("Dropping inbound offer from peer {PeerId}: pending-connection cap ({Cap}) reached", peerId, MaxPendingConnections);
-            return;
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_connections.TryGetValue(offerId, out var existing))
+            {
+                // A duplicate inbound offer cannot replace a live negotiation or stream.
+                if (!existing.Initiator || existing.IsAttached || !ReferenceEquals(existing.Runtime, runtime)) return;
+                replaced = existing;
+            }
+            if (replaced == null && PendingConnectionCount >= MaxPendingConnections) return;
+            var connection = _rtcFactory.Create();
+            pending = new PendingPeer(offerId, connection, null, false, runtime, _options.TimeProvider.GetUtcNow() + PendingPeerTimeout) { RemotePeerId = peerId };
+            _connections[offerId] = pending;
         }
-
-        await ReplaceExistingPendingForInboundOfferAsync(offerId).ConfigureAwait(false);
-
-        var connection = _rtcFactory.Create();
-        var pending = new PendingPeer(offerId, connection, null, initiator: false, runtime, _options.TimeProvider.GetUtcNow() + PendingPeerTimeout)
-        {
-            RemotePeerId = peerId
-        };
-
+        if (replaced != null) await DisposePendingAsync(replaced, "replacing pending peer").ConfigureAwait(false);
         ConfigurePendingPeer(pending);
-        _connections[offerId] = pending;
-
+        using var timeout = new CancellationTokenSource(PendingPeerTimeout, _options.TimeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdownToken, pending.LifetimeToken, timeout.Token);
+        cancellationToken = linked.Token;
+        var connectionForOffer = pending.Connection;
         try
         {
             var offer = new WebRtcSessionDescription(WebRtcSessionDescriptionType.Offer, IceCandidateFilter.FilterUnsupportedIceCandidates(offerSdp));
-            await connection.SetRemoteDescriptionAsync(offer, cancellationToken).ConfigureAwait(false);
-            pending.RemoteDescriptionSet = true;
+            await AwaitNegotiationAsync(connectionForOffer.SetRemoteDescriptionAsync(offer, cancellationToken), cancellationToken).ConfigureAwait(false);
+            lock (pending.SyncRoot) { pending.RemoteDescriptionSet = true; }
 
-            var answer = await connection.CreateAnswerAsync(cancellationToken).ConfigureAwait(false);
-            await connection.SetLocalDescriptionAsync(answer, cancellationToken).ConfigureAwait(false);
+            var answer = await AwaitNegotiationAsync(connectionForOffer.CreateAnswerAsync(cancellationToken), cancellationToken).ConfigureAwait(false);
+            await AwaitNegotiationAsync(connectionForOffer.SetLocalDescriptionAsync(answer, cancellationToken), cancellationToken).ConfigureAwait(false);
 
             var trackerAnswer = new WebRtcSessionDescription(answer.Type, IceCandidateFilter.FilterUnsupportedIceCandidates(answer.Sdp));
             bool answerSent = await sendAnswerFunc(pending, trackerAnswer, cancellationToken).ConfigureAwait(false);
             if (!answerSent)
             {
-                await RemovePendingAsync(offerId).ConfigureAwait(false);
+                await RemovePendingAsync(pending).ConfigureAwait(false);
                 return;
             }
 
@@ -163,26 +209,26 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
             FlushBufferedLocalCandidates(pending);
             await FlushBufferedRemoteCandidatesAsync(pending, cancellationToken).ConfigureAwait(false);
 
-            bool connected = await connection.ConnectAsync(cancellationToken).ConfigureAwait(false);
+            bool connected = await AwaitNegotiationAsync(connectionForOffer.ConnectAsync(cancellationToken), cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("ConnectAsync returned {Connected} for inbound peer {PeerId}", connected, peerId);
             if (!connected)
             {
-                await RemovePendingAsync(offerId).ConfigureAwait(false);
+                await RemovePendingAsync(pending).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
-            await RemovePendingAsync(offerId).ConfigureAwait(false);
+            await RemovePendingAsync(pending).ConfigureAwait(false);
             throw;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to handle offer from peer {PeerId}", peerId);
-            await RemovePendingAsync(offerId).ConfigureAwait(false);
+            await RemovePendingAsync(pending).ConfigureAwait(false);
         }
     }
 
-    public async Task HandleCandidateAsync(WebTorrentSignalMessage signal, CancellationToken cancellationToken)
+    public async Task HandleCandidateAsync(WebTorrentSignalMessage signal, TrackerRuntime runtime, CancellationToken cancellationToken)
     {
         if (!IceCandidateFilter.IsSupportedIceCandidate(signal.Candidate!))
         {
@@ -192,22 +238,37 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
 
         if (!_connections.TryGetValue(signal.OfferId!, out var pending))
         {
-            BufferEarlyRemoteCandidate(signal.OfferId!, signal.Candidate!);
+            BufferEarlyRemoteCandidate(runtime, signal.OfferId!, signal.PeerId, signal.Candidate!);
             return;
         }
 
-        pending.ExpiresAt = _options.TimeProvider.GetUtcNow() + PendingPeerTimeout;
+        if (!ReferenceEquals(pending.Runtime, runtime)
+            || (pending.RemotePeerId != null && pending.RemotePeerId != signal.PeerId)) return;
 
-        if (!pending.RemoteDescriptionSet)
+        lock (pending.SyncRoot)
         {
-            lock (pending.SyncRoot)
+            if (!pending.RemoteDescriptionSet)
             {
-                pending.BufferedRemoteCandidates.Add(signal.Candidate!);
+                if (pending.BufferedRemoteCandidates.Count < 32) pending.BufferedRemoteCandidates.Add(signal.Candidate!);
+                return;
             }
-            return;
         }
 
         await pending.Connection.AddRemoteIceCandidateAsync(new WebRtcIceCandidateDescription(signal.Candidate!), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static Task AwaitNegotiationAsync(Task task, CancellationToken ct)
+    {
+        _ = task.ContinueWith(static completed => _ = completed.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return task.WaitAsync(ct);
+    }
+
+    private static Task<T> AwaitNegotiationAsync<T>(Task<T> task, CancellationToken ct)
+    {
+        _ = task.ContinueWith(static completed => _ = completed.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return task.WaitAsync(ct);
     }
 
     private void ConfigurePendingPeer(PendingPeer pending)
@@ -312,7 +373,7 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
         {
             if (string.IsNullOrWhiteSpace(pending.RemotePeerId) || !pending.LocalCandidateSignalingReady)
             {
-                pending.BufferedLocalCandidates.Add(candidate);
+                if (pending.BufferedLocalCandidates.Count < 32) pending.BufferedLocalCandidates.Add(candidate);
                 return;
             }
         }
@@ -342,27 +403,28 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
         }
     }
 
-    private void BufferEarlyRemoteCandidate(string offerId, string candidate)
+    private void BufferEarlyRemoteCandidate(TrackerRuntime runtime, string offerId, string peerId, string candidate)
     {
-        if (!_earlyRemoteCandidates.ContainsKey(offerId) && _earlyRemoteCandidates.Count >= MaxPendingConnections)
+        lock (_connectionsLock)
         {
-            return;
-        }
-
-        var candidates = _earlyRemoteCandidates.GetOrAdd(offerId, static _ => new ConcurrentQueue<string>());
-        candidates.Enqueue(candidate);
-        while (candidates.Count > 32 && candidates.TryDequeue(out _))
-        {
-            _logger.LogDebug("Dropped oldest buffered ICE candidate for offer {OfferId}", FormatOfferIdForLog(offerId));
+            if (_disposed) return;
+            var key = (runtime, offerId, peerId);
+            if (!_earlyRemoteCandidates.TryGetValue(key, out var buffered))
+            {
+                if (_earlyRemoteCandidates.Count >= MaxPendingConnections) return;
+                _earlyRemoteCandidates[key] = buffered = new EarlyCandidates(_options.TimeProvider.GetUtcNow() + PendingPeerTimeout);
+            }
+            buffered.Candidates.Enqueue(candidate);
+            while (buffered.Candidates.Count > 32) buffered.Candidates.TryDequeue(out _);
         }
     }
 
     private async Task FlushBufferedRemoteCandidatesAsync(PendingPeer pending, CancellationToken cancellationToken)
     {
         var candidates = new List<string>();
-        if (_earlyRemoteCandidates.TryRemove(pending.OfferId, out var earlyCandidates))
+        if (_earlyRemoteCandidates.TryRemove((pending.Runtime, pending.OfferId, pending.RemotePeerId!), out var earlyBuffer))
         {
-            while (earlyCandidates.TryDequeue(out var candidate))
+            while (earlyBuffer.Candidates.TryDequeue(out var candidate))
             {
                 candidates.Add(candidate);
             }
@@ -383,21 +445,26 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
         }
     }
 
-    private async Task ReplaceExistingPendingForInboundOfferAsync(string offerId)
-    {
-        if (_connections.TryRemove(offerId, out var existing))
-        {
-            await DisposePendingAsync(existing, "replacing pending peer").ConfigureAwait(false);
-        }
-    }
-
     public async Task RemovePendingAsync(string offerId)
     {
-        _earlyRemoteCandidates.TryRemove(offerId, out _);
-        if (_connections.TryRemove(offerId, out var removed))
+        PendingPeer? removed;
+        lock (_connectionsLock)
         {
-            await DisposePendingAsync(removed, "removing pending peer").ConfigureAwait(false);
+            foreach (var key in _earlyRemoteCandidates.Keys.Where(key => key.OfferId == offerId)) _earlyRemoteCandidates.TryRemove(key, out _);
+            _connections.TryRemove(offerId, out removed);
         }
+        if (removed != null) await DisposePendingAsync(removed, "removing pending peer").ConfigureAwait(false);
+    }
+
+    internal async Task RemovePendingAsync(PendingPeer pending)
+    {
+        lock (_connectionsLock)
+        {
+            if (!_connections.TryGetValue(pending.OfferId, out var current) || !ReferenceEquals(current, pending)) return;
+            _connections.TryRemove(pending.OfferId, out _);
+            foreach (var key in _earlyRemoteCandidates.Keys.Where(key => key.OfferId == pending.OfferId && ReferenceEquals(key.Runtime, pending.Runtime))) _earlyRemoteCandidates.TryRemove(key, out _);
+        }
+        await DisposePendingAsync(pending, "removing pending peer").ConfigureAwait(false);
     }
 
     private async Task DisposePendingAsync(PendingPeer pending, string reason)
@@ -420,14 +487,16 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
     public async Task CleanupExpiredPendingPeersAsync()
     {
         var now = _options.TimeProvider.GetUtcNow();
+        foreach (var (key, buffered) in _earlyRemoteCandidates)
+            if (buffered.ExpiresAt <= now) _earlyRemoteCandidates.TryRemove(key, out _);
         var expiredOfferIds = _connections
-            .Where(kvp => kvp.Value.ExpiresAt <= now)
-            .Select(kvp => kvp.Key)
+            .Where(kvp => !kvp.Value.IsAttached && kvp.Value.ExpiresAt <= now)
+            .Select(kvp => kvp.Value)
             .ToList();
 
-        foreach (string offerId in expiredOfferIds)
+        foreach (var pending in expiredOfferIds)
         {
-            await RemovePendingAsync(offerId).ConfigureAwait(false);
+            await RemovePendingAsync(pending).ConfigureAwait(false);
         }
     }
 
@@ -450,11 +519,15 @@ internal sealed class WebRtcPeerManager : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var pending in _connections.Values)
+        PendingPeer[] peers;
+        lock (_connectionsLock)
         {
-            await DisposePendingAsync(pending, "disposing pending peer").ConfigureAwait(false);
+            if (_disposed) return;
+            _disposed = true;
+            peers = [.. _connections.Values];
+            _connections.Clear();
+            _earlyRemoteCandidates.Clear();
         }
-        _connections.Clear();
-        _earlyRemoteCandidates.Clear();
+        await Task.WhenAll(peers.Select(peer => DisposePendingAsync(peer, "disposing pending peer"))).ConfigureAwait(false);
     }
 }

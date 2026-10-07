@@ -8,6 +8,17 @@ namespace PeerSharp.Internals.Utilities;
 /// </summary>
 internal static class NetworkUtils
 {
+    internal static bool IsLocalAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        if (IPAddress.IsLoopback(address)) return true;
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+            return address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6UniqueLocal;
+        byte[] bytes = address.GetAddressBytes();
+        return bytes[0] == 10 || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31)
+            || (bytes[0] == 192 && bytes[1] == 168) || (bytes[0] == 169 && bytes[1] == 254);
+    }
+
     /// <summary>
     /// This machine's own globally routable IPv6 address, or null when it has none.
     ///
@@ -51,6 +62,30 @@ internal static class NetworkUtils
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Whether a unicast datagram or connection to this endpoint can leave the machine at all. Port
+    /// zero, the unspecified addresses, 0.0.0.0/8, multicast and the reserved 240.0.0.0/4 block
+    /// (which includes the broadcast address) cannot - the socket refuses them with an exception - and
+    /// peers, PEX and DHT nodes hand them out regardless. Private and loopback addresses are fine.
+    /// </summary>
+    public static bool IsDeliverableUnicast(IPEndPoint endPoint)
+    {
+        if (endPoint.Port is <= 0 or > ushort.MaxValue)
+        {
+            return false;
+        }
+
+        var address = endPoint.Address.IsIPv4MappedToIPv6 ? endPoint.Address.MapToIPv4() : endPoint.Address;
+        if (address.AddressFamily == AddressFamily.InterNetwork)
+        {
+            Span<byte> bytes = stackalloc byte[4];
+            address.TryWriteBytes(bytes, out _);
+            return bytes[0] is not 0 and < 224;
+        }
+
+        return !address.Equals(IPAddress.IPv6Any) && !address.IsIPv6Multicast;
     }
 
     /// <summary>

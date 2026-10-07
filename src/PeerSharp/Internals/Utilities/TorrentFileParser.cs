@@ -22,7 +22,7 @@ internal static class TorrentFileParser
         {
             return ParseCore(data, loggerFactory);
         }
-        catch (Exception ex) when (ex is FormatException or InvalidDataException or EndOfStreamException)
+        catch (Exception ex) when (ex is FormatException or InvalidDataException or EndOfStreamException or OverflowException)
         {
             throw new TorrentMetadataException($"The torrent file could not be read: {ex.Message}", ex);
         }
@@ -35,7 +35,7 @@ internal static class TorrentFileParser
         {
             return ParseInfoBytesCore(infoBytes, loggerFactory);
         }
-        catch (Exception ex) when (ex is FormatException or InvalidDataException or EndOfStreamException)
+        catch (Exception ex) when (ex is FormatException or InvalidDataException or EndOfStreamException or OverflowException)
         {
             throw new TorrentMetadataException($"The info dictionary could not be read: {ex.Message}", ex);
         }
@@ -316,15 +316,18 @@ internal static class TorrentFileParser
     {
         foreach (var kvp in tree.Dict)
         {
-            string name = kvp.Key;
+            string name = System.Text.Encoding.UTF8.GetString(System.Text.Encoding.Latin1.GetBytes(kvp.Key));
+            if (name.Length == 0) throw new FormatException("The file tree root or a directory cannot contain file properties.");
             string path = string.IsNullOrEmpty(pathPrefix) ? name : $"{pathPrefix}{Path.DirectorySeparatorChar}{name}";
 
+            if (kvp.Value is not BDict) throw new FormatException("Invalid file tree node.");
             if (kvp.Value is BDict nodeDict)
             {
                 // Check if this is a file (has empty string key with length) or directory
                 var fileInfoNode = nodeDict.Get("");
                 if (fileInfoNode is BDict fileInfo)
                 {
+                    if (nodeDict.Dict.Count != 1) throw new FormatException("A file tree node cannot be both a file and a directory.");
                     // This is a file
                     long length = RequireNonNegativeLength(fileInfo, "length", "BEP 52 file");
                     var piecesRootBytes = fileInfo.GetBytes("pieces root");
@@ -342,8 +345,8 @@ internal static class TorrentFileParser
                     // BEP 52: Calculate first piece index (files are piece-aligned)
                     if (metadata.Info.PieceSize > 0)
                     {
-                        file.FirstPieceIndex = (int)(currentOffset / metadata.Info.PieceSize);
-                        file.PieceCount = length > 0 ? (int)((length + metadata.Info.PieceSize - 1) / metadata.Info.PieceSize) : 0;
+                        file.FirstPieceIndex = checked((int)(currentOffset / metadata.Info.PieceSize));
+                        file.PieceCount = length > 0 ? checked((int)(1 + (length - 1) / metadata.Info.PieceSize)) : 0;
                     }
 
                     metadata.Info.Files.Add(file);
@@ -352,7 +355,7 @@ internal static class TorrentFileParser
                     // Offset advances by file size rounded up to piece boundary
                     if (metadata.Info.PieceSize > 0 && length > 0)
                     {
-                        currentOffset += (length + metadata.Info.PieceSize - 1) / metadata.Info.PieceSize * metadata.Info.PieceSize;
+                        currentOffset = checked(currentOffset + checked((1 + (length - 1) / metadata.Info.PieceSize) * metadata.Info.PieceSize));
                     }
                 }
                 else
@@ -363,6 +366,48 @@ internal static class TorrentFileParser
             }
         }
         return currentOffset;
+    }
+
+    private static void ValidateHybridLayout(BDict info, TorrentFileMetadata metadata)
+    {
+        var v1 = new List<TorrentFileEntry>();
+        if (info.Get("files") is BList files)
+        {
+            long offset = 0;
+            foreach (var node in files.List)
+            {
+                if (node is not BDict file) throw new FormatException("Invalid hybrid v1 file entry.");
+                if (file.Get("path") is not BList path || path.List.Count == 0 || path.List.Any(part => part is not BString))
+                    throw new FormatException("Invalid hybrid v1 file path.");
+                var entry = new TorrentFileEntry
+                {
+                    Path = string.Join(Path.DirectorySeparatorChar, path.List.Cast<BString>().Select(part => part.Text)),
+                    Size = RequireNonNegativeLength(file, "length", "hybrid v1 file"),
+                    Offset = offset
+                };
+                ApplyBep47Attributes(file, entry);
+                entry.IsPadding |= PaddingFileHelper.IsPaddingPath(entry.Path);
+                v1.Add(entry);
+                offset = checked(offset + entry.Size);
+            }
+        }
+        else
+        {
+            v1.Add(new TorrentFileEntry { Path = metadata.Info.Name, Size = RequireNonNegativeLength(info, "length", "hybrid v1 file") });
+        }
+        var realFiles = v1.Where(file => !file.IsPadding).ToArray();
+        if (realFiles.Length != metadata.Info.Files.Count) throw new FormatException("Hybrid v1 and v2 file lists differ.");
+        for (int i = 0; i < realFiles.Length; i++)
+        {
+            var v2 = metadata.Info.Files[i];
+            if (realFiles[i].Path != v2.Path || realFiles[i].Size != v2.Size || realFiles[i].Offset != v2.Offset)
+                throw new FormatException("Hybrid v1 and v2 file layouts differ.");
+        }
+        long total = v1.Count == 0 ? 0 : checked(v1[^1].Offset + v1[^1].Size);
+        if (total > metadata.Info.FullSize) throw new FormatException("Hybrid padding extends beyond the v2 piece space.");
+        // The final v1 piece ends at the actual v1 stream boundary. Padding after the
+        // final content file is optional, so the rounded v2 boundary cannot stand in for it.
+        metadata.Info.FullSize = total;
     }
 
     private static void ParseInfoDictionary(BDict info, TorrentFileMetadata metadata, byte[] infoBytes, BDict? root, ILogger logger)
@@ -391,6 +436,8 @@ internal static class TorrentFileParser
             metadata.Info.Version = TorrentVersion.V1;
         }
 
+        if (hasV2FileTree && metaVersion != 2) throw new FormatException("A v2 file tree requires meta version 2.");
+        if (metaVersion == 2 && info.Get("file tree") is not BDict) throw new FormatException("Missing or invalid v2 file tree.");
         metadata.InfoBytes = infoBytes;
 
         // V1 info hash (SHA-1) - always calculate for v1 and hybrid
@@ -446,6 +493,7 @@ internal static class TorrentFileParser
         }
 
         // Parse files based on version
+        metadata.Info.IsMultiFile = info.Get("files") is BList;
         if (metadata.Info.IsV2 && hasV2FileTree && info.Get("file tree") is BDict fileTree)
         {
             long endOffset = ParseFileTree(metadata, fileTree, "", 0);
@@ -509,6 +557,9 @@ internal static class TorrentFileParser
                 metadata.Info.FullSize = len;
             }
         }
+
+        if (metadata.Info.IsV2 && metadata.Info.Files.Count == 0) throw new FormatException("The v2 file tree contains no files.");
+        if (metadata.Info.Version == TorrentVersion.Hybrid) ValidateHybridLayout(info, metadata);
 
         // Parse V1 piece hashes after file sizes are known so the count can be validated.
         if (metadata.Info.IsV1 && !metadata.Info.IsMerkle)

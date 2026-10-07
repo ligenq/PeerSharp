@@ -11,6 +11,12 @@ public interface IPeerTransportHost
     InfoHash Hash { get; }
 
     /// <summary>
+    /// Whether transport adapters may establish direct network connections. Adapters that cannot
+    /// honor the host's proxy policy must check this before opening sockets or signaling channels.
+    /// </summary>
+    bool AllowsDirectConnections => true;
+
+    /// <summary>
     /// Gets the remaining bytes to download.
     /// </summary>
     long DataLeft { get; }

@@ -9,6 +9,46 @@ namespace PeerSharp.Tests.Core;
 
 public class ClientEngineTests
 {
+    [Fact]
+    public async Task AddMagnetAsync_CopiesSelectionsForFutureMetadata()
+    {
+        await using var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        FileSelection[] selections = [new(true, Priority.High)];
+        var magnet = MagnetLink.Parse("magnet:?xt=urn:btih:" + new string('a', 40));
+        var torrent = (Torrent)await engine.AddMagnetAsync(magnet,
+            new AddTorrentOptions { StartImmediately = false, FileSelections = selections });
+        selections[0] = new(false, Priority.DoNotDownload);
+        Assert.Equal(new FileSelection(true, Priority.High), Assert.Single(torrent.PendingFileSelections!));
+    }
+
+    [Fact]
+    public async Task AddTorrentAsync_InvalidOptionsDoNotRegisterTorrent()
+    {
+        await using var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => engine.AddTorrentAsync(
+            new TorrentFile(ThreeFileMetadata()), new AddTorrentOptions { StartImmediately = false, RatioLimit = float.NaN }));
+        Assert.Empty(engine.GetTorrents());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Dispose_DuringInitialization_WaitsForNetworkStartBeforeDisposal()
+    {
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _networkManager.StartHandler = async () => { entered.SetResult(); await release.Task; };
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        var initialize = engine.InitializeAsync();
+        await entered.Task;
+        var dispose = engine.DisposeAsync().AsTask();
+        Assert.False(dispose.IsCompleted);
+        Assert.Equal(0, _networkManager.DisposeCallCount);
+        release.SetResult();
+        await initialize;
+        await dispose;
+        Assert.Equal(1, _networkManager.DisposeCallCount);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => engine.InitializeAsync());
+    }
+
     private class MockNetworkManager : INetworkManager
     {
         public IDhtManager Dht { get; set; } = null!;
@@ -23,11 +63,12 @@ public class ClientEngineTests
         public bool Stopped { get; private set; }
         public int StopCallCount { get; private set; }
         public int DisposeCallCount { get; private set; }
+        public Func<Task>? StartHandler { get; set; }
 
         public Task StartAsync(CancellationToken cancellationToken = default)
         {
             Started = true;
-            return Task.CompletedTask;
+            return StartHandler?.Invoke() ?? Task.CompletedTask;
         }
 
         public Task StopAsync(CancellationToken ct = default)
@@ -103,6 +144,75 @@ public class ClientEngineTests
             new AddTorrentOptions { StartImmediately = false, AdditionalPeers = [endpoint] });
 
         Assert.Equal(0, torrent.Peers.Add([endpoint]));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddTorrentAsync_AppliesTheGivenFileSelection()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        var torrent = await engine.AddTorrentAsync(
+            new TorrentFile(ThreeFileMetadata()),
+            new AddTorrentOptions
+            {
+                StartImmediately = false,
+                FileSelections = [new FileSelection(), new FileSelection(false, Priority.DoNotDownload), new FileSelection(true, Priority.High)],
+            });
+
+        var selections = torrent.GetAllFileSelections();
+        Assert.True(selections[0].Selected);
+        Assert.False(selections[1].Selected);
+        Assert.Equal(Priority.High, selections[2].Priority);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddTorrentAsync_RefusesAFileSelectionOfTheWrongLength()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => engine.AddTorrentAsync(
+            new TorrentFile(ThreeFileMetadata()),
+            new AddTorrentOptions { StartImmediately = false, FileSelections = [new FileSelection()] }));
+
+        Assert.Empty(engine.GetTorrents());
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AddTorrentAsync_AddsTheGivenTrackersAndWebSeeds()
+    {
+        var engine = ClientEngine.Create(_settings, networkManager: _networkManager, timeProvider: _timeProvider);
+        await engine.InitializeAsync();
+
+        var torrent = await engine.AddTorrentAsync(
+            new TorrentFile(ThreeFileMetadata()),
+            new AddTorrentOptions
+            {
+                StartImmediately = false,
+                AdditionalTrackers = ["http://tracker.example/announce"],
+                AdditionalWebSeeds = ["http://seed.example/files/"],
+            });
+
+        Assert.Contains(torrent.Trackers.GetTrackers(), tracker => tracker.Url == "http://tracker.example/announce");
+        Assert.Contains("http://seed.example/files/", torrent.WebSeeds.GetAll());
+    }
+
+    private static TorrentFileMetadata ThreeFileMetadata()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Version = TorrentVersion.V1;
+        metadata.Info.Hash = InfoHash.CreateRandom();
+        metadata.Info.Name = "three";
+        metadata.Info.PieceSize = 100;
+        metadata.Info.FullSize = 300;
+        for (int i = 0; i < 3; i++)
+        {
+            metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = $"f{i}", Size = 100, Offset = i * 100 });
+            metadata.Info.Pieces.Add(new byte[20]);
+        }
+
+        return metadata;
     }
 
     [Fact(Timeout = 30000)]

@@ -47,6 +47,13 @@ public class HttpRangePropertyTests
             {
                 return;
             }
+            if (totalLength == 0)
+            {
+                Assert.False(range.IsPartial);
+                Assert.Equal(0, range.Start);
+                Assert.Equal(-1, range.End);
+                return;
+            }
 
             Assert.InRange(range.Start, 0, totalLength - 1);
             Assert.InRange(range.End, range.Start, totalLength - 1);
@@ -54,11 +61,13 @@ public class HttpRangePropertyTests
     }
 
     [Fact]
-    public void AnEmptyFileIsNeverSatisfiable()
+    public void AnEmptyFileAcceptsOnlyAWholeRepresentation()
     {
-        // There is no byte to send, so every form of the header has to be refused rather than
-        // producing a range of length zero or a negative one.
-        Header.Sample(header => Assert.False(HttpRangeParser.Parse(header, 0).IsValid), iter: 5_000);
+        Header.Sample(header =>
+        {
+            var range = HttpRangeParser.Parse(header, 0);
+            Assert.Equal(!range.IsPartial, range.IsValid);
+        }, iter: 5_000);
     }
 
     [Fact]

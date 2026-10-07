@@ -553,7 +553,8 @@ public class RealSwarmSoakTests
         cts.CancelAfter(duration + TimeSpan.FromMinutes(5));
 
         var source = await ResolveTorrentSourceAsync(cts.Token);
-        var (engine, downloadPath) = CreateEngine();
+        var capture = new CapturingLoggerProvider(LogLevel.Debug);
+        var (engine, downloadPath) = CreateEngine(capture);
 
         try
         {
@@ -564,6 +565,13 @@ public class RealSwarmSoakTests
 
             _output.WriteLine(observer.BuildReport($"real swarm interop over {duration.TotalMinutes:F0} minutes"));
             WriteInterpretationNotes(torrent);
+
+            if (observer.Peers.Count == 0)
+            {
+                _output.WriteLine("Engine diagnostics for the unsuccessful peer search:");
+                foreach (var (message, count) in capture.Summarise(50))
+                    _output.WriteLine($"  {count,8:N0}  {message}");
+            }
 
             Assert.True(
                 observer.Peers.Count > 0,

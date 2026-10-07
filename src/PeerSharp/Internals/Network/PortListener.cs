@@ -168,7 +168,9 @@ internal class PortListener : IPortListener
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            var stream = client.GetStream();
+            // Not owned: the socket passes to the peer if negotiation succeeds, and is closed below if not.
+            // Its read ends the negotiation's deadline by closing the socket rather than by throwing.
+            using var stream = new SocketStream(client.Client, ownsSocket: false);
 
             // Shared with the inbound uTP path, so the two cannot drift apart. They already had:
             // this one negotiated MSE, that one assumed plaintext and rejected every encrypted peer.
