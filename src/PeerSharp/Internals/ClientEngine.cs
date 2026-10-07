@@ -83,13 +83,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         _fileHandleCache = new FileHandleCache(loggerFactory: loggerFactory); // Default 200 handles
         // One pool for this engine's trackers, web seeds and magnet fetches, disposed with the engine.
-        _httpClientFactory = new HttpClientFactory();
+        _httpClientFactory = new HttpClientFactory(new HostAddressCache(_timeProvider));
         _connectionGovernor = new ConnectionGovernor(settings);
 
         // Initialize dependencies
         _geoIp = new GeoIpService();
         _peerFactory = new PeerCommunicationFactory(loggerFactory);
-        _trackerFactory = new TrackerFactory(loggerFactory, _httpClientFactory);
+        _trackerFactory = new TrackerFactory(loggerFactory, _httpClientFactory, _httpClientFactory.HostAddresses);
 
         // Reads through GetStats, which refuses a disposed engine - hence the guard rather than the
         // call alone. Nothing is measured unless something subscribes to the meter.
@@ -255,113 +255,129 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _geoIp.Clear();
     }
 
+    private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
+    private readonly Lock _registrationLock = new();
+
     public async ValueTask DisposeAsync()
     {
         if (_disposal.MarkDisposed())
         {
-            var shutdownStopwatch = System.Diagnostics.Stopwatch.StartNew();
-            var phaseStopwatch = System.Diagnostics.Stopwatch.StartNew();
-            // Cancel both background loops, wait for them to drain, and only then dispose their
-            // token sources - a source must outlive every token still in flight.
-            if (_queueCts != null)
+            await _lifecycleLock.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
             {
-                await _queueCts.CancelAsync().ConfigureAwait(false);
-            }
-
-            if (_dhtSaveCts != null)
-            {
-                await _dhtSaveCts.CancelAsync().ConfigureAwait(false);
-            }
-
-            if (_republishCts != null)
-            {
-                await _republishCts.CancelAsync().ConfigureAwait(false);
-            }
-
-            if (_queueTask is { } queueTask)
-            {
-                try { await queueTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
-            }
-
-            if (_dhtSaveTask is { } dhtSaveTask)
-            {
-                try { await dhtSaveTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
-            }
-
-            if (_republishTask is { } republishTask)
-            {
-                try { await republishTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
-            }
-
-            _queueCts?.Dispose();
-            _queueCts = null;
-            _dhtSaveCts?.Dispose();
-            _dhtSaveCts = null;
-            _republishCts?.Dispose();
-            _republishCts = null;
-            _logger.LogDebug("Shutdown phase queue completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
-
-            // Save all resume data before shutting down
-            phaseStopwatch.Restart();
-            if (_sessionManager != null)
-            {
-                try
+                var shutdownStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                var phaseStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                // Cancel both background loops, wait for them to drain, and only then dispose their
+                // token sources - a source must outlive every token still in flight.
+                if (_queueCts != null)
                 {
-                    _logger.LogInformation("Saving session data before shutdown...");
-                    await _sessionManager.SaveAllResumeDataAsync(CancellationToken.None).ConfigureAwait(false);
-                    _logger.LogInformation("Session data saved successfully");
+                    await _queueCts.CancelAsync().ConfigureAwait(false);
                 }
-                catch (Exception ex)
+
+                if (_dhtSaveCts != null)
                 {
-                    _logger.LogError(ex, "Failed to save session data during shutdown");
+                    await _dhtSaveCts.CancelAsync().ConfigureAwait(false);
                 }
-                await _sessionManager.DisposeAsync().ConfigureAwait(false);
-            }
-            _logger.LogDebug("Shutdown phase session completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
 
-            // Dispose all torrents to ensure they stop and release file handles
-            phaseStopwatch.Restart();
-            var torrents = _registry.GetAll();
-            var disposeTasks = new List<Task>(torrents.Count);
-            foreach (var torrent in torrents)
-            {
-                disposeTasks.Add(torrent.DisposeAsync().AsTask());
-            }
-
-            if (disposeTasks.Count > 0)
-            {
-                try
+                if (_republishCts != null)
                 {
-                    // 15s: torrent disposal flushes the block cache and closes file handles,
-                    // which can take several seconds on slow storage or large write queues.
-                    await Task.WhenAll(disposeTasks).WaitAsync(TimeSpan.FromSeconds(15), CancellationToken.None).ConfigureAwait(false);
+                    await _republishCts.CancelAsync().ConfigureAwait(false);
                 }
-                catch (Exception ex)
+
+                if (_queueTask is { } queueTask)
                 {
-                    _logger.LogWarning(ex, "Timed out or error waiting for torrents to dispose");
+                    try { await queueTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
                 }
-            }
-            _logger.LogDebug("Shutdown phase torrents completed in {ElapsedMs} ms for {TorrentCount} torrents", phaseStopwatch.ElapsedMilliseconds, disposeTasks.Count);
 
-            // Stop and dispose network manager
-            phaseStopwatch.Restart();
-            if (_ownsNetworkManager && _networkManager != null)
+                if (_dhtSaveTask is { } dhtSaveTask)
+                {
+                    try { await dhtSaveTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
+                }
+
+                if (_republishTask is { } republishTask)
+                {
+                    try { await republishTask.ConfigureAwait(false); } catch { /* Ignore cancellation */ }
+                }
+
+                _queueCts?.Dispose();
+                _queueCts = null;
+                _dhtSaveCts?.Dispose();
+                _dhtSaveCts = null;
+                _republishCts?.Dispose();
+                _republishCts = null;
+                _logger.LogDebug("Shutdown phase queue completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
+
+                // Save all resume data before shutting down
+                phaseStopwatch.Restart();
+                if (_sessionManager != null)
+                {
+                    try
+                    {
+                        _logger.LogInformation("Saving session data before shutdown...");
+                        await _sessionManager.SaveAllResumeDataAsync(CancellationToken.None).ConfigureAwait(false);
+                        _logger.LogInformation("Session data saved successfully");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to save session data during shutdown");
+                    }
+                    try { await _sessionManager.DisposeAsync().ConfigureAwait(false); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to dispose the session manager"); }
+                }
+                _logger.LogDebug("Shutdown phase session completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
+
+                // Dispose all torrents to ensure they stop and release file handles
+                phaseStopwatch.Restart();
+                IReadOnlyList<Torrent> torrents;
+                lock (_registrationLock)
+                {
+                    torrents = _registry.GetAllIncludingTransient();
+                }
+                var disposeTasks = new List<Task>(torrents.Count);
+                foreach (var torrent in torrents)
+                {
+                    disposeTasks.Add(torrent.DisposeAsync().AsTask());
+                }
+
+                if (disposeTasks.Count > 0)
+                {
+                    try
+                    {
+                        // Owners must drain before their shared file handles and bandwidth are disposed.
+                        await Task.WhenAll(disposeTasks).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Error waiting for torrents to dispose");
+                    }
+                }
+                _logger.LogDebug("Shutdown phase torrents completed in {ElapsedMs} ms for {TorrentCount} torrents", phaseStopwatch.ElapsedMilliseconds, disposeTasks.Count);
+
+                // Stop and dispose network manager
+                phaseStopwatch.Restart();
+                if (_ownsNetworkManager && _networkManager != null)
+                {
+                    // NetworkManager.DisposeAsync performs the stop. Calling both would
+                    // repeat slow best-effort cleanup such as NAT-PMP/UPnP unmapping.
+                    try { await _networkManager.DisposeAsync().ConfigureAwait(false); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Failed to dispose the network manager"); }
+                }
+                _logger.LogDebug("Shutdown phase network completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
+
+                phaseStopwatch.Restart();
+                _metrics.Dispose();
+                _fileHandleCache.Dispose();
+                _httpClientFactory.Dispose();
+
+                // Dispose bandwidth manager
+                await _bandwidth.DisposeAsync().ConfigureAwait(false);
+                _logger.LogDebug("Shutdown phase final resources completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
+                _logger.LogDebug("ClientEngine shutdown completed in {ElapsedMs} ms", shutdownStopwatch.ElapsedMilliseconds);
+            }
+            finally
             {
-                // NetworkManager.DisposeAsync performs the stop. Calling both would
-                // repeat slow best-effort cleanup such as NAT-PMP/UPnP unmapping.
-                await _networkManager.DisposeAsync().ConfigureAwait(false);
+                _lifecycleLock.Release();
             }
-            _logger.LogDebug("Shutdown phase network completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
-
-            phaseStopwatch.Restart();
-            _metrics.Dispose();
-            _fileHandleCache.Dispose();
-            _httpClientFactory.Dispose();
-
-            // Dispose bandwidth manager
-            await _bandwidth.DisposeAsync().ConfigureAwait(false);
-            _logger.LogDebug("Shutdown phase final resources completed in {ElapsedMs} ms", phaseStopwatch.ElapsedMilliseconds);
-            _logger.LogDebug("ClientEngine shutdown completed in {ElapsedMs} ms", shutdownStopwatch.ElapsedMilliseconds);
         }
     }
 
@@ -641,7 +657,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         // Started, because a lookup answered after the torrent stopped would otherwise queue dials for
         // a torrent nobody is waiting on.
-        if (torrent is Torrent { Started: true } t)
+        if (torrent is Torrent { Started: true } t && !t.InfoFile.Info.IsPrivate)
         {
             t.PeersInternal.AddPeers(peers, PeerSourceKind.Dht, null);
 
@@ -667,6 +683,24 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
     }
 
+    private void AnnounceChangedPeerPort()
+    {
+        foreach (var torrent in _registry.GetAllIncludingTransient())
+        {
+            if (!torrent.Started) continue;
+            try
+            {
+                _ = torrent.TrackerManager.AnnounceAsync(cancellationToken: CancellationToken.None); // Scheduling completes synchronously.
+                torrent.PeersInternal.AnnounceListenPort();
+                if (!torrent.InfoFile.Info.IsPrivate)
+                {
+                    torrent.DhtManager?.Announce(torrent.InfoFile.Info.GetTrackerInfoHash(), torrent.AdvertisedPeerPort);
+                }
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "Could not refresh network advertisements for {TorrentName}", torrent.Name); }
+        }
+    }
+
     public void OnScrapeResult(InfoHash infoHash, int estimatedSeeds, int estimatedPeers)
     {
         var torrent = ResolveTorrentForBackgroundWork(infoHash);
@@ -689,28 +723,31 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     public async Task StopAsync(CancellationToken ct = default)
     {
         _disposal.ThrowIfDisposed(this);
+        await _lifecycleLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            _disposal.ThrowIfDisposed(this);
+            await StopCoreAsync(ct).ConfigureAwait(false);
+        }
+        finally { _lifecycleLock.Release(); }
+    }
+
+    private async Task StopCoreAsync(CancellationToken ct)
+    {
+        _disposal.ThrowIfDisposed(this);
 
         _logger.LogInformation("Stopping ClientEngine...");
 
         var stopTasks = new List<Task>();
-        if (_networkManager != null && _ownsNetworkManager)
-        {
-            stopTasks.Add(_networkManager.StopAsync(ct));
-        }
-
-        var torrents = _registry.GetAll();
-        foreach (var torrent in torrents)
-        {
-            stopTasks.Add(torrent.StopAsync(ct));
-        }
-
         // Cancel the background loops here but dispose their token sources only after the loops
         // have actually drained (below). Disposing a source whose token is still in use can make
         // the loop fault with ObjectDisposedException on its way out.
         var queueCts = _queueCts;
         var dhtSaveCts = _dhtSaveCts;
+        var republishCts = _republishCts;
         _queueCts = null;
         _dhtSaveCts = null;
+        _republishCts = null;
 
         if (queueCts != null)
         {
@@ -731,6 +768,28 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (_dhtSaveTask is { } dhtSaveTask)
         {
             backgroundLoops.Add(dhtSaveTask);
+        }
+        if (republishCts != null)
+        {
+            await republishCts.CancelAsync().ConfigureAwait(false);
+        }
+        if (_republishTask is { } republishTask)
+        {
+            backgroundLoops.Add(republishTask);
+        }
+
+        // Scheduling must finish before we stop its torrents, or a queued start can undo the stop.
+        try { await Task.WhenAll(backgroundLoops).ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* The component tokens were cancelled above. */ }
+        catch (Exception ex) { _logger.LogDebug(ex, "Background loop failed during engine stop"); }
+
+        if (_networkManager != null && _ownsNetworkManager)
+        {
+            stopTasks.Add(_networkManager.StopAsync(ct));
+        }
+        foreach (var torrent in _registry.GetAllIncludingTransient())
+        {
+            stopTasks.Add(torrent.StopAsync(ct));
         }
 
         stopTasks.AddRange(backgroundLoops);
@@ -772,12 +831,14 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 // register anything new on these sources.
                 DisposeDrainedLoop(queueCts, backgroundLoops);
                 DisposeDrainedLoop(dhtSaveCts, backgroundLoops);
+                DisposeDrainedLoop(republishCts, backgroundLoops);
             }
         }
         else
         {
             queueCts?.Dispose();
             dhtSaveCts?.Dispose();
+            republishCts?.Dispose();
         }
 
         _logger.LogInformation("ClientEngine stopped");
@@ -830,7 +891,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             null);
     }
 
-    private Torrent AddMagnetInternal(MagnetLink magnetLink, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false)
+    private async Task<Torrent> AddMagnetInternal(MagnetLink magnetLink, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false)
     {
         _disposal.ThrowIfDisposed(this);
 
@@ -878,6 +939,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
         torrent.PortListener = _networkManager?.PortListener;
+        torrent.Network.GetAdvertisedPeerPort = () => _networkManager?.AdvertisedPeerPort ?? Settings.Connection.TcpPort;
         torrent.Blocklist = Blocklist;
         torrent.MetadataDownload = new MetadataDownload(torrent, _loggerFactory);
         torrent.MetadataDownload.Start();
@@ -901,12 +963,12 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             }
         }
 
-        Register(torrent, transient);
+        await RegisterAsync(torrent, transient).ConfigureAwait(false);
 
         return torrent;
     }
 
-    private Torrent AddTorrentInternal(TorrentFileMetadata metadata, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false)
+    private async Task<Torrent> AddTorrentInternal(TorrentFileMetadata metadata, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false)
     {
         _disposal.ThrowIfDisposed(this);
 
@@ -922,9 +984,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         torrent.UtpManager = Utp;
         torrent.LsdManager = _networkManager?.Lsd;
         torrent.PortListener = _networkManager?.PortListener;
+        torrent.Network.GetAdvertisedPeerPort = () => _networkManager?.AdvertisedPeerPort ?? Settings.Connection.TcpPort;
         torrent.Blocklist = Blocklist;
 
-        Register(torrent, transient);
+        await RegisterAsync(torrent, transient).ConfigureAwait(false);
 
         return torrent;
     }
@@ -934,15 +997,27 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     /// stays resolvable for inbound connections without joining the caller's torrent list or
     /// tripping the duplicate guard against a hash they may already hold.
     /// </summary>
-    private void Register(Torrent torrent, bool transient)
+    private async Task RegisterAsync(Torrent torrent, bool transient)
     {
-        if (transient)
+        try
         {
-            _registry.AddTransient(torrent);
+            lock (_registrationLock)
+            {
+                _disposal.ThrowIfDisposed(this);
+                if (transient)
+                {
+                    _registry.AddTransient(torrent);
+                }
+                else
+                {
+                    _registry.Add(torrent);
+                }
+            }
         }
-        else
+        catch
         {
-            _registry.Add(torrent);
+            await torrent.DisposeAsync().ConfigureAwait(false);
+            throw;
         }
     }
 
@@ -962,7 +1037,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                     _logger.LogError(t.Exception.GetBaseException(), "Unhandled exception persisting magnet metadata");
                 }
             }, TaskScheduler.Default);
-        });
+        }, _logger);
     }
 
     private async Task PersistMagnetMetadataAsync(Torrent torrent)
@@ -992,11 +1067,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         private readonly ITorrentEvents _inner;
         private readonly Action<Torrent> _onMetadataReceived;
+        private readonly ILogger _eventsLogger;
 
-        public TorrentEventsProxy(ITorrentEvents inner, Action<Torrent> onMetadataReceived)
+        public TorrentEventsProxy(ITorrentEvents inner, Action<Torrent> onMetadataReceived, ILogger logger)
         {
             _inner = inner;
             _onMetadataReceived = onMetadataReceived;
+            _eventsLogger = logger;
         }
 
         public Action<ITorrent, Exception>? Error => _inner?.Error;
@@ -1004,10 +1081,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         public Action<ITorrent, MetadataProgress>? MetadataProgress => _inner?.MetadataProgress;
         public Action<ITorrent>? MetadataReceived => t =>
         {
-            _inner?.MetadataReceived?.Invoke(t);
-            if (t is Torrent torrent)
+            try { TorrentEventDispatcher.Invoke(_inner.MetadataReceived, t, _eventsLogger); }
+            finally
             {
-                _onMetadataReceived(torrent);
+                if (t is Torrent torrent)
+                {
+                    _onMetadataReceived(torrent);
+                }
             }
         };
         public Action<ITorrent, PieceProgress>? PieceCompleted => _inner?.PieceCompleted;
@@ -1028,6 +1108,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // indefinitely.
             using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
+            // The deadline closes the stream, which ends a pending read as end of input, rather than being
+            // passed in to cancel the read - which could only report it by throwing, for every inbound peer
+            // that connects and then says nothing.
+            using var deadline = timeoutCts.Token.UnsafeRegister(static state => ((UtpStream)state!).CloseAndStopReading(), stream);
+
             // uTP peers negotiate MSE exactly as TCP peers do. This path used to read 68 bytes and
             // insist the first was 19, so every encrypted inbound uTP peer was rejected - its
             // Diffie-Hellman key looks like noise, which is what the old "Invalid uTP handshake ...
@@ -1038,7 +1123,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 stream,
                 this,
                 _logger,
-                timeoutCts.Token).ConfigureAwait(false);
+                CancellationToken.None).ConfigureAwait(false);
 
             if (!negotiated.Success)
             {
@@ -1142,16 +1227,17 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
 
         // Disable UPnP if ForceProxy is enabled
-        if (Settings.Proxy.ForceProxy && Settings.Proxy.Type != ProxyType.None)
+        if (Settings.Proxy.ForceProxy)
         {
             _logger.LogInformation("ForceProxy is enabled, disabling UPnP port mapping");
             Settings.Connection.UpnpPortMapping = false;
+            Settings.Connection.NatPmpPortMapping = false;
         }
 
         if (Settings.PeerId.All(b => b == 0))
         {
             // BEP 20: Generate peer ID using Azureus-style format
-            // Format: -PS0500-xxxxxxxxxxxx (20 bytes)
+            // Format: -PS0501-xxxxxxxxxxxx (20 bytes)
             var peerId = ProtocolConstants.GeneratePeerId();
             Array.Copy(peerId, Settings.PeerId, 20);
             // NOTE: Client application is responsible for persisting Settings if it wants to keep PeerID
@@ -1200,7 +1286,9 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 Settings,
                 HandleUtpConnection,
                 networkServices,
-                _loggerFactory);
+                _loggerFactory,
+                _timeProvider,
+                AnnounceChangedPeerPort);
         }
 
         await _networkManager.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -1389,14 +1477,25 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // Restore path: suppress the redundant disk write-back (the entry was just read from
         // disk) and defer queue rebalancing to a single pass after the whole batch loads.
         ITorrent torrent;
-        if (entry.TorrentFileData is { Length: > 0 })
+        TorrentFile? savedFile = null;
+        if (entry.TorrentFileData is { Length: > 0 }
+            && (!TorrentFile.TryParse(entry.TorrentFileData, out savedFile)
+                || (!savedFile.Metadata.Info.Hash.Matches(entry.Hash) && !savedFile.Metadata.Info.HashV2.Matches(entry.Hash))))
         {
-            var torrentFile = TorrentFile.Parse(entry.TorrentFileData);
-            torrent = await AddTorrentCoreAsync(torrentFile, options, persistToDisk: false, rebalanceQueue: false, entry.Options?.PeerPreferences, entry.Hash, cancellationToken).ConfigureAwait(false);
+            _logger.LogWarning("Persisted metadata for {Hash} is corrupt or has a different identity; trying its magnet link", entry.Hash);
+            savedFile = null;
+        }
+        if (savedFile != null)
+        {
+            torrent = await AddTorrentCoreAsync(savedFile, options, persistToDisk: false, rebalanceQueue: false, entry.Options?.PeerPreferences, entry.Hash, cancellationToken).ConfigureAwait(false);
         }
         else if (!string.IsNullOrEmpty(entry.MagnetLink))
         {
             var magnet = MagnetLink.Parse(entry.MagnetLink);
+            if (!magnet.InfoHash.Matches(entry.Hash) && !magnet.InfoHashV2.Matches(entry.Hash))
+            {
+                throw new InvalidDataException("Persisted magnet does not match its session hash.");
+            }
             torrent = await AddMagnetCoreAsync(magnet, options, persistToDisk: false, rebalanceQueue: false, transient: false, entry.Options?.PeerPreferences, entry.Hash, cancellationToken).ConfigureAwait(false);
         }
         else
@@ -1499,7 +1598,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             return;
         }
 
-        var byHash = torrents.ToDictionary(t => t.Hash, t => t);
+        var byHash = torrents.ToDictionary(t => t.SessionHash, t => t);
 
         foreach (var hash in plan.Stop)
         {
@@ -1554,6 +1653,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         ArgumentNullException.ThrowIfNull(magnetLink);
         cancellationToken.ThrowIfCancellationRequested();
 
+        options = options?.Snapshot();
+
         Torrent? torrent = null;
         byte[]? torrentBytes = null;
 
@@ -1563,11 +1664,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             if (fetched != null)
             {
                 torrentBytes = fetched.Value.Bytes;
-                torrent = AddTorrentInternal(fetched.Value.Metadata, options?.Events, options?.ResumeData, transient);
+                torrent = await AddTorrentInternal(fetched.Value.Metadata, options?.Events, options?.ResumeData, transient).ConfigureAwait(false);
             }
         }
 
-        torrent ??= AddMagnetInternal(magnetLink, options?.Events, options?.ResumeData, transient);
+        torrent ??= await AddMagnetInternal(magnetLink, options?.Events, options?.ResumeData, transient).ConfigureAwait(false);
 
         // The torrent is registered above, so from here on any failure - most commonly the
         // caller's token tripping during StartAsync - has to unregister it again. Leaving a
@@ -1594,23 +1695,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             }
 
             AddOptionPeers(torrent, options);
-
-            // Add additional trackers from options
-            if (options?.AdditionalTrackers != null)
-            {
-                foreach (var tracker in options.AdditionalTrackers)
-                {
-                    torrent.TrackerManager.AddTracker(tracker);
-                }
-            }
-
-            if (options?.AdditionalWebSeeds != null)
-            {
-                foreach (var webSeed in options.AdditionalWebSeeds)
-                {
-                    torrent.WebSeeds.Add(webSeed);
-                }
-            }
+            AddOptionSources(torrent, options);
 
             // Apply options
             if (options != null)
@@ -1637,6 +1722,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 torrent.PendingSelectOnlyFileIndices = magnetLink.SelectOnlyFileIndices;
                 await torrent.ApplyPendingSelectOnlyFileIndicesAsync(cancellationToken).ConfigureAwait(false);
             }
+
+            // Applied after the magnet's own restriction, which it overrides; without metadata yet, when
+            // the metadata arrives.
+            torrent.PendingFileSelections = options?.FileSelections;
+            await torrent.ApplyPendingFileSelectionsAsync(cancellationToken).ConfigureAwait(false);
 
             // Preview mode: leave the torrent stopped once metadata has been downloaded so the
             // application can inspect the file list and adjust selections before starting.
@@ -1859,7 +1949,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     private IHttpClient GetMagnetHttpClient()
     {
         var settings = Settings.Proxy;
-        if (!settings.ProxyTrackers || settings.Type == ProxyType.None)
+        if (!settings.ProxyTrackers && !settings.ForceProxy)
         {
             settings = NoProxy;
         }
@@ -1888,8 +1978,14 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(torrentFile);
         cancellationToken.ThrowIfCancellationRequested();
+        options = options?.Snapshot();
+        if (options?.FileSelections is { } selections && selections.Count != torrentFile.FileCount)
+        {
+            throw new ArgumentException(
+                $"FileSelections has {selections.Count} entries but the torrent has {torrentFile.FileCount} files.", nameof(options));
+        }
 
-        var torrent = AddTorrentInternal(torrentFile.Metadata, options?.Events, options?.ResumeData);
+        var torrent = await AddTorrentInternal(torrentFile.Metadata, options?.Events, options?.ResumeData).ConfigureAwait(false);
 
         // See AddMagnetCoreAsync: the torrent is already registered, so a failure or a tripped
         // token from here on has to unregister it again.
@@ -1902,6 +1998,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             torrent.PeersInternal.ImportConnectionPreferences(restoredPeerPreferences);
 
             AddOptionPeers(torrent, options);
+            AddOptionSources(torrent, options);
 
             // Apply options
             if (options != null)
@@ -1919,6 +2016,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 torrent.SuperSeeding = options.SuperSeeding;
                 torrent.QueueAutoStart = options.StartImmediately;
             }
+
+            // Before starting: a torrent's web seeds fetch from the moment it starts, and would fetch
+            // files the caller does not want.
+            torrent.PendingFileSelections = options?.FileSelections;
+            await torrent.ApplyPendingFileSelectionsAsync(cancellationToken).ConfigureAwait(false);
 
             // Start if requested
             if (options?.StartImmediately ?? true)
@@ -1961,6 +2063,20 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         return torrent;
     }
 
+    /// <summary>Adds the trackers and web seeds the caller gave on top of the torrent's own.</summary>
+    private static void AddOptionSources(Torrent torrent, AddTorrentOptions? options)
+    {
+        foreach (var tracker in options?.AdditionalTrackers ?? [])
+        {
+            torrent.TrackerManager.AddTracker(tracker);
+        }
+
+        foreach (var webSeed in options?.AdditionalWebSeeds ?? [])
+        {
+            torrent.WebSeeds.Add(webSeed);
+        }
+    }
+
     private void AddOptionPeers(Torrent torrent, AddTorrentOptions? options)
     {
         if (options?.AdditionalPeers is not { Count: > 0 })
@@ -1979,6 +2095,18 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        _disposal.ThrowIfDisposed(this);
+        await _lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _disposal.ThrowIfDisposed(this);
+            await InitializeCoreAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally { _lifecycleLock.Release(); }
+    }
+
+    private async Task InitializeCoreAsync(CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
         cancellationToken.ThrowIfCancellationRequested();
@@ -2089,6 +2217,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         RemoveOptions options = RemoveOptions.None,
         CancellationToken cancellationToken = default)
     {
+        await _lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { await RemoveTorrentCoreAsync(torrent, options, cancellationToken).ConfigureAwait(false); }
+        finally { _lifecycleLock.Release(); }
+    }
+
+    private async Task RemoveTorrentCoreAsync(ITorrent torrent, RemoveOptions options, CancellationToken cancellationToken)
+    {
         _disposal.ThrowIfDisposed(this);
         ArgumentNullException.ThrowIfNull(torrent);
         cancellationToken.ThrowIfCancellationRequested();
@@ -2108,43 +2243,50 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             throw new TorrentNotFoundException(t.Hash);
         }
 
-        await t.StopAsync(CancellationToken.None).ConfigureAwait(false);
-
-        if (options.HasFlag(RemoveOptions.DeleteFiles))
+        try
         {
-            try
+            try { await t.StopAsync(CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to stop removed torrent {Hash}", t.Hash); }
+
+            if (options.HasFlag(RemoveOptions.DeleteFiles))
             {
-                await t.FilesInternal.DeleteFilesAsync(CancellationToken.None).ConfigureAwait(false);
+                try
+                {
+                    await t.FilesInternal.DeleteFilesAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    // Failed to delete some files - not fatal
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Access denied - not fatal
+                }
             }
-            catch (IOException)
+
+            _bandwidth.RemoveTorrentChannels(t);
+            _alerts.TorrentAlert(AlertId.TorrentRemoved, t);
+
+            // Delete from session persistence if enabled
+            if (_sessionManager != null)
             {
-                // Failed to delete some files - not fatal
+                try
+                {
+                    await _sessionManager.DeleteAsync(t, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to delete persisted torrent {Hash}", t.Hash);
+                }
             }
-            catch (UnauthorizedAccessException)
-            {
-                // Access denied - not fatal
-            }
+
+            await RebalanceQueueAsync(QueueToken).ConfigureAwait(false);
         }
-
-        _bandwidth.RemoveTorrentChannels(t);
-        _alerts.TorrentAlert(AlertId.TorrentRemoved, t);
-
-        // Delete from session persistence if enabled
-        if (_sessionManager != null)
+        finally
         {
-            try
-            {
-                await _sessionManager.DeleteAsync(t.SessionHash, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to delete persisted torrent {Hash}", t.Hash);
-            }
+            _bandwidth.RemoveTorrentChannels(t);
+            await t.DisposeAsync().ConfigureAwait(false);
         }
-
-        await RebalanceQueueAsync(QueueToken).ConfigureAwait(false);
-
-        await t.DisposeAsync().ConfigureAwait(false);
     }
 
     #endregion New Async API

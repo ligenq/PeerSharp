@@ -4,6 +4,38 @@ namespace PeerSharp.Tests.Core.Peers;
 
 public class ConnectionGovernorTests
 {
+    [Fact(Timeout = 30000)]
+    public void ConcurrentReservationsNeverExceedActiveOrPendingLimits()
+    {
+        var settings = new Settings();
+        settings.Connection.MaxConnections = 1;
+        settings.Connection.MaxPendingConnections = 1;
+        var governors = Enumerable.Range(0, 500).Select(_ => new ConnectionGovernor(settings)).ToArray();
+        using var barrier = new Barrier(16);
+        var workers = Enumerable.Range(0, 16).Select(_ => new Thread(() =>
+        {
+            foreach (var governor in governors)
+            {
+                barrier.SignalAndWait();
+                governor.TryAcquireConnectionSlot();
+                governor.TryAcquirePendingSlot();
+            }
+        })).ToArray();
+        foreach (var worker in workers)
+        {
+            worker.Start();
+        }
+        foreach (var worker in workers)
+        {
+            worker.Join();
+        }
+        Assert.All(governors, governor =>
+        {
+            Assert.Equal(1, governor.ActiveConnections);
+            Assert.Equal(1, governor.PendingConnections);
+        });
+    }
+
     [Fact]
     public void TryAcquireConnectionSlot_UnderLimit_IncrementsAndReturnsTrue()
     {

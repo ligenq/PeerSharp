@@ -75,4 +75,49 @@ public class ExceptionOnOrdinaryPathsTests
         await Assert.ThrowsAsync<IOException>(async () =>
             await stream.WriteAsync(new byte[16], TestContext.Current.CancellationToken));
     }
+
+    /// <summary>
+    /// A full queue that stays full is reported as false once the wait runs out, not as a cancelled wait.
+    /// A peer that stops reading fills its queue as a matter of course.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task WaitingForRoomThatNeverComes_IsFalse()
+    {
+        var queue = new MessageQueue(capacity: 1);
+        Assert.True(queue.TryEnqueue(new PeerMessage(MessageId.KeepAlive)));
+
+        using var waiting = new PeerMessage(MessageId.KeepAlive);
+        Assert.False(await queue.TryEnqueueWithinAsync(waiting, TimeSpan.FromMilliseconds(50)));
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RoomAppearingWhileWaiting_TakesTheMessage()
+    {
+        var queue = new MessageQueue(capacity: 1);
+        Assert.True(queue.TryEnqueue(new PeerMessage(MessageId.KeepAlive)));
+
+        var waiting = queue.TryEnqueueWithinAsync(new PeerMessage(MessageId.Interested), TimeSpan.FromSeconds(20));
+        Assert.True(queue.TryDequeue(out var first));
+        first.Dispose();
+
+        Assert.True(await waiting);
+        Assert.True(queue.TryDequeue(out var second));
+        Assert.Equal(MessageId.Interested, second.Id);
+        second.Dispose();
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task TheQueueClosingWhileWaiting_IsFalse()
+    {
+        // Closing the connection completes the queue, which is what ends a wait - no token needed.
+        var queue = new MessageQueue(capacity: 1);
+        Assert.True(queue.TryEnqueue(new PeerMessage(MessageId.KeepAlive)));
+        using var message = new PeerMessage(MessageId.KeepAlive);
+
+        var waiting = queue.TryEnqueueWithinAsync(message, TimeSpan.FromSeconds(20));
+        queue.TryComplete();
+
+        Assert.False(await waiting);
+    }
+
 }

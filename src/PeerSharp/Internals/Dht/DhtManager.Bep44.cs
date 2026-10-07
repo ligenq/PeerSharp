@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using PeerSharp.BEncoding;
+using PeerSharp.Internals.Utilities;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
@@ -78,7 +79,8 @@ internal partial class DhtManager
 
     private static readonly TimeSpan QueryTimeout = TimeSpan.FromSeconds(5);
 
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<BDict>> _pendingQueries = new();
+    private sealed record PendingQuery(IPEndPoint Endpoint, TaskCompletionSource<BDict> Completion);
+    private readonly ConcurrentDictionary<string, PendingQuery> _pendingQueries = new();
 
     /// <summary>
     /// Fetches an item from the DHT.
@@ -119,7 +121,7 @@ internal partial class DhtManager
         DhtTarget target,
         CancellationToken cancellationToken = default)
     {
-        if (!_running)
+        if (!Running)
         {
             throw new InvalidOperationException("The DHT must be started before publishing an item.");
         }
@@ -154,7 +156,7 @@ internal partial class DhtManager
             var delay = remaining < RoutingTablePollInterval ? remaining : RoutingTablePollInterval;
             await Task.Delay(delay, timeProvider, cancellationToken).ConfigureAwait(false);
 
-            if (!_running)
+            if (!Running)
             {
                 throw new InvalidOperationException("The DHT stopped while waiting to publish an item.");
             }
@@ -182,6 +184,7 @@ internal partial class DhtManager
     {
         ArgumentNullException.ThrowIfNull(item);
 
+        item = DhtItemCodec.Snapshot(item);
         var validation = DhtItemCodec.Validate(item);
         if (validation != DhtPutError.None)
         {
@@ -225,6 +228,7 @@ internal partial class DhtManager
     /// </summary>
     private async Task<ItemLookupResult> RunItemLookupAsync(DhtTarget target, byte[]? salt, CancellationToken cancellationToken)
     {
+        if (salt is { Length: > DhtItem.MaxSaltLength }) throw new ArgumentException("DHT salt exceeds 64 bytes.", nameof(salt));
         var queried = new HashSet<IPEndPoint>();
         var writeTargets = new List<(IPEndPoint Endpoint, byte[] Token)>();
         DhtItem? best = null;
@@ -291,7 +295,7 @@ internal partial class DhtManager
                 discovered.AddRange(ReadNodeEndpoints(reply));
             }
 
-            candidates = discovered.Where(endpoint => !queried.Contains(endpoint)).Distinct().ToList();
+            candidates = candidates.Concat(discovered).Where(endpoint => !queried.Contains(endpoint)).Distinct().Take(MaxLookupRounds * LookupConcurrency).ToList();
         }
 
         var stats = new DhtItemLookupStats(
@@ -340,7 +344,7 @@ internal partial class DhtManager
         if (publicKey is null)
         {
             var immutable = new DhtImmutableItem { Value = value };
-            return immutable.Target == target ? immutable : null;
+            return DhtItemCodec.Validate(immutable) == DhtPutError.None && immutable.Target == target ? immutable : null;
         }
 
         var signature = reply.GetBytes("sig");
@@ -358,15 +362,10 @@ internal partial class DhtManager
             Salt = salt is { Length: > 0 } ? salt : null,
         };
 
+        if (DhtItemCodec.Validate(mutable) != DhtPutError.None) return null;
         if (mutable.Target != target)
         {
             _logger.LogDebug("Discarded a BEP 44 reply whose key and salt address {Actual}, not {Requested}", mutable.Target, target);
-            return null;
-        }
-
-        if (!mutable.VerifySignature())
-        {
-            _logger.LogDebug("Discarded a BEP 44 reply for {Target} with an invalid signature", target);
             return null;
         }
 
@@ -459,15 +458,28 @@ internal partial class DhtManager
     private async Task<BDict?> SendCorrelatedQueryAsync(BDict query, string transactionId, IPEndPoint endpoint, CancellationToken cancellationToken)
     {
         var completion = new TaskCompletionSource<BDict>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_pendingQueries.TryAdd(transactionId, completion))
+        var pending = new PendingQuery(NetworkUtils.NormalizeEndPoint(endpoint), completion);
+        CancellationToken componentToken;
+        await _lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            return null;
+            if (!Running || _disposal.IsDisposed)
+            {
+                return null;
+            }
+            componentToken = DhtToken;
+            if (!_pendingQueries.TryAdd(transactionId, pending))
+            {
+                return null;
+            }
         }
+        finally { _lifecycleLock.Release(); }
 
         try
         {
-            SendPacket(query, endpoint, cancellationToken);
-            return await completion.Task.WaitAsync(QueryTimeout, _timeProvider, cancellationToken).ConfigureAwait(false);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, componentToken);
+            SendPacket(query, endpoint, linked.Token);
+            return await completion.Task.WaitAsync(QueryTimeout, _timeProvider, linked.Token).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
@@ -486,7 +498,7 @@ internal partial class DhtManager
         }
         finally
         {
-            _pendingQueries.TryRemove(transactionId, out _);
+            _pendingQueries.TryRemove(new KeyValuePair<string, PendingQuery>(transactionId, pending));
         }
     }
 

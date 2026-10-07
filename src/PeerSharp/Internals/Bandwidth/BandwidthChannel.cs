@@ -12,8 +12,8 @@ internal interface IBandwidthUser
 /// </summary>
 /// <remarks>
 /// <para>
-/// Callers are concurrent by design: <see cref="BandwidthManager"/> spends quota from a deliberately
-/// lock-free fast path, on whichever peer thread wants to send, while its tick loop refills every
+/// Callers are concurrent by design: <see cref="BandwidthManager"/> spends quota
+/// on whichever peer thread wants to send, while its tick loop refills every
 /// channel from another thread entirely.
 /// </para>
 /// <para>
@@ -112,7 +112,20 @@ internal class BandwidthChannel
 
         lock (_lock)
         {
+            _quota = limit == 0 || _limit == 0 ? 0 : Math.Clamp(_quota, -SaturatingTriple(limit), SaturatingTriple(limit));
+            _subQuota = 0;
             Interlocked.Exchange(ref _limit, limit);
+        }
+    }
+
+    internal bool TryUseQuota(int amount)
+    {
+        lock (_lock)
+        {
+            if (_limit == 0) return true;
+            if (_quota < amount) return false;
+            _quota -= amount;
+            return true;
         }
     }
 
@@ -121,6 +134,7 @@ internal class BandwidthChannel
     /// </summary>
     public void UpdateQuota(int dt)
     {
+        if (dt <= 0) return;
         lock (_lock)
         {
             if (_limit == 0)

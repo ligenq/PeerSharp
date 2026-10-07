@@ -6,6 +6,21 @@ namespace PeerSharp.Tests.Core.Dht;
 public class DhtExternalIpVoteTrackerTests
 {
     [Fact]
+    public void ProcessReport_RequiresIndependentDhtSources()
+    {
+        var tracker = new DhtExternalIpVoteTracker(requiredVotes: 3);
+        var address = IPAddress.Parse("8.8.8.8");
+        byte[] report = address.GetAddressBytes();
+        var source = IPAddress.Parse("1.1.1.1");
+        tracker.ProcessReport(report, source);
+        tracker.ProcessReport(report, source);
+        tracker.ProcessReport(report, source);
+        Assert.Null(tracker.ConfirmedAddress);
+        tracker.ProcessReport(report, IPAddress.Parse("1.1.1.2"));
+        tracker.ProcessReport(report, IPAddress.Parse("1.1.1.3"));
+        Assert.Equal(address, tracker.ConfirmedAddress);
+    }
+    [Fact]
     public void ProcessReport_InvalidLength_IsIgnored()
     {
         var tracker = new DhtExternalIpVoteTracker(requiredVotes: 3);

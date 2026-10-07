@@ -13,7 +13,7 @@ public interface IWebSeeds
     /// <summary>
     /// Adds a web seed URL for this torrent.
     /// </summary>
-    /// <param name="url">An absolute <c>http</c>, <c>https</c> or <c>ftp</c> URL.</param>
+    /// <param name="url">An absolute <c>http</c> or <c>https</c> URL.</param>
     /// <returns>
     /// <see langword="true"/> if it was added; <see langword="false"/> if the torrent already had it,
     /// or the URL is blank, malformed, or not one of those schemes.

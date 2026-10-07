@@ -24,6 +24,11 @@ public class WebSeedManagerErrorTests
             RequestedUrls.Add(request.RequestUri!.ToString());
             if (Responses.TryDequeue(out var response))
             {
+                if (response.StatusCode == HttpStatusCode.PartialContent)
+                {
+                    var range = request.Headers.Range!.Ranges.Single();
+                    response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(range.From!.Value, range.To!.Value);
+                }
                 return Task.FromResult(response);
             }
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));

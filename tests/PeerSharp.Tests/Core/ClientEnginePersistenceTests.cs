@@ -302,6 +302,35 @@ public class ClientEnginePersistenceTests
 
     // ── RebalanceQueueAsync ───────────────────────────────────────────────────
 
+    [Theory(Timeout = 10000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PersistedIdentityMustMatchItsTorrentOrMagnet(bool useMagnet)
+    {
+        var torrentFile = CreateAndParseTorrentFile();
+        var persistence = new MockSessionPersistence();
+        persistence.SavedEntries.Add(new SavedTorrentEntry(
+            InfoHash.CreateRandom(), useMagnet ? null : torrentFile.RawData.ToArray(),
+            useMagnet ? $"magnet:?xt=urn:btih:{torrentFile.InfoHash.ToHexString()}" : null,
+            Options: new SavedTorrentOptions(DownloadPath: Path.GetTempPath(), WasStarted: false)));
+        await using var engine = ClientEngine.Create(new TorrentClientOptions { Settings = CreateSettings(), SessionPersistence = persistence });
+        await InvokePrivateAsync(engine, "LoadPersistedTorrentsAsync", CancellationToken.None);
+        Assert.Empty(engine.GetTorrents());
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task CorruptSavedMetadataCanRecoverThroughItsMatchingMagnet()
+    {
+        var file = CreateAndParseTorrentFile();
+        var persistence = new MockSessionPersistence();
+        persistence.SavedEntries.Add(new SavedTorrentEntry(file.InfoHash, [1, 2, 3],
+            $"magnet:?xt=urn:btih:{file.InfoHash.ToHexString()}",
+            Options: new SavedTorrentOptions(DownloadPath: Path.GetTempPath(), WasStarted: false)));
+        await using var engine = ClientEngine.Create(new TorrentClientOptions { Settings = CreateSettings(), SessionPersistence = persistence });
+        await InvokePrivateAsync(engine, "LoadPersistedTorrentsAsync", CancellationToken.None);
+        Assert.Equal(file.InfoHash, Assert.Single(engine.GetTorrents()).Hash);
+    }
+
     [Fact(Timeout = 10000)]
     public async Task RebalanceQueueAsync_NullQueueManager_ReturnsEarlyWithoutError()
     {

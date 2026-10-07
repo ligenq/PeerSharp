@@ -14,6 +14,63 @@ namespace PeerSharp.Tests.Core.Extensions;
 /// </summary>
 public class MetadataDownloadUpdateTests
 {
+    [Theory]
+    [InlineData(262144)]
+    [InlineData(int.MaxValue)]
+    public async Task MetadataRequest_OverflowingIndex_IsRejected(int piece)
+    {
+        await using var torrent = TorrentTestUtility.CreateMinimal();
+        using var download = new MetadataDownload(torrent);
+        download.SetMetadata(new byte[100]);
+        var peer = MakePeer(100);
+        download.MetadataRequestReceived(peer, piece);
+        var messages = (MockUtMetadata)peer.UtMetadata;
+        Assert.Empty(messages.SentDataPieces);
+        Assert.Equal([piece], messages.RejectedPieces);
+    }
+
+    [Fact]
+    public async Task Update_UnknownSize_RetriesTimedOutProbe()
+    {
+        var time = new FakeTimeProvider();
+        await using var torrent = TorrentTestUtility.CreateMinimal(timeProvider: time);
+        using var download = new MetadataDownload(torrent);
+        download.Start();
+        var peer = MakePeer();
+        download.PeerConnected(peer);
+        Assert.Single(((MockUtMetadata)peer.UtMetadata).RequestedPieces);
+        time.Advance(TimeSpan.FromMinutes(1));
+        download.Update();
+        Assert.Equal(2, ((MockUtMetadata)peer.UtMetadata).RequestedPieces.Count);
+    }
+
+    [Fact]
+    public async Task Update_UnresponsiveDeclaredSize_SwitchesToAnotherHolder()
+    {
+        var time = new FakeTimeProvider();
+        await using var torrent = TorrentTestUtility.CreateMinimal(timeProvider: time);
+        torrent.Settings.Transfer.MetadataMaxRequestAttempts = 1;
+        using var download = new MetadataDownload(torrent);
+        download.Start();
+        var silent = MakePeer(100);
+        var alternate = MakePeer(200);
+        download.PeerConnected(silent);
+        download.PeerConnected(alternate);
+        time.Advance(TimeSpan.FromMinutes(1));
+        download.Update();
+        Assert.Single(((MockUtMetadata)alternate.UtMetadata).RequestedPieces);
+        Assert.Contains(download.GetPendingRequestsForTesting(), request => request.Peer == alternate);
+    }
+
+    [Fact]
+    public async Task Start_DisposedDownload_Throws()
+    {
+        await using var torrent = TorrentTestUtility.CreateMinimal();
+        var download = new MetadataDownload(torrent);
+        download.Dispose();
+        Assert.Throws<ObjectDisposedException>(download.Start);
+    }
+
     private class MockUtMetadata : IUtMetadata
     {
         public int? LocalMessageId { get; private set; }

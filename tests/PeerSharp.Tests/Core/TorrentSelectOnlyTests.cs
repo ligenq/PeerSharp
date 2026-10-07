@@ -133,6 +133,69 @@ public class TorrentSelectOnlyTests
         }
     }
 
+    [Fact]
+    public async Task ApplyFileSelections_WinOverResumeData_AndClearPending()
+    {
+        var torrent = CreateTorrent(CreateMultiFileMetadata());
+        try
+        {
+            torrent.LocalState.Selection = [new FileSelection(), new FileSelection(), new FileSelection()];
+            torrent.PendingFileSelections = [new FileSelection(false, Priority.DoNotDownload), new FileSelection(), new FileSelection()];
+
+            await torrent.ApplyPendingFileSelectionsAsync();
+
+            Assert.False(torrent.GetFileSelection(0).Selected);
+            Assert.True(torrent.GetFileSelection(1).Selected);
+            Assert.Null(torrent.PendingFileSelections);
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ApplyFileSelections_OfTheWrongLength_AreIgnored()
+    {
+        var torrent = CreateTorrent(CreateMultiFileMetadata());
+        try
+        {
+            torrent.PendingFileSelections = [new FileSelection(false, Priority.DoNotDownload)];
+
+            await torrent.ApplyPendingFileSelectionsAsync();
+
+            Assert.True(torrent.GetFileSelection(0).Selected);
+            Assert.Null(torrent.PendingFileSelections);
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ApplyFileSelections_WithoutMetadata_StayPending()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Version = TorrentVersion.V1;
+        metadata.Info.Hash = new InfoHash(Enumerable.Range(0, 20).Select(i => (byte)i).ToArray());
+        metadata.Info.PieceSize = 16384;
+
+        var torrent = CreateTorrent(metadata);
+        try
+        {
+            torrent.PendingFileSelections = [new FileSelection()];
+
+            await torrent.ApplyPendingFileSelectionsAsync();
+
+            Assert.NotNull(torrent.PendingFileSelections);
+        }
+        finally
+        {
+            await torrent.DisposeAsync();
+        }
+    }
+
     private static TorrentFileMetadata CreateMultiFileMetadata()
     {
         var metadata = new TorrentFileMetadata();

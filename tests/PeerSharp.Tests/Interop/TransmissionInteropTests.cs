@@ -845,7 +845,7 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
             Path.Combine(configDir, "settings.json"),
             JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
 
-        var info = new ProcessStartInfo(exe) { UseShellExecute = false };
+        var info = new ProcessStartInfo(exe) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
         info.EnvironmentVariables["TRANSMISSION_HOME"] = configDir;
 
         // transmission-daemon needs telling not to fork, and it is the only build that writes the log

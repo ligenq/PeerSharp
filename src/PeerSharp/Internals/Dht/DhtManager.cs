@@ -67,6 +67,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     private IDhtCallback? _callback;
     private CancellationTokenSource? _cts;
     private AtomicDisposal _disposal = new();
+    private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private bool _stateDirty;
 
     private DhtExternalIpVoteTracker _externalIpVoteTracker = new(requiredVotes: ExternalIpVotesRequired);
@@ -79,7 +80,8 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
     private Task? _rebootstrapTask;
 
-    private bool _running;
+    private int _runningState;
+    private bool Running => Interlocked.CompareExchange(ref _runningState, 0, 0) != 0;
 
     private byte[] _secret = GenerateSecret();
 
@@ -165,7 +167,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     public void Announce(InfoHash infoHash, int port)
     {
         _disposal.ThrowIfDisposed(this);
-        if (!_running)
+        if (!Running || _transactions.Count >= MaxTransactions)
         {
             return;
         }
@@ -216,7 +218,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     public int FindPeers(InfoHash infoHash)
     {
         _disposal.ThrowIfDisposed(this);
-        if (!_running)
+        if (!Running)
         {
             return 0;
         }
@@ -241,7 +243,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     public void Ping(IPEndPoint ep)
     {
         _disposal.ThrowIfDisposed(this);
-        if (!_running)
+        if (!Running || _transactions.Count >= MaxTransactions)
         {
             return;
         }
@@ -258,13 +260,13 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         a.Dict["id"] = new BString(NodeId.ToArray());
         dict.Dict["a"] = a;
 
-        RegisterTransaction(tid, "ping", InfoHash.Empty);
+        RegisterTransaction(tid, "ping", InfoHash.Empty, ep);
         SendPacket(dict, ep, DhtToken);
     }
 
     public void Receive(byte[] data, IPEndPoint remote)
     {
-        if (!_running)
+        if (!Running)
         {
             return;
         }
@@ -284,7 +286,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     public void ScrapeInfoHash(InfoHash infoHash)
     {
         _disposal.ThrowIfDisposed(this);
-        if (!_running)
+        if (!Running)
         {
             return;
         }
@@ -304,29 +306,41 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         _callback = callback;
     }
 
-    public Task StartAsync(CancellationToken ct = default)
+    public async Task StartAsync(CancellationToken ct = default)
     {
-        if (_running)
+        await _lifecycleLock.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            return Task.CompletedTask;
+            _disposal.ThrowIfDisposed(this);
+            if (Running)
+            {
+                return;
+            }
+
+            _cts?.Dispose();
+            _cts = new CancellationTokenSource();
+            Interlocked.Exchange(ref _runningState, 1);
+
+            RestoreInitialState();
+
+            _bootstrapTask = BootstrapAsync(_cts.Token);
+
+            _maintenanceTask = RunMaintenanceAsync(_cts.Token);
+
         }
-
-        _running = true;
-        _cts?.Dispose();
-        _cts = new CancellationTokenSource();
-
-        RestoreInitialState();
-
-        _bootstrapTask = BootstrapAsync(_cts.Token);
-
-        _maintenanceTask = RunMaintenanceAsync(_cts.Token);
-
-        return Task.CompletedTask;
+        finally { _lifecycleLock.Release(); }
     }
 
     public async Task StopAsync(CancellationToken ct = default)
     {
-        _running = false;
+        await _lifecycleLock.WaitAsync(ct).ConfigureAwait(false);
+        try { await StopCoreAsync().ConfigureAwait(false); }
+        finally { _lifecycleLock.Release(); }
+    }
+
+    private async Task StopCoreAsync()
+    {
+        Interlocked.Exchange(ref _runningState, 0);
 
         var cts = _cts;
         if (cts != null)
@@ -341,6 +355,14 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         _bootstrapTask = null;
         _maintenanceTask = null;
         _rebootstrapTask = null;
+        _transactions.Clear();
+        foreach (var pending in _pendingQueries)
+        {
+            if (_pendingQueries.TryRemove(pending))
+            {
+                pending.Value.Completion.TrySetCanceled(CancellationToken.None);
+            }
+        }
 
         var completion = Task.WhenAll(tasks);
         if (completion.IsCompleted)
@@ -580,9 +602,23 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var ips = await _dnsResolver
-                    .GetHostAddressesAsync(node.Host, cancellationToken)
-                    .ConfigureAwait(false);
+                IPAddress[] ips;
+                if (IPAddress.TryParse(node.Host, out var literal))
+                {
+                    ips = [literal];
+                }
+                else if (UdpProxyPolicy.Decide(_settings.Proxy, proxyTraffic: true) != UdpProxyPolicy.Decision.BindDirectly)
+                {
+                    // DHT transactions bind replies to concrete endpoints. Until the shared UDP
+                    // transport supports resolving names through the proxy, bootstrap from saved
+                    // nodes or configured IP literals rather than leaking DNS outside that route.
+                    _logger.LogWarning("Skipping DHT bootstrap host {Host} under proxy routing; configure an IP address or restore saved DHT nodes", node.Host);
+                    continue;
+                }
+                else
+                {
+                    ips = await _dnsResolver.GetHostAddressesAsync(node.Host, cancellationToken).ConfigureAwait(false);
+                }
                 // One address of each family, not merely the first the resolver happened to list.
                 // BEP 32 describes two overlaid DHTs, and a node is only in the one it can be reached
                 // over: bootstrapping into whichever family DNS returned first left the routing table
@@ -674,6 +710,11 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         }
 
         var id = a.GetBytes("id");
+        if (id is null || id.Value.Length != 20)
+        {
+            SendError(t, DhtErrorProtocol, "Invalid node ID", remote);
+            return;
+        }
         if (id != null)
         {
             // BEP 43: a sender flagged read-only must not enter the routing table. Pinging it later
@@ -704,7 +745,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         else if (q == "find_node")
         {
             var target = a.GetBytes("target");
-            if (target != null)
+            if (target != null && target.Value.Length == 20)
             {
                 // BEP 32: each field comes from its own DHT's closest nodes. Selecting eight from a
                 // combined table first could return only one family even when both were requested.
@@ -724,11 +765,12 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
                 SendResponse(t, r, remote);
             }
+            else { SendError(t, DhtErrorProtocol, "Invalid target", remote); }
         }
         else if (q == "get_peers")
         {
             var infoHash = a.GetBytes("info_hash");
-            if (infoHash != null)
+            if (infoHash != null && infoHash.Value.Length == 20)
             {
                 r.Dict["token"] = new BString(GenerateToken(remote, infoHash.Value.Span));
 
@@ -806,6 +848,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 }
                 SendResponse(t, r, remote);
             }
+            else { SendError(t, DhtErrorProtocol, "Invalid info hash", remote); }
         }
         else if (q == "sample_infohashes")
         {
@@ -824,7 +867,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             var infoHash = a.GetBytes("info_hash");
             var token = a.GetBytes("token");
 
-            if (infoHash == null || token == null)
+            if (infoHash == null || infoHash.Value.Length != 20 || token == null)
             {
                 SendError(t, DhtErrorProtocol, "Missing arguments", remote);
             }
@@ -835,14 +878,19 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             }
             else
             {
-                int p = a.Get("port") is BNumber port ? (int)port.Value : remote.Port;
+                long p = a.Get("port") is BNumber port ? port.Value : 0;
                 if (a.Get("implied_port") is BNumber impliedPort && impliedPort.Value != 0)
                 {
                     p = remote.Port;
                 }
+                if (p is <= 0 or > 65535)
+                {
+                    SendError(t, DhtErrorProtocol, "Invalid peer port", remote);
+                    return;
+                }
 
                 var hashStr = Convert.ToHexString(infoHash.Value.Span);
-                var ep = new IPEndPoint(remote.Address, p);
+                var ep = new IPEndPoint(remote.Address, (int)p);
 
                 // Only take on a hash we are not already holding when there is room for it. Refusing
                 // to record is not refusing to answer: BEP 5 expects a response either way, and a
@@ -872,6 +920,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
                 SendResponse(t, r, remote);
             }
+        }
+        else
+        {
+            SendError(t, DhtErrorMethodUnknown, "Method Unknown", remote);
         }
     }
 
@@ -1126,9 +1178,16 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         // Use Latin1 encoding to match how transactions are registered
         var t = Encoding.Latin1.GetString(tBytes.Value.Span);
 
+        if (node.Get("r") is not BDict reply || reply.GetBytes("id") is not { Length: 20 })
+        {
+            return;
+        }
+        remote = NetworkUtils.NormalizeEndPoint(remote);
+
         // BEP 44 queries are awaited by their caller rather than driven by callbacks, so they
         // have their own correlation table and are matched before the fire-and-forget one.
-        if (_pendingQueries.TryRemove(t, out var pending))
+        if (_pendingQueries.TryGetValue(t, out var pending) && pending.Endpoint.Equals(remote) &&
+            _pendingQueries.TryRemove(new KeyValuePair<string, PendingQuery>(t, pending)))
         {
             if (node.Get("r") is BDict itemReply)
             {
@@ -1140,11 +1199,12 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 }
             }
 
-            pending.TrySetResult(node);
+            pending.Completion.TrySetResult(node);
             return;
         }
 
-        if (!_transactions.TryRemove(t, out var trans))
+        if (!_transactions.TryGetValue(t, out var trans) || trans.Endpoint?.Equals(remote) != true ||
+            !_transactions.TryRemove(new KeyValuePair<string, Transaction>(t, trans)))
         {
             return;
         }
@@ -1162,7 +1222,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             var ipField = r.GetBytes("ip");
             if (ipField != null)
             {
-                ProcessExternalIp(ipField.Value.Span);
+                ProcessExternalIp(ipField.Value.Span, remote.Address);
             }
 
             // BEP 32: Parse both IPv4 (nodes) and IPv6 (nodes6) compact node info
@@ -1240,9 +1300,9 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// BEP 42: Process external IP field from DHT response.
     /// When we receive consistent reports of our external IP, regenerate our node ID.
     /// </summary>
-    private void ProcessExternalIp(ReadOnlySpan<byte> ipBytes)
+    private void ProcessExternalIp(ReadOnlySpan<byte> ipBytes, IPAddress source)
     {
-        ApplyExternalIpVote(_externalIpVoteTracker.ProcessReport(ipBytes), "BEP 42 DHT node");
+        ApplyExternalIpVote(_externalIpVoteTracker.ProcessReport(ipBytes, source), "BEP 42 DHT node");
     }
 
     /// <summary>
@@ -1300,7 +1360,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             // Error replies were previously dropped on the floor. That is harmless for the
             // callback-driven queries, but a BEP 44 caller awaiting a reply would sit out its
             // whole timeout against a node that answered immediately.
-            else if (y == "e" && !TryCompleteItemQueryWithError(node))
+            else if (y == "e" && !TryCompleteItemQueryWithError(node, remote))
             {
                 _logger.LogDebug("Received a DHT error reply from {Remote} with no matching query", remote);
             }
@@ -1331,7 +1391,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
         // Re-bootstrap to populate the new routing table. Skip once stopped so we
         // never spawn an uncancellable straggler after the token has been detached.
-        if (!_running)
+        if (!Running)
         {
             return;
         }
@@ -1339,7 +1399,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         _rebootstrapTask = BootstrapAsync(DhtToken);
     }
 
-    private void RegisterTransaction(ReadOnlySpan<byte> tid, string type, InfoHash infoHash, bool announce = false, int port = 0, bool scrape = false, int depth = 0)
+    private void RegisterTransaction(ReadOnlySpan<byte> tid, string type, InfoHash infoHash, IPEndPoint endpoint, bool announce = false, int port = 0, bool scrape = false, int depth = 0)
     {
         var idString = Encoding.Latin1.GetString(tid);
         _transactions[idString] = new Transaction
@@ -1347,6 +1407,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
             Id = idString,
             Type = type,
             InfoHash = infoHash,
+            Endpoint = NetworkUtils.NormalizeEndPoint(endpoint),
             Timestamp = _timeProvider.GetUtcNow(),
             Announce = announce,
             Port = port,
@@ -1369,7 +1430,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// <param name="depth">Rounds already walked. The response handler stops at MaxFindNodeDepth.</param>
     private void SendFindNode(IPEndPoint ep, InfoHash target, int depth = 0)
     {
-        if (!_running || _transactions.Count >= MaxTransactions)
+        if (!Running || _transactions.Count >= MaxTransactions)
         {
             return;
         }
@@ -1400,7 +1461,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         AddWant(a);
         dict.Dict["a"] = a;
 
-        RegisterTransaction(tid, "find_node", target, depth: depth);
+        RegisterTransaction(tid, "find_node", target, ep, depth: depth);
         SendPacket(dict, ep, DhtToken);
     }
 
@@ -1559,7 +1620,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
     private async Task RunMaintenanceAsync(CancellationToken token)
     {
-        while (_running && !token.IsCancellationRequested)
+        while (Running && !token.IsCancellationRequested)
         {
             try
             {
@@ -1659,7 +1720,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         AddWant(a);
         dict.Dict["a"] = a;
 
-        RegisterTransaction(tid, "get_peers", infoHash, announce, port, scrape);
+        RegisterTransaction(tid, "get_peers", infoHash, ep, announce, port, scrape);
         SendPacket(dict, ep, DhtToken);
         return true;
     }
@@ -1703,8 +1764,13 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// Completes a pending BEP 44 query that came back as an error rather than a reply.
     /// Without this the caller would sit out the full timeout on a node that answered promptly.
     /// </summary>
-    private bool TryCompleteItemQueryWithError(BDict node)
+    private bool TryCompleteItemQueryWithError(BDict node, IPEndPoint remote)
     {
+        if (node.Get("e") is not BList error || error.List.Count != 2 ||
+            error.List[0] is not BNumber || error.List[1] is not BString)
+        {
+            return false;
+        }
         var tBytes = node.GetBytes("t");
         if (tBytes is null)
         {
@@ -1712,12 +1778,14 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         }
 
         var t = Encoding.Latin1.GetString(tBytes.Value.Span);
-        if (!_pendingQueries.TryRemove(t, out var pending))
+        if (!_pendingQueries.TryGetValue(t, out var pending) ||
+            !pending.Endpoint.Equals(NetworkUtils.NormalizeEndPoint(remote)) ||
+            !_pendingQueries.TryRemove(new KeyValuePair<string, PendingQuery>(t, pending)))
         {
             return false;
         }
 
-        pending.TrySetResult(node);
+        pending.Completion.TrySetResult(node);
         return true;
     }
 
@@ -1779,6 +1847,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     // Transaction tracking
     internal sealed class Transaction
     {
+        public IPEndPoint? Endpoint { get; init; }
         public bool Announce { get; init; }
 
         /// <summary>Rounds of find_node already walked, so recursion terminates.</summary>

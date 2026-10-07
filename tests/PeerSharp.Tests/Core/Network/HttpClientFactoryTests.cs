@@ -47,8 +47,10 @@ public class HttpClientFactoryTests
     }
 
     [Fact]
-    public async Task CreateClient_WithIPv4Family_ConnectsOnlyToIPv4Endpoint()
+    public async Task CreateClient_NotFollowingRedirects_HandsTheRedirectBack()
     {
+        // For a caller that names the server in the Host header: HttpClient would carry that header to
+        // wherever the redirect points, so the caller follows it itself.
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         try
@@ -59,23 +61,20 @@ public class HttpClientFactoryTests
             var client = factory.CreateClient(
                 new ProxySettings { Type = ProxyType.None },
                 isTracker: true,
-                addressFamily: AddressFamily.InterNetwork);
+                followRedirects: false);
 
-            var request = client.GetAsync(
-                $"http://localhost:{port}/",
-                HttpCompletionOption.ResponseHeadersRead,
-                TestContext.Current.CancellationToken);
+            var request = client.GetAsync($"http://127.0.0.1:{port}/", TestContext.Current.CancellationToken);
             using var connection = await accepted;
-            Assert.Equal(AddressFamily.InterNetwork, connection.Client.RemoteEndPoint?.AddressFamily);
-
             await using var stream = connection.GetStream();
             byte[] buffer = new byte[1024];
             _ = await stream.ReadAsync(buffer, TestContext.Current.CancellationToken);
             await stream.WriteAsync(
-                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(),
+                "HTTP/1.1 302 Found\r\nLocation: http://elsewhere.example/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(),
                 TestContext.Current.CancellationToken);
             using var response = await request;
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            Assert.Equal(HttpStatusCode.Found, response.StatusCode);
+            Assert.Equal(new Uri("http://elsewhere.example/"), response.Headers.Location);
         }
         finally
         {
@@ -83,12 +82,17 @@ public class HttpClientFactoryTests
         }
     }
 
-    /// <summary>
-    /// Selecting the address family means resolving and connecting by hand, which quietly gives up
-    /// what <see cref="SocketsHttpHandler"/> did for free: it hands the whole resolved set to the
-    /// socket and tries each in turn. Trackers behind DNS round-robin publish several A records
-    /// precisely so that one being down does not matter, and this path is now on every announce.
-    /// </summary>
+    [Fact]
+    public void CreateClient_FollowingRedirectsOrNot_AreSeparateClients()
+    {
+        using var factory = new HttpClientFactory();
+        var proxy = new ProxySettings { Type = ProxyType.None };
+
+        Assert.NotSame(
+            factory.CreateClient(proxy, isTracker: true),
+            factory.CreateClient(proxy, isTracker: true, followRedirects: false));
+    }
+
     [Fact]
     public async Task Connect_WhenAnEarlierAddressRefuses_TriesTheRest()
     {
@@ -245,18 +249,6 @@ public class HttpClientFactoryTests
         var proxy = new ProxySettings { Type = ProxyType.None };
 
         Assert.NotSame(first.CreateClient(proxy, isTracker: true), second.CreateClient(proxy, isTracker: true));
-    }
-
-    [Fact]
-    public void CreateClient_BindAndRequestedFamilyMismatch_IsRejected()
-    {
-        var factory = new HttpClientFactory();
-
-        Assert.Throws<ArgumentException>(() => factory.CreateClient(
-            new ProxySettings { Type = ProxyType.None },
-            isTracker: true,
-            bindAddress: IPAddress.Loopback,
-            addressFamily: AddressFamily.InterNetworkV6));
     }
 
     [Fact]

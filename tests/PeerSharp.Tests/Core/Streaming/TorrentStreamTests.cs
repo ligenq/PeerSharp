@@ -4,14 +4,17 @@ using Microsoft.Extensions.Time.Testing;
 
 namespace PeerSharp.Tests.Core.Streaming;
 
-public class TorrentStreamTests
+public class TorrentStreamTests : IAsyncLifetime
 {
+    private readonly string _testRoot = Path.Combine(Path.GetTempPath(), "PeerSharpStreamTests", Guid.NewGuid().ToString("N"));
+    private readonly List<Torrent> _testTorrents = [];
     private readonly Torrent _torrent;
     private readonly FakeTimeProvider _timeProvider = new();
 
     public TorrentStreamTests()
     {
-        _torrent = TorrentTestUtility.CreateMinimal();
+        _torrent = TorrentTestUtility.CreateMinimal(downloadPath: Path.Combine(_testRoot, "small"));
+        _testTorrents.Add(_torrent);
         // Setup a file: 10KB total, 1KB pieces
         _torrent.InfoFile.Info.PieceSize = 1000;
         _torrent.InfoFile.Info.FullSize = 10000;
@@ -23,6 +26,7 @@ public class TorrentStreamTests
         }
 
         _torrent.ReinitializeAfterMetadataAsync().GetAwaiter().GetResult();
+        _torrent.FilesInternal.InitializeAsync([], TestContext.Current.CancellationToken).GetAwaiter().GetResult();
     }
 
     #region Constructor Tests
@@ -32,7 +36,7 @@ public class TorrentStreamTests
     {
         using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
 
-        Assert.Equal(DownloadStrategy.Streaming, _torrent.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.Streaming, _torrent.EffectiveDownloadStrategy);
         Assert.NotNull(_torrent.StreamingPriorityPieces);
 
         // Should prioritize start (header) pieces
@@ -65,6 +69,117 @@ public class TorrentStreamTests
         Assert.Contains(9, priorities);
     }
 
+    [Fact]
+    public void AReaderPartWayIn_IsFetchedFor_BeforeTheStartOfTheFile_ThenItsEnd()
+    {
+        // 8 MiB in 256 KiB pieces; half a megabyte of read-ahead from 4 MiB in is pieces 16 to 17. The
+        // start of the file is its first megabyte, pieces 0 to 3, in order; the end its last, 28 to 31.
+        var torrent = LargeTorrent();
+        torrent.Settings.Streaming.ReadAheadBytes = 512 * 1024;
+        torrent.Settings.Streaming.ReadAheadSeconds = 0;
+        using var stream = new TorrentStream(torrent.Streaming, torrent, 0, _timeProvider);
+
+        stream.Seek(4 * 1024 * 1024, SeekOrigin.Begin);
+
+        Assert.Equal([16, 17, 0, 1, 2, 3, 28, 29, 30, 31], torrent.StreamingPriorityPieces!);
+    }
+
+    [Theory]
+    [InlineData(4, true)]
+    [InlineData(0, false)]
+    public async Task ReadAhead_ReachesSecondsAtTheRateTheStreamIsRead(int readAheadSeconds, bool reachesFurther)
+    {
+        // Read at half a megabyte a second for four seconds: four seconds ahead is two megabytes, where
+        // the bytes setting alone is half of one.
+        var torrent = LargeTorrent();
+        torrent.Settings.Streaming.ReadAheadBytes = 512 * 1024;
+        torrent.Settings.Streaming.ReadAheadSeconds = readAheadSeconds;
+        for (int piece = 0; piece < 8; piece++)
+        {
+            torrent.Pieces.AddPiece(piece);
+        }
+
+        await using var stream = new TorrentStream(torrent.Streaming, torrent, 0, _timeProvider);
+        var buffer = new byte[256 * 1024];
+        for (int read = 0; read < 8; read++)
+        {
+            await stream.ReadExactlyAsync(buffer, TestContext.Current.CancellationToken);
+            _timeProvider.Advance(TimeSpan.FromSeconds(0.5));
+        }
+
+        // Read to 2 MiB, piece 8: half a megabyte ahead reaches piece 9, two megabytes piece 15.
+        stream.Seek(2 * 1024 * 1024 + 1, SeekOrigin.Begin);
+        stream.Seek(2 * 1024 * 1024, SeekOrigin.Begin);
+
+        Assert.Contains(9, torrent.StreamingPriorityPieces!);
+        Assert.Equal(reachesFurther, torrent.StreamingPriorityPieces!.Contains(15));
+    }
+
+    [Fact]
+    public async Task AStream_IsBuffering_UntilEnoughIsDownloadedAheadAtItsRate_AndAgainWhenItMovesPastIt()
+    {
+        // Read at 64 KiB a second: twenty seconds of that is 1.25 MiB, five pieces of 256 KiB.
+        var torrent = LargeTorrent();
+        for (int piece = 0; piece < 12; piece++)
+        {
+            torrent.Pieces.AddPiece(piece);
+        }
+
+        await using var stream = new TorrentStream(torrent.Streaming, torrent, 0, _timeProvider);
+        Assert.True(stream.IsBuffering);
+        Assert.True(torrent.Streaming.IsBuffering);
+
+        var buffer = new byte[64 * 1024];
+        for (int read = 0; read < 8; read++)
+        {
+            await stream.ReadExactlyAsync(buffer, TestContext.Current.CancellationToken);
+            _timeProvider.Advance(TimeSpan.FromSeconds(1));
+        }
+
+        // Half a megabyte in, two and a half are downloaded ahead: more than twenty seconds' worth.
+        stream.OnPieceVerified(0);
+        Assert.False(stream.IsBuffering);
+        Assert.False(torrent.Streaming.IsBuffering);
+
+        // Moved to where nothing is downloaded, it is buffering again.
+        stream.Seek(6 * 1024 * 1024, SeekOrigin.Begin);
+        Assert.True(stream.IsBuffering);
+    }
+
+    /// <summary>A torrent of one 8 MiB file in 256 KiB pieces: larger than the start and end fetched first.</summary>
+    private Torrent LargeTorrent()
+    {
+        const int PieceSize = 256 * 1024;
+        var torrent = TorrentTestUtility.CreateMinimal(downloadPath: Path.Combine(_testRoot, "large"));
+        _testTorrents.Add(torrent);
+        torrent.InfoFile.Info.PieceSize = PieceSize;
+        torrent.InfoFile.Info.FullSize = 32 * PieceSize;
+        torrent.InfoFile.Info.Files.Add(new Internals.TorrentFileEntry { Path = "film.mkv", Size = 32 * PieceSize, Offset = 0 });
+        torrent.InfoFile.Info.Pieces.Clear();
+        for (int i = 0; i < 32; i++)
+        {
+            torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        }
+
+        torrent.ReinitializeAfterMetadataAsync().GetAwaiter().GetResult();
+        torrent.FilesInternal.InitializeAsync([], TestContext.Current.CancellationToken).GetAwaiter().GetResult();
+        return torrent;
+    }
+
+    public ValueTask InitializeAsync() => ValueTask.CompletedTask;
+
+    public async ValueTask DisposeAsync()
+    {
+        foreach (var torrent in _testTorrents)
+        {
+            await torrent.DisposeAsync();
+        }
+        if (Directory.Exists(_testRoot))
+        {
+            Directory.Delete(_testRoot, true);
+        }
+    }
+
     #endregion
 
     #region Stream Properties Tests
@@ -94,6 +209,43 @@ public class TorrentStreamTests
     #endregion
 
     #region Seek Tests
+
+    [Fact]
+    public void Seek_ToEndReleasesPrioritiesAndBuffering()
+    {
+        using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        stream.Seek(0, SeekOrigin.End);
+        Assert.Empty(_torrent.StreamingPriorityPieces!);
+        Assert.False(stream.IsBuffering);
+        stream.Seek(0, SeekOrigin.Begin);
+        Assert.NotEmpty(_torrent.StreamingPriorityPieces!);
+        Assert.True(stream.IsBuffering);
+    }
+
+    [Fact]
+    public void FullyAvailableStreamDoesNotLimitOtherReadersAsBuffering()
+    {
+        for (int i = 0; i < 10; i++) _torrent.Pieces.AddPiece(i);
+        using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        Assert.False(stream.IsBuffering);
+        Assert.False(_torrent.Streaming.IsBuffering);
+    }
+
+    [Fact]
+    public void ReadRateHistoryStaysBoundedForTinyReads()
+    {
+        using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        var recordRead = typeof(TorrentStream).GetMethod("RecordRead", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .CreateDelegate<Action<int>>(stream);
+        for (int i = 0; i < 200_000; i++)
+        {
+            recordRead(1);
+            _timeProvider.Advance(TimeSpan.FromTicks(1000));
+        }
+        var history = (System.Collections.ICollection)typeof(TorrentStream)
+            .GetField("_reads", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(stream)!;
+        Assert.InRange(history.Count, 1, 101);
+    }
 
     [Fact]
     public void Seek_UpdatesPriorities()
@@ -317,10 +469,8 @@ public class TorrentStreamTests
         // Advance time past the 60 second timeout
         _timeProvider.Advance(TimeSpan.FromSeconds(61));
 
-        // A stalled swarm must not be reported as end-of-file: returning 0 here would make
-        // CopyToAsync and the HTTP stream server silently truncate the file. The waiter notices
-        // on its next poll, which runs on the real clock at a 1s cadence.
-        await Assert.ThrowsAsync<TimeoutException>(() => readTask.WaitAsync(TimeSpan.FromSeconds(10)));
+        // The injected clock expires the deadline immediately, without waiting for the real-clock poll.
+        await Assert.ThrowsAsync<TimeoutException>(() => readTask.WaitAsync(TimeSpan.FromMilliseconds(500)));
     }
 
     #endregion
@@ -378,12 +528,12 @@ public class TorrentStreamTests
     {
         await _torrent.StartAsync();
         var stream = await _torrent.Streaming.OpenStreamAsync(0);
-        Assert.Equal(DownloadStrategy.Streaming, _torrent.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.Streaming, _torrent.EffectiveDownloadStrategy);
         Assert.NotNull(_torrent.StreamingPriorityPieces);
 
         stream.Dispose();
 
-        Assert.Equal(DownloadStrategy.RarestFirst, _torrent.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.RarestFirst, _torrent.EffectiveDownloadStrategy);
         Assert.Null(_torrent.StreamingPriorityPieces);
     }
 
@@ -435,6 +585,56 @@ public class TorrentStreamTests
 
     #region Multi-File Torrent Tests
 
+    [Fact(Timeout = 10000)]
+    public async Task DisposeCancelsAPendingReadAndRejectsFurtherOperations()
+    {
+        var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        var reading = stream.ReadAsync(new byte[100].AsMemory()).AsTask();
+        Assert.False(reading.IsCompleted);
+        stream.Dispose();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => reading);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => stream.ReadAsync(new byte[1].AsMemory()).AsTask());
+        Assert.Throws<ObjectDisposedException>(() => stream.Seek(0, SeekOrigin.Begin));
+        Assert.False(stream.CanRead);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task StoppingTheTorrentCancelsReadsWaitingOnMissingPieces()
+    {
+        await _torrent.StartAsync();
+        await using var stream = await _torrent.OpenStreamAsync(0);
+        var reading = stream.ReadAsync(new byte[100].AsMemory()).AsTask();
+        await _torrent.StopAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => reading);
+        Assert.False(_torrent.Streaming.IsStreaming);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task ReadsUseRecordedOffsetsAcrossImplicitPaddingGaps()
+    {
+        _torrent.InfoFile.Info.Files.Add(new Internals.TorrentFileEntry { Path = "after-gap.bin", Size = 1000, Offset = 12000 });
+        _torrent.InfoFile.Info.FullSize = 13000;
+        for (int i = 0; i < 3; i++) _torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        await _torrent.ReinitializeAfterMetadataAsync();
+        await _torrent.FilesInternal.InitializeAsync([]);
+        byte[] payload = Enumerable.Repeat((byte)0xAB, 1000).ToArray();
+        await _torrent.FilesInternal.WriteAsync(12000, payload, TestContext.Current.CancellationToken);
+        _torrent.Pieces.AddPiece(12);
+        await using var stream = new TorrentStream(_torrent.Streaming, _torrent, 1, _timeProvider);
+        byte[] read = new byte[1000];
+        await stream.ReadExactlyAsync(read, TestContext.Current.CancellationToken);
+        Assert.Equal(payload, read);
+    }
+
+    [Fact]
+    public void RelativeSeekSaturatesInsteadOfWrappingAtLongMaxValue()
+    {
+        using var stream = new TorrentStream(_torrent.Streaming, _torrent, 0, _timeProvider);
+        stream.Position = 1;
+        Assert.Equal(stream.Length, stream.Seek(long.MaxValue, SeekOrigin.Current));
+        Assert.Equal(stream.Length, stream.Seek(long.MaxValue, SeekOrigin.End));
+    }
+
     [Fact]
     public async Task Constructor_CalculatesCorrectOffset_ForSecondFile()
     {
@@ -456,8 +656,6 @@ public class TorrentStreamTests
 
     #endregion
 }
-
-
 
 
 

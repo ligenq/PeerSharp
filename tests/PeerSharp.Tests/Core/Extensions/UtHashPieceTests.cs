@@ -104,8 +104,10 @@ public class UtHashPieceTests
     [Fact]
     public async Task HandleMessage_HashPiece_StoresPieceHashAndUncles()
     {
+        byte[] pieceHash = Enumerable.Range(0, 20).Select(i => (byte)(i + 1)).ToArray();
+        byte[] uncleHash = Enumerable.Range(0, 20).Select(i => (byte)(0x80 + i)).ToArray();
         var metadata = new TorrentFileMetadata();
-        metadata.Info.MerkleRootHash = new byte[20];
+        metadata.Info.MerkleRootHash = Internals.Utilities.MerkleTreeSha1.HashPair(uncleHash, pieceHash);
         metadata.Info.PieceSize = 16384;
         metadata.Info.FullSize = 16384 * 2;
 
@@ -114,8 +116,6 @@ public class UtHashPieceTests
 
         var mockPeer = new MockPeerCommunication();
         var utHashPiece = new UtHashPiece(mockPeer, torrent);
-        byte[] pieceHash = Enumerable.Range(0, 20).Select(i => (byte)(i + 1)).ToArray();
-        byte[] uncleHash = Enumerable.Range(0, 20).Select(i => (byte)(0x80 + i)).ToArray();
 
         var dict = new BDict();
         dict.Dict["msg_type"] = new BNumber(1);

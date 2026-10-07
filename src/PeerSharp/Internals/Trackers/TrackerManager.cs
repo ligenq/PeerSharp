@@ -269,11 +269,33 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
     public async ValueTask DisposeAsync()
     {
+        await DisposeAsync(sendStoppedAnnounce: true).ConfigureAwait(false);
+        GC.SuppressFinalize(this);
+    }
+
+    internal async ValueTask DisposeAsync(bool sendStoppedAnnounce)
+    {
         if (_disposal.MarkDisposed())
         {
-            await StopAsync().ConfigureAwait(false);
+            try
+            {
+                await StopAsync(sendStoppedAnnounce).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_lock)
+                {
+                    foreach (var info in _trackers)
+                    {
+                        DisposeTracker(info);
+                    }
+                    _trackers.Clear();
+                    _trackerLookup.Clear();
+                    _trackerUrls.Clear();
+                    _tiers.Clear();
+                }
+            }
         }
-        GC.SuppressFinalize(this);
     }
 
     public IReadOnlyList<TrackerStatus> GetTrackers()
@@ -340,9 +362,6 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             {
                 return;
             }
-
-            info.CurrentAnnounceCts?.Dispose();
-            info.CurrentAnnounceCts = null;
 
             info.LastError = errorMessage;
 
@@ -537,7 +556,8 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                     && (_started
                         || info.LastAnnounce != DateTimeOffset.MinValue
                         || info.CurrentAnnounceTask != null);
-                info.Dispose();
+                try { info.Dispose(); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Failed to cancel removed tracker {Url}", info.Url); }
 
                 _trackers.Remove(info);
                 _trackerUrls.Remove(url);
@@ -558,7 +578,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
         if (!shouldSendStopped)
         {
-            removed.Tracker.Deinit();
+            DisposeTracker(removed);
             return true;
         }
 
@@ -577,8 +597,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     {
         try
         {
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            await removed.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token).ConfigureAwait(false);
+            await SendStoppedAnnounceAsync(removed, _timeProvider).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -586,7 +605,17 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         }
         finally
         {
-            removed.Tracker.Deinit();
+            DisposeTracker(removed);
+        }
+    }
+
+    private void DisposeTracker(TrackerInfo info)
+    {
+        Action[] cleanup = [info.Dispose, info.Tracker.Deinit, () => (info.Tracker as IDisposable)?.Dispose()];
+        foreach (var action in cleanup)
+        {
+            try { action(); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to dispose tracker {Url}", info.Url); }
         }
     }
 
@@ -594,6 +623,11 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     {
         lock (_lock)
         {
+            _disposal.ThrowIfDisposed(this);
+            if (_started)
+            {
+                return Task.CompletedTask;
+            }
             _started = true;
             foreach (var info in GetActiveTrackersLocked())
             {
@@ -729,7 +763,8 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         using var timeoutCts = new CancellationTokenSource(StopAnnounceTimeout, timeProvider);
         try
         {
-            await info.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token).ConfigureAwait(false);
+            await info.Tracker.AnnounceAsync(TrackerEvent.Stopped, timeoutCts.Token)
+                .WaitAsync(StopAnnounceTimeout, timeProvider).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { /* Expected on timeout */ }
         catch (Exception) { /* Stop announces are best effort. */ }
@@ -887,23 +922,27 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                 return;
             }
 
-            // Cancel existing announce for this tracker
-            info.CurrentAnnounceCts?.Cancel();
-            info.CurrentAnnounceCts?.Dispose();
-            info.CurrentAnnounceCts = new CancellationTokenSource();
-
-            var ct = info.CurrentAnnounceCts.Token;
+            // Coalesce timer and manual requests while this tracker is already announcing.
+            // Its callback has no attempt ID, so overlapping attempts cannot be correlated safely.
+            if (info.CurrentAnnounceTask is { IsCompleted: false })
+            {
+                info.PendingCompleted |= evt == TrackerEvent.Completed;
+                return;
+            }
+            var cts = new CancellationTokenSource();
+            info.CurrentAnnounceCts = cts;
 
             // Task.Run, not Task.Yield: YieldAwaitable has no ConfigureAwait, so it resumes on
             // SynchronizationContext.Current when the caller has one. In a UI host that would
             // drag tracker network continuations onto the UI thread - and StopAsync awaits these
             // tasks, so a UI thread blocked on shutdown would deadlock. TaskScheduler.Default
             // also keeps tracker code off this lock.
-            info.CurrentAnnounceTask = Task.Run(() => RunTrackedAnnounceAsync(info, evt, ct), CancellationToken.None);
+            var ct = cts.Token;
+            info.CurrentAnnounceTask = Task.Run(() => RunTrackedAnnounceAsync(info, evt, cts, ct), CancellationToken.None);
         }
     }
 
-    private async Task RunTrackedAnnounceAsync(TrackerInfo info, TrackerEvent evt, CancellationToken ct)
+    private async Task RunTrackedAnnounceAsync(TrackerInfo info, TrackerEvent evt, CancellationTokenSource cts, CancellationToken ct)
     {
         try
         {
@@ -917,10 +956,27 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         {
             _logger.LogWarning(ex, "Unhandled exception in tracked announce for {Url}", info.Url);
         }
+        finally
+        {
+            lock (_lock)
+            {
+                if (ReferenceEquals(info.CurrentAnnounceCts, cts))
+                {
+                    info.CurrentAnnounceCts = null;
+                    info.CurrentAnnounceTask = null;
+                    if (info.PendingCompleted && _started)
+                    {
+                        info.PendingCompleted = false;
+                        TrackedAnnounce(info, TrackerEvent.Completed);
+                    }
+                }
+            }
+            cts.Dispose();
+        }
     }
 
     [ExcludeFromCodeCoverage]
-    private sealed class TrackerInfo : IDisposable
+    private sealed class TrackerInfo(ILogger logger) : IDisposable
     {
         private AtomicDisposal _disposal = new();
         public int CircuitOpenCount { get; set; }
@@ -936,6 +992,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         public int ConsecutiveSuccesses { get; set; }
         public CancellationTokenSource? CurrentAnnounceCts { get; set; }
         public Task? CurrentAnnounceTask { get; set; }
+        public bool PendingCompleted { get; set; }
         public CancellationTokenSource? CurrentScrapeCts { get; set; }
         public int Interval { get; set; } = 600;
         public int? MinInterval { get; set; }
@@ -969,12 +1026,20 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         {
             if (_disposal.MarkDisposed())
             {
-                Timer.Dispose();
-                CurrentAnnounceCts?.Cancel();
-                CurrentAnnounceCts?.Dispose();
-                CurrentScrapeCts?.Cancel();
-                CurrentScrapeCts?.Dispose();
+                Action[] cleanup = [Timer.Dispose, () => CancelAndDispose(CurrentAnnounceCts), () => CancelAndDispose(CurrentScrapeCts)];
+                foreach (var action in cleanup)
+                {
+                    try { action(); }
+                    catch (Exception ex) { logger.LogWarning(ex, "Failed to dispose tracker state for {Url}", Url); }
+                }
             }
+        }
+
+        private static void CancelAndDispose(CancellationTokenSource? cts)
+        {
+            if (cts == null) { return; }
+            try { cts.Cancel(); }
+            finally { cts.Dispose(); }
         }
     }
 
@@ -1008,7 +1073,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
         tracker.Init(url, _torrent, this);
 
-        var info = new TrackerInfo
+        var info = new TrackerInfo(_logger)
         {
             Tracker = tracker,
             Url = url,

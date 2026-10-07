@@ -176,7 +176,7 @@ public class StorageAdditionalTests : IAsyncLifetime
     // ── UpdateFileSelection ───────────────────────────────────────────────────
 
     [Fact]
-    public async Task UpdateFileSelection_DeselectedFile_SkipsWrites()
+    public async Task UpdateFileSelection_DeselectedFile_PreservesInFlightWrites()
     {
         var storage = CreateStorage();
         await storage.InitAsync();
@@ -189,8 +189,10 @@ public class StorageAdditionalTests : IAsyncLifetime
         };
         await storage.UpdateFileSelectionAsync(selection);
 
-        // Writing to offset 0 (file 1's region) should silently skip
-        await storage.WriteAsync(0, new byte[512]); // no exception
+        // Already received data must survive deselection so verified pieces remain seedable.
+        byte[] data = Enumerable.Repeat((byte)42, 512).ToArray();
+        await storage.WriteAsync(0, data);
+        Assert.Equal(data, await storage.ReadAsync(0, data.Length));
 
         await storage.DisposeAsync();
     }

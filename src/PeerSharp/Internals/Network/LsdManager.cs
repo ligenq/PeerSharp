@@ -59,7 +59,7 @@ internal class LsdManager : ILsdManager
 
     public async Task AnnounceAsync(InfoHash infoHash, CancellationToken token = default)
     {
-        if (!_running)
+        if (_settings.Proxy.ForceProxy || !_running || _resolver.GetTorrent(infoHash) is Torrent { InfoFile.Info.IsPrivate: true })
         {
             return;
         }
@@ -103,7 +103,7 @@ internal class LsdManager : ILsdManager
 
     public void Start()
     {
-        if (!_settings.Connection.EnableLsd || _running)
+        if (_settings.Proxy.ForceProxy || !_settings.Connection.EnableLsd || _running)
         {
             return;
         }
@@ -194,7 +194,7 @@ internal class LsdManager : ILsdManager
 
     internal void ProcessMessage(string message, IPEndPoint sender)
     {
-        if (string.IsNullOrWhiteSpace(message))
+        if (_settings.Proxy.ForceProxy || string.IsNullOrWhiteSpace(message))
         {
             return;
         }
@@ -232,10 +232,10 @@ internal class LsdManager : ILsdManager
             return;
         }
 
-        if (port > 0 && !string.IsNullOrEmpty(hashStr) && InfoHash.TryFromHex(hashStr, out var hash))
+        if (port is > 0 and <= ushort.MaxValue && !string.IsNullOrEmpty(hashStr) && InfoHash.TryFromHex(hashStr, out var hash))
         {
             var torrent = _resolver.GetTorrent(hash);
-            if (torrent is Torrent t)
+            if (torrent is Torrent t && !t.InfoFile.Info.IsPrivate)
             {
                 var peerEp = new IPEndPoint(sender.Address, port);
                 _logger.LogInformation("LSD found peer {Peer} for {Torrent}", peerEp, t.Name);
@@ -265,7 +265,7 @@ internal class LsdManager : ILsdManager
         var announceTasks = new List<Task>();
         foreach (var torrent in torrents)
         {
-            if (torrent.State == TorrentState.Active)
+            if (torrent.State == TorrentState.Active && torrent is not Torrent { InfoFile.Info.IsPrivate: true })
             {
                 announceTasks.Add(AnnounceAsync(torrent.Hash, token));
             }
@@ -296,7 +296,7 @@ internal class LsdManager : ILsdManager
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                if (_running)
+                if (_settings.Proxy.ForceProxy || _running)
                 {
                     _logger.LogDebug(ex, "LSD receive error");
                 }

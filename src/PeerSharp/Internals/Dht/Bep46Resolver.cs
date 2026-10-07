@@ -228,7 +228,7 @@ internal sealed class Bep46Resolver
         var publicKey = Ed25519.PublicKeyFromSeed(seed);
         var current = await ResolveAsync(publicKey, salt, cancellationToken).ConfigureAwait(false);
 
-        long next = (current?.SequenceNumber ?? -1) + 1;
+        long next = checked((current?.SequenceNumber ?? -1) + 1);
         long? cas = current?.SequenceNumber;
 
         int accepted = await PublishAsync(seed, infoHash, next, salt, cas, cancellationToken).ConfigureAwait(false);

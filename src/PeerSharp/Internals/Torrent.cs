@@ -22,6 +22,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 {
     internal long _lastReportedDownloadSpeed;
     internal long _lastReportedUploadSpeed;
+    private Interfaces.TransferStats? _lastReportedTransferStats;
     private readonly IFileSelectionManager _fileSelectionManager;
     private readonly ILogger<Torrent> _logger;
 
@@ -119,15 +120,18 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public long DiskWriteLimitBytesPerSecond { get => Configuration.DiskWriteLimitBytesPerSecond; set => Configuration.DiskWriteLimitBytesPerSecond = value; }
 
     // Configuration Passthrough
+    // The strategy this torrent was configured with. Opening a stream overrides it only for as long
+    // as the stream is open, and never writes here, so the configured choice survives streaming,
+    // metadata arriving, and a restart from saved state.
     public DownloadStrategy DownloadStrategy
     {
-        get => Streaming?.DownloadStrategy ?? DownloadStrategy.RarestFirst;
-        set
-        {
-            Streaming?.DownloadStrategy = value;
-            Configuration.DownloadStrategy = value;
-        }
+        get => Configuration.DownloadStrategy;
+        set => Configuration.DownloadStrategy = value;
     }
+
+    /// <summary>The strategy the piece picker follows: streaming while a stream is open.</summary>
+    internal DownloadStrategy EffectiveDownloadStrategy =>
+        Streaming?.IsStreaming == true ? DownloadStrategy.Streaming : Configuration.DownloadStrategy;
 
     public ITorrentEvents? Events { get; set; }
 
@@ -157,6 +161,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public ulong FinishedSelectedBytes => _fileSelectionManager.CalculateFinishedSelectedBytes();
 
     public InfoHash Hash => InfoFile.Info.Hash;
+    InfoHash IPeerTransportHost.Hash => InfoFile.Info.GetTrackerInfoHash();
+    bool IPeerTransportHost.AllowsDirectConnections => !Settings.Proxy.ForceProxy &&
+        !(Settings.Proxy.ProxyPeers && Settings.Proxy.Type != ProxyType.None && !string.IsNullOrEmpty(Settings.Proxy.Host));
 
     public InfoHash HashV2 => InfoFile.Info.HashV2;
 
@@ -375,6 +382,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     /// <summary>Where we accept peer connections, or null when we are not listening.</summary>
     public IPortListener? PortListener { get => Network.PortListener; set => Network.PortListener = value; }
+    internal int AdvertisedPeerPort => Network.GetAdvertisedPeerPort?.Invoke() ?? PortListener?.Port ?? Settings.Connection.TcpPort;
 
     /// <summary>
     /// BEP 10 <c>yourip</c>: one peer's opinion of our external address.
@@ -408,6 +416,34 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         dht.ReportExternalIp(parsed);
     }
     public WebSeedManager? WebSeedManager { get; private set; }
+    private readonly Lock _webSeedLock = new();
+
+    internal void RefreshWebSeeds()
+    {
+        lock (_webSeedLock)
+        {
+            if (!Started || !HasMetadata || _disposal.IsDisposed || Volatile.Read(ref _stopping) == 1 || !Settings.Connection.EnableWebSeeds) return;
+            var urls = _webSeeds.GetAll();
+            if (WebSeedManager == null && urls.Count == 0) return;
+            WebSeedManager ??= new WebSeedManager(this, urls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
+            foreach (string existing in WebSeedManager.GetSourceUrls())
+            {
+                if (!urls.Contains(existing, StringComparer.Ordinal)) WebSeedManager.RemoveSource(existing);
+            }
+            foreach (string url in urls) WebSeedManager.AddSource(url);
+            WebSeedManager.Start();
+        }
+    }
+
+    private WebSeedManager? TakeWebSeedManager()
+    {
+        lock (_webSeedLock)
+        {
+            var manager = WebSeedManager;
+            WebSeedManager = null;
+            return manager;
+        }
+    }
 
     // Internal Modules
     internal Files FilesInternal { get; private set; } = null!;
@@ -418,7 +454,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     internal PeerManager PeersInternal { get; private set; } = null!;
     internal TorrentServices Services { get; }
     internal StreamingController Streaming { get; private set; } = null!;
-    internal List<int>? StreamingPriorityPieces => Streaming?.PriorityPieces;
+    internal IReadOnlyList<int>? StreamingPriorityPieces => Streaming?.PriorityPieces;
 
     /// <summary>
     /// Lets the owning engine serialize starts with its session pause transition. Torrents created
@@ -478,7 +514,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 _logger.LogError(ex, "StopInternalAsync failed during DisposeAsync");
             }
 
-            _timer.Dispose();
+            await _timer.DisposeAsync().ConfigureAwait(false);
+            _metadataApplied.TrySetCanceled(CancellationToken.None);
             GC.SuppressFinalize(this);
         }
     }
@@ -576,7 +613,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return Pieces?.ToBitfield() ?? [];
     }
 
-    public TorrentResumeData GetResumeData()
+    public TorrentResumeData GetResumeData() => SerializeResumeState(GetResumeState());
+
+    internal TorrentStateData GetResumeState()
     {
         var state = new TorrentStateData
         {
@@ -591,6 +630,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             DownloadPath = FilesInternal?.DownloadPath ?? Settings.Files.DefaultDownloadPath,
             Selection = [.. _fileSelectionManager.GetAllFileSelections()],
             RenamedFiles = [.. LocalState.RenamedFiles],
+            FileSnapshots = FilesInternal?.GetFileSnapshots() ?? LocalState.FileSnapshots,
             Info =
             {
                 Name = Name,
@@ -599,6 +639,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             }
         };
 
+        return state;
+    }
+
+    internal TorrentResumeData SerializeResumeState(TorrentStateData state)
+    {
         // Use MemoryStream instead of SerializeToUtf8Bytes to avoid
         // ArrayPool<byte>.Shared retention of large intermediate buffers
         using var ms = new MemoryStream();
@@ -621,6 +666,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             // between a separate IsDisposed check here and a concurrent shutdown.
             await FilesInternal.UpdateFileSelectionAsync(selection, ct).ConfigureAwait(false);
         }
+        if (Started) await PeersInternal.AnnounceUploadOnlyAsync().ConfigureAwait(false);
     }
 
     public Task<Stream> OpenStreamAsync(int fileIndex, CancellationToken cancellationToken = default)
@@ -641,6 +687,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// arrive so they can be applied to the file selection. Null when no restriction is pending.
     /// </summary>
     internal IReadOnlyList<int>? PendingSelectOnlyFileIndices { get; set; }
+
+    /// <summary>
+    /// The file selection a caller asked for when adding the torrent
+    /// (<see cref="Config.AddTorrentOptions.FileSelections"/>), waiting for metadata to arrive so it
+    /// can be applied. Null when none is pending.
+    /// </summary>
+    internal IReadOnlyList<FileSelection>? PendingFileSelections { get; set; }
 
     // Completed once metadata is available and applied (immediately for torrents created
     // from a .torrent file; after the post-download reinitialize for magnet torrents).
@@ -679,49 +732,76 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public async Task ReinitializeAfterMetadataAsync(CancellationToken ct = default)
     {
-        bool wasStarted = Started;
-        var peerPreferences = PeersInternal.ExportConnectionPreferences();
-        IReadOnlyList<PeerCommunication> retainedPeers = [];
+        _disposal.ThrowIfDisposed(this);
+        await _stateLock.WaitAsync(ct).ConfigureAwait(false);
+        IReadOnlyList<PeerCommunication> unadoptedPeers = [];
+        var oldPeers = PeersInternal;
+        try
+        {
+            _disposal.ThrowIfDisposed(this);
+            bool wasStarted = Started;
+            var peerPreferences = PeersInternal.ExportConnectionPreferences();
+            IReadOnlyList<PeerCommunication> retainedPeers = [];
 
-        // Only preserve peers when the torrent will resume. Preview mode intentionally leaves the
-        // torrent stopped, so keeping live sockets there would violate its public state contract.
-        bool preservePeers = wasStarted && !StopAfterMetadata;
-        if (preservePeers)
-        {
-            retainedPeers = await PeersInternal.DetachConnectedPeersForMetadataRebuildAsync().ConfigureAwait(false);
-        }
+            // Only preserve peers when the torrent will resume. Preview mode intentionally leaves the
+            // torrent stopped, so keeping live sockets there would violate its public state contract.
+            bool preservePeers = wasStarted && !StopAfterMetadata && !InfoFile.Info.IsPrivate;
+            if (preservePeers)
+            {
+                retainedPeers = await PeersInternal.DetachConnectedPeersForMetadataRebuildAsync().ConfigureAwait(false);
+                unadoptedPeers = retainedPeers;
+            }
 
-        // Not a stop, a rebuild: the info hash was verified against the metadata we just received, so
-        // the tracker session is still valid and a started announce follows immediately. Sending the
-        // courtesy stopped announce here would claim otherwise, and it is bounded by a timeout that one
-        // unresponsive UDP tracker runs out in full - 2.5 of the 5.75 seconds a real magnet spent
-        // between its last metadata byte and its first block.
-        await StopInternalAsync(
-            disposing: false,
-            sendStoppedAnnounce: false,
-            peerManagerAlreadyStopped: preservePeers,
-            ct).ConfigureAwait(false);
-        Initialize();
-        PeersInternal.ImportConnectionPreferences(peerPreferences);
-        await ApplyPendingSelectOnlyFileIndicesAsync(ct).ConfigureAwait(false);
-        if (retainedPeers.Count > 0)
-        {
-            await PeersInternal.AdoptPeersAfterMetadataRebuildAsync(retainedPeers).ConfigureAwait(false);
-        }
-        if (wasStarted && !StopAfterMetadata)
-        {
-            await StartAsync(ct).ConfigureAwait(false);
-        }
-        else
-        {
-            FireAndForgetLsdAnnounce();
-        }
+            // Not a stop, a rebuild: the info hash was verified against the metadata we just received, so
+            // the tracker session is still valid and a started announce follows immediately. Sending the
+            // courtesy stopped announce here would claim otherwise, and it is bounded by a timeout that one
+            // unresponsive UDP tracker runs out in full - 2.5 of the 5.75 seconds a real magnet spent
+            // between its last metadata byte and its first block.
+            await StopInternalAsync(
+                disposing: false,
+                sendStoppedAnnounce: false,
+                peerManagerAlreadyStopped: preservePeers,
+                stateLockHeld: true, ct: ct).ConfigureAwait(false);
+            // A stopped magnet can receive metadata too; its workers still belong to the old geometry.
+            await FileTransferInternal.DisposeAsync().ConfigureAwait(false);
+            await FilesInternal.StopAsync().ConfigureAwait(false);
+            await PeersInternal.DisposeAsync().ConfigureAwait(false);
+            await TrackerManager.DisposeAsync(sendStoppedAnnounce: false).ConfigureAwait(false);
+            MetadataDownloadInternal?.Dispose();
+            _disposal.ThrowIfDisposed(this);
+            Initialize();
+            if (!InfoFile.Info.IsPrivate) PeersInternal.ImportConnectionPreferences(peerPreferences);
+            await ApplyPendingSelectOnlyFileIndicesAsync(ct).ConfigureAwait(false);
+            await ApplyPendingFileSelectionsAsync(ct).ConfigureAwait(false);
+            if (retainedPeers.Count > 0)
+            {
+                unadoptedPeers = [];
+                await PeersInternal.AdoptPeersAfterMetadataRebuildAsync(retainedPeers).ConfigureAwait(false);
+            }
+            if (wasStarted && !StopAfterMetadata)
+            {
+                await StartCoreAsync(stateLockHeld: true, cancellationToken: ct).ConfigureAwait(false);
+            }
 
-        // Signal only after selections are applied and the start/stop decision is final,
-        // so WaitForMetadataAsync waiters observe a settled torrent.
-        if (HasMetadata)
+            // Signal only after selections are applied and the start/stop decision is final,
+            // so WaitForMetadataAsync waiters observe a settled torrent.
+            if (HasMetadata)
+            {
+                _metadataApplied.TrySetResult();
+            }
+        }
+        catch (Exception ex)
         {
-            _metadataApplied.TrySetResult();
+            _metadataApplied.TrySetException(ex);
+            throw;
+        }
+        finally
+        {
+            foreach (var peer in unadoptedPeers)
+            {
+                await oldPeers.ReleaseTransferredPeerAsync(peer).ConfigureAwait(false);
+            }
+            _stateLock.Release();
         }
     }
 
@@ -765,6 +845,36 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
 
         _logger.LogInformation("BEP 53: Magnet 'so=' selection applied - downloading {Selected} of {Total} files", fileCount - deselected, fileCount);
+    }
+
+    /// <summary>
+    /// Applies the file selection given when the torrent was added, one entry per file in order. No-ops
+    /// until metadata is available. It is the caller's choice for this torrent, made as it was added, so
+    /// it wins over a selection from resume data and over a magnet link's "so=" restriction. A list
+    /// whose length turns out not to match the files is not applied: there is no telling which file an
+    /// entry was meant for.
+    /// </summary>
+    internal async Task ApplyPendingFileSelectionsAsync(CancellationToken ct = default)
+    {
+        var selections = PendingFileSelections;
+        if (selections == null || !HasMetadata)
+        {
+            return;
+        }
+
+        PendingFileSelections = null;
+
+        int fileCount = InfoFile.Info.GetVisibleFileCount();
+        if (selections.Count != fileCount)
+        {
+            _logger.LogWarning("Ignoring the file selection given when adding {Name}: it has {Given} entries for {Files} files", Name, selections.Count, fileCount);
+            return;
+        }
+
+        for (int i = 0; i < fileCount; i++)
+        {
+            await SetFileSelectionAsync(i, selections[i], ct).ConfigureAwait(false);
+        }
     }
 
     public Task SetAllFilesPriorityAsync(Priority priority, CancellationToken cancellationToken = default)
@@ -1057,13 +1167,19 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             ?? StartCoreAsync(cancellationToken);
     }
 
-    internal async Task StartCoreAsync(CancellationToken cancellationToken = default)
+    internal Task StartCoreAsync(CancellationToken cancellationToken = default) => StartCoreAsync(false, cancellationToken);
+
+    private async Task StartCoreAsync(bool stateLockHeld, CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
 
-        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (!stateLockHeld)
+        {
+            await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
         try
         {
+            _disposal.ThrowIfDisposed(this);
             Configuration.QueueAutoStart = true;
             if (Interlocked.CompareExchange(ref _started, 0, 0) == 1)
             {
@@ -1114,6 +1230,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                     _logger.LogInformation("Classic trackers disabled because TCP/uTP transports are disabled");
                 }
                 await StartPeerTransportsAsync(cancellationToken).ConfigureAwait(false);
+                _disposal.ThrowIfDisposed(this);
+                MetadataDownloadInternal?.Start();
 
                 FireAndForgetLsdAnnounce();
 
@@ -1121,7 +1239,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 {
                     var dhtHash = InfoFile.Info.GetTrackerInfoHash();
                     Network.Dht.FindPeers(dhtHash);
-                    Network.Dht.Announce(dhtHash, Settings.Connection.TcpPort);
+                    Network.Dht.Announce(dhtHash, AdvertisedPeerPort);
                 }
                 else if (InfoFile.Info.IsPrivate)
                 {
@@ -1131,8 +1249,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 var webSeedUrls = _webSeeds.GetAll();
                 if (Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
                 {
-                    WebSeedManager ??= new WebSeedManager(this, webSeedUrls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
-                    WebSeedManager.Start();
+                    RefreshWebSeeds();
                     _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", webSeedUrls.Count);
                 }
                 else if (!Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
@@ -1154,7 +1271,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
         finally
         {
-            _stateLock.Release();
+            if (!stateLockHeld)
+            {
+                _stateLock.Release();
+            }
         }
 
         StartSeedingTimerIfNeeded();
@@ -1181,11 +1301,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         complete &= await TryTeardownAsync(() => TrackerManager?.StopAsync() ?? Task.CompletedTask, "trackers").ConfigureAwait(false);
         complete &= await TryTeardownAsync(() => PeersInternal?.StopAsync() ?? Task.CompletedTask, "peers").ConfigureAwait(false);
 
-        if (WebSeedManager is { } webSeeds)
+        if (TakeWebSeedManager() is { } webSeeds)
         {
             // Cleared as well as disposed: StartAsync only creates one when the field is null,
             // so leaving a disposed instance behind would break the next start.
-            WebSeedManager = null;
             complete &= await TryTeardownAsync(() => webSeeds.DisposeAsync().AsTask(), "web seeds").ConfigureAwait(false);
         }
 
@@ -1198,7 +1317,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             complete ? "completed and returned the torrent to stopped" : "is incomplete");
     }
 
-    private async Task<bool> TryTeardownAsync(Func<Task> teardown, string what)
+    private async Task<bool> TryTeardownAsync(Func<Task> teardown, string what, List<Exception>? failures = null)
     {
         try
         {
@@ -1207,7 +1326,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Failed to roll back {Component} after a failed start of {TorrentName}", what, Name);
+            failures?.Add(ex);
+            _logger.LogDebug(ex, "Failed to stop {Component} for {TorrentName}", what, Name);
             return false;
         }
     }
@@ -1402,6 +1522,21 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// </summary>
     private bool IsResumeDataUsable(TorrentStateData state, out string? reason)
     {
+        if (state.Info == null || state.Pieces == null || state.Selection == null || state.RenamedFiles == null ||
+            state.Selection.Contains(null!) || state.RenamedFiles.Contains(null!) ||
+            state.AddedTime < -62135596800L || state.AddedTime > 253402300799L ||
+            state.SeedTimeSeconds < 0 || state.SeedTimeSeconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerSecond)
+        {
+            reason = "it contains invalid or missing state fields";
+            return false;
+        }
+        if (state.FileSnapshots != null && (state.FileSnapshots.Contains(null!)
+            || state.FileSnapshots.Any(file => file.Index < 0 || file.Length < -1 || file.LastWriteTimeUtcTicks < 0 || file.LastWriteTimeUtcTicks > DateTime.MaxValue.Ticks)
+            || state.FileSnapshots.Select(file => file.Index).Distinct().Count() != state.FileSnapshots.Count))
+        {
+            reason = "it contains invalid file snapshots";
+            return false;
+        }
         if (state.Version > SupportedResumeVersion)
         {
             reason = $"it was written by a newer version (format {state.Version}, this build understands {SupportedResumeVersion})";
@@ -1443,6 +1578,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 reason = $"its bitfield is {state.Pieces.Length} bytes, but {expectedPieces} pieces need {expectedBytes}";
                 return false;
             }
+            int spareBits = (8 - expectedPieces % 8) % 8;
+            if (spareBits != 0 && (state.Pieces[^1] & ((1 << spareBits) - 1)) != 0)
+            {
+                reason = "its bitfield contains nonzero spare bits";
+                return false;
+            }
         }
 
         // A name change on its own cannot make the bitfield wrong, so it is worth saying out loud
@@ -1459,10 +1600,15 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return true;
     }
 
+    private void NotifyEvent<T>(Action<ITorrent, T>? callback, T value)
+    {
+        TorrentEventDispatcher.Invoke(callback, this, value, _logger);
+    }
+
     internal void FireErrorEvent(Exception exception)
     {
         LastException = exception;
-        Events?.Error?.Invoke(this, exception);
+        NotifyEvent(Events?.Error, exception);
         Alerts.TorrentErrorAlert(this, exception);
     }
 
@@ -1476,7 +1622,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         var previousState = _previousState;
         _previousState = newState;
 
-        Events?.StateChanged?.Invoke(this, new StateTransition
+        NotifyEvent(Events?.StateChanged, new StateTransition
         {
             PreviousState = previousState,
             NewState = newState
@@ -1499,17 +1645,15 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             downloadSpeed += peer.DownloadSpeed;
             uploadSpeed += peer.UploadSpeed;
         }
-
-        if (downloadSpeed == _lastReportedDownloadSpeed && uploadSpeed == _lastReportedUploadSpeed)
-        {
-            return;
-        }
+        downloadSpeed += WebSeedManager?.SampleDownloadSpeed() ?? 0;
 
         Volatile.Write(ref _lastReportedDownloadSpeed, downloadSpeed);
         Volatile.Write(ref _lastReportedUploadSpeed, uploadSpeed);
 
         var stats = ((ITorrent)this).GetTransferStats();
-        Events?.TransferStats?.Invoke(this, stats);
+        if (_lastReportedTransferStats is { } previous && previous.Equals(stats)) return;
+        _lastReportedTransferStats = stats;
+        NotifyEvent(Events?.TransferStats, stats);
         Alerts.TransferStatsAlert(this, stats.Downloaded, stats.Uploaded, stats.DownloadSpeed, stats.UploadSpeed, stats.ConnectedPeers);
     }
 
@@ -1673,7 +1817,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     private void FireAndForgetLsdAnnounce()
     {
         var lsd = Network.Lsd;
-        if (lsd == null)
+        if (lsd == null || InfoFile.Info.IsPrivate)
         {
             return;
         }
@@ -1691,12 +1835,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private void FireFinishedEvent(bool selectionOnly)
     {
-        Events?.Finished?.Invoke(this, selectionOnly);
+        NotifyEvent(Events?.Finished, selectionOnly);
     }
 
     private void FirePieceCompletedEvent(int pieceIndex, int completedPieces, int totalPieces)
     {
-        Events?.PieceCompleted?.Invoke(this, new PieceProgress
+        NotifyEvent(Events?.PieceCompleted, new PieceProgress
         {
             PieceIndex = pieceIndex,
             CompletedPieces = completedPieces,
@@ -1717,7 +1861,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             TotalPieces = PieceCount
         };
 
-        Events?.ProgressChanged?.Invoke(this, progressInfo);
+        NotifyEvent(Events?.ProgressChanged, progressInfo);
         Alerts.ProgressChangedAlert(this, progressInfo.Progress, progressInfo.SelectionProgress,
             progressInfo.FinishedBytes, progressInfo.TotalBytes, progressInfo.CompletedPieces, progressInfo.TotalPieces);
     }
@@ -1806,7 +1950,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         string? downloadPath = !string.IsNullOrEmpty(LocalState.DownloadPath) ? LocalState.DownloadPath : null;
 
         FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, downloadPath);
-        Streaming = new StreamingController(this, Services.TimeProvider, Services.LoggerFactory);
+        // Created once and kept. Initialize runs again when a magnet's metadata arrives, and a
+        // stream opened while waiting for that metadata belongs to this controller. Replacing the
+        // controller would leave the stream's priorities where the picker no longer looks.
+        Streaming ??= new StreamingController(this, Services.TimeProvider, Services.LoggerFactory);
 
         PeersInternal = new PeerManager(this, Services.GeoIp, Services.PeerFactory, Services.TimeProvider, Services.ConnectionGovernor, Services.LoggerFactory.CreateLogger<PeerManager>());
         TrackerManager = new TrackerManager(this, Services.TrackerFactory, Services.TimeProvider, Services.LoggerFactory.CreateLogger<TrackerManager>());
@@ -1902,12 +2049,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     }
 
     private Task StopInternalAsync(bool disposing, CancellationToken ct = default)
-        => StopInternalAsync(disposing, sendStoppedAnnounce: true, peerManagerAlreadyStopped: false, ct);
+        => StopInternalAsync(disposing, sendStoppedAnnounce: true, peerManagerAlreadyStopped: false, ct: ct);
 
     private async Task StopInternalAsync(
         bool disposing,
         bool sendStoppedAnnounce,
         bool peerManagerAlreadyStopped = false,
+        bool stateLockHeld = false,
         CancellationToken ct = default)
     {
         if (!disposing)
@@ -1915,9 +2063,16 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             _disposal.ThrowIfDisposed(this);
         }
 
-        await _stateLock.WaitAsync(ct).ConfigureAwait(false);
+        if (!stateLockHeld)
+        {
+            await _stateLock.WaitAsync(ct).ConfigureAwait(false);
+        }
         try
         {
+            if (!disposing)
+            {
+                _disposal.ThrowIfDisposed(this);
+            }
             bool recoveringFailedStart = Interlocked.CompareExchange(ref _rollbackIncomplete, 0, 0) == 1;
             if (Interlocked.CompareExchange(ref _started, 0, 0) == 0 && !recoveringFailedStart && !disposing)
             {
@@ -1931,47 +2086,60 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
             _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
             Interlocked.Exchange(ref _started, 0);
+            MetadataDownloadInternal?.Stop();
+            Streaming?.CloseStreams();
 
+            List<Exception> failures = [];
             try
             {
                 if (PeersInternal != null && !peerManagerAlreadyStopped)
                 {
-                    await PeersInternal.StopAsync().ConfigureAwait(false);
+                    await TryTeardownAsync(() => disposing ? PeersInternal.DisposeAsync().AsTask() : PeersInternal.StopAsync(), "peers", failures).ConfigureAwait(false);
                 }
                 if (TrackerManager != null)
                 {
-                    await TrackerManager.StopAsync(sendStoppedAnnounce).ConfigureAwait(false);
+                    await TryTeardownAsync(() => disposing ? TrackerManager.DisposeAsync(sendStoppedAnnounce).AsTask() : TrackerManager.StopAsync(sendStoppedAnnounce), "trackers", failures).ConfigureAwait(false);
                 }
                 // Deliberately uncancellable, like the rest of this block: once the stop has
                 // begun, aborting it midway would leave some transports running while the
                 // torrent already reports itself stopped.
-                await StopPeerTransportsAsync(
+                await TryTeardownAsync(() => StopPeerTransportsAsync(
                     disposing,
-                    throwOnFailure: recoveringFailedStart && !disposing,
-                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
-                if (WebSeedManager is { } webSeeds)
+                    throwOnFailure: true,
+                    cancellationToken: CancellationToken.None), "peer transports", failures).ConfigureAwait(false);
+                if (TakeWebSeedManager() is { } webSeeds)
                 {
                     // A disposed manager cannot own the next start: restarting it would create a
                     // worker whose later DisposeAsync is a no-op because its disposal flag is already
                     // set. Clear it so StartAsync rebuilds from the durable effective URL list.
-                    WebSeedManager = null;
-                    await webSeeds.DisposeAsync().ConfigureAwait(false);
+                    await TryTeardownAsync(() => webSeeds.DisposeAsync().AsTask(), "web seeds", failures).ConfigureAwait(false);
                 }
                 if (FileTransferInternal != null)
                 {
-                    await FileTransferInternal.DisposeAsync().ConfigureAwait(false);
+                    await TryTeardownAsync(() => FileTransferInternal.DisposeAsync().AsTask(), "file transfer", failures).ConfigureAwait(false);
                 }
                 if (FilesInternal != null)
                 {
-                    await FilesInternal.StopAsync().ConfigureAwait(false);
+                    await TryTeardownAsync(() => FilesInternal.StopAsync(), "files", failures).ConfigureAwait(false);
+                }
+                if (disposing)
+                {
+                    MetadataDownloadInternal?.Dispose();
                 }
 
-                Interlocked.Exchange(ref _rollbackIncomplete, 0);
+                Interlocked.Exchange(ref _rollbackIncomplete, failures.Count == 0 ? 0 : 1);
             }
             finally
             {
+                Volatile.Write(ref _lastReportedDownloadSpeed, 0);
+                Volatile.Write(ref _lastReportedUploadSpeed, 0);
                 Interlocked.Exchange(ref _stopping, 0);
                 Interlocked.Exchange(ref _activityTimeTicks, Services.TimeProvider.GetUtcNow().Ticks);
+            }
+
+            if (failures.Count > 0 && !disposing)
+            {
+                throw new AggregateException("One or more torrent components failed to stop.", failures);
             }
 
             Alerts.TorrentAlert(AlertId.TorrentStopped, this);
@@ -1981,7 +2149,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
         finally
         {
-            _stateLock.Release();
+            if (!stateLockHeld)
+            {
+                _stateLock.Release();
+            }
         }
     }
 }

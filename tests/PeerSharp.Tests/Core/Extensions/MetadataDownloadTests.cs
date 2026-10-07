@@ -10,6 +10,52 @@ namespace PeerSharp.Tests.Core.Extensions;
 
 public class MetadataDownloadTests
 {
+    [Fact]
+    public async Task RejectedMetadata_ResetsReportedProgress()
+    {
+        await using var torrent = TorrentTestUtility.CreateMinimal();
+        using var download = new MetadataDownload(torrent);
+        var (bytes, _) = BuildTwoPieceMetadata();
+        torrent.InfoFile.Info.Hash = InfoHash.CreateRandom();
+        var progress = new List<float>();
+        torrent.Events = new PeerSharp.Interfaces.TorrentEventsBuilder()
+            .OnMetadataProgress((_, value) => progress.Add(value.Progress)).Build();
+        download.Start();
+        download.InitializeMetadataBuffer(bytes.Length);
+        var peer = MakePeer(bytes.Length);
+        await download.MetadataPieceReceivedAsync(peer, 0, bytes[..UtMetadata.PieceSize]);
+        await download.MetadataPieceReceivedAsync(peer, 1, bytes[UtMetadata.PieceSize..]);
+        Assert.False(download.Finished);
+        Assert.Equal(0f, progress[^1]);
+        Assert.Contains(1f, progress);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task MetadataCompletion_ThrowingCallbacks_DoNotPreventInitialization()
+    {
+        await using var torrent = TorrentTestUtility.CreateMinimal(downloadPath: Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()));
+        using var download = new MetadataDownload(torrent);
+        var (bytes, hash) = BuildTwoPieceMetadata();
+        var oldTransfer = torrent.FileTransferInternal;
+        var oldFiles = torrent.FilesInternal;
+        torrent.InfoFile.Info.Hash = hash;
+        int observedPieces = -1;
+        torrent.Events = new PeerSharp.Interfaces.TorrentEventsBuilder()
+            .OnMetadataProgress((_, _) => throw new InvalidOperationException("progress subscriber"))
+            .OnMetadataReceived(_ => { observedPieces = torrent.Pieces.Count; throw new InvalidOperationException("received subscriber"); })
+            .Build();
+        download.Start();
+        download.InitializeMetadataBuffer(bytes.Length);
+        var peer = MakePeer(bytes.Length);
+        await download.MetadataPieceReceivedAsync(peer, 0, bytes[..UtMetadata.PieceSize]);
+        await download.MetadataPieceReceivedAsync(peer, 1, bytes[UtMetadata.PieceSize..]);
+        await torrent.WaitForMetadataAsync();
+        Assert.Equal(2, observedPieces);
+        Assert.True(oldTransfer.IsDisposed);
+        Assert.True(oldFiles.IsDisposed);
+        Assert.False(torrent.Started);
+    }
+
     private class MockPeerCommunication : IPeerCommunication
     {
         public byte[] PeerId { get; set; } = new byte[20];

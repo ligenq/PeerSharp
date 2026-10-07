@@ -152,7 +152,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
         {
             stream.ProcessPacketWithSack(header, data, headerSize, sackRanges, extensionBits, remote);
         }
-        else if (header.Type == MessageType.ST_SYN)
+        else if (header.Type == MessageType.ST_SYN && _settings.EnableUtpIn)
         {
             ushort sendId = header.ConnectionId;
             ushort recvId = (ushort)(header.ConnectionId + 1);
@@ -255,7 +255,9 @@ internal class UtpManager : IUdpReceiver, IUtpManager
 
     private bool TryGetStream(MessageType type, UtpSocketKey key, [NotNullWhen(true)] out UtpStream? stream)
     {
-        if (type == MessageType.ST_RESET)
+        // An accepted stream receives SYN retries on its send ID: the initiator
+        // uses its receive ID for SYN, and receive ID + 1 for subsequent packets.
+        if (type == MessageType.ST_RESET || type == MessageType.ST_SYN)
         {
             if (_streamsBySendId.TryGetValue(key, out stream))
             {

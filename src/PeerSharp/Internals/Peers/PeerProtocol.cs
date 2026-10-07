@@ -61,7 +61,34 @@ internal static class PeerProtocol
         }
 
         var messageBuffer = buffer.Slice(4, length);
-        byte id = messageBuffer.FirstSpan[0];
+        var reader = new SequenceReader<byte>(messageBuffer);
+        reader.TryRead(out byte id);
+        int expectedLength = (MessageId)id switch
+        {
+            MessageId.Choke or MessageId.Unchoke or MessageId.Interested or MessageId.NotInterested or
+                MessageId.HaveAll or MessageId.HaveNone => 1,
+            MessageId.Have or MessageId.Suggest or MessageId.AllowedFast => 5,
+            MessageId.Request or MessageId.Cancel or MessageId.Reject => 13,
+            MessageId.Port => 3,
+            MessageId.HashRequest or MessageId.HashReject => 49,
+            _ => 0
+        };
+        if (expectedLength != 0 && length != expectedLength)
+        {
+            throw new InvalidDataException($"Invalid {(MessageId)id} message length: {length}, expected {expectedLength}");
+        }
+        if ((MessageId)id == MessageId.Extended && length < 2)
+        {
+            throw new InvalidDataException("Extended message is missing its extension ID");
+        }
+        if ((MessageId)id == MessageId.Hashes && (length < 49 || (length - 49) % 32 != 0))
+        {
+            throw new InvalidDataException("Invalid hashes message length");
+        }
+        if ((MessageId)id is MessageId.Handshake or MessageId.KeepAlive or MessageId.Invalid)
+        {
+            throw new InvalidDataException($"Invalid wire message ID: {id}");
+        }
         message = new PeerMessage((MessageId)id);
 
         switch (message.Id)
@@ -91,7 +118,7 @@ internal static class PeerProtocol
                 break;
 
             case MessageId.Piece:
-                if (length < 9)
+                if (length < 10)
                 {
                     throw new InvalidDataException($"Piece message too short: {length} < 9");
                 }

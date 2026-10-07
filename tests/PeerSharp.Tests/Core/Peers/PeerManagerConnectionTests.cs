@@ -17,9 +17,12 @@ public class PeerManagerConnectionTests
         {
         }
 
+        public System.Collections.Concurrent.ConcurrentQueue<int>? DialedPorts { get; init; }
+
         public override Task<bool> ConnectAsync(string ip, int port, bool useUtp, int timeoutMs, bool offerEncryption = true, CancellationToken ct = default)
         {
             ConnectCalls++;
+            DialedPorts?.Enqueue(port);
             return ConnectTask.Task;
         }
     }
@@ -28,9 +31,12 @@ public class PeerManagerConnectionTests
     {
         public MockPeerCommunication LastCreated { get; private set; } = null!;
 
+        /// <summary>The port of every dial made, in order.</summary>
+        public System.Collections.Concurrent.ConcurrentQueue<int> DialedPorts { get; } = new();
+
         public PeerCommunication Create(Torrent torrent, IPeerListener listener, TimeProvider timeProvider)
         {
-            LastCreated = new MockPeerCommunication(torrent, listener, timeProvider);
+            LastCreated = new MockPeerCommunication(torrent, listener, timeProvider) { DialedPorts = DialedPorts };
             return LastCreated;
         }
 
@@ -61,6 +67,41 @@ public class PeerManagerConnectionTests
 
         Assert.Equal(1, factory.LastCreated.ConnectCalls);
 
+        await manager.StopAsync();
+    }
+
+    [Fact]
+    public async Task APeerNamedBeforeARestart_IsDialledAgainAfterIt()
+    {
+        // As a magnet link's x.pe names one: known to no tracker, so nothing else would find it again.
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var timeProvider = new FakeTimeProvider();
+        var factory = new MockPeerFactory();
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), factory, timeProvider, new TorrentTestUtility.MockConnectionGovernor());
+        await manager.StartAsync();
+
+        manager.AddPeers([new IPEndPoint(IPAddress.Parse("192.0.2.10"), 51888)], PeerSourceKind.Resume);
+        await TorrentTestUtility.WaitUntilAsync(() => factory.DialedPorts.Contains(51888), because: "the named peer to be dialled");
+
+        await manager.StopAsync();
+        factory.DialedPorts.Clear();
+        await manager.StartAsync();
+
+        await TorrentTestUtility.WaitUntilAsync(() => factory.DialedPorts.Contains(51888), because: "the named peer to be dialled again after the restart");
+        await manager.StopAsync();
+    }
+
+    [Fact]
+    public async Task TheFirstStart_DialsNothingOfItsOwn()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var factory = new MockPeerFactory();
+        var manager = new PeerManager(torrent, new TorrentTestUtility.MockGeoIpService(), factory, new FakeTimeProvider(), new TorrentTestUtility.MockConnectionGovernor());
+
+        await manager.StartAsync();
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+
+        Assert.Empty(factory.DialedPorts);
         await manager.StopAsync();
     }
 
@@ -110,10 +151,9 @@ public class PeerManagerConnectionTests
         var peer1 = factory.LastCreated;
 
         // Verify delay logic: advance time
-        timeProvider.Advance(TimeSpan.FromSeconds(1.1));
-
-        // Now second should proceed
-        await TorrentTestUtility.WaitUntilAsync(() => !ReferenceEquals(factory.LastCreated, peer1), because: "second peer to be created");
+        await TorrentTestUtility.AdvanceUntilAsync(timeProvider,
+            () => !ReferenceEquals(factory.LastCreated, peer1), TimeSpan.FromSeconds(1.1),
+            because: "second peer to be created after its delay is armed");
 
         Assert.NotSame(peer1, factory.LastCreated);
         Assert.Equal(1, factory.LastCreated.ConnectCalls);

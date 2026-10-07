@@ -13,7 +13,7 @@ internal sealed class BlockProcessor
     private readonly RequestCompletionTracker _requestCompletionTracker;
     private readonly Torrent _torrent;
     private readonly ILogger<BlockProcessor> _logger;
-    private readonly Func<int, int, PeerCommunication, Task> _cancelBlockRequestAsync;
+    private readonly Func<int, int, PeerCommunication?, Task> _cancelBlockRequestAsync;
 
     public BlockProcessor(BlockProcessorOptions options)
     {
@@ -32,6 +32,11 @@ internal sealed class BlockProcessor
 
     public async Task HandleWebSeedBlockReceivedAsync(Block block, CancellationToken ct)
     {
+        if (!IsValidBlockGeometry(block) || _torrent.Pieces.HasPiece(block.PieceIndex))
+        {
+            block.Dispose();
+            return;
+        }
         // Ensure piece state exists for this piece
         long pieceSize = _torrent.InfoFile.Info.GetPieceSize(block.PieceIndex);
         int blocksPerPiece = (int)Math.Ceiling((double)pieceSize / _blockSize);
@@ -60,8 +65,9 @@ internal sealed class BlockProcessor
         bool stored = false;
 
         _pieceStateManager.TryGetPiece(block.PieceIndex, out var state);
+        _requestCompletionTracker.TryGetPendingRequest(peer, block, out var pendingRequest);
 
-        if (state != null && !IsValidRequestedBlock(peer, block, out _))
+        if (state != null && !IsValidRequestedBlock(peer, block, out pendingRequest))
         {
             _logger.LogDebug(
                 "Rejected unsolicited or malformed block: Piece {PieceIndex}, Offset {Offset}, Length {Length} from {RemoteEndPoint}",
@@ -86,7 +92,14 @@ internal sealed class BlockProcessor
                     _downloader.AddDownloaded(block.Length);
                     peer.AddDownloaded(block.Length);
 
-                    await _cancelBlockRequestAsync(block.PieceIndex, block.Offset, peer).ConfigureAwait(false);
+                    try
+                    {
+                        await _cancelBlockRequestAsync(block.PieceIndex, block.Offset, peer).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "Could not cancel duplicate block requests");
+                    }
 
                     if (state.TryCompleteAndSetWriting())
                     {
@@ -108,7 +121,15 @@ internal sealed class BlockProcessor
 
             if (pieceToProcess != null)
             {
-                await _enqueuePeerPieceAsync(pieceToProcess).ConfigureAwait(false);
+                try
+                {
+                    await _enqueuePeerPieceAsync(pieceToProcess).ConfigureAwait(false);
+                }
+                catch
+                {
+                    pieceToProcess.ReleaseWriting();
+                    throw;
+                }
             }
         }
         finally
@@ -117,17 +138,21 @@ internal sealed class BlockProcessor
             // broadcast, piece enqueue) throws: the request was answered, and leaving it
             // in-flight depresses the request pipeline until the stale-piece sweep runs.
             // Only reads the block's index/offset ints, so a disposed block is fine here.
-            _requestCompletionTracker.HandleBlockReceived(peer, block);
+            if (!stored)
+            {
+                block.Dispose();
+            }
+            if (pendingRequest != null)
+            {
+                _requestCompletionTracker.HandleBlockReceived(peer, block, pendingRequest);
+            }
         }
     }
 
     private bool IsValidRequestedBlock(PeerCommunication peer, Block block, out BlockRequest request)
     {
         request = default!;
-        if (block.PieceIndex < 0 ||
-            block.Offset < 0 ||
-            block.Length <= 0 ||
-            block.Offset % _blockSize != 0)
+        if (!IsValidBlockGeometry(block))
         {
             return false;
         }
@@ -138,6 +163,20 @@ internal sealed class BlockProcessor
         }
 
         return request.Length == block.Length;
+    }
+
+    private bool IsValidBlockGeometry(Block block)
+    {
+        var info = _torrent.InfoFile.Info;
+        if (info.PieceSize == 0 || block.PieceIndex < 0 ||
+            block.PieceIndex >= (info.FullSize + info.PieceSize - 1) / info.PieceSize ||
+            block.Offset < 0 || block.Offset % _blockSize != 0)
+        {
+            return false;
+        }
+        long size = info.GetPieceSize(block.PieceIndex);
+        return block.Offset < size && block.Length == Math.Min(_blockSize, size - block.Offset) &&
+            block.Data.Length == block.Length;
     }
 
     private async Task ProcessWebSeedBlockAsync(Block block, CancellationToken ct)
@@ -157,6 +196,16 @@ internal sealed class BlockProcessor
             {
                 stored = true;
                 _downloader.AddDownloaded(block.Length);
+
+                // A web seed can race every peer owing this block; there is no peer source to exclude.
+                try
+                {
+                    await _cancelBlockRequestAsync(block.PieceIndex, block.Offset, null).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Could not cancel duplicate block requests");
+                }
 
                 if (state.TryCompleteAndSetWriting())
                 {
@@ -178,7 +227,15 @@ internal sealed class BlockProcessor
 
         if (pieceToProcess != null)
         {
-            await _enqueueWebSeedPieceAsync(pieceToProcess, ct).ConfigureAwait(false);
+            try
+            {
+                await _enqueueWebSeedPieceAsync(pieceToProcess, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                pieceToProcess.ReleaseWriting();
+                throw;
+            }
         }
     }
 }
@@ -192,6 +249,6 @@ internal sealed class BlockProcessorOptions
     public required TransferStats Downloader { get; init; }
     public required RequestCompletionTracker RequestCompletionTracker { get; init; }
     public required Torrent Torrent { get; init; }
-    public required Func<int, int, PeerCommunication, Task> CancelBlockRequest { get; init; }
+    public required Func<int, int, PeerCommunication?, Task> CancelBlockRequest { get; init; }
     public required ILogger<BlockProcessor> Logger { get; init; }
 }

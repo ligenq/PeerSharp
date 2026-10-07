@@ -95,6 +95,36 @@ public class PeerCommunicationTests
         CleanupPath(path);
     }
 
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(0, 3)]
+    public async Task GetOptimalPipelineDepth_IsShorter_WhileAStreamIsBuffering(int whileBuffering, int expectedSeconds)
+    {
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.InfoFile.Info.PieceSize = 256 * 1024;
+        torrent.InfoFile.Info.FullSize = 4 * 256 * 1024;
+        torrent.InfoFile.Info.Files.Add(new Internals.TorrentFileEntry { Path = "film.mkv", Size = 4 * 256 * 1024, Offset = 0 });
+        torrent.InfoFile.Info.Pieces.Clear();
+        for (int i = 0; i < 4; i++)
+        {
+            torrent.InfoFile.Info.Pieces.Add(new byte[20]);
+        }
+
+        await torrent.ReinitializeAfterMetadataAsync();
+        torrent.Settings.Transfer.RequestQueueTimeSeconds = 3;
+        torrent.Settings.Streaming.RequestQueueSecondsWhileBuffering = whileBuffering;
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        peer.SetSmoothedDownloadSpeedForTesting(1024 * 1024);
+        int ordinarily = peer.GetOptimalPipelineDepth();
+
+        // Just opened, nothing downloaded: the stream is buffering.
+        using var stream = new PeerSharp.Streaming.TorrentStream(torrent.Streaming, torrent, 0, TimeProvider.System);
+        int buffering = peer.GetOptimalPipelineDepth();
+
+        Assert.Equal(3 * 1024 * 1024 / (16 * 1024), ordinarily);
+        Assert.Equal(expectedSeconds * 1024 * 1024 / (16 * 1024), buffering);
+    }
+
     [Fact]
     public async Task GetAdaptivePipelineDepth_ReducesForStrikesAndHighRtt()
     {
@@ -871,11 +901,12 @@ public class PeerCommunicationTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
         var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
 
-        var msg = new PeerMessage(MessageId.Suggest) { PieceIndex = 7 };
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
+        var msg = new PeerMessage(MessageId.Suggest) { PieceIndex = 0 };
         await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
 
         var suggested = peer.GetSuggestedPieces();
-        Assert.Contains(7, suggested);
+        Assert.Contains(0, suggested);
 
         await torrent.DisposeAsync();
         CleanupPath(path);
@@ -889,10 +920,11 @@ public class PeerCommunicationTests
         var torrent = TorrentTestUtility.CreateMinimal(metadata, path);
         var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
 
-        var msg = new PeerMessage(MessageId.AllowedFast) { PieceIndex = 11 };
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
+        var msg = new PeerMessage(MessageId.AllowedFast) { PieceIndex = 0 };
         await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
 
-        Assert.True(peer.IsAllowedFast(11));
+        Assert.True(peer.IsAllowedFast(0));
 
         await torrent.DisposeAsync();
         CleanupPath(path);
@@ -908,6 +940,7 @@ public class PeerCommunicationTests
         var peer = new PeerCommunication(torrent, listener, TimeProvider.System);
 
         var msg = new PeerMessage(MessageId.Reject) { PieceIndex = 2, BlockOffset = 0, BlockLength = 16384 };
+        SetPrivateProperty(peer, "RemoteSupportsFastExtension", true);
         await InvokePrivate<Task>(peer, "ProcessMessageAsync", msg);
 
         Assert.Contains(listener.Received, m => m.Id == MessageId.Reject);
@@ -1112,6 +1145,18 @@ public class PeerCommunicationTests
 
         await torrent.DisposeAsync();
         CleanupPath(path);
+    }
+
+    [Fact]
+    public async Task ChokedFastRequestReachesTheUploadHandlerForAcceptanceOrRejection()
+    {
+        var listener = new RecordingPeerListener();
+        await using var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1WithPieces());
+        var peer = new PeerCommunication(torrent, listener, TimeProvider.System);
+        typeof(PeerCommunication).GetProperty(nameof(peer.RemoteSupportsFastExtension))!.SetValue(peer, true);
+        using var message = new PeerMessage(MessageId.Request) { PieceIndex = 0, BlockLength = 16384 };
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", message);
+        Assert.Contains(message, listener.Received);
     }
 
     [Fact]

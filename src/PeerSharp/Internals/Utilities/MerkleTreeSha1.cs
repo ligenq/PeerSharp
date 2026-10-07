@@ -25,6 +25,8 @@ internal class MerkleTreeSha1
 
     private readonly int _leafStart;
     private readonly byte[]?[] _nodes;
+    private readonly byte[]? _trustedRoot;
+    private readonly Lock _proofLock = new();
 
     /// <summary>
     /// Create a new Merkle tree for the given number of pieces.
@@ -45,7 +47,8 @@ internal class MerkleTreeSha1
     {
         if (rootHash.Length == HashSize)
         {
-            _nodes[0] = rootHash;
+            _trustedRoot = rootHash.ToArray();
+            _nodes[0] = _trustedRoot;
         }
     }
 
@@ -122,30 +125,33 @@ internal class MerkleTreeSha1
     /// </summary>
     public bool CanVerifyPiece(int pieceIndex)
     {
-        if (pieceIndex < 0 || pieceIndex >= PieceCount)
+        lock (_proofLock)
         {
-            return false;
-        }
-
-        // Need the piece hash itself
-        int nodeIndex = _leafStart + pieceIndex;
-        if (_nodes[nodeIndex] == null)
-        {
-            return false;
-        }
-
-        // Need all uncle hashes up to the root
-        while (nodeIndex > 0)
-        {
-            int siblingIndex = GetSibling(nodeIndex);
-            if (_nodes[siblingIndex] == null)
+            if (pieceIndex < 0 || pieceIndex >= PieceCount)
             {
                 return false;
             }
-            nodeIndex = GetParent(nodeIndex);
-        }
 
-        return true;
+            // Need the piece hash itself
+            int nodeIndex = _leafStart + pieceIndex;
+            if (_nodes[nodeIndex] == null)
+            {
+                return false;
+            }
+
+            // Need all uncle hashes up to the root
+            while (nodeIndex > 0)
+            {
+                int siblingIndex = GetSibling(nodeIndex);
+                if (_nodes[siblingIndex] == null)
+                {
+                    return false;
+                }
+                nodeIndex = GetParent(nodeIndex);
+            }
+
+            return true;
+        }
     }
 
     /// <summary>
@@ -244,6 +250,10 @@ internal class MerkleTreeSha1
     /// </summary>
     public void SetNode(int nodeIndex, byte[] hash)
     {
+        if (hash.Length != HashSize || (nodeIndex == 0 && _trustedRoot != null))
+        {
+            return;
+        }
         if (nodeIndex >= 0 && nodeIndex < TreeSize)
         {
             _nodes[nodeIndex] = hash;
@@ -255,7 +265,8 @@ internal class MerkleTreeSha1
     /// </summary>
     public void SetPieceHash(int pieceIndex, byte[] hash)
     {
-        if (pieceIndex < 0 || pieceIndex >= PieceCount)
+        if (pieceIndex < 0 || pieceIndex >= PieceCount || hash.Length != HashSize ||
+            (_leafStart == 0 && _trustedRoot != null))
         {
             return;
         }
@@ -297,49 +308,85 @@ internal class MerkleTreeSha1
 
     public bool VerifyPiece(int pieceIndex, ReadOnlySpan<byte> pieceData)
     {
-        if (pieceIndex < 0 || pieceIndex >= PieceCount)
+        lock (_proofLock)
         {
-            return false;
-        }
-
-        if (_nodes[0] == null)
-        {
-            return false; // No root hash to verify against
-        }
-
-        // Compute piece hash
-        byte[] pieceHash = SHA1.HashData(pieceData);
-
-        // Store and verify path to root
-        int nodeIndex = _leafStart + pieceIndex;
-        byte[] currentHash = pieceHash;
-
-        while (nodeIndex > 0)
-        {
-            int siblingIndex = GetSibling(nodeIndex);
-            byte[]? siblingHash = _nodes[siblingIndex];
-
-            if (siblingHash == null)
+            if (pieceIndex < 0 || pieceIndex >= PieceCount)
             {
-                // Missing sibling - use zero hash for padding
-                siblingHash = new byte[HashSize];
+                return false;
             }
 
-            // Combine with sibling to get parent hash
-            if (IsLeftChild(nodeIndex))
+            if (_nodes[0] == null)
             {
-                currentHash = HashPair(currentHash, siblingHash);
-            }
-            else
-            {
-                currentHash = HashPair(siblingHash, currentHash);
+                return false; // No root hash to verify against
             }
 
-            nodeIndex = GetParent(nodeIndex);
+            // Compute piece hash
+            byte[] pieceHash = SHA1.HashData(pieceData);
+
+            // Store and verify path to root
+            int nodeIndex = _leafStart + pieceIndex;
+            byte[] currentHash = pieceHash;
+
+            while (nodeIndex > 0)
+            {
+                int siblingIndex = GetSibling(nodeIndex);
+                byte[]? siblingHash = _nodes[siblingIndex];
+
+                if (siblingHash == null)
+                {
+                    // Missing sibling - use zero hash for padding
+                    siblingHash = new byte[HashSize];
+                }
+
+                // Combine with sibling to get parent hash
+                if (IsLeftChild(nodeIndex))
+                {
+                    currentHash = HashPair(currentHash, siblingHash);
+                }
+                else
+                {
+                    currentHash = HashPair(siblingHash, currentHash);
+                }
+
+                nodeIndex = GetParent(nodeIndex);
+            }
+
+            // Compare computed root with stored root
+            return currentHash.AsSpan().SequenceEqual(_trustedRoot ?? _nodes[0]);
         }
+    }
 
-        // Compare computed root with stored root
-        return currentHash.AsSpan().SequenceEqual(_nodes[0]);
+    /// <summary>Authenticates a complete proof before publishing any peer-supplied hashes.</summary>
+    public bool TryAddPieceProof(int pieceIndex, byte[] pieceHash, IReadOnlyList<byte[]> uncles)
+    {
+        lock (_proofLock)
+        {
+            byte[]? root = _trustedRoot ?? _nodes[0];
+            if (root == null || pieceIndex < 0 || pieceIndex >= PieceCount || pieceHash.Length != HashSize ||
+                uncles.Count != GetDepth() - 1 || uncles.Any(hash => hash.Length != HashSize))
+            {
+                return false;
+            }
+            byte[] hash = pieceHash;
+            int node = _leafStart + pieceIndex;
+            foreach (var uncle in uncles)
+            {
+                hash = IsLeftChild(node) ? HashPair(hash, uncle) : HashPair(uncle, hash);
+                node = GetParent(node);
+            }
+            if (!hash.AsSpan().SequenceEqual(root))
+            {
+                return false;
+            }
+            node = _leafStart + pieceIndex;
+            _nodes[node] = pieceHash.ToArray();
+            foreach (var uncle in uncles)
+            {
+                _nodes[GetSibling(node)] = uncle.ToArray();
+                node = GetParent(node);
+            }
+            return true;
+        }
     }
 
     private static int GetLeftChild(int index)

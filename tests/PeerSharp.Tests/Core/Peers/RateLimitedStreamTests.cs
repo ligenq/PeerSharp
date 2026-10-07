@@ -178,4 +178,66 @@ public class RateLimitedStreamTests
 
         Assert.Throws<ObjectDisposedException>(() => inner.Position);
     }
+
+    [Fact]
+    public async Task ReadAsync_WhenThePeerResetsTheConnection_ReportsEndOfStream()
+    {
+        // Every reader above treats end of input and an I/O error alike, by closing, so passing the
+        // error on only cost a rethrow at each layer for the commonest event in a swarm.
+        var manager = new TestBandwidthManager();
+        await using var stream = Create(new ResettingStream(), manager);
+
+        int read = await stream.ReadAsync(new byte[100], TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, read);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task DisposingWhileQuotaIsPendingCancelsTheWait()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var manager = new TestBandwidthManager
+        {
+            RequestStep = async ct =>
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                return 1;
+            }
+        };
+        using var stream = Create(new MemoryStream([1]), manager);
+        var read = stream.ReadAsync(new byte[1], TestContext.Current.CancellationToken).AsTask();
+        await entered.Task;
+        stream.Dispose();
+        Assert.Equal(0, await read);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task AGrantArrivingAfterDisposalIsRefunded()
+    {
+        var quota = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var manager = new TestBandwidthManager { RequestStep = _ => quota.Task };
+        using var stream = Create(new MemoryStream(), manager);
+        var write = stream.WriteAsync(new byte[1], TestContext.Current.CancellationToken).AsTask();
+        stream.Dispose();
+        quota.SetResult(100);
+        await Assert.ThrowsAsync<IOException>(() => write);
+        Assert.Equal(100, manager.ReturnedUpload);
+    }
+
+    private sealed class ResettingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new IOException("Connection reset by peer.");
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromException<int>(new IOException("Connection reset by peer."));
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }

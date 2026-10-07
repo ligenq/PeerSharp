@@ -443,22 +443,28 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         {
             foreach (var torrent in _resolver.GetTorrents())
             {
-                var candidate = torrent.Hash.ToArray();
-                var candidateReq2 = Sha1("req2"u8, candidate);
-
-                bool match = true;
-                for (int i = 0; i < 20; i++)
+                foreach (var candidate in GetEncryptionHashes(torrent))
                 {
-                    if ((hash2[i] ^ req3Hash[i]) != candidateReq2[i])
+                    var candidateReq2 = Sha1("req2"u8, candidate);
+                    bool match = true;
+                    for (int i = 0; i < 20; i++)
                     {
-                        match = false;
+                        if ((hash2[i] ^ req3Hash[i]) != candidateReq2[i])
+                        {
+                            match = false;
+                            break;
+                        }
+                    }
+
+                    if (match)
+                    {
+                        matchedHash = candidate;
                         break;
                     }
                 }
 
-                if (match)
+                if (matchedHash != null)
                 {
-                    matchedHash = candidate;
                     break;
                 }
             }
@@ -577,6 +583,19 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         Encryption.RC4Out.Encrypt(respBytes);
 
         return respBytes;
+    }
+
+    private static IEnumerable<byte[]> GetEncryptionHashes(ITorrent torrent)
+    {
+        if (!torrent.Hash.IsEmpty || torrent.HashV2.IsEmpty)
+        {
+            yield return torrent.Hash.ToArray();
+        }
+
+        if (!torrent.HashV2.IsEmpty)
+        {
+            yield return torrent.HashV2.TruncateToV1().ToArray();
+        }
     }
 
     private byte[] ProcessPe4()

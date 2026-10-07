@@ -59,10 +59,8 @@ internal abstract record DhtItem
 /// </summary>
 internal sealed record DhtImmutableItem : DhtItem
 {
-    private DhtTarget? _target;
-
     /// <inheritdoc/>
-    public override DhtTarget Target => _target ??= DhtItemCodec.ComputeImmutableTarget(Value);
+    public override DhtTarget Target => DhtItemCodec.ComputeImmutableTarget(Value);
 }
 
 /// <summary>
@@ -75,8 +73,6 @@ internal sealed record DhtImmutableItem : DhtItem
 /// </summary>
 internal sealed record DhtMutableItem : DhtItem
 {
-    private DhtTarget? _target;
-
     /// <summary>The publisher's 32-byte Ed25519 public key.</summary>
     public required byte[] PublicKey { get; init; }
 
@@ -93,7 +89,7 @@ internal sealed record DhtMutableItem : DhtItem
     public byte[]? Salt { get; init; }
 
     /// <inheritdoc/>
-    public override DhtTarget Target => _target ??= DhtItemCodec.ComputeMutableTarget(PublicKey, Salt);
+    public override DhtTarget Target => DhtItemCodec.ComputeMutableTarget(PublicKey, Salt);
 
     /// <summary>Verifies the signature over this item's salt, sequence number and value.</summary>
     public bool VerifySignature() => DhtItemCodec.VerifySignature(this);

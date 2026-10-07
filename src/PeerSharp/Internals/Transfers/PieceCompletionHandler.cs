@@ -7,7 +7,7 @@ namespace PeerSharp.Internals.Transfers;
 internal sealed class PieceCompletionHandler
 {
     private readonly BlockRequestTracker _requestTracker;
-    private readonly Action<int, int, PeerCommunication> _removeBlockRequest;
+    private readonly Action<int, int, PeerCommunication>? _removeBlockRequest;
     private readonly Torrent _torrent;
     private readonly ILogger<PieceCompletionHandler> _logger;
 
@@ -45,9 +45,9 @@ internal sealed class PieceCompletionHandler
         List<Task>? cancelTasks = endGameMode ? [] : null;
         foreach (var (peer, key, r) in requestsToRemove)
         {
-            if (_requestTracker.TryRemovePeerRequest(peer, key, out _))
+            if (_requestTracker.TryRemovePeerRequest(peer, key, out _, r))
             {
-                _removeBlockRequest(r.PieceIndex, r.Offset, peer);
+                _removeBlockRequest?.Invoke(r.PieceIndex, r.Offset, peer);
                 if (endGameMode)
                 {
                     cancelTasks!.Add(peer.SendMessageAsync(new PeerMessage(MessageId.Cancel)
@@ -71,7 +71,7 @@ internal sealed class PieceCompletionHandler
         // Send Suggest messages (BEP 6) to peers who don't have this piece
         foreach (var connectedPeer in _torrent.PeersInternal.GetConnectedPeersInternal())
         {
-            if (connectedPeer.RemoteSupportsExtensions && !connectedPeer.PeerPieces.HasPiece(pieceIndex))
+            if (connectedPeer.RemoteSupportsFastExtension && !connectedPeer.PeerPieces.HasPiece(pieceIndex))
             {
                 await connectedPeer.SendSuggestAsync(pieceIndex).ConfigureAwait(false);
                 _logger.LogTrace("Suggested piece {PieceIndex} to {PeerName}", pieceIndex, connectedPeer.Name);
