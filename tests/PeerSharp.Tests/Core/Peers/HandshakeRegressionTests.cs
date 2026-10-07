@@ -161,14 +161,18 @@ public class HandshakeRegressionTests
         var peer = new PeerCommunication(torrent, new Listener(), TimeProvider.System);
         using var server = new TcpListener(IPAddress.Loopback, 0);
         server.Start();
-        var connect = peer.ConnectAsync("127.0.0.1", ((IPEndPoint)server.LocalEndpoint).Port, false, 750);
+        // The handshake trickles in over 6.8 seconds: an attempt whose deadline restarted with each byte
+        // would still be connecting when the wait below gives up. The deadline leaves a loaded runner time
+        // to accept and read the first byte before it passes - at 750 ms one did not, and the reset that
+        // ended the attempt took the unread byte with it.
+        var connect = peer.ConnectAsync("127.0.0.1", ((IPEndPoint)server.LocalEndpoint).Port, false, 2000);
         using var remote = await server.AcceptTcpClientAsync(TestContext.Current.CancellationToken);
         byte[] first = new byte[1];
         await remote.GetStream().ReadExactlyAsync(first, TestContext.Current.CancellationToken);
         var sender = SendFragmentsAsync();
         try
         {
-            Assert.False(await connect.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+            Assert.False(await connect.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
         }
         finally
         {
