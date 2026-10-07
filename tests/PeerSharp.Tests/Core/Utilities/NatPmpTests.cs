@@ -2,11 +2,74 @@ using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Utilities;
 using System.Net;
 using System.Net.Sockets;
+using System.Buffers.Binary;
 
 namespace PeerSharp.Tests.Core.Utilities;
 
 public sealed class NatPmpTests
 {
+    [Fact]
+    public async Task MapPortAsync_RetriesLostDatagram()
+    {
+        var requests = new List<byte[]>();
+        await using var server = new NatPmpTestServer(true, 5555, requests, responsesToDrop: 1);
+        var mapper = new NatPmpPortMapping(() => [IPAddress.Loopback], server.Port);
+        await mapper.StartAsync(CancellationToken.None);
+        Assert.True(await mapper.MapPortAsync(1234, "TCP", "test", TestContext.Current.CancellationToken));
+        Assert.Equal(2, server.CapturedCount);
+        Assert.Equal(5555, mapper.GetExternalPort(1234, "TCP"));
+        await mapper.UnmapAllAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(PortMappingResult.NotAttempted, Assert.Single(mapper.GetStatus()).Result);
+    }
+
+    [Theory]
+    [InlineData("short")]
+    [InlineData("internal-port")]
+    [InlineData("external-port")]
+    [InlineData("lifetime")]
+    [InlineData("opcode")]
+    public async Task MapPortAsync_RejectsMalformedOrUnrelatedResponses(string fault)
+    {
+        byte[] Transform(byte[] response)
+        {
+            switch (fault)
+            {
+                case "short": return response[..12];
+                case "internal-port": response[8] ^= 1; break;
+                case "external-port": response[10] = response[11] = 0; break;
+                case "lifetime": response.AsSpan(12).Clear(); break;
+                case "opcode": response[1] ^= 1; break;
+            }
+            return response;
+        }
+        await using var server = new NatPmpTestServer(true, 5555, responseTransform: Transform);
+        var mapper = new NatPmpPortMapping(() => [IPAddress.Loopback], server.Port);
+        await mapper.StartAsync(CancellationToken.None);
+        Assert.False(await mapper.MapPortAsync(1234, "UDP", "test", CancellationToken.None));
+        Assert.Null(Assert.Single(mapper.GetStatus()).ExternalPort);
+    }
+
+    [Fact]
+    public async Task Renewal_UsesAssignedPortAndGrantedLifetime_WithoutDuplicateUnmaps()
+    {
+        var received = new List<byte[]>();
+        await using var server = new NatPmpTestServer(true, 5555, received, response =>
+        {
+            BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(12), 60);
+            return response;
+        });
+        var mapper = new NatPmpPortMapping(() => [IPAddress.Loopback], server.Port);
+        await mapper.StartAsync(CancellationToken.None);
+        Assert.True(await mapper.MapPortAsync(1234, "UDP", "test", CancellationToken.None));
+        Assert.Equal(TimeSpan.FromSeconds(30), mapper.RenewalInterval);
+        await mapper.StartAsync(CancellationToken.None);
+        Assert.True(await mapper.MapPortAsync(1234, "UDP", "test", CancellationToken.None));
+        Assert.Equal(5555, BinaryPrimitives.ReadUInt16BigEndian(received[1].AsSpan(6)));
+        await mapper.UnmapAllAsync(CancellationToken.None);
+        await server.WaitForPacketCountAsync(3, TimeSpan.FromSeconds(5));
+        Assert.Equal(3, server.CapturedCount);
+    }
+
     [Fact]
     public async Task MapPortAsync_UnexpectedFailure_KeepsDiagnosticException()
     {
@@ -180,12 +243,16 @@ public sealed class NatPmpTests
         private readonly List<byte[]>? _captureRequests;
         private readonly Lock _captureLock = new();
         private readonly SemaphoreSlim _packetSignal = new(0);
+        private readonly Func<byte[], byte[]>? _responseTransform;
+        private int _responsesToDrop;
 
-        public NatPmpTestServer(bool success, int? externalPort, List<byte[]>? captureRequests = null)
+        public NatPmpTestServer(bool success, int? externalPort, List<byte[]>? captureRequests = null, Func<byte[], byte[]>? responseTransform = null, int responsesToDrop = 0)
         {
             _success = success;
             _externalPort = externalPort;
             _captureRequests = captureRequests;
+            _responseTransform = responseTransform;
+            _responsesToDrop = responsesToDrop;
             _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
             Port = ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
             _loopTask = Task.Run(ReceiveLoopAsync);
@@ -279,6 +346,7 @@ public sealed class NatPmpTests
                                result.Buffer[10] == 0 && result.Buffer[11] == 0;
                 if (!isUnmap)
                 {
+                    if (_responsesToDrop-- > 0) continue;
                     var response = BuildResponse(result.Buffer);
                     await _udp.SendAsync(response, result.RemoteEndPoint).ConfigureAwait(false);
                 }
@@ -288,7 +356,7 @@ public sealed class NatPmpTests
         private byte[] BuildResponse(byte[] request)
         {
             byte opCode = request.Length > 1 ? request[1] : (byte)0x01;
-            var response = new byte[12];
+            var response = new byte[16];
             response[0] = 0;
             response[1] = (byte)(128 + opCode);
             if (_success)
@@ -296,15 +364,19 @@ public sealed class NatPmpTests
                 response[2] = 0;
                 response[3] = 0;
                 int port = _externalPort ?? 0;
-                response[8] = (byte)(port >> 8);
-                response[9] = (byte)(port & 0xFF);
+                response[8] = request[4];
+                response[9] = request[5];
+                response[10] = (byte)(port >> 8);
+                response[11] = (byte)(port & 0xFF);
+                response[14] = 0x0e;
+                response[15] = 0x10;
             }
             else
             {
                 response[2] = 0;
                 response[3] = 1;
             }
-            return response;
+            return _responseTransform?.Invoke(response) ?? response;
         }
     }
 }

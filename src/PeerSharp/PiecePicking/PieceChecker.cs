@@ -40,7 +40,14 @@ internal class PieceChecker : IAsyncDisposable
     /// </summary>
     public void Cancel()
     {
-        _cts?.Cancel();
+        try
+        {
+            Volatile.Read(ref _cts)?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The check already finished and disposed its cancellation source.
+        }
     }
 
     /// <summary>
@@ -50,22 +57,29 @@ internal class PieceChecker : IAsyncDisposable
     /// <returns>Number of valid pieces found.</returns>
     public async Task<int> CheckAllPiecesAsync(CancellationToken cancellationToken = default)
     {
+        _disposal.ThrowIfDisposed(this);
         if (Interlocked.Exchange(ref _isRunning, 1) == 1)
         {
             throw new InvalidOperationException("Piece check is already running");
         }
 
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var token = source.Token;
+        Volatile.Write(ref _cts, source);
+        if (_disposal.IsDisposed)
+        {
+            await source.CancelAsync().ConfigureAwait(false);
+        }
 
         try
         {
-            return await CheckPiecesInternalAsync(_cts.Token).ConfigureAwait(false);
+            return await CheckPiecesInternalAsync(token).ConfigureAwait(false);
         }
         finally
         {
+            Interlocked.CompareExchange(ref _cts, null, source);
+            source.Dispose();
             Interlocked.Exchange(ref _isRunning, 0);
-            _cts.Dispose();
-            _cts = null;
         }
     }
 
@@ -127,6 +141,10 @@ internal class PieceChecker : IAsyncDisposable
                     System.Buffers.ArrayPool<byte>.Shared.Return(pieceBuffer);
                 }
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch
             {
                 // Piece is invalid
@@ -138,11 +156,16 @@ internal class PieceChecker : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposal.MarkDisposed() && _cts != null)
+        if (_disposal.MarkDisposed() && Volatile.Read(ref _cts) is { } source)
         {
-            await _cts.CancelAsync().ConfigureAwait(false);
-            _cts.Dispose();
-            _cts = null;
+            try
+            {
+                await source.CancelAsync().ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // The check completed concurrently; it owns disposal of its source.
+            }
         }
         GC.SuppressFinalize(this);
     }
@@ -224,6 +247,10 @@ internal class PieceChecker : IAsyncDisposable
                     CurrentPiece = pieceIndex,
                     Progress = (float)checkedPieces / totalPieces
                 });
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (IOException)
             {

@@ -6,6 +6,8 @@ internal sealed class DiskBandwidthLimiter : IBandwidthUser
 {
     private const int DefaultChunkSize = 256 * 1024;
     private readonly IBandwidthManager _bandwidth;
+    private readonly IBandwidthUser _readUser = new DirectionUser("DiskRead");
+    private readonly IBandwidthUser _writeUser = new DirectionUser("DiskWrite");
     private readonly string[] _readChannels;
     private readonly string[] _writeChannels;
     private readonly string _torrentReadChannel;
@@ -31,20 +33,24 @@ internal sealed class DiskBandwidthLimiter : IBandwidthUser
 
     public Task<int> RequestReadAsync(int amount, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        ArgumentOutOfRangeException.ThrowIfNegative(amount);
         if (!IsReadLimited())
         {
             return Task.FromResult(amount);
         }
-        return _bandwidth.RequestBandwidthAsync(this, amount, priority: 0, _readChannels, ct);
+        return _bandwidth.RequestBandwidthAsync(_readUser, amount, priority: 0, _readChannels, ct);
     }
 
     public Task<int> RequestWriteAsync(int amount, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
+        ArgumentOutOfRangeException.ThrowIfNegative(amount);
         if (!IsWriteLimited())
         {
             return Task.FromResult(amount);
         }
-        return _bandwidth.RequestBandwidthAsync(this, amount, priority: 0, _writeChannels, ct);
+        return _bandwidth.RequestBandwidthAsync(_writeUser, amount, priority: 0, _writeChannels, ct);
     }
 
     public void ReturnRead(int amount)
@@ -66,6 +72,12 @@ internal sealed class DiskBandwidthLimiter : IBandwidthUser
 
     /// <summary>Whether any write limit is in force. See <see cref="IsReadLimitedNow"/>.</summary>
     internal bool IsWriteLimitedNow() => IsWriteLimited();
+
+    private sealed class DirectionUser(string name) : IBandwidthUser
+    {
+        public string Name => name;
+        public void AssignBandwidth(int amount) { /* Requests complete through their tasks. */ }
+    }
 
     private bool IsReadLimited()
     {

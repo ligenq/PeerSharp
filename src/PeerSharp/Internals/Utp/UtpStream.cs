@@ -55,6 +55,21 @@ internal class UtpStream : Stream
 
     private const uint MaxRemoteWndSize = 4 * 1024 * 1024;
 
+    /// <summary>How few packets must be waiting for the reader before a drain held back for it resumes.</summary>
+    private const int DrainResumeCount = 900;
+
+    /// <summary>How long a gap in what the peer sent may stand, with nothing more arriving, before this side goes quiet.</summary>
+    internal static readonly TimeSpan GapBeforeQuiet = TimeSpan.FromSeconds(1);
+
+    /// <summary>How long nothing must have arrived from the peer for a gap to count as stalled.</summary>
+    private static readonly TimeSpan SilenceBeforeQuiet = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// How long this side sends nothing, to let a peer's retransmission timer run out: libtorrent's is at
+    /// least half a second and a round trip or so, restarted by every packet it receives.
+    /// </summary>
+    internal static readonly TimeSpan QuietPeriod = TimeSpan.FromMilliseconds(1500);
+
     // Link MTUs. Everything below counts the UDP payload - the uTP header plus its data - so the IP
     // and UDP headers have to come off these before they mean anything, as libtorrent's utp_stream
     // does with TORRENT_ETHERNET_MTU - TORRENT_IPV4_HEADER - TORRENT_UDP_HEADER.
@@ -116,6 +131,37 @@ internal class UtpStream : Stream
     private readonly Task? _pipeWriteTask;
     private readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
     private readonly PriorityQueue<ReceivedPacket, ushort> _reorderBuffer = new(new SeqComparer());
+
+    /// <summary>
+    /// Set when data waiting in the reorder buffer could not be passed on because the reader was
+    /// behind: the pipe writer drains it, and tells the peer the window is open again, once the reader
+    /// has caught up. Nothing else would - no packet the peer sends can arrive in order until then.
+    /// </summary>
+    private bool _drainPending;
+
+    /// <summary>When <see cref="_ackNr"/> last moved on: how long a gap in what the peer sent has stood.</summary>
+    private DateTimeOffset _lastAckAdvance;
+
+    /// <summary>When the peer last sent data.</summary>
+    private DateTimeOffset _lastDataReceived;
+
+    /// <summary>
+    /// Until when this side sends nothing, so a peer that will resend a lost packet only once its
+    /// retransmission timer runs out gets the chance; <see cref="DateTimeOffset.MinValue"/> when it is not quiet.
+    /// </summary>
+    /// <remarks>
+    /// libtorrent - qBittorrent's - resends a lost packet at once only the first time; after that it
+    /// waits for its retransmission timer, which every packet it receives starts again. A downloader
+    /// sends a steady stream of its own - requests, and a HAVE for each piece - so when that one
+    /// resend was lost too, the timer never ran out and the connection sent nothing more, however long
+    /// it lasted. Against Debian's swarm, nine of twenty-three qBittorrent peers on uTP stopped this way
+    /// within a minute, and no Transmission peer, whose timer runs from when it sent the packet.
+    /// </remarks>
+    private DateTimeOffset _quietUntil = DateTimeOffset.MinValue;
+
+    /// <summary>When this side may go quiet again, after the last time it did.</summary>
+    private DateTimeOffset _nextQuietAllowed = DateTimeOffset.MinValue;
+
     private readonly HashSet<ushort> _reorderBufferSeqs = [];
 
     // SACK SUPPORT: Dictionary for O(1) lookup/removal on selective ACKs
@@ -130,6 +176,8 @@ internal class UtpStream : Stream
 
     // Track seqs to prevent duplicates
     private TaskCompletionSource<bool>? _connectTcs;
+    private bool _abandonedConnectIsFailure;
+    private Exception? _endedBy;
 
     private int _curDelayIdx = 0;
 
@@ -262,6 +310,7 @@ internal class UtpStream : Stream
 
         // Start the pipe write processing task
         _pipeWriteTask = ProcessPipeWriteChannelAsync();
+        _lastAckAdvance = _lastDataReceived = _timeProvider.GetUtcNow();
     }
 
     public override bool CanRead => true;
@@ -336,7 +385,9 @@ internal class UtpStream : Stream
     {
         lock (_lock)
         {
-            if (_state == UtpState.Closed || _disposal.IsDisposed)
+            // Application disposal starts a graceful close. Transport timers must
+            // keep retrying its FIN and eventually remove an unanswered connection.
+            if (_state == UtpState.Closed)
             {
                 return;
             }
@@ -353,6 +404,27 @@ internal class UtpStream : Stream
                     RemoteEndPoint,
                     ProtocolConstants.UtpInactivityTimeoutMs);
                 CloseInternal(false, new TimeoutException("Inactivity timeout"));
+                return;
+            }
+
+            if (IsQuiet)
+            {
+                if (now < _quietUntil)
+                {
+                    return;
+                }
+
+                EndQuiet();
+            }
+            else if (_state == UtpState.Connected && _reorderBuffer.Count > 0
+                && now - _lastAckAdvance > GapBeforeQuiet
+                && now - _lastDataReceived > SilenceBeforeQuiet
+                && now >= _nextQuietAllowed)
+            {
+                _quietUntil = now + QuietPeriod;
+                _logger.LogDebug(
+                    "uTP {Remote}: Nothing sent to fill the gap after {AckNr} for {Waited}ms; going quiet so the peer resends it",
+                    RemoteEndPoint, _ackNr, (int)(now - _lastAckAdvance).TotalMilliseconds);
                 return;
             }
 
@@ -439,7 +511,7 @@ internal class UtpStream : Stream
                     CheckIfClosed();
                 }
             }
-            else if (_state == UtpState.Connected)
+            if (_state == UtpState.Connected)
             {
                 // KEEP-ALIVE and ZERO-WINDOW PROBING
                 // Per libutp: KEEPALIVE_INTERVAL = 29000ms
@@ -474,9 +546,40 @@ internal class UtpStream : Stream
         }
     }
 
+    /// <summary>
+    /// Why the connection ended, when it was not a clean close: a reset from the peer, or a timeout. Reads
+    /// report every ending as end of input, as <see cref="Network.SocketStream"/> does for TCP; this is the
+    /// reason, for anyone who wants to log it.
+    /// </summary>
+    internal Exception? EndedBy
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _endedBy;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sends a FIN: a half-close, after which what the peer still sends can be read.
+    /// </summary>
     public override void Close()
     {
         CloseInternal(true);
+    }
+
+    /// <summary>
+    /// Sends a FIN and ends a pending read as end of input, for an owner that is done with the stream in
+    /// both directions. <see cref="Close"/> keeps reading, which is right for a half-close but left a
+    /// connection being torn down with a read that only its cancellation could end - an exception thrown
+    /// up through every layer above, on every uTP disconnect.
+    /// </summary>
+    internal void CloseAndStopReading()
+    {
+        CloseInternal(true);
+        EndPendingRead();
     }
 
     /// <summary>
@@ -500,9 +603,25 @@ internal class UtpStream : Stream
     /// linked source does - turns every unanswered peer back into an exception, which is the mistake
     /// HttpClient is still criticised for.
     /// </remarks>
-    public async Task<bool> ConnectAsync(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+    public Task<bool> ConnectAsync(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        => ConnectCoreAsync(timeout, abandonedIsFailure: false, cancellationToken);
+
+    /// <summary>
+    /// Opens the stream, reporting a caller that gave up, and a peer that reset the attempt, the same way
+    /// as a peer that never answered: false. For an owner that treats them alike - the peer manager, whose
+    /// pending dials are all given up at once when a magnet's metadata arrives - each was an exception for
+    /// an outcome it was going to handle identically. The caller can tell them apart from its token and
+    /// from <see cref="EndedBy"/>.
+    /// </summary>
+    internal Task<bool> ConnectOrAbandonAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        => ConnectCoreAsync(timeout, abandonedIsFailure: true, cancellationToken);
+
+    private async Task<bool> ConnectCoreAsync(TimeSpan? timeout, bool abandonedIsFailure, CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return abandonedIsFailure ? false : throw new OperationCanceledException(cancellationToken);
+        }
 
         Task<bool> connectTask;
         TaskCompletionSource<bool> connectTcs;
@@ -515,6 +634,7 @@ internal class UtpStream : Stream
 
             _state = UtpState.SynSend;
             _connectTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _abandonedConnectIsFailure = abandonedIsFailure;
             connectTcs = _connectTcs;
             SendPacket(MessageType.ST_SYN, null);
             connectTask = connectTcs.Task;
@@ -526,7 +646,10 @@ internal class UtpStream : Stream
             // A reply may have won immediately before this callback. Do not turn a successful
             // connection into a closed stream while the async continuation is still disposing the
             // registration.
-            if (connectTcs.TrySetCanceled(cancellationToken))
+            bool abandoned = abandonedIsFailure
+                ? connectTcs.TrySetResult(false)
+                : connectTcs.TrySetCanceled(cancellationToken);
+            if (abandoned)
             {
                 CloseInternal(false);
             }
@@ -550,18 +673,16 @@ internal class UtpStream : Stream
         if (_disposal.MarkDisposed())
         {
             CloseInternal(true);
+            EndPendingRead();
 
-            // Wait for pipe write task to complete (with timeout to avoid hanging)
+            // Wait for pipe write task to complete (with timeout to avoid hanging). Its outcome does not
+            // matter here, and neither does running out of time, so neither is thrown: a graceful close
+            // is still waiting for the peer's FIN, which made the timeout the usual case.
             if (_pipeWriteTask?.IsCompleted == false)
             {
-                try
-                {
-                    await _pipeWriteTask.WaitAsync(TimeSpan.FromMilliseconds(500)).ConfigureAwait(false);
-                }
-                catch (Exception)
-                {
-                    // Task may have faulted, ignore during dispose
-                }
+                await _pipeWriteTask
+                    .WaitAsync(TimeSpan.FromMilliseconds(500))
+                    .ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
             }
 
             _writeSemaphore.Dispose();
@@ -572,6 +693,14 @@ internal class UtpStream : Stream
 
     public override void Flush()
     { }
+
+    /// <summary>
+    /// Ends a read that is waiting for data, as end of input. Disposing sends a FIN and keeps the
+    /// stream open until the peer answers, so a pending read was left waiting until its owner cancelled
+    /// it - an exception thrown through every layer above - even though the owner disposing the stream
+    /// is exactly the signal that it has stopped reading.
+    /// </summary>
+    private void EndPendingRead() => _pipe.Reader.CancelPendingRead();
 
     public override int Read(byte[] buffer, int offset, int count)
     {
@@ -588,6 +717,13 @@ internal class UtpStream : Stream
         try
         {
             var result = await _pipe.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (result.IsCanceled)
+            {
+                // Disposed by its owner, which has finished reading - see EndPendingRead.
+                _pipe.Reader.AdvanceTo(result.Buffer.Start);
+                return 0;
+            }
+
             var seq = result.Buffer;
             if (seq.IsEmpty && result.IsCompleted)
             {
@@ -662,8 +798,8 @@ internal class UtpStream : Stream
                     throw new IOException("Connection closed while writing");
                 }
                 double effectiveWindow = Math.Min(_wndSize, _cwnd);
-                canSend = _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
-                if (!canSend)
+                canSend = !IsQuiet && _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
+                if (!canSend && !IsQuiet)
                 {
                     _lastMaxedOutWindow = _timeProvider.GetUtcNow();
                 }
@@ -679,8 +815,8 @@ internal class UtpStream : Stream
                         throw new IOException("Connection closed while writing");
                     }
                     double effectiveWindow = Math.Min(_wndSize, _cwnd);
-                    canSend = _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
-                    if (!canSend)
+                    canSend = !IsQuiet && _timeoutResendQueue.Count == 0 && _sentBytesUnacked < effectiveWindow;
+                    if (!canSend && !IsQuiet)
                     {
                         _lastMaxedOutWindow = _timeProvider.GetUtcNow();
                     }
@@ -719,7 +855,20 @@ internal class UtpStream : Stream
             _lastReceiveTime = _timeProvider.GetUtcNow();
             UpdatePeerExtensionBits(extensionBits);
 
-            if ((header.Type != MessageType.ST_SYN || _state != UtpState.None) && !IsAckNrValid(header.AckNr))
+            // A SYN has no defined ACK. A retry must only repeat our handshake
+            // response, even if data we sent since the first SYN is outstanding.
+            if (header.Type == MessageType.ST_SYN && _state != UtpState.None)
+            {
+                if ((_state == UtpState.SynRecv || _state == UtpState.Connected) && header.SeqNr == _ackNr)
+                {
+                    _lastReplyDelay = Utils.TimestampMicro() - header.TimestampMicroseconds;
+                    _logger.LogDebug("uTP {Remote}: Received duplicate SYN, resending ACK", RemoteEndPoint);
+                    SendPacket(MessageType.ST_STATE, null);
+                }
+                return;
+            }
+
+            if (header.Type != MessageType.ST_SYN && !IsAckNrValid(header.AckNr))
             {
                 _logger.LogTrace("uTP {Remote}: Invalid ack_nr {AckNr} for seq {SeqNr}", RemoteEndPoint, header.AckNr, _seqNr);
                 return;
@@ -761,6 +910,7 @@ internal class UtpStream : Stream
                     {
                         _state = UtpState.Connected;
                     }
+                    _lastDataReceived = _timeProvider.GetUtcNow();
                     HandleData(header, data, headerSize);
                     break;
 
@@ -771,19 +921,11 @@ internal class UtpStream : Stream
                         _ackNr = header.SeqNr;
                         SendPacket(MessageType.ST_STATE, null);
                     }
-                    else if ((_state == UtpState.SynRecv || _state == UtpState.Connected) && header.SeqNr == _ackNr)
-                    {
-                        // Duplicate SYN (retransmission), resend ACK
-                        _logger.LogDebug("uTP {Remote}: Received duplicate SYN, resending ACK", RemoteEndPoint);
-                        SendPacket(MessageType.ST_STATE, null);
-                    }
                     break;
 
                 case MessageType.ST_RESET:
                     _logger.LogDebug("Reset from {Remote}", RemoteEndPoint);
-                    var ex = new IOException("Connection reset by remote peer");
-                    _connectTcs?.TrySetException(ex);
-                    CloseInternal(false, ex);
+                    CloseInternal(false, new IOException("Connection reset by remote peer"));
                     break;
             }
 
@@ -817,6 +959,7 @@ internal class UtpStream : Stream
         if (_disposal.MarkDisposed() && disposing)
         {
             CloseInternal(true);
+            EndPendingRead();
             _writeSemaphore.Dispose();
         }
         base.Dispose(disposing);
@@ -862,6 +1005,25 @@ internal class UtpStream : Stream
         return (uint)(remainingSlots * GetPayloadMss(0));
     }
 
+    private bool IsQuiet => _quietUntil != DateTimeOffset.MinValue;
+
+    /// <summary>
+    /// Ends a quiet period, if one is on: the peer is told where this side is at once - its gap, and
+    /// whether filled - and data waiting to be sent goes.
+    /// </summary>
+    private void EndQuiet()
+    {
+        if (!IsQuiet)
+        {
+            return;
+        }
+
+        _quietUntil = DateTimeOffset.MinValue;
+        _nextQuietAllowed = _timeProvider.GetUtcNow() + GapBeforeQuiet;
+        SendPacket(MessageType.ST_STATE, null);
+        FlushPendingWrites();
+    }
+
     private void CheckIfClosed()
     {
         // Symmetric close: we are closed only if we both sent and received FIN,
@@ -889,20 +1051,51 @@ internal class UtpStream : Stream
 
             var next = _reorderBuffer.Peek();
 
+            // Delivered already - a copy the peer sent again reached us in order while this one waited.
+            // Left at the head, it would stop everything behind it for good.
+            if (Utils.CompareSeq(next.SeqNr, _ackNr) <= 0)
+            {
+                _reorderBuffer.Dequeue();
+                _reorderBufferSeqs.Remove(next.SeqNr);
+                if (next.Data.Pooled)
+                {
+                    _pool.Return(next.Data.Buffer);
+                }
+
+                continue;
+            }
+
             if (next.SeqNr != (ushort)(_ackNr + 1))
             {
+                break;
+            }
+
+            // FIN needs an EOF marker as well as any payload. Keep the packet queued until
+            // both fit, otherwise it could be acknowledged with no EOF delivered to the reader.
+            int slotsNeeded = (next.Data.Length > 0 ? 1 : 0) + (next.IsFin ? 1 : 0);
+            if (_pipeWriteChannel.Reader.Count + slotsNeeded > 1000)
+            {
+                Volatile.Write(ref _drainPending, true);
                 break;
             }
 
             // Write payload if any
             if (next.Data.Length > 0 && !_pipeWriteChannel.Writer.TryWrite(next.Data))
             {
-                break; // backpressure
+                Volatile.Write(ref _drainPending, true);
+                break; // backpressure: drained once the reader catches up
             }
 
             _ackNr = next.SeqNr;
+            _lastAckAdvance = _timeProvider.GetUtcNow();
             _reorderBuffer.Dequeue();
             _reorderBufferSeqs.Remove(next.SeqNr);
+
+            // Empty packets are not handed to the pipe writer, which normally returns the buffer.
+            if (next.Data.Length == 0 && next.Data.Pooled)
+            {
+                _pool.Return(next.Data.Buffer);
+            }
 
             // FIN handling - after processing FIN, break to prevent further data processing
             if (next.IsFin && !_finReceived)
@@ -949,18 +1142,40 @@ internal class UtpStream : Stream
                 _manager.CloseStream(this);
                 ReleaseAllSentPackets();
                 ReleaseReorderBuffer();
-                _pipeWriteChannel.Writer.TryComplete(error);
+                // Completed without the error, so reads end as end of input the way they do on a TCP
+                // connection that was reset. Handing the error to the channel made it throw on the way
+                // out and again from every read, for the ordinary end of a peer connection. The reason
+                // is kept in EndedBy.
+                _endedBy ??= error;
+                _pipeWriteChannel.Writer.TryComplete();
             }
 
             CheckIfClosed();
 
             if (error != null)
             {
-                _connectTcs?.TrySetException(error);
+                // A reset or timeout while connecting: a peer that will not talk, which a caller that asked
+                // for it hears as false - see ConnectOrAbandonAsync.
+                if (_abandonedConnectIsFailure)
+                {
+                    _connectTcs?.TrySetResult(false);
+                }
+                else
+                {
+                    _connectTcs?.TrySetException(error);
+                }
             }
             else
             {
-                _connectTcs?.TrySetCanceled();
+                // Closed while still connecting: the connect is abandoned, reported the way its caller asked.
+                if (_abandonedConnectIsFailure)
+                {
+                    _connectTcs?.TrySetResult(false);
+                }
+                else
+                {
+                    _connectTcs?.TrySetCanceled();
+                }
             }
 
             // Wake up any pending writes so they can observe the closed state
@@ -1019,7 +1234,8 @@ internal class UtpStream : Stream
 
     private void FlushPendingWrites()
     {
-        if (_disposal.IsDisposed)
+        // ACKs still clock reliability retries while a disposed stream is closing.
+        if (_state == UtpState.Closed || IsQuiet)
         {
             return;
         }
@@ -1289,9 +1505,8 @@ internal class UtpStream : Stream
             return;
         }
 
-        // How much the peer says it holds past the gap. More than the limit means the packets behind
-        // the hole are arriving while it is not, which is loss; a few is a path reordering.
-        int ackedPastHole = 0;
+        // Ignore evidence for packets we have not sent, including padding in a
+        // peer's mask. Ranges from multiple extensions may overlap.
         ushort highestAcked = ackNr;
         foreach (var (start, end) in sackRanges)
         {
@@ -1300,10 +1515,19 @@ internal class UtpStream : Stream
                 continue;
             }
 
-            ackedPastHole += (ushort)(end - start) + 1;
-            if (Utils.CompareSeq(end, highestAcked) > 0)
+            ushort effectiveEnd = Utils.CompareSeq(end, lastSent) > 0 ? lastSent : end;
+            if (Utils.CompareSeq(start, effectiveEnd) <= 0 && Utils.CompareSeq(effectiveEnd, highestAcked) > 0)
             {
-                highestAcked = end;
+                highestAcked = effectiveEnd;
+            }
+        }
+
+        int ackedPastHole = 0;
+        for (ushort seq = (ushort)(ackNr + 1); Utils.CompareSeq(seq, highestAcked) <= 0; seq++)
+        {
+            if (IsSelectivelyAcked(seq, sackRanges))
+            {
+                ackedPastHole++;
             }
         }
 
@@ -1317,7 +1541,18 @@ internal class UtpStream : Stream
             Utils.CompareSeq(seq, highestAcked) < 0 && Utils.CompareSeq(seq, lastSent) <= 0;
             seq++)
         {
-            if (Utils.CompareSeq(seq, _fastResendSeqNr) < 0 || IsSelectivelyAcked(seq, sackRanges))
+            // Only acknowledgments after this particular hole count as evidence
+            // of its loss. Near the tail, a few overtaking packets are reordering.
+            if (IsSelectivelyAcked(seq, sackRanges))
+            {
+                ackedPastHole--;
+                continue;
+            }
+            if (ackedPastHole <= DuplicateAcksBeforeResend)
+            {
+                break;
+            }
+            if (Utils.CompareSeq(seq, _fastResendSeqNr) < 0)
             {
                 continue;
             }
@@ -1381,8 +1616,13 @@ internal class UtpStream : Stream
             int slotsNeeded = (payloadLen > 0 ? 1 : 0) + (isFin && !_finReceived ? 1 : 0);
             if (slotsNeeded > 0 && _pipeWriteChannel.Reader.Count + slotsNeeded > 1000)
             {
-                _logger.LogWarning("uTP {Remote}: Local buffer full, backpressuring packet {SeqNr}", RemoteEndPoint, seq);
-                // Send STATE to update window size but don't advance _ackNr
+                // The reader is behind. The packet is kept, to be passed on once it catches up, rather
+                // than dropped for the peer to send again: a sender whose retransmissions keep being
+                // dropped backs off each time, and a connection that went quiet this way stayed quiet
+                // for up to a minute.
+                _logger.LogDebug("uTP {Remote}: Reader behind; holding packet {SeqNr}", RemoteEndPoint, seq);
+                BufferOutOfOrder(header, data, headerSize, seq);
+                Volatile.Write(ref _drainPending, true);
                 SendPacket(MessageType.ST_STATE, null);
                 return;
             }
@@ -1397,6 +1637,8 @@ internal class UtpStream : Stream
                 }
             }
             _ackNr = seq;
+            _lastAckAdvance = _timeProvider.GetUtcNow();
+            EndQuiet();
 
             if (isFin && !_finReceived)
             {
@@ -1417,24 +1659,51 @@ internal class UtpStream : Stream
         }
         else
         {
-            // Out of order - check for duplicates and buffer limit
-            if (_reorderBuffer.Count < 1024 && !_reorderBufferSeqs.Contains(seq))
-            {
-                int payloadLen = data.Length - headerSize;
-                var payload = _pool.Rent(payloadLen);
-                Array.Copy(data, headerSize, payload, 0, payloadLen);
-
-                _reorderBuffer.Enqueue(
-                    new ReceivedPacket
-                    {
-                        SeqNr = seq,
-                        Data = new PacketBuffer(payload, payloadLen, pooled: true),
-                        IsFin = header.Type == MessageType.ST_FIN
-                    },
-                    seq);
-                _reorderBufferSeqs.Add(seq);
-            }
+            BufferOutOfOrder(header, data, headerSize, seq);
             SendPacket(MessageType.ST_STATE, null);
+        }
+    }
+
+    /// <summary>Keeps a packet that cannot be passed on yet, unless it is kept already or the buffer is full.</summary>
+    private void BufferOutOfOrder(MessageHeader header, byte[] data, int headerSize, ushort seq)
+    {
+        if (_reorderBuffer.Count >= 1024 || _reorderBufferSeqs.Contains(seq))
+        {
+            return;
+        }
+
+        int payloadLen = data.Length - headerSize;
+        var payload = _pool.Rent(payloadLen);
+        Array.Copy(data, headerSize, payload, 0, payloadLen);
+
+        _reorderBuffer.Enqueue(
+            new ReceivedPacket
+            {
+                SeqNr = seq,
+                Data = new PacketBuffer(payload, payloadLen, pooled: true),
+                IsFin = header.Type == MessageType.ST_FIN
+            },
+            seq);
+        _reorderBufferSeqs.Add(seq);
+    }
+
+    /// <summary>
+    /// Once the reader has caught up, passes on what the reorder buffer held for it, and tells the peer
+    /// the window is open again - an acknowledgement it would otherwise wait for its own timers to prompt.
+    /// </summary>
+    private void DrainAfterBackpressure()
+    {
+        lock (_lock)
+        {
+            if (!Volatile.Read(ref _drainPending) || _state == UtpState.Closed)
+            {
+                return;
+            }
+
+            Volatile.Write(ref _drainPending, false);
+            CheckReorderBuffer();
+            SendPacket(MessageType.ST_STATE, null);
+            CheckIfClosed();
         }
     }
 
@@ -1571,6 +1840,12 @@ internal class UtpStream : Stream
                     {
                         return;
                     }
+
+                    // Resumed once there is room for a good run of packets, not at the first free slot.
+                    if (Volatile.Read(ref _drainPending) && _pipeWriteChannel.Reader.Count <= DrainResumeCount)
+                    {
+                        DrainAfterBackpressure();
+                    }
                 }
             }
         }
@@ -1671,18 +1946,7 @@ internal class UtpStream : Stream
         UtpManager.WriteUInt32BigEndian(pkt.Buffer, 8, _lastReplyDelay);
 
         _lastSendTime = _timeProvider.GetUtcNow();
-        // Fire-and-forget UDP send; cancellation isn't meaningful for datagrams here.
-        var task = _manager.SendAsync(pkt.Buffer.AsMemory(0, pkt.Length), RemoteEndPoint, CancellationToken.None);
-        if (!task.IsCompletedSuccessfully)
-        {
-            _ = task.ContinueWith(t =>
-            {
-                if (t.IsFaulted)
-                {
-                    _logger.LogTrace(t.Exception, "ResendPacket failed for {Remote}", RemoteEndPoint);
-                }
-            }, TaskScheduler.Default);
-        }
+        SendReliabilityPacket(pkt);
     }
 
     private void ResetMtu()
@@ -1728,6 +1992,12 @@ internal class UtpStream : Stream
     {
         // Don't send packets on closed connections (except FIN during closing)
         if (_state == UtpState.Closed)
+        {
+            return;
+        }
+
+        // An acknowledgement held back while quiet is sent when it ends, with everything it would have said.
+        if (type == MessageType.ST_STATE && IsQuiet)
         {
             return;
         }
@@ -1810,24 +2080,22 @@ internal class UtpStream : Stream
             _seqNr++;
 
             _lastSendTime = _timeProvider.GetUtcNow();
-            // Fire-and-forget UDP send; cancellation isn't meaningful for datagrams here.
-            var task = _manager.SendAsync(buffer.AsMemory(0, totalLen), RemoteEndPoint, CancellationToken.None);
-            if (!task.IsCompletedSuccessfully)
-            {
-                _ = task.ContinueWith(t =>
-                {
-                    if (t.IsFaulted)
-                    {
-                        _logger.LogTrace(t.Exception, "SendPacket failed for {Remote}", RemoteEndPoint);
-                    }
-                }, TaskScheduler.Default);
-            }
+            SendReliabilityPacket(pkt);
         }
         else
         {
             _lastSendTime = _timeProvider.GetUtcNow();
             _ = SendAsyncAndReturn(buffer, totalLen);
         }
+    }
+
+    private void SendReliabilityPacket(SentPacket packet)
+    {
+        // ACKs and close may return the reliability buffer to the pool, and retries
+        // update its header. Each send owns an immutable snapshot until UDP finishes.
+        byte[] buffer = _pool.Rent(packet.Length);
+        packet.Buffer.AsSpan(0, packet.Length).CopyTo(buffer);
+        _ = SendAsyncAndReturn(buffer, packet.Length);
     }
 
     private async Task SendAsyncAndReturn(byte[] buffer, int length)

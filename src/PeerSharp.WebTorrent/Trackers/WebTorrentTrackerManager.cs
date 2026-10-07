@@ -55,7 +55,8 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
         var clients = new List<WebTorrentTrackerClient>(urls.Count);
         foreach (var url in urls)
         {
-            var client = new WebTorrentTrackerClient(
+            WebTorrentTrackerClient? client = null;
+            client = new WebTorrentTrackerClient(
                 url,
                 _host,
                 _socketFactory,
@@ -65,8 +66,8 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
                 _options.MinimumReannounceInterval,
                 _uploadedBaseline,
                 _downloadedBaseline,
-                signal => _onSignalReceived(signal, GetRuntimeForUrl(url)),
-                ex => HandleTrackerFailure(url, ex)
+                signal => _onSignalReceived(signal, client!.Runtime),
+                ex => HandleTrackerFailure(client!.Runtime, ex)
             );
             clients.Add(client);
         }
@@ -102,17 +103,9 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
         }
     }
 
-    private TrackerRuntime GetRuntimeForUrl(string url)
+    private void HandleTrackerFailure(TrackerRuntime runtime, Exception ex)
     {
-        lock (_clients)
-        {
-            return _clients.First(c => c.Runtime.Url == url).Runtime;
-        }
-    }
-
-    private void HandleTrackerFailure(string url, Exception ex)
-    {
-        var runtime = GetRuntimeForUrl(url);
+        string url = runtime.Url;
         if (TrackerConnectFailureClassifier.IsTerminal(ex))
         {
             _logger.LogInformation("Terminal failure for tracker {Url}: {Reason}", url, TrackerConnectFailureClassifier.Describe(ex));
@@ -130,7 +123,6 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
         lock (runtime.SyncRoot)
         {
             runtime.IsConnected = false;
-            runtime.Socket = null;
             runtime.LastError = TrackerConnectFailureClassifier.Describe(ex);
             runtime.NextReconnectAt = DateTimeOffset.MinValue;
             runtime.ReconnectInProgress = false;
@@ -170,7 +162,7 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                HandleTrackerFailure(runtime.Url, ex);
+                HandleTrackerFailure(runtime, ex);
                 throw;
             }
         }
@@ -196,7 +188,7 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                HandleTrackerFailure(runtime.Url, ex);
+                HandleTrackerFailure(runtime, ex);
                 throw;
             }
         }
@@ -230,9 +222,10 @@ internal sealed class WebTorrentTrackerManager : IAsyncDisposable
             await client.ConnectAsync(isInitial: false, cancellationToken).ConfigureAwait(false);
             return true;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            HandleTrackerFailure(runtime.Url, ex);
+            HandleTrackerFailure(runtime, ex);
             return false;
         }
         finally

@@ -47,6 +47,25 @@ public class UploadQueueManagerTests
         => new(execute, NullLogger<UploadQueueManager>.Instance, stopToken);
 
     [Fact]
+    public async Task ConcurrentFirstRequestsUseOnePumpAndDisposedManagerRejectsNewWork()
+    {
+        using var cts = new CancellationTokenSource();
+        var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int started = 0;
+        var manager = CreateManager(async (_, _, ct) => { Interlocked.Increment(ref started); first.TrySetResult(); await release.Task.WaitAsync(ct); }, cts.Token);
+        var peer = CreateUnchockedPeer();
+        Parallel.For(0, 50, i => manager.TryEnqueue(peer, new UploadQueueItem(i, 0, 16384)));
+        await first.Task.WaitAsync(PumpStart, TestContext.Current.CancellationToken);
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        Assert.Equal(1, Volatile.Read(ref started));
+        await manager.DisposeAsync();
+        Assert.False(manager.TryEnqueue(peer, new UploadQueueItem(100, 0, 16384)));
+        release.TrySetResult();
+        await peer.DisposeAsync();
+    }
+
+    [Fact]
     public async Task TryEnqueue_ExecutesItemViaCallback()
     {
         using var cts = new CancellationTokenSource();
@@ -127,6 +146,52 @@ public class UploadQueueManagerTests
         Assert.Equal([0], executed.ToArray());
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task ARejectedDuplicateRequest_DoesNotUndoAnEarlierCancellation()
+    {
+        using var cts = new CancellationTokenSource();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var executed = new ConcurrentQueue<int>();
+        await using var manager = CreateManager(async (_, item, ct) =>
+        {
+            if (item.PieceIndex == 0)
+            {
+                started.SetResult();
+                await gate.Task.WaitAsync(ct);
+            }
+
+            executed.Enqueue(item.PieceIndex);
+            if (item.PieceIndex == UploadQueueManager.MaxQueueDepthPerPeer)
+            {
+                finished.SetResult();
+            }
+        }, cts.Token);
+        var peer = CreateUnchockedPeer();
+
+        try
+        {
+            Assert.True(manager.TryEnqueue(peer, new UploadQueueItem(0, 0, 16384)));
+            await started.Task.WaitAsync(PumpStart);
+            for (int i = 1; i <= UploadQueueManager.MaxQueueDepthPerPeer; i++)
+            {
+                Assert.True(manager.TryEnqueue(peer, new UploadQueueItem(i, 0, 16384)));
+            }
+
+            manager.Cancel(peer, 1, 0);
+            Assert.False(manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384)));
+            gate.SetResult();
+            await finished.Task.WaitAsync(PumpStart);
+            Assert.DoesNotContain(1, executed);
+            Assert.Equal(UploadQueueManager.MaxQueueDepthPerPeer, executed.Count);
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+    }
+
     [Fact]
     public async Task Cancel_SameItem_IsDeduplicated()
     {
@@ -158,6 +223,52 @@ public class UploadQueueManagerTests
             () => executed.Count >= 1, 10000, "the pump to execute the first item");
         await Task.Delay(200);
         Assert.Equal([0], executed.ToArray());
+    }
+
+    [Fact]
+    public async Task ABlockAskedForAgain_AfterItsRequestWasCancelled_IsSent()
+    {
+        // A cancel applies to the request waiting when it came. A streaming client cancels to make room
+        // and asks again later; a hash failure has any client ask again. Both must be served.
+        using var cts = new CancellationTokenSource();
+        var pumpOnFirst = new SemaphoreSlim(0);
+        var gate = new TaskCompletionSource();
+        var executed = new ConcurrentQueue<int>();
+
+        await using var manager = CreateManager(async (_, item, _) =>
+        {
+            if (item.PieceIndex == 0 && executed.IsEmpty) { pumpOnFirst.Release(); await gate.Task; }
+            executed.Enqueue(item.PieceIndex);
+        }, cts.Token);
+
+        var peer = CreateUnchockedPeer();
+        manager.TryEnqueue(peer, new UploadQueueItem(0, 0, 16384)); // blocks pump
+        manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384)); // cancelled
+        Assert.True(await pumpOnFirst.WaitAsync(PumpStart));
+        manager.Cancel(peer, 1, 0);
+        manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384)); // asked for again
+        gate.SetResult();
+
+        await TorrentTestUtility.WaitUntilAsync(() => executed.Count >= 2, 10000, "the pump to send the block asked for again");
+        Assert.Equal([0, 1], executed.ToArray());
+    }
+
+    [Fact]
+    public async Task ACancelForARequestNoLongerWaiting_DoesNotRefuseTheNextOne()
+    {
+        using var cts = new CancellationTokenSource();
+        var executed = new ConcurrentQueue<int>();
+        await using var manager = CreateManager((_, item, _) => { executed.Enqueue(item.PieceIndex); return Task.CompletedTask; }, cts.Token);
+
+        var peer = CreateUnchockedPeer();
+        manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384));
+        await TorrentTestUtility.WaitUntilAsync(() => executed.Count >= 1, 10000, "the pump to send the block");
+
+        // Too late: already sent. It must not linger and refuse the block the next time it is asked for.
+        manager.Cancel(peer, 1, 0);
+        manager.TryEnqueue(peer, new UploadQueueItem(1, 0, 16384));
+
+        await TorrentTestUtility.WaitUntilAsync(() => executed.Count >= 2, 10000, "the pump to send the block asked for again");
     }
 
     [Fact]
@@ -318,9 +429,8 @@ public class UploadQueueManagerTests
         var peer = new PeerCommunication(torrent, new MockPeerListener(), TimeProvider.System);
         Assert.True(peer.AmChoking); // choked — no Unchoke() call
 
-        // Inject piece 5 into the peer's AllowedFast set directly (AddAllowedFastPiece is private)
-        var field = typeof(PeerCommunication).GetField("_allowedFastPieces", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        ((HashSet<int>)field.GetValue(peer)!).Add(5);
+        typeof(PeerCommunication).GetProperty(nameof(peer.RemoteSupportsFastExtension))!.SetValue(peer, true);
+        await peer.SendAllowedFastAsync(5);
 
         manager.TryEnqueue(peer, new UploadQueueItem(5, 0, 16384));
 

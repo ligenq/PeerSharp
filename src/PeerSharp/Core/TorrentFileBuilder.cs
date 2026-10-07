@@ -271,7 +271,7 @@ public sealed class TorrentFileBuilder
             var current = root;
             for (int i = 0; i < parts.Length - 1; i++)
             {
-                string part = parts[i];
+                string part = Encoding.Latin1.GetString(Encoding.UTF8.GetBytes(parts[i]));
                 if (!current.Dict.TryGetValue(part, out var node) || node is not BDict next)
                 {
                     next = new BDict();
@@ -280,7 +280,7 @@ public sealed class TorrentFileBuilder
                 current = next;
             }
 
-            string fileName = parts[^1];
+            string fileName = Encoding.Latin1.GetString(Encoding.UTF8.GetBytes(parts[^1]));
             var fileNode = new BDict();
             var fileInfo = new BDict();
             fileInfo.Dict["length"] = new BNumber(file.Length);
@@ -495,7 +495,7 @@ public sealed class TorrentFileBuilder
 
     private void ApplyHybridV1Fields(BDict info)
     {
-        if (_files.Count == 1)
+        if (_files.Count == 1 && string.Equals(_files[0].Path, _name ?? InferName(), StringComparison.Ordinal))
         {
             var file = _files[0];
             info.Dict["length"] = new BNumber(file.Length);
@@ -1023,6 +1023,18 @@ public sealed class TorrentFileBuilder
         return string.IsNullOrWhiteSpace(commonRoot) ? "torrent" : commonRoot;
     }
 
+    private static int CompareFileTreePaths(string left, string right)
+    {
+        var leftParts = SplitPath(left);
+        var rightParts = SplitPath(right);
+        for (int i = 0; i < Math.Min(leftParts.Length, rightParts.Length); i++)
+        {
+            int comparison = Encoding.UTF8.GetBytes(leftParts[i]).AsSpan().SequenceCompareTo(Encoding.UTF8.GetBytes(rightParts[i]));
+            if (comparison != 0) return comparison;
+        }
+        return leftParts.Length.CompareTo(rightParts.Length);
+    }
+
     private void ValidateInputs()
     {
         if (_files.Count == 0)
@@ -1045,8 +1057,25 @@ public sealed class TorrentFileBuilder
             throw new InvalidOperationException("Padding files are only supported for V1 and hybrid torrents.");
         }
 
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var file in _files)
+        {
+            string normalized = string.Join('/', SplitPath(file.Path));
+            if (!paths.Add(normalized)) throw new InvalidOperationException("Duplicate torrent file path.");
+        }
+        foreach (string path in paths)
+        {
+            int slash = path.IndexOf('/');
+            while (slash >= 0)
+            {
+                if (paths.Contains(path[..slash])) throw new InvalidOperationException("A torrent path cannot be both a file and a directory.");
+                slash = path.IndexOf('/', slash + 1);
+            }
+        }
+
         if (_version != TorrentFileVersion.V1)
         {
+            _files.Sort((left, right) => CompareFileTreePaths(left.Path, right.Path));
             if (_pieceLength < MerkleTree.BlockSize)
             {
                 throw new InvalidOperationException($"V2 piece length must be at least {MerkleTree.BlockSize} bytes.");

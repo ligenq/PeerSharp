@@ -22,6 +22,9 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
 
     private readonly TrackerRuntime _runtime;
     private readonly CancellationTokenSource _cts = new();
+    private readonly SemaphoreSlim _connectGate = new(1, 1);
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
+    private Task? _disposeTask;
 
     public WebTorrentTrackerClient(
         string url,
@@ -71,10 +74,20 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
 
     public async Task ConnectAsync(bool isInitial, CancellationToken cancellationToken)
     {
+        lock (_runtime.SyncRoot) { ObjectDisposedException.ThrowIf(_disposeTask != null, this); }
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
+        await _connectGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        try { await ConnectCoreAsync(linked.Token).ConfigureAwait(false); }
+        finally { _connectGate.Release(); }
+    }
+
+    private async Task ConnectCoreAsync(CancellationToken cancellationToken)
+    {
         var socket = _socketFactory.Create();
-        var connectTask = socket.ConnectAsync(new Uri(_url), cancellationToken);
+        Task? connectTask = null;
         try
         {
+            connectTask = socket.ConnectAsync(new Uri(_url), cancellationToken);
             await connectTask.WaitAsync(_connectTimeout, _timeProvider, cancellationToken).ConfigureAwait(false);
         }
         catch
@@ -82,7 +95,7 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
             // Observe connectTask on every failure path, not just timeouts: we stop awaiting it
             // here, and the DisposeAsync below will typically fault it. An unobserved fault would
             // surface later as TaskScheduler.UnobservedTaskException.
-            _ = connectTask.ContinueWith(
+            _ = connectTask?.ContinueWith(
                 static completed => _ = completed.Exception,
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
@@ -101,8 +114,16 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
         }
 
         int generation;
+        IWebSocketConnection? previous;
         lock (_runtime.SyncRoot)
         {
+            if (cancellationToken.IsCancellationRequested || _disposeTask != null)
+            {
+                _ = socket.DisposeAsync().AsTask().ContinueWith(static task => _ = task.Exception, TaskScheduler.Default);
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new ObjectDisposedException(nameof(WebTorrentTrackerClient));
+            }
+            previous = _runtime.Socket;
             _runtime.Socket = socket;
             _runtime.IsConnected = true;
             _runtime.ConsecutiveFailures = 0;
@@ -111,18 +132,17 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
             _runtime.ReconnectInProgress = false;
             _runtime.CompletedSent = false;
             generation = ++_runtime.Generation;
+            _runtime.ReceiveTask = RunReceiveLoopAsync(generation, socket, _cts.Token);
         }
-
-        _runtime.ReceiveTask = RunReceiveLoopAsync(generation, _cts.Token);
+        if (previous != null && !ReferenceEquals(previous, socket))
+        {
+            try { await previous.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Ignored old tracker socket cleanup error for {Url}", _url); }
+        }
     }
 
     public async Task SendAnnounceAsync(string? @event, JsonArray? offers, CancellationToken cancellationToken)
     {
-        if (!TryGetSocket(out var socket))
-        {
-            return;
-        }
-
         var payload = CreateAnnounceBasePayload();
         if (@event != null)
         {
@@ -134,16 +154,11 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
             payload["offers"] = offers;
         }
 
-        await socket.SendTextAsync(payload.ToJsonString(), cancellationToken).ConfigureAwait(false);
+        await SendPayloadAsync(payload, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task SendSignalAsync(string toPeerId, string offerId, JsonObject signalData, CancellationToken cancellationToken)
     {
-        if (!TryGetSocket(out var socket))
-        {
-            return;
-        }
-
         var payload = CreateAnnounceBasePayload();
         payload["to_peer_id"] = toPeerId;
         payload["offer_id"] = offerId;
@@ -154,7 +169,21 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
             payload[property.Key] = property.Value?.DeepClone();
         }
 
-        await socket.SendTextAsync(payload.ToJsonString(), cancellationToken).ConfigureAwait(false);
+        await SendPayloadAsync(payload, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SendPayloadAsync(JsonObject payload, CancellationToken cancellationToken)
+    {
+        lock (_runtime.SyncRoot) { ObjectDisposedException.ThrowIf(_disposeTask != null, this); }
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10), _timeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token, timeout.Token);
+        await _sendGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        try
+        {
+            if (!TryGetSocket(out var socket)) throw new IOException("The WebTorrent tracker is disconnected.");
+            await socket.SendTextAsync(payload.ToJsonString(), linked.Token).ConfigureAwait(false);
+        }
+        finally { _sendGate.Release(); }
     }
 
     private JsonObject CreateAnnounceBasePayload()
@@ -181,7 +210,7 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
         }
     }
 
-    private async Task RunReceiveLoopAsync(int generation, CancellationToken cancellationToken)
+    private async Task RunReceiveLoopAsync(int generation, IWebSocketConnection connectedSocket, CancellationToken cancellationToken)
     {
         try
         {
@@ -218,6 +247,8 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
                 }
 
                 var signal = WebTorrentProtocolCodec.Parse(message);
+                string localHash = BinaryStringEncoding.Encode(_host.Hash.ToArray());
+                if (!string.Equals(signal.InfoHash, localHash, StringComparison.Ordinal)) continue;
                 if (signal.Interval.HasValue)
                 {
                     var interval = TimeSpan.FromSeconds(Math.Max((int)_minReannounceInterval.TotalSeconds, signal.Interval.Value));
@@ -226,12 +257,6 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
                         _runtime.ReannounceInterval = interval;
                         _runtime.NextAnnounce = _timeProvider.GetUtcNow() + interval;
                     }
-                }
-
-                string localHash = BinaryStringEncoding.Encode(_host.Hash.ToArray());
-                if (!string.Equals(signal.InfoHash, localHash, StringComparison.Ordinal))
-                {
-                    continue;
                 }
 
                 if (string.Equals(signal.PeerId, BinaryStringEncoding.Encode(_host.PeerId), StringComparison.Ordinal))
@@ -248,12 +273,30 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Receive loop failed for tracker {Url}", _url);
-            _onConnectionFailed(ex);
+            lock (_runtime.SyncRoot)
+            {
+                if (_runtime.Generation != generation || !ReferenceEquals(_runtime.Socket, connectedSocket) || _disposeTask != null) return;
+                _logger.LogError(ex, "Receive loop failed for tracker {Url}", _url);
+                _onConnectionFailed(ex);
+            }
+        }
+        finally
+        {
+            try { await connectedSocket.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Ignored receive socket cleanup error for {Url}", _url); }
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        lock (_runtime.SyncRoot)
+        {
+            _disposeTask ??= DisposeCoreAsync();
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
     {
         await _cts.CancelAsync().ConfigureAwait(false);
 
@@ -263,6 +306,9 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
         {
             socket = _runtime.Socket;
             receiveTask = _runtime.ReceiveTask;
+            _runtime.Socket = null;
+            _runtime.IsConnected = false;
+            _runtime.Generation++;
         }
 
         if (socket != null)
@@ -289,6 +335,13 @@ internal sealed class WebTorrentTrackerClient : IAsyncDisposable
             }
         }
 
-        _cts.Dispose();
+        await _connectGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            await _sendGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try { _cts.Dispose(); }
+            finally { _sendGate.Release(); }
+        }
+        finally { _connectGate.Release(); }
     }
 }

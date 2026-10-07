@@ -6,9 +6,8 @@ namespace PeerSharp.Internals.Transfers;
 internal sealed class PeerRequestCollection
 {
     private readonly ConcurrentDictionary<(int Piece, int Offset), BlockRequest> _requests = new();
-    private int _count;
 
-    public int Count => Interlocked.CompareExchange(ref _count, 0, 0);
+    public int Count => _requests.Count;
     public bool IsEmpty => Count == 0;
 
     public ICollection<(int Piece, int Offset)> Keys => _requests.Keys;
@@ -19,14 +18,7 @@ internal sealed class PeerRequestCollection
     {
         set
         {
-            if (_requests.TryAdd(key, value))
-            {
-                Interlocked.Increment(ref _count);
-            }
-            else
-            {
-                _requests[key] = value;
-            }
+            _requests[key] = value;
         }
     }
 
@@ -40,22 +32,20 @@ internal sealed class PeerRequestCollection
 
     public bool TryRemove((int Piece, int Offset) key, out BlockRequest value)
     {
-        if (_requests.TryRemove(key, out value!))
-        {
-            Interlocked.Decrement(ref _count);
-            return true;
-        }
-        return false;
+        return _requests.TryRemove(key, out value!);
     }
+
+    public bool TryRemove((int Piece, int Offset) key, BlockRequest expected)
+        => _requests.TryRemove(new KeyValuePair<(int Piece, int Offset), BlockRequest>(key, expected));
 }
 
 internal sealed class BlockRequestTracker
 {
     private readonly ConcurrentDictionary<(int Piece, int Offset), ConcurrentDictionary<PeerCommunication, BlockRequest>> _blockRequestIndex = new();
     private readonly ConcurrentDictionary<PeerCommunication, PeerRequestCollection> _peerRequests = new();
-    private int _blockRequestIndexCount;
+    private readonly Lock _mutationLock = new();
 
-    public int BlockRequestIndexCount => Interlocked.CompareExchange(ref _blockRequestIndexCount, 0, 0);
+    public int BlockRequestIndexCount => _blockRequestIndex.Count;
 
     public PeerRequestCollection GetOrAddPeerRequests(PeerCommunication peer)
     {
@@ -70,28 +60,34 @@ internal sealed class BlockRequestTracker
         return _peerRequests.TryGetValue(peer, out requests!);
     }
 
-    public bool TryRemovePeerRequest(PeerCommunication peer, (int Piece, int Offset) key, out BlockRequest request)
+    public bool TryRemovePeerRequest(PeerCommunication peer, (int Piece, int Offset) key, out BlockRequest request, BlockRequest? expected = null)
     {
-        if (_peerRequests.TryGetValue(peer, out var list))
+        lock (_mutationLock)
         {
-            var result = list.TryRemove(key, out request);
-            if (list.IsEmpty)
+            request = default!;
+            if (!_peerRequests.TryGetValue(peer, out var list) ||
+                !list.TryGetValue(key, out request) ||
+                (expected != null && !ReferenceEquals(request, expected)) || !list.TryRemove(key, request))
             {
-                _peerRequests.TryRemove(peer, out _);
+                return false;
             }
-            return result;
+            RemoveIndexEntry(key, peer, request);
+            // Retain the collection until disconnect: schedulers may already hold it.
+            return true;
         }
-        request = default!;
-        return false;
     }
 
     public void RemovePeer(PeerCommunication peer)
     {
-        if (_peerRequests.TryRemove(peer, out var list))
+        lock (_mutationLock)
         {
-            foreach (var (Piece, Offset) in list.Keys)
+            if (_peerRequests.TryRemove(peer, out var list))
             {
-                RemoveBlockRequest(Piece, Offset, peer);
+                foreach (var entry in list.AsEnumerable().ToArray())
+                {
+                    list.TryRemove(entry.Key, entry.Value);
+                    RemoveIndexEntry(entry.Key, peer, entry.Value);
+                }
             }
         }
     }
@@ -103,37 +99,26 @@ internal sealed class BlockRequestTracker
 
     public void AddBlockRequest(int piece, int offset, PeerCommunication peer, BlockRequest request)
     {
-        // Ensure peer request collection is updated
-        var peerReqs = GetOrAddPeerRequests(peer);
-        peerReqs[(piece, offset)] = request;
-
-        var key = (piece, offset);
-        while (true)
+        lock (_mutationLock)
         {
-            var list = _blockRequestIndex.GetOrAdd(key, _ =>
-            {
-                Interlocked.Increment(ref _blockRequestIndexCount);
-                return new ConcurrentDictionary<PeerCommunication, BlockRequest>();
-            });
-
-            list[peer] = request;
-
-            if (_blockRequestIndex.TryGetValue(key, out var currentList) && currentList == list)
-            {
-                return;
-            }
+            GetOrAddPeerRequests(peer)[(piece, offset)] = request;
+            _blockRequestIndex.GetOrAdd((piece, offset), _ => new())[peer] = request;
         }
     }
 
     public void RemoveBlockRequest(int piece, int offset, PeerCommunication peer)
     {
-        var key = (piece, offset);
+        TryRemovePeerRequest(peer, (piece, offset), out _);
+    }
+
+    private void RemoveIndexEntry((int Piece, int Offset) key, PeerCommunication peer, BlockRequest expected)
+    {
         if (_blockRequestIndex.TryGetValue(key, out var list))
         {
-            list.TryRemove(peer, out _);
-            if (list.IsEmpty && _blockRequestIndex.TryRemove(key, out _))
+            list.TryRemove(new KeyValuePair<PeerCommunication, BlockRequest>(peer, expected));
+            if (list.IsEmpty)
             {
-                Interlocked.Decrement(ref _blockRequestIndexCount);
+                _blockRequestIndex.TryRemove(key, out _);
             }
         }
     }

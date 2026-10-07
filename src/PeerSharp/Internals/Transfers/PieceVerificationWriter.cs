@@ -65,11 +65,40 @@ internal sealed class PieceVerificationWriter
         ct.ThrowIfCancellationRequested();
 
         long pSize = _torrent.InfoFile.Info.GetPieceSize(pieceToProcess.Index);
-        if (pSize <= 0)
+        if (pieceToProcess.Index < 0 || pSize <= 0 || pSize > int.MaxValue)
         {
             return new PieceVerificationOutcome(hashSuccess: false, hashFailed: true, pieceSize: 0, fullData: null, pool: null);
         }
         int pieceSize = (int)pSize;
+
+        int expectedBlocks = (pieceSize - 1) / _blockSize + 1;
+        if (pieceToProcess.BlockData.Length != expectedBlocks)
+        {
+            return new PieceVerificationOutcome(false, true, pieceSize, null, null);
+        }
+        for (int i = 0; i < expectedBlocks; i++)
+        {
+            var block = pieceToProcess.BlockData[i];
+            int offset = i * _blockSize;
+            if (block == null || block.PieceIndex != pieceToProcess.Index || block.Offset != offset ||
+                block.Length != Math.Min(_blockSize, pieceSize - offset) || block.Data.Length != block.Length)
+            {
+                return new PieceVerificationOutcome(false, true, pieceSize, null, null);
+            }
+        }
+
+        var info = _torrent.InfoFile.Info;
+        if ((info.IsMerkle && (_torrent.MerkleTree == null || !_torrent.MerkleTree.CanVerifyPiece(pieceToProcess.Index))) ||
+            (info.IsV2 && info.GetV2ExpectedPieceHash(pieceToProcess.Index) == null))
+        {
+            _requestMerkleHashes(pieceToProcess.Index);
+            // Missing proof is neither verified data nor evidence of a bad supplier.
+            return new PieceVerificationOutcome(false, false, pieceSize, null, null);
+        }
+        if (!info.IsMerkle && info.IsV1 && info.Pieces.Count <= pieceToProcess.Index)
+        {
+            return new PieceVerificationOutcome(false, true, pieceSize, null, null);
+        }
 
         bool hashSuccess = false;
         bool hashFailed = false;
@@ -78,86 +107,87 @@ internal sealed class PieceVerificationWriter
         // Always assemble a full piece buffer. This allows:
         // 1. Single disk write per piece (instead of 128 block-by-block writes)
         // 2. Unified verification path for both SHA1 and Merkle
-        // The buffer is short-lived and GC-collected after write completes.
-        byte[]? fullData = PieceBufferPool.Rent(pieceSize);
-        double copyMs = 0;
-        double hashMs = 0;
-
-        bool valid = true;
-
-        var copyStart = _timeProvider.GetUtcNow();
-        for (int i = 0; i < pieceToProcess.BlockData.Length; i++)
+        // The outcome returns this buffer to the pool after verification and writing finish.
+        byte[] fullData = PieceBufferPool.Rent(pieceSize);
+        try
         {
-            var b = pieceToProcess.BlockData[i];
-            if (b == null)
+            double copyMs = 0;
+            double hashMs = 0;
+
+            bool valid = true;
+
+            var copyStart = _timeProvider.GetUtcNow();
+            for (int i = 0; i < pieceToProcess.BlockData.Length; i++)
             {
-                valid = false;
-                break;
+                var b = pieceToProcess.BlockData[i];
+                if (b == null)
+                {
+                    valid = false;
+                    break;
+                }
+                Array.Copy(b.Buffer, 0, fullData, i * _blockSize, b.Length);
             }
-            Array.Copy(b.Buffer, 0, fullData, i * _blockSize, b.Length);
-        }
-        copyMs = (_timeProvider.GetUtcNow() - copyStart).TotalMilliseconds;
+            copyMs = (_timeProvider.GetUtcNow() - copyStart).TotalMilliseconds;
 
-        bool isMerkle = _torrent.InfoFile.Info.IsMerkle && _torrent.MerkleTree != null;
-        bool isV2 = _torrent.InfoFile.Info.IsV2;
+            bool isMerkle = _torrent.InfoFile.Info.IsMerkle && _torrent.MerkleTree != null;
+            bool isV2 = _torrent.InfoFile.Info.IsV2;
 
-        // BEP 30: For Merkle hash torrents, use the Merkle tree for verification
-        if (valid && isMerkle)
-        {
-            var hashCalcStart = _timeProvider.GetUtcNow();
-            valid = _torrent.MerkleTree!.VerifyPiece(pieceToProcess.Index, fullData.AsSpan(0, pieceSize));
-            hashMs = (_timeProvider.GetUtcNow() - hashCalcStart).TotalMilliseconds;
-
-            if (!valid && !_torrent.MerkleTree.CanVerifyPiece(pieceToProcess.Index))
+            // BEP 30: For Merkle hash torrents, use the Merkle tree for verification
+            if (valid && isMerkle)
             {
-                _logger.LogDebug("BEP 30: Missing hashes for piece {PieceIndex}, requesting from peers", pieceToProcess.Index);
-                _requestMerkleHashes(pieceToProcess.Index);
-                valid = true; // Assume valid for now, will re-verify when hashes arrive
+                var hashCalcStart = _timeProvider.GetUtcNow();
+                valid = _torrent.MerkleTree!.VerifyPiece(pieceToProcess.Index, fullData.AsSpan(0, pieceSize));
+                hashMs = (_timeProvider.GetUtcNow() - hashCalcStart).TotalMilliseconds;
+
+                if (!valid && !_torrent.MerkleTree.CanVerifyPiece(pieceToProcess.Index))
+                {
+                    _logger.LogDebug("BEP 30: Missing hashes for piece {PieceIndex}, requesting from peers", pieceToProcess.Index);
+                    _requestMerkleHashes(pieceToProcess.Index);
+                    PieceBufferPool.Return(fullData);
+                    return new PieceVerificationOutcome(false, false, pieceSize, null, null);
+                }
+                _logger.LogTrace("Piece {PieceIndex} Merkle verification: {Elapsed}ms, size={Size} bytes, valid={Valid}", pieceToProcess.Index, Math.Round(hashMs, 1), pieceSize, valid);
             }
-            _logger.LogTrace("Piece {PieceIndex} Merkle verification: {Elapsed}ms, size={Size} bytes, valid={Valid}", pieceToProcess.Index, Math.Round(hashMs, 1), pieceSize, valid);
-        }
-        else if (valid && isV2)
-        {
-            var hashCalcStart = _timeProvider.GetUtcNow();
-            var expected = _torrent.InfoFile.Info.GetV2ExpectedPieceHash(pieceToProcess.Index);
-            bool padToPieceSize = _torrent.InfoFile.Info.ShouldPadV2PieceToPieceSize(pieceToProcess.Index);
-            valid = expected != null && MerkleTree.VerifyPiece(fullData.AsSpan(0, pieceSize), pieceToProcess.Index, expected, _torrent.InfoFile.Info.PieceSize, padToPieceSize);
-            hashMs = (_timeProvider.GetUtcNow() - hashCalcStart).TotalMilliseconds;
-        }
-        else if (valid && _torrent.InfoFile.Info.Pieces.Count > pieceToProcess.Index)
-        {
-            var hashCalcStart = _timeProvider.GetUtcNow();
-            byte[] computed = System.Security.Cryptography.SHA1.HashData(fullData.AsSpan(0, pieceSize));
-            hashMs = (_timeProvider.GetUtcNow() - hashCalcStart).TotalMilliseconds;
-            var expected = _torrent.InfoFile.Info.Pieces[pieceToProcess.Index];
-            // AsSpan first: byte[].SequenceEqual(byte[]) binds to LINQ's Enumerable.SequenceEqual,
-            // which allocates two enumerators and compares element by element. The span overload
-            // is vectorised. This runs once per completed piece for the whole download.
-            if (!computed.AsSpan().SequenceEqual(expected))
+            else if (valid && isV2)
             {
-                valid = false;
+                var hashCalcStart = _timeProvider.GetUtcNow();
+                var expected = _torrent.InfoFile.Info.GetV2ExpectedPieceHash(pieceToProcess.Index);
+                bool padToPieceSize = _torrent.InfoFile.Info.ShouldPadV2PieceToPieceSize(pieceToProcess.Index);
+                valid = expected != null && MerkleTree.VerifyPiece(fullData.AsSpan(0, pieceSize), pieceToProcess.Index, expected, _torrent.InfoFile.Info.PieceSize, padToPieceSize);
+                hashMs = (_timeProvider.GetUtcNow() - hashCalcStart).TotalMilliseconds;
             }
+            if (valid && !isMerkle && info.IsV1)
+            {
+                var hashCalcStart = _timeProvider.GetUtcNow();
+                valid = info.VerifyV1PieceHash(pieceToProcess.Index, fullData.AsSpan(0, pieceSize));
+                hashMs += (_timeProvider.GetUtcNow() - hashCalcStart).TotalMilliseconds;
+            }
+
+            _logger.LogTrace("Piece {PieceIndex} hash verification: copy={CopyElapsed}ms, hash={HashElapsed}ms, size={Size} bytes, valid={Valid}",
+                pieceToProcess.Index, Math.Round(copyMs, 1), Math.Round(hashMs, 1), pieceSize, valid);
+
+            if (!valid)
+            {
+                hashFailed = true;
+            }
+            else
+            {
+                hashSuccess = true;
+            }
+
+            var totalMs = (_timeProvider.GetUtcNow() - hashStart).TotalMilliseconds;
+            if (totalMs > 50)
+            {
+                _logger.LogTrace("Piece {PieceIndex} verification took {Elapsed}ms total", pieceToProcess.Index, Math.Round(totalMs, 1));
+            }
+
+            return new PieceVerificationOutcome(hashSuccess, hashFailed, pieceSize, fullData, PieceBufferPool);
         }
-
-        _logger.LogTrace("Piece {PieceIndex} hash verification: copy={CopyElapsed}ms, hash={HashElapsed}ms, size={Size} bytes, valid={Valid}",
-            pieceToProcess.Index, Math.Round(copyMs, 1), Math.Round(hashMs, 1), pieceSize, valid);
-
-        if (!valid)
+        catch
         {
-            hashFailed = true;
+            PieceBufferPool.Return(fullData);
+            throw;
         }
-        else
-        {
-            hashSuccess = true;
-        }
-
-        var totalMs = (_timeProvider.GetUtcNow() - hashStart).TotalMilliseconds;
-        if (totalMs > 50)
-        {
-            _logger.LogTrace("Piece {PieceIndex} verification took {Elapsed}ms total", pieceToProcess.Index, Math.Round(totalMs, 1));
-        }
-
-        return new PieceVerificationOutcome(hashSuccess, hashFailed, pieceSize, fullData, PieceBufferPool);
     }
 
     public async Task<bool> WriteAsync(PieceState pieceToProcess, int pieceSize, byte[]? fullData, CancellationToken ct)
@@ -177,7 +207,7 @@ internal sealed class PieceVerificationWriter
         // Non-recoverable storage failures (disk full, permanently failed file) deliberately
         // propagate: retrying is hopeless, and FileTransfer stops the torrent with an error
         // instead of re-downloading this piece forever.
-        catch (Exception ex) when (ex is not StorageException { IsRecoverable: false })
+        catch (Exception ex) when (ex is not OperationCanceledException and not StorageException { IsRecoverable: false })
         {
             _logger.LogError(ex, "Write failed for piece {PieceIndex}", pieceToProcess.Index);
             return false;

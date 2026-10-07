@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Framework;
+using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
@@ -216,6 +217,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private long _connectionStartTicks;
 
     private CancellationTokenSource? _cts;
+    private readonly Lock _receiveReaderLock = new();
+    private PipeReader? _receivePipeReader;
+    private ITimer? _stuckReadTimer;
     private AtomicDisposal _disposal = new();
     private long _downloaded;
     private bool _encryptionHandshakeComplete;
@@ -313,6 +317,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private int _rttVarianceMs = 50;
 
     private int _strikes;
+    private readonly HashSet<int> _uploadAllowedFastPieces = [];
     private IReadOnlyList<int>? _suggestedSnapshot;
     private int _totalMessageCount = 0;
     private long _totalMessageWindowStart = Environment.TickCount64;
@@ -333,7 +338,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         PeerPieces = new PiecesProgress(torrent.Pieces.Count);
         UtPex = new UtPex(this);
         UtMetadata = new UtMetadata(this);
-        UtHolepunch = new UtHolepunch(this);
+        UtHolepunch = new UtHolepunch(this, loggerFactory);
         LtDontHave = new LtDontHave(this, loggerFactory.CreateLogger<LtDontHave>());
 
         // BEP 30: Initialize ut_hash_piece extension for Merkle hash torrents
@@ -344,7 +349,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
         // Use Wait mode to provide back-pressure. DropNewest causes protocol violations
         // (missing blocks/messages) which kills throughput.
-        _sendQueue = new MessageQueue(SendQueueCapacityMax);
+        _sendQueue = new MessageQueue(SendQueueCapacityMax, timeProvider);
     }
 
     /// <summary>
@@ -570,14 +575,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _deferredHavePieces.Add(pieceIndex);
     }
 
-    private static bool HasNonZeroSpareBits(byte[] bitfield, int pieceCount)
+    private static bool HasNonZeroSpareBits(ReadOnlySpan<byte> bitfield, int pieceCount)
     {
         int spareBits = 8 - (pieceCount & 7);
         return spareBits < 8 && (bitfield[^1] & ((1 << spareBits) - 1)) != 0;
     }
 
     internal Task RefreshExtendedHandshakeAfterMetadataAsync() =>
-        RemoteSupportsExtensions ? SendExtendedHandshakeAsync() : Task.CompletedTask;
+        RemoteSupportsExtensions ? SendExtendedHandshakeAsync(isUpdate: true) : Task.CompletedTask;
 
     /// <summary>
     /// BEP 40: Canonical peer priority. Higher values indicate more preferred peers.
@@ -719,7 +724,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     IUtPex IPeerCommunication.UtPex => UtPex;
 
-    internal TcpClient? Client { get; set; }
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S2292:Trivial properties should be auto-implemented", Justification = "Backing field used with Interlocked")]
+    internal TcpClient? Client { get => _client; set => _client = value; }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S2292:Trivial properties should be auto-implemented", Justification = "Backing field used with Interlocked")]
     internal int Connected { get => _connected; set => _connected = value; }
@@ -756,6 +762,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     internal void MarkUsefulDataExchanged() => Volatile.Write(ref _usefulDataExchanged, 1);
 
     private Stream? _stream;
+    private TcpClient? _client;
+    private UtpStream? _utpStream;
 
     /// <summary>
     /// The peer connection, always metered.
@@ -786,7 +794,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return stream;
         }
 
-        string hash = _torrent.Hash.ToHexStringUpper();
+        string hash = BandwidthManager.GetTorrentChannelKey(_torrent);
 
         return new RateLimitedStream(
             stream,
@@ -801,7 +809,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             leaveInnerOpen: false);
     }
 
-    internal UtpStream? UtpStream { get; set; }
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("SonarLint", "S2292:Trivial properties should be auto-implemented", Justification = "Backing field used with Interlocked")]
+    internal UtpStream? UtpStream { get => _utpStream; set => _utpStream = value; }
 
     // Connection-scoped token; falls back to non-cancelable when not connected yet.
     private CancellationToken ConnectionToken => _cts?.Token ?? CancellationToken.None;
@@ -958,6 +967,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             // Use provided timeout (from adaptive timeout manager)
             using var connectTimeoutCts = new CancellationTokenSource(timeoutMs);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ConnectionToken, connectTimeoutCts.Token, ct);
+            // The dial budget also bounds negotiation and handshake writes/reads.
+            using var abandon = linkedCts.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
 
             // The same tokens without the deadline. Giving up on a peer is this engine's own decision
             // and belongs in the result; only these two mean somebody asked us to stop.
@@ -974,15 +985,33 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 {
                     var ipAddress = System.Net.IPAddress.Parse(ip);
                     var endpoint = new System.Net.IPEndPoint(ipAddress, port);
-                    UtpStream = _torrent.UtpManager.CreateStream(endpoint);
-                    Stream = UtpStream;
+                    // Held here as well as in the property: closing the connection clears the property,
+                    // and an abandoned dial is exactly the one that gets closed while this waits.
+                    var utpStream = _torrent.UtpManager.CreateStream(endpoint);
+                    UtpStream = utpStream;
+                    Stream = utpStream;
                     RemoteEndPoint = endpoint;
 
                     _logger.LogDebug("Initiating uTP connection to {Endpoint}", endpoint);
-                    if (!await UtpStream.ConnectAsync(TimeSpan.FromMilliseconds(timeoutMs), abortCts.Token).ConfigureAwait(false))
+                    if (!await utpStream.ConnectOrAbandonAsync(TimeSpan.FromMilliseconds(timeoutMs), abortCts.Token).ConfigureAwait(false))
                     {
-                        // The peer never answered the SYN, which uTP now reports rather than throws.
-                        LogConnectTimeout(ip, port, GetConnectionElapsedMs(), "uTP SYN timeout");
+                        if (abortCts.IsCancellationRequested)
+                        {
+                            LogConnectCancelled(ip, port);
+                            await CloseAsync().ConfigureAwait(false);
+                            return false;
+                        }
+
+                        // The peer never answered the SYN, or refused it, which uTP reports rather than throws.
+                        if (utpStream.EndedBy is IOException refused)
+                        {
+                            LogConnectFailed(ip, port, refused.Message);
+                        }
+                        else
+                        {
+                            LogConnectTimeout(ip, port, GetConnectionElapsedMs(), "uTP SYN timeout");
+                        }
+
                         await CloseAsync().ConfigureAwait(false);
                         return false;
                     }
@@ -996,7 +1025,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             {
                 var proxy = _torrent.Settings.Proxy;
                 var bindAddress = _torrent.Settings.Connection.BindAddress;
-                if (proxy.Type != ProxyType.None && proxy.ProxyPeers && !string.IsNullOrEmpty(proxy.Host))
+                if (proxy.Type != ProxyType.None && (proxy.ProxyPeers || proxy.ForceProxy) && !string.IsNullOrEmpty(proxy.Host))
                 {
                     _logger.LogDebug("Connecting to {Ip}:{Port} via {ProxyType} proxy {ProxyHost}:{ProxyPort}", ip, port, proxy.Type, proxy.Host, proxy.Port);
                     var result = proxy.Type switch
@@ -1014,6 +1043,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     // will be the proxy endpoint, not the peer endpoint.
                     // We set it manually here.
                     RemoteEndPoint = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(ip), port);
+                }
+                else if (proxy.ForceProxy)
+                {
+                    throw new IOException("ForceProxy requires a usable proxy configuration.");
                 }
                 else if (System.Net.IPAddress.TryParse(ip, out var peerAddress))
                 {
@@ -1056,7 +1089,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         return false;
                     }
 
-                    Stream = Client.GetStream();
+                    Stream = new SocketStream(Client.Client);
                     RemoteEndPoint = Client.Client.RemoteEndPoint as System.Net.IPEndPoint;
                 }
                 else
@@ -1072,11 +1105,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     }
                     ConfigureTcpClient(Client, _torrent.Settings, _logger);
                     await Client.ConnectAsync(ip, port, linkedCts.Token).ConfigureAwait(false);
-                    Stream = Client.GetStream();
+                    Stream = new SocketStream(Client.Client);
                     RemoteEndPoint = Client.Client.RemoteEndPoint as System.Net.IPEndPoint;
                 }
             }
 
+            linkedCts.Token.ThrowIfCancellationRequested();
             _connected = 1;
 
             // From here a handshake is genuinely attempted, so whatever happens next is evidence
@@ -1108,14 +1142,20 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                         return false;
                     }
 
+                    linkedCts.Token.ThrowIfCancellationRequested();
                     try { await Listener.HandshakeFinishedAsync(this).ConfigureAwait(false); } catch (Exception ex) { _logger.LogError(ex, "HandshakeFinished callback error"); }
                     StartBackgroundLoops();
                     return true;
                 }
                 else if (encryptionResult == EncryptionHandshakeResult.PlaintextDetected)
                 {
-                    // Peer sent plaintext response, already handled in handshake
-                    _logger.LogDebug("Peer {Ip}:{Port} responded with plaintext, handshake complete", ip, port);
+                    if (encryptionSetting == Encryption.Require || !await PerformPlaintextHandshakeAsync().ConfigureAwait(false))
+                    {
+                        await CloseAsync().ConfigureAwait(false);
+                        return false;
+                    }
+
+                    linkedCts.Token.ThrowIfCancellationRequested();
                     try { await Listener.HandshakeFinishedAsync(this).ConfigureAwait(false); } catch (Exception ex) { _logger.LogError(ex, "HandshakeFinished callback error"); }
                     StartBackgroundLoops();
                     return true;
@@ -1150,6 +1190,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             _logger.LogDebug("Trying plaintext handshake with {Ip}:{Port}", ip, port);
             if (await PerformPlaintextHandshakeAsync().ConfigureAwait(false))
             {
+                linkedCts.Token.ThrowIfCancellationRequested();
                 try { await Listener.HandshakeFinishedAsync(this).ConfigureAwait(false); } catch (Exception ex) { _logger.LogError(ex, "HandshakeFinished callback error"); }
                 StartBackgroundLoops();
                 return true;
@@ -1334,9 +1375,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         var transferSettings = _torrent.Settings.Transfer;
         int speedBytesPerSec = (int)Math.Min(int.MaxValue, Math.Max(DownloadSpeed, SmoothedDownloadSpeed));
 
+        // While a stream is waiting for what it reads next, a short queue lets its requests through.
+        int queueTime = transferSettings.RequestQueueTimeSeconds;
+        int whileBuffering = _torrent.Settings.Streaming.RequestQueueSecondsWhileBuffering;
+        if (whileBuffering > 0 && whileBuffering < queueTime && _torrent.Streaming?.IsBuffering == true)
+        {
+            queueTime = whileBuffering;
+        }
+
         return PipelineDepthCalculator.CalculateOptimal(
             speedBytesPerSec,
-            transferSettings.RequestQueueTimeSeconds,
+            queueTime,
             transferSettings.EstimatedBandwidthBytesPerSec,
             transferSettings.InitialPipelineDepth,
             transferSettings.MaxRequestsPerPeer);
@@ -1380,6 +1429,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
     }
 
+    public bool IsUploadAllowedFast(int pieceIndex)
+    {
+        lock (_fastPiecesLock)
+        {
+            return RemoteSupportsFastExtension && _uploadAllowedFastPieces.Contains(pieceIndex);
+        }
+    }
+
     // Default 100ms RTT estimate
     public void RecordRtt(int rttMs)
     {
@@ -1418,6 +1475,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             PieceIndex = pieceIndex
         };
+        lock (_fastPiecesLock)
+        {
+            _uploadAllowedFastPieces.Add(pieceIndex);
+        }
         await SendMessageAsync(msg).ConfigureAwait(false);
     }
 
@@ -1481,10 +1542,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return;
             }
 
-            // Use WriteAsync with timeout to prevent indefinite blocking if send loop is stuck
-            using var timeoutCts = new CancellationTokenSource(SendQueueTimeoutMs);
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ConnectionToken);
-            await _sendQueue.EnqueueAsync(msg, linkedCts.Token).ConfigureAwait(false);
+            // Bounded, so a stuck send loop cannot block the caller indefinitely. Closing the connection
+            // completes the queue, which ends the wait too.
+            if (!await _sendQueue.TryEnqueueWithinAsync(msg, TimeSpan.FromMilliseconds(SendQueueTimeoutMs)).ConfigureAwait(false))
+            {
+                msg.Dispose();
+                if (!_sendQueue.IsCompleted && _cts?.IsCancellationRequested != true)
+                {
+                    _logger.LogWarning("Send queue timeout for {PeerName} - queue backed up, closing connection", Name);
+                    await CloseAsync().ConfigureAwait(false);
+                }
+            }
         }
         catch (ChannelClosedException)
         {
@@ -1603,7 +1671,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
 
         _handshakePreRead = true;
-        _preReadHandshake = handshake;
+        _preReadHandshake = handshake.AsSpan(0, 68).ToArray();
+        if (handshake.Length > 68)
+        {
+            _bufferedAfterHandshake = handshake.AsSpan(68).ToArray();
+        }
 
         // Extract reserved bytes flags (bytes 20-27)
         RemoteSupportsExtensions = parsed.SupportsExtensions;
@@ -1746,6 +1818,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     internal static bool CanUseUtpWithProxy(Settings settings)
     {
         var proxy = settings.Proxy;
+        if (proxy.ForceProxy) return proxy.Type == ProxyType.Socks5 && !string.IsNullOrEmpty(proxy.Host);
         if (proxy.Type == ProxyType.None || !proxy.ProxyPeers || string.IsNullOrEmpty(proxy.Host))
         {
             return true;
@@ -1806,21 +1879,34 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // Nothing can loop back to a connection that is gone, and the set must not grow forever.
         _torrent.ReleaseOutgoingPeerId(_ourPeerId);
 
-        if (_cts != null)
-        {
-            await _cts.CancelAsync().ConfigureAwait(false);
-        }
+        // Closed before cancelling, so the loops end the ordinary way: an idle send loop sees a finished
+        // queue, and the receive loop sees end of input from the closed stream. Cancelling first woke both
+        // with an exception, rethrown through every stream layer, on every disconnect - the commonest
+        // event in a swarm. Cancellation still follows for whatever is waiting on something else.
+        _sendQueue.TryComplete();
 
         // Always dispose resources, even if we weren't fully connected
         // This prevents leaks when connection fails during ConnectAsync
-        // Disposing Stream cascades through the encryption and rate limiting wrappers to the socket.
-        // Client and UtpStream are still disposed below for the paths that own one; both are
-        // idempotent, so the second call is a no-op.
+        // Disposing Stream cascades through the encryption and rate limiting wrappers to the socket, but
+        // only half-closes a uTP stream, which keeps its read waiting for the peer - so that one is closed
+        // for good first. A TcpClient goes first too: it shuts its socket down itself, and doing that to a
+        // socket the stream has already closed trips an exception inside the runtime. Closing it after is
+        // a no-op.
+        //
+        // Each is taken exactly once: a close from the receive loop and one from the send loop - or a
+        // close and a dispose - can run this at the same time, and one of them reading a property the
+        // other had just cleared was a NullReferenceException on a busy swarm.
+        var utpStream = Interlocked.Exchange(ref _utpStream, null);
+        var client = Interlocked.Exchange(ref _client, null);
+        var stream = Interlocked.Exchange(ref _stream, null);
+        try { utpStream?.CloseAndStopReading(); } catch { /* Ignore disposal errors */ }
+        try { client?.Dispose(); } catch { /* Ignore disposal errors */ }
+
         try
         {
-            if (Stream != null)
+            if (stream != null)
             {
-                await Stream.DisposeAsync().ConfigureAwait(false);
+                await stream.DisposeAsync().ConfigureAwait(false);
             }
         }
         catch
@@ -1828,14 +1914,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             /* Ignore disposal errors */
         }
 
-        try { Client?.Dispose(); } catch { /* Ignore disposal errors */ }
-        try { UtpStream?.Close(); } catch { /* Ignore disposal errors */ }
-
-        Client = null;
-        UtpStream = null;
-        Stream = null;
-
-        _sendQueue.TryComplete();
+        if (_cts != null)
+        {
+            await _cts.CancelAsync().ConfigureAwait(false);
+        }
     }
 
     private byte[] CreateHandshakeBuffer()
@@ -1877,7 +1959,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             if (dict is not null)
             {
-                RemoteExtensions = ExtensionHandshake.Parse(dict);
+                RemoteExtensions = ExtensionHandshake.Parse(dict, RemoteExtensions);
                 UtMetadata.Init(RemoteExtensions);
                 UtPex.Init(RemoteExtensions);
                 UtHolepunch.Init(RemoteExtensions);
@@ -1910,9 +1992,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // BEP 10 'yourip': one peer's opinion of our external address. Treated as a vote rather
                 // than an answer - any single peer can be wrong or lying, and the tracker already
                 // resolves this by agreement.
-                if (RemoteExtensions.YourIp is { Length: 4 or 16 } reportedIp)
+                if (dict.GetBytes("yourip") is { Length: 4 or 16 } reportedIp)
                 {
-                    _torrent.ReportExternalAddress(reportedIp);
+                    _torrent.ReportExternalAddress(reportedIp.ToArray());
                 }
 
                 _logger.LogDebug("{PeerName} supports extensions: {Extensions}", Name, string.Join(", ", RemoteExtensions.MessageIds.Keys));
@@ -1959,6 +2041,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private async Task IncomingHandshakeLoopAsync(CancellationToken token)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(DefaultConnectionTimeoutMs);
+        using var abandon = deadline.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
+        var encryptionSetting = _torrent.Settings.Connection.Encryption;
+        if ((_encryptionHandshakeComplete && encryptionSetting == Encryption.Refuse)
+            || (_handshakePreRead && !_encryptionHandshakeComplete && encryptionSetting == Encryption.Require))
+        {
+            await CloseAsync().ConfigureAwait(false);
+            return;
+        }
+
         // If encryption was already established by PortListener/dispatcher, skip negotiation
         if (_encryptionHandshakeComplete)
         {
@@ -1980,8 +2073,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
-        var encryptionSetting = _torrent.Settings.Connection.Encryption;
-
         // Try encrypted handshake first (unless Encryption=Refuse)
         if (encryptionSetting != Encryption.Refuse)
         {
@@ -1994,24 +2085,23 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 StartBackgroundLoops();
                 return;
             }
-            else if (result == EncryptionHandshakeResult.PlaintextDetected)
+            else if (result == EncryptionHandshakeResult.PlaintextDetected && encryptionSetting != Encryption.Require)
             {
                 // Handle as plaintext - fall through
                 _logger.LogDebug("Incoming connection from {PeerName} is plaintext", Name);
             }
-            else if (encryptionSetting == Encryption.Require)
+            else
             {
-                _logger.LogWarning("Encryption required but incoming connection from {PeerName} failed encryption", Name);
+                _logger.LogDebug("Incoming encryption negotiation failed for {PeerName}", Name);
                 await CloseAsync().ConfigureAwait(false);
                 return;
             }
-            // Failed encryption in Allow mode - try plaintext
         }
 
         // Handle plaintext connection
         try
         {
-            if (Stream == null) { await CloseAsync().ConfigureAwait(false); return; }
+            if (Stream is not { } stream) { await CloseAsync().ConfigureAwait(false); return; }
 
             byte[] hBuffer = new byte[68];
             int read = 0;
@@ -2034,9 +2124,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             while (read < 68)
             {
-                using var timeoutCts = new CancellationTokenSource(10000);
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, timeoutCts.Token);
-                int r = await Stream.ReadAsync(hBuffer.AsMemory(read, 68 - read), linkedCts.Token).ConfigureAwait(false);
+                var (r, _) = await ReadHandshakeBytesAsync(stream, hBuffer.AsMemory(read, 68 - read), 10000).ConfigureAwait(false);
                 if (r == 0) { await CloseAsync().ConfigureAwait(false); return; }
                 Interlocked.Exchange(ref _lastActivityTicksValue, Environment.TickCount64);
                 read += r;
@@ -2074,6 +2162,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private async Task OutgoingConnectedHandshakeLoopAsync(CancellationToken token)
     {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(DefaultConnectionTimeoutMs);
+        using var abandon = deadline.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
         try
         {
             if (!await PerformPlaintextHandshakeAsync().ConfigureAwait(false))
@@ -2116,7 +2207,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return EncryptionHandshakeResult.Failed;
             }
 
-            var pe = new ProtocolEncryptionHandshake(_torrent.InfoFile.Info.Hash.ToArray(), initiator);
+            var info = _torrent.InfoFile.Info;
+            using var pe = new ProtocolEncryptionHandshake(
+                (info.IsV1 ? info.Hash : info.HashV2.TruncateToV1()).ToArray(), initiator);
 
             if (initiator)
             {
@@ -2130,18 +2223,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             bool firstRead = true;
             while (!pe.IsComplete && !pe.IsError)
             {
-                int read;
-                try
+                // A short deadline for the first read, to notice an unresponsive peer quickly.
+                var (read, timedOut) = await ReadHandshakeBytesAsync(stream, buffer, firstRead ? 5000 : 30000).ConfigureAwait(false);
+                if (timedOut)
                 {
-                    // Use a timeout for the first read to detect unresponsive peers quickly
-                    using var timeoutCts = new CancellationTokenSource(firstRead ? 5000 : 30000);
-                    read = await stream.ReadAsync(buffer, timeoutCts.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-#pragma warning disable S6667 // Deliberately no stack trace: see note above.
                     _logger.LogDebug("Encryption handshake timeout for {PeerName}", Name);
-#pragma warning restore S6667
                     return EncryptionHandshakeResult.Failed;
                 }
 
@@ -2155,12 +2241,23 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 Interlocked.Exchange(ref _lastActivityTicksValue, Environment.TickCount64);
 
                 // Detect if peer responded with plaintext BitTorrent handshake instead of encryption
-                if (firstRead && initiator && read >= 20 && buffer[0] == 19 && buffer.AsSpan(1, 19).SequenceEqual("BitTorrent protocol"u8))
+                if (firstRead && buffer[0] == 19)
                 {
-                    _logger.LogDebug("Peer {PeerName} responded with plaintext instead of encryption", Name);
-                    // Buffer the received data and handle as plaintext
-                    _plaintextBuffer = buffer.AsSpan(0, read).ToArray();
-                    return EncryptionHandshakeResult.PlaintextDetected;
+                    while (read < 20)
+                    {
+                        var (more, _) = await ReadHandshakeBytesAsync(stream, buffer.AsMemory(read, 20 - read), 5000).ConfigureAwait(false);
+                        if (more == 0)
+                        {
+                            return EncryptionHandshakeResult.ConnectionClosed;
+                        }
+                        read += more;
+                    }
+
+                    if (buffer.AsSpan(1, 19).SequenceEqual("BitTorrent protocol"u8))
+                    {
+                        _plaintextBuffer = buffer.AsSpan(0, read).ToArray();
+                        return EncryptionHandshakeResult.PlaintextDetected;
+                    }
                 }
                 firstRead = false;
 
@@ -2178,13 +2275,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return EncryptionHandshakeResult.Failed;
             }
 
-            // Decrypt it and store in _plaintextBuffer so ReadHandshakeAsync can pick it up
+            // IA is already decrypted; any bytes beyond Pe3/Pe4 still need decryption.
             var trailing = pe.TrailingData;
-            if (trailing.Length > 0 && pe.Encryption != null)
+            if (pe.Encryption == null)
             {
-                pe.Encryption.RC4In.Decrypt(trailing);
-                _plaintextBuffer = trailing;
+                return EncryptionHandshakeResult.Failed;
             }
+            pe.Encryption.Decrypt(trailing);
+            _plaintextBuffer = [.. pe.ReceivedPayload ?? [], .. trailing];
 
             // Re-check the property: if CloseAsync ran while we were handshaking,
             // Stream will have been nulled and the underlying socket disposed,
@@ -2195,12 +2293,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // and owning it makes one Dispose cascade down to the socket.
                 Stream = new EncryptedStream(
                     stream,
-                    pe.Encryption ?? new ProtocolEncryption(),
+                    pe.Encryption,
                     leaveInnerOpen: false);
 
-                if (pe.ReceivedPayload != null)
+                if (!initiator && !await ReadHandshakeAsync().ConfigureAwait(false))
                 {
-                    await SetHandshakeReceivedAsync(pe.ReceivedPayload).ConfigureAwait(false);
+                    return EncryptionHandshakeResult.ConnectionClosed;
                 }
 
                 return EncryptionHandshakeResult.Success;
@@ -2264,7 +2362,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
-        if (msg.Id == MessageId.Bitfield && _firstMessageProcessed)
+        if (msg.Id is MessageId.Suggest or MessageId.AllowedFast or MessageId.HaveAll or MessageId.HaveNone or MessageId.Reject &&
+            !RemoteSupportsFastExtension)
+        {
+            throw new InvalidDataException("Fast extension message received without negotiation");
+        }
+        if (msg.Id is MessageId.Bitfield or MessageId.HaveAll or MessageId.HaveNone && _firstMessageProcessed)
         {
             if (!_torrent.HasMetadata)
             {
@@ -2322,6 +2425,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     }
                     else
                     {
+                        if ((uint)msg.HavePieceIndex >= (uint)PeerPieces.Count)
+                        {
+                            throw new InvalidDataException("Have refers to a piece outside the torrent");
+                        }
                         PeerPieces.AddPiece(msg.HavePieceIndex);
                     }
                     HasReportedPieces = true;
@@ -2338,6 +2445,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     }
                     else
                     {
+                        if (receivedBitfield.Length != (PeerPieces.Count + 7) / 8 || HasNonZeroSpareBits(receivedBitfield, PeerPieces.Count))
+                        {
+                            throw new InvalidDataException("Invalid bitfield length or spare bits");
+                        }
                         PeerPieces.FromBitfield(receivedBitfield);
                     }
                     HasReportedPieces = true;
@@ -2393,11 +2504,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 await SafeNotifyListenerAsync(msg).ConfigureAwait(false);
                 return; // Don't call MessageReceived again at end of method
             case MessageId.Suggest:
+                ValidateOfferedPieceIndex(msg.PieceIndex);
                 AddSuggestedPiece(msg.PieceIndex);
                 _logger.LogDebug("{PeerName} SUGGESTS piece {PieceIndex}", Name, msg.PieceIndex);
                 break;
 
             case MessageId.AllowedFast:
+                ValidateOfferedPieceIndex(msg.PieceIndex);
                 AddAllowedFastPiece(msg.PieceIndex);
                 _logger.LogDebug("{PeerName} ALLOWED FAST piece {PieceIndex}", Name, msg.PieceIndex);
                 break;
@@ -2408,7 +2521,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 break;
 
             case MessageId.Request:
-                if (!AmChoking)
+                if (!AmChoking || RemoteSupportsFastExtension)
                 {
                     await SafeNotifyListenerAsync(msg).ConfigureAwait(false);
                 }
@@ -2458,6 +2571,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
     }
 
+    private void ValidateOfferedPieceIndex(int pieceIndex)
+    {
+        if (pieceIndex < 0 || (PeerPieces.Count > 0 && pieceIndex >= PeerPieces.Count))
+        {
+            throw new InvalidDataException("Offered piece is outside the torrent");
+        }
+    }
+
     private async Task HandleHashRequestAsync(PeerMessage msg)
     {
         if (!RemoteSupportsV2 || !_torrent.InfoFile.Info.IsV2 || msg.HashPiecesRoot == null)
@@ -2502,11 +2623,37 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         });
     }
 
+    /// <summary>
+    /// Reads part of a handshake, giving up after <paramref name="timeoutMs"/> by closing the connection -
+    /// which ends the read as end of input - rather than by cancelling the read, which can only report
+    /// it by throwing: once for every peer that connects and then says nothing, which is a large share
+    /// of them. A handshake that stalls loses its connection either way.
+    /// </summary>
+    /// <returns>What was read, and whether zero means the deadline passed rather than the peer hanging up.</returns>
+    private async ValueTask<(int Read, bool TimedOut)> ReadHandshakeBytesAsync(Stream stream, Memory<byte> buffer, int timeoutMs)
+    {
+        using var deadline = new CancellationTokenSource(timeoutMs);
+        using var giveUp = deadline.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
+
+        int read = await stream.ReadAsync(buffer, CancellationToken.None).ConfigureAwait(false);
+        return (read, read == 0 && deadline.IsCancellationRequested);
+    }
+
+    /// <summary>
+    /// Closes the transport under whatever is reading it, ending that read as end of input. Stream.Dispose
+    /// alone would only half-close a uTP stream, which keeps its read waiting for the peer.
+    /// </summary>
+    private void AbortTransport()
+    {
+        try { UtpStream?.CloseAndStopReading(); } catch { /* Ignore disposal errors */ }
+        try { Stream?.Dispose(); } catch { /* Ignore disposal errors */ }
+    }
+
     private async Task<bool> ReadHandshakeAsync()
     {
         try
         {
-            if (Stream == null)
+            if (Stream is not { } stream)
             {
                 return false;
             }
@@ -2529,8 +2676,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             while (read < 68)
             {
-                using var timeoutCts = new CancellationTokenSource(10000);
-                int r = await Stream.ReadAsync(hBuffer.AsMemory(read, 68 - read), timeoutCts.Token).ConfigureAwait(false);
+                var (r, _) = await ReadHandshakeBytesAsync(stream, hBuffer.AsMemory(read, 68 - read), 10000).ConfigureAwait(false);
                 if (r == 0)
                 {
                     return false;
@@ -2594,18 +2740,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
-        if (Stream == null)
+        if (Stream is not { } stream)
         {
             return;
         }
 
         // Anything read off the socket along with the handshake has to be seen before the socket itself,
         // or the message stream starts part way through a message.
-        // Anything read off the socket along with the handshake has to be seen before the socket itself,
-        // or the message stream starts part way through a message.
         var source = _bufferedAfterHandshake.Length > 0
-            ? new PrefixedStream(_bufferedAfterHandshake, Stream, leaveInnerOpen: true)
-            : Stream;
+            ? new PrefixedStream(_bufferedAfterHandshake, stream, leaveInnerOpen: true)
+            : stream;
         _bufferedAfterHandshake = [];
 
         // leaveOpen: the connection stream is owned by CleanupResourcesAsync, which disposes it to close
@@ -2626,12 +2770,25 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             source,
             new StreamPipeReaderOptions(bufferSize: 4 * ProtocolConstants.BlockSize, leaveOpen: true));
         bool handshakeReceived = _handshakePreRead;
+        using var stuckReadFallback = token.UnsafeRegister(
+            static state => ((PeerCommunication)state!).EndReadIfStillPending(),
+            this);
+        _receivePipeReader = pipeReader;
 
         try
         {
             while (!token.IsCancellationRequested)
             {
-                ReadResult result = await pipeReader.ReadAsync(token).ConfigureAwait(false);
+                // No token: closing the connection is what ends this read, as end of input. A token here
+                // reaches every stream below through the pipe reader, and cancelling it on each disconnect
+                // threw from our streams into System.IO.Pipelines - an exception per closed peer, and a
+                // stop in the debugger for anyone with Just My Code on. See EndReadIfStillPending.
+                ReadResult result = await pipeReader.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+                if (result.IsCanceled)
+                {
+                    break;
+                }
+
                 Interlocked.Exchange(ref _lastActivityTicksValue, Environment.TickCount64);
                 var buffer = result.Buffer;
 
@@ -2747,8 +2904,57 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
         finally
         {
+            lock (_receiveReaderLock)
+            {
+                _receivePipeReader = null;
+                _stuckReadTimer?.Dispose();
+                _stuckReadTimer = null;
+            }
+
             await pipeReader.CompleteAsync().ConfigureAwait(false);
             Interlocked.Exchange(ref _receiveLoopState, 0);
+        }
+    }
+
+    /// <summary>
+    /// How long a closed connection's read may take to end on its own before it is cancelled. Every
+    /// transport ends a pending read when its stream is disposed - a socket, a uTP stream and a WebRTC
+    /// data channel all do - so this only matters for a stream that does not, which would otherwise
+    /// hold the receive loop forever.
+    /// </summary>
+    internal static readonly TimeSpan StuckReadGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Runs when the connection is cancelled. By then the stream has been closed, which normally ends
+    /// the read; cancelling it straight away would race that and throw. So the pipe reader's read is
+    /// cancelled only if it is still waiting after <see cref="StuckReadGrace"/>.
+    /// </summary>
+    private void EndReadIfStillPending()
+    {
+        lock (_receiveReaderLock)
+        {
+            if (_receivePipeReader is not { } reader || _stuckReadTimer != null)
+            {
+                return;
+            }
+
+            _stuckReadTimer = _timeProvider.CreateTimer(
+                static state => CancelStuckRead((PipeReader)state!),
+                reader,
+                StuckReadGrace,
+                Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    private static void CancelStuckRead(PipeReader reader)
+    {
+        try
+        {
+            reader.CancelPendingRead();
+        }
+        catch (InvalidOperationException)
+        {
+            // The loop finished and completed the reader as the timer fired: nothing left to end.
         }
     }
 
@@ -2834,7 +3040,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         }
     }
 
-    private async Task SendExtendedHandshakeAsync()
+    private async Task SendExtendedHandshakeAsync(bool isUpdate = false)
     {
         try
         {
@@ -2851,7 +3057,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // the listener that knows what was actually bound. Without it a peer we dialled sees
                 // only our ephemeral source port and can neither reconnect to us nor tell anyone else
                 // how to reach us.
-                ListenPort = _torrent.PortListener?.Port is > 0 and var bound ? bound : null,
+                ListenPort = _torrent.AdvertisedPeerPort is > 0 and var bound ? bound : null,
 
                 // BEP 10 'yourip'. The peer cannot see its own external address; we can, and telling it
                 // is how it learns. Costs four bytes and is the same courtesy we want in return.
@@ -2867,8 +3073,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 UtPex.SetLocalMessageId(2);
             }
 
-            handshake.MessageIds[UtHolepunch.Name] = 3;
-            UtHolepunch.SetLocalMessageId(3);
+            if (!_torrent.InfoFile.Info.IsPrivate && _torrent.Settings.Connection.EnableUtpOut && !_torrent.Settings.Proxy.ForceProxy)
+            {
+                handshake.MessageIds[UtHolepunch.Name] = 3;
+                UtHolepunch.SetLocalMessageId(3);
+            }
 
             // BEP 30: Advertise ut_hash_piece support for Merkle hash torrents
             if (UtHashPiece != null)
@@ -2894,7 +3103,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 handshake.MetadataSize = _torrent.InfoFile.InfoBytes.Length;
             }
 
-            using var result = BencodeWriter.WriteToResult(handshake.ToBencode());
+            var encodedHandshake = handshake.ToBencode();
+            // Updates must explicitly clear upload_only when the selection starts needing data again.
+            if (isUpdate) encodedHandshake.Dict["upload_only"] = new BNumber(handshake.IsUploadOnly ? 1 : 0);
+            using var result = BencodeWriter.WriteToResult(encodedHandshake);
 
             var msg = new PeerMessage(MessageId.Extended)
             {
@@ -2910,12 +3122,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private async Task SendHandshakeAsync()
     {
-        if (Stream == null)
+        if (Stream is not { } stream)
         {
             return;
         }
 
-        await Stream.WriteAsync(CreateHandshakeBuffer(), CancellationToken.None).ConfigureAwait(false);
+        await stream.WriteAsync(CreateHandshakeBuffer(), CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task SendLoopAsync(CancellationToken token)
@@ -2932,6 +3144,14 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 int batchCount = 0;
                 while (_sendQueue.TryDequeue(out var msg))
                 {
+                    // Completed means the connection is closing and the stream is going or gone. What is
+                    // left in the queue is released unsent rather than written into a closed socket.
+                    if (_sendQueue.IsCompleted)
+                    {
+                        msg.Dispose();
+                        continue;
+                    }
+
                     try
                     {
                         var writeStart = _timeProvider.GetUtcNow();
@@ -3016,10 +3236,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return false;
             }
 
-            using var timeoutCts = new CancellationTokenSource(timeoutMs);
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ConnectionToken);
-            await _sendQueue.EnqueueAsync(msg, linkedCts.Token).ConfigureAwait(false);
-            return true;
+            if (await _sendQueue.TryEnqueueWithinAsync(msg, TimeSpan.FromMilliseconds(timeoutMs)).ConfigureAwait(false))
+            {
+                return true;
+            }
+
+            msg.Dispose();
+            return false;
         }
         catch (ChannelClosedException)
         {
@@ -3036,9 +3259,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private async Task WriteMessageToStreamAsync(PeerMessage msg, CancellationToken token)
     {
-        if (Stream == null)
+        // Read once: the connection can close between a check and a use, clearing the property - which
+        // was a NullReferenceException. With no stream the connection is already closing, and the
+        // message goes nowhere, as everything else still queued does.
+        if (Stream is not { } stream)
         {
-            throw new InvalidOperationException("Cannot write message: stream is not connected");
+            return;
         }
 
         if (msg.Id == MessageId.Interested)
@@ -3058,7 +3284,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         try
         {
             int written = PeerProtocol.WriteMessage(msg, packet.AsSpan(0, len));
-            await Stream.WriteAsync(packet.AsMemory(0, written), token).ConfigureAwait(false);
+            await stream.WriteAsync(packet.AsMemory(0, written), token).ConfigureAwait(false);
         }
         finally
         {

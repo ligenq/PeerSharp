@@ -48,6 +48,7 @@ internal sealed class PieceState : IDisposable
     private int _receivedCount;
     private bool _disposed;
     private bool _hasWebSeedContributor;
+    private DateTimeOffset _retryVerificationAt;
 
     public PieceState(int index, int blocksCount)
     {
@@ -189,6 +190,51 @@ internal sealed class PieceState : IDisposable
         Dispose();
     }
 
+    public bool TryDisposeIfInactive()
+    {
+        lock (_lock)
+        {
+            if (_isWriting || _receivedCount == Blocks.Length)
+            {
+                return false;
+            }
+            Dispose();
+            return true;
+        }
+    }
+
+    public void ReleaseWriting(DateTimeOffset retryAt = default)
+    {
+        lock (_lock)
+        {
+            _isWriting = false;
+            _retryVerificationAt = retryAt;
+        }
+    }
+
+    public TorrentStateData.UnfinishedPieceData? CaptureResumeData(int pieceSize)
+    {
+        lock (_lock)
+        {
+            if (_disposed || _receivedCount == 0)
+            {
+                return null;
+            }
+            var data = new byte[pieceSize];
+            var flags = new bool[Blocks.Length];
+            for (int i = 0; i < BlockData.Length; i++)
+            {
+                var block = BlockData[i];
+                if (block != null)
+                {
+                    block.Data.Span.CopyTo(data.AsSpan(i * ProtocolConstants.BlockSize, block.Length));
+                    flags[i] = true;
+                }
+            }
+            return new TorrentStateData.UnfinishedPieceData { Index = Index, Blocks = flags, Data = data };
+        }
+    }
+
     public long GetReceivedBytes(long pieceStartOffset, uint pieceSize, long torrentFullSize, long rangeStart, long rangeSize)
     {
         lock (_lock)
@@ -281,7 +327,7 @@ internal sealed class PieceState : IDisposable
     {
         lock (_lock)
         {
-            if (_isWriting)
+            if (_disposed || _isWriting)
             {
                 return false;
             }
@@ -312,7 +358,7 @@ internal sealed class PieceState : IDisposable
     {
         lock (_lock)
         {
-            if (_isWriting)
+            if (_disposed || _isWriting)
             {
                 return false;
             }
@@ -340,11 +386,11 @@ internal sealed class PieceState : IDisposable
     /// Returns true only when the piece is fully received and this call was the one that claimed
     /// it, so exactly one caller ever writes a given piece.
     /// </summary>
-    public bool TryCompleteAndSetWriting()
+    public bool TryCompleteAndSetWriting(DateTimeOffset now = default)
     {
         lock (_lock)
         {
-            if (_receivedCount != Blocks.Length)
+            if (_disposed || Blocks.Length == 0 || _receivedCount != Blocks.Length || now < _retryVerificationAt)
             {
                 return false;
             }
@@ -533,7 +579,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         var requestTimeoutLogger = loggerFactory.CreateLogger<RequestTimeoutManager>();
         _requestTimeoutManager = new RequestTimeoutManager(
             _requestTracker,
-            RemoveBlockRequest,
+            (_, _, _) => { },
             GetAdaptiveHardTimeout,
             requestTimeoutLogger,
             MaxRequestAttempts);
@@ -541,15 +587,14 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         var pieceCompletionLogger = loggerFactory.CreateLogger<PieceCompletionHandler>();
         _pieceCompletionHandler = new PieceCompletionHandler(
             _requestTracker,
-            RemoveBlockRequest,
+            (_, _, _) => { },
             _torrent,
             pieceCompletionLogger);
 
         var blockProcessorLogger = loggerFactory.CreateLogger<BlockProcessor>();
         var requestCompletionTracker = new RequestCompletionTracker(
             _requestTracker,
-            _timeProvider,
-            RemoveBlockRequest);
+            _timeProvider);
         _blockProcessor = new BlockProcessor(new BlockProcessorOptions
         {
             PieceStateManager = _pieceStateManager,
@@ -664,10 +709,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     private void ReleasePendingRequest(PeerCommunication peer, Block block)
     {
         var key = (block.PieceIndex, block.Offset);
-        if (_requestTracker.TryRemovePeerRequest(peer, key, out var r))
-        {
-            RemoveBlockRequest(r.PieceIndex, r.Offset, peer);
-        }
+        _requestTracker.TryRemovePeerRequest(peer, key, out _);
     }
 
     /// <summary>
@@ -712,9 +754,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         }
 
         var key = (msg.PieceIndex, msg.BlockOffset);
-        if (_requestTracker.TryRemovePeerRequest(peer, key, out var r))
+        if (!_requestTracker.TryGetPeerRequests(peer, out var requests) ||
+            !requests.TryGetValue(key, out var request) || request.Length != msg.BlockLength ||
+            !_requestTracker.TryRemovePeerRequest(peer, key, out _, request))
         {
-            RemoveBlockRequest(r.PieceIndex, r.Offset, peer);
+            return;
         }
 
         // The peer has gone back on an offer. Keeping it would have us ask for the same piece again and
@@ -749,7 +793,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         string? rejectReason = null;
 
-        if (peer.AmChoking && !peer.IsAllowedFast(msg.PieceIndex))
+        if (peer.AmChoking && !peer.IsUploadAllowedFast(msg.PieceIndex))
         {
             rejectReason = "we are choking this peer and the piece is not allowed-fast";
         }
@@ -1014,22 +1058,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
                 budget -= pSize;
 
-                var data = new byte[pSize];
-                for (int i = 0; i < piece.BlockData.Length; i++)
+                var saved = piece.CaptureResumeData(checked((int)pSize));
+                if (saved != null)
                 {
-                    var b = piece.BlockData[i];
-                    if (b != null)
-                    {
-                        Array.Copy(b.Buffer, 0, data, i * BlockSize, b.Length);
-                    }
+                    list.Add(saved);
                 }
-
-                list.Add(new TorrentStateData.UnfinishedPieceData
-                {
-                    Index = piece.Index,
-                    Blocks = (bool[])piece.Blocks.Clone(),
-                    Data = data
-                });
             }
         }
 
@@ -1077,6 +1110,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         foreach (var p in pieces)
         {
+            if (p == null)
+            {
+                continue;
+            }
             if (_torrent.Pieces.HasPiece(p.Index))
             {
                 continue;
@@ -1093,13 +1130,13 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
             long pieceSize = _torrent.InfoFile.Info.GetPieceSize(p.Index);
             int expectedBlocks = (int)((pieceSize + BlockSize - 1) / BlockSize);
-            if (p.Blocks.Length != expectedBlocks || p.Data.Length < pieceSize)
+            if (p.Blocks == null || p.Data == null || p.Blocks.Length != expectedBlocks || p.Data.Length != pieceSize)
             {
                 Logger.LogWarning(
                     "Ignoring resumed piece {PieceIndex}: {Blocks} block flags and {DataLength} bytes do not describe a {PieceSize}-byte piece",
                     p.Index,
-                    p.Blocks.Length,
-                    p.Data.Length,
+                    p.Blocks?.Length ?? 0,
+                    p.Data?.Length ?? 0,
                     pieceSize);
                 continue;
             }
@@ -1114,7 +1151,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 {
                     count++;
                     int offset = i * BlockSize;
-                    int len = Math.Min(BlockSize, p.Data.Length - offset);
+                    int len = (int)Math.Min(BlockSize, pieceSize - offset);
                     var block = new Block(p.Index, offset, len);
                     Array.Copy(p.Data, offset, block.Buffer, 0, len);
                     state.BlockData[i] = block;
@@ -1182,6 +1219,16 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         }
 
         var now = _timeProvider.GetUtcNow();
+
+        // Complete resumed pieces and pieces waiting for authenticated hashes need no more blocks.
+        // Retry them without occupying the hash worker while proofs are still unavailable.
+        foreach (var piece in _pieceStateManager.ActivePieces.Values)
+        {
+            if (piece.TryCompleteAndSetWriting(now) && !_pieceProcessingQueue.Writer.TryWrite(piece))
+            {
+                piece.ReleaseWriting();
+            }
+        }
 
         if ((now - _lastQueueStatusLog).TotalSeconds >= 5)
         {
@@ -1288,10 +1335,12 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             _torrent.Settings.Transfer.RemoveConcurrencyLimitListener(this);
             try
             {
-                await _cts.CancelAsync().ConfigureAwait(false);
+                // Queues first, so idle workers see them finish and return instead of each waking with
+                // an OperationCanceledException. Cancelling then stops the ones in the middle of a piece.
                 _incomingBlocks.Writer.TryComplete();
                 _peerEvaluationQueue.Writer.TryComplete();
                 _pieceProcessingQueue.Writer.TryComplete();
+                await _cts.CancelAsync().ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -1455,7 +1504,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         return (int)Math.Clamp(timeout, minMs, maxMs);
     }
 
-    private async Task CancelBlockRequestAsync(int pieceIndex, int offset, PeerCommunication source)
+    private async Task CancelBlockRequestAsync(int pieceIndex, int offset, PeerCommunication? source)
     {
         var key = (pieceIndex, offset);
         if (_requestTracker.TryGetBlockPeers(key, out var list))
@@ -1473,6 +1522,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             // Now cancel and remove
             foreach (var (peer, req) in peersToCancel)
             {
+                if (!_requestTracker.TryRemovePeerRequest(peer, key, out _, req))
+                {
+                    continue;
+                }
                 await peer.SendMessageAsync(new PeerMessage(MessageId.Cancel)
                 {
                     PieceIndex = pieceIndex,
@@ -1480,9 +1533,6 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                     BlockLength = req.Length
                 }).ConfigureAwait(false);
 
-                _requestTracker.TryRemovePeerRequest(peer, key, out _);
-
-                RemoveBlockRequest(pieceIndex, offset, peer);
             }
         }
     }
@@ -1524,10 +1574,8 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 catch (Exception ex)
                 {
                     Logger.LogError(ex, "Error processing block from {RemoteEndPoint}", item.Peer.RemoteEndPoint);
-                    // Ensure block is disposed even on error
-                    item.Block.Dispose();
-                    // And free its request slot so the block gets re-requested promptly
-                    ReleasePendingRequest(item.Peer, item.Block);
+                    // BlockProcessor owns disposal and request completion, including its error path.
+                    // The block may now belong to a complete piece waiting to retry its enqueue.
                 }
             }
         }
@@ -1625,6 +1673,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
             using (outcome)
             {
+                if (!outcome.HashSuccess && !outcome.HashFailed)
+                {
+                    pieceToProcess.ReleaseWriting(_timeProvider.GetUtcNow() + HashRequestRetryInterval);
+                    return;
+                }
                 bool writeFailed = false;
                 if (outcome.HashSuccess)
                 {
@@ -1757,22 +1810,19 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         catch (OperationCanceledException)
         {
             // Graceful shutdown
+            pieceToProcess.ReleaseWriting();
         }
         catch (Exception ex)
         {
             // Log unhandled exceptions in fire-and-forget task to prevent silent failures
             Logger.LogError(ex, "Error processing piece {PieceIndex}", pieceToProcess.Index);
+            pieceToProcess.ReleaseWriting();
         }
     }
 
     private void PruneStalePieces()
     {
         _pieceStateManager.PruneStalePieces();
-    }
-
-    private void RemoveBlockRequest(int piece, int offset, PeerCommunication peer)
-    {
-        _requestTracker.RemoveBlockRequest(piece, offset, peer);
     }
 
     /// <summary>

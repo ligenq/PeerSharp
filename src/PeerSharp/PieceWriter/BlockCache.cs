@@ -29,6 +29,7 @@ internal class BlockCache : IBlockCache
     private readonly ConcurrentDictionary<long, byte> _readAheadInFlight = new();
     private readonly SemaphoreSlim _readAheadSemaphore = new(2, 2);
     private long _writeGeneration;
+    private readonly SemaphoreSlim _writeSemaphore = new(1, 1);
     // 16KB
 
     public BlockCache(int capacityBytes, int readAheadBlocks, bool readAheadEnabled, long totalSize)
@@ -50,12 +51,31 @@ internal class BlockCache : IBlockCache
         _storage = storage;
     }
 
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            // Preserve odd/even writer state while excluding reads started before this clear.
+            Interlocked.Add(ref _writeGeneration, 2);
+            foreach (var block in _blocks.Values)
+            {
+                CachePool.Return(block.Data);
+            }
+            _blocks.Clear();
+            _lruList.Clear();
+            _currentBytes = 0;
+        }
+    }
+
     public async Task<bool> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
     {
+        ObjectDisposedException.ThrowIf(_disposal.IsDisposed, this);
+        ct.ThrowIfCancellationRequested();
         if (_storage == null)
         {
             throw new InvalidOperationException("BlockCache not initialized");
         }
+        ValidateRange(offset, buffer.Length);
 
         // We only cache strictly aligned 16KB blocks to keep logic simple and fast.
         // If request is not 16KB or not aligned, bypass cache (or handle partials).
@@ -92,40 +112,69 @@ internal class BlockCache : IBlockCache
 
     public async Task WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
     {
+        ObjectDisposedException.ThrowIf(_disposal.IsDisposed, this);
         if (_storage == null)
         {
             throw new InvalidOperationException("BlockCache not initialized");
         }
-
-        // Write-Through: Write to storage first
-        await _storage.WriteAsync(offset, data, ct).ConfigureAwait(false);
-
-        // Increment before touching the cache. Any miss or prefetch that started before this write
-        // must either observe the increment and decline admission, or admit first and then be
-        // refreshed/invalidated by the cache operations below.
-        Interlocked.Increment(ref _writeGeneration);
-
-        // Populate the cache, walking the aligned blocks this write touches rather than the write's
-        // own chunks. Every touched block ends up in one of two states and never in between: fully
-        // rewritten by this data and therefore refreshed, or only partly covered and therefore
-        // dropped.
-        //
-        // Dropping the partial ones is the part that matters. Only whole aligned blocks are cached,
-        // so an earlier version simply skipped a partial write here - leaving any block it overlapped
-        // holding pre-write bytes, which the next aligned read served in preference to storage. The
-        // last block of a torrent is partial, and repair and end-game rewrite blocks that have
-        // already been read, so this is reachable and it hands stale data to peers.
-        long end = offset + data.Length;
-        for (long blockOffset = offset / BlockSize * BlockSize; blockOffset < end; blockOffset += BlockSize)
+        ValidateRange(offset, data.Length);
+        ct.ThrowIfCancellationRequested();
+        if (data.IsEmpty)
         {
-            if (blockOffset >= offset && blockOffset + BlockSize <= end)
-            {
-                AddToCache(blockOffset, data.Slice((int)(blockOffset - offset), BlockSize).Span);
-            }
-            else
+            return;
+        }
+
+        await _writeSemaphore.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // Odd generations prohibit cache hits and admission while storage is being changed.
+            // Serialize writers so their cache updates retain the same order as their disk writes.
+            Interlocked.Increment(ref _writeGeneration);
+            long writeEnd = checked(offset + data.Length);
+            for (long blockOffset = offset / BlockSize * BlockSize; blockOffset < writeEnd;
+                blockOffset = writeEnd - blockOffset <= BlockSize ? writeEnd : blockOffset + BlockSize)
             {
                 Invalidate(blockOffset);
             }
+            await _storage.WriteAsync(offset, data, ct).ConfigureAwait(false);
+
+            // Populate the cache, walking the aligned blocks this write touches rather than the write's
+            // own chunks. Every touched block ends up in one of two states and never in between: fully
+            // rewritten by this data and therefore refreshed, or only partly covered and therefore
+            // dropped.
+            //
+            // Dropping the partial ones is the part that matters. Only whole aligned blocks are cached,
+            // so an earlier version simply skipped a partial write here - leaving any block it overlapped
+            // holding pre-write bytes, which the next aligned read served in preference to storage. The
+            // last block of a torrent is partial, and repair and end-game rewrite blocks that have
+            // already been read, so this is reachable and it hands stale data to peers.
+            long end = offset + data.Length;
+            for (long blockOffset = offset / BlockSize * BlockSize; blockOffset < end;
+                blockOffset = end - blockOffset <= BlockSize ? end : blockOffset + BlockSize)
+            {
+                if (blockOffset >= offset && end - blockOffset >= BlockSize)
+                {
+                    AddToCache(blockOffset, data.Slice((int)(blockOffset - offset), BlockSize).Span);
+                }
+                else
+                {
+                    Invalidate(blockOffset);
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Increment(ref _writeGeneration);
+            _writeSemaphore.Release();
+        }
+    }
+
+    private void ValidateRange(long offset, int length)
+    {
+        if (offset < 0 || length > long.MaxValue - offset ||
+            (_totalSize > 0 && (offset > _totalSize || length > _totalSize - offset)))
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset));
         }
     }
 
@@ -154,7 +203,8 @@ internal class BlockCache : IBlockCache
             return;
         }
 
-        if (_totalSize > 0 && startOffset + BlockSize > _totalSize)
+        if (startOffset > long.MaxValue - BlockSize ||
+            (_totalSize > 0 && (startOffset > _totalSize || BlockSize > _totalSize - startOffset)))
         {
             return;
         }
@@ -190,8 +240,12 @@ internal class BlockCache : IBlockCache
         int blocks = 0;
         for (int i = 0; i < _readAheadBlocks; i++)
         {
+            if (startOffset > long.MaxValue - ((i + 1L) * BlockSize))
+            {
+                break;
+            }
             long offset = startOffset + (i * BlockSize);
-            if (_totalSize > 0 && offset + BlockSize > _totalSize)
+            if (_totalSize > 0 && (offset > _totalSize || BlockSize > _totalSize - offset))
             {
                 break;
             }
@@ -273,7 +327,7 @@ internal class BlockCache : IBlockCache
             // Make the generation check and admission indivisible with respect to the writer's
             // cache refresh. Otherwise a writer can update the cache after this check but before
             // AddToCache takes the lock, letting the older read overwrite it last.
-            if (writeGeneration == Volatile.Read(ref _writeGeneration))
+            if ((writeGeneration & 1) == 0 && writeGeneration == Volatile.Read(ref _writeGeneration))
             {
                 AddToCacheLocked(offset, data);
             }
@@ -282,6 +336,10 @@ internal class BlockCache : IBlockCache
 
     private void AddToCacheLocked(long offset, ReadOnlySpan<byte> data)
     {
+        if (_disposal.IsDisposed)
+        {
+            return;
+        }
         if (_blocks.TryGetValue(offset, out var existing))
         {
             // Refresh the cached contents: the same offset can be written again with
@@ -358,7 +416,7 @@ internal class BlockCache : IBlockCache
     {
         lock (_lock)
         {
-            if (_blocks.TryGetValue(offset, out var block))
+            if ((Volatile.Read(ref _writeGeneration) & 1) == 0 && _blocks.TryGetValue(offset, out var block))
             {
                 // Move to MRU
                 _lruList.Remove(block.Node);

@@ -65,7 +65,11 @@ public class SocketConnectTests
         ];
 
         int thrown = 0;
-        void Count(object? sender, FirstChanceExceptionEventArgs e) => Interlocked.Increment(ref thrown);
+        var connecting = new AsyncLocal<bool>();
+        void Count(object? sender, FirstChanceExceptionEventArgs e)
+        {
+            if (connecting.Value) Interlocked.Increment(ref thrown);
+        }
 
         AppDomain.CurrentDomain.FirstChanceException += Count;
         try
@@ -78,7 +82,11 @@ public class SocketConnectTests
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
                     cts.CancelAfter(TimeSpan.FromMilliseconds(300));
 
+                    // Background work from other completed tests can still raise exceptions.
+                    // Count only this connect's execution context, including its cancellation callback.
+                    connecting.Value = true;
                     var error = await SocketConnect.ConnectAsync(socket, target, cts.Token);
+                    connecting.Value = false;
 
                     Assert.NotEqual(SocketError.Success, error);
                 }

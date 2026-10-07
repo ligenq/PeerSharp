@@ -32,7 +32,7 @@ public class DhtItemStoreTests
         var item = new DhtImmutableItem { Value = Text("hello") };
 
         Assert.Equal(DhtPutError.None, store.Store(item));
-        Assert.Same(item, store.TryGet(item.Target));
+        Assert.Equal(BencodeWriter.Write(item.Value), BencodeWriter.Write(store.TryGet(item.Target)!.Value));
     }
 
     [Fact]
@@ -42,7 +42,7 @@ public class DhtItemStoreTests
         var item = DhtItemCodec.CreateSigned(Ed25519.GenerateSeed(), [], 1, Text("value"));
 
         Assert.Equal(DhtPutError.None, store.Store(item));
-        Assert.Same(item, store.TryGet(item.Target));
+        Assert.Equal(BencodeWriter.Write(item.Value), BencodeWriter.Write(store.TryGet(item.Target)!.Value));
     }
 
     [Fact]

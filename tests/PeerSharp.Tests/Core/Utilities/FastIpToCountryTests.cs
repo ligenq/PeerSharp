@@ -7,6 +7,61 @@ namespace PeerSharp.Tests.Core.Utilities;
 public class FastIpToCountryTests
 {
     [Fact]
+    public void Load_HandlesShortReadsAndMappedAddresses()
+    {
+        using var database = CreateDatabase();
+        using var stream = new ShortReadStream(database.ToArray());
+        var geo = new FastIpToCountry();
+        geo.Load(stream);
+        Assert.Equal("US", geo.GetCountry(IPAddress.Parse("::ffff:1.2.3.4")));
+        Assert.Equal("GB", geo.GetCountry(IPAddress.Parse("1.11.0.1")));
+    }
+
+    [Fact]
+    public void Load_ReplacesPreviousDatabase()
+    {
+        using var first = CreateDatabase();
+        var geo = new FastIpToCountry();
+        geo.Load(first);
+        using var replacement = new MemoryStream();
+        replacement.Write(Encoding.ASCII.GetBytes("SE\n\n"));
+        WriteEntry(replacement, 0, 0x4545);
+        WriteEntry(replacement, 0x01000000, 0);
+        WriteEntry(replacement, 0, 0x4545);
+        replacement.Position = 0;
+        geo.Load(replacement);
+        Assert.Equal("SE", geo.GetCountry(IPAddress.Parse("1.11.0.1")));
+    }
+
+    [Theory]
+    [InlineData(0)] // Truncated entry
+    [InlineData(1)] // Invalid country
+    [InlineData(2)] // Wrong bucket
+    [InlineData(3)] // Unsorted ranges
+    [InlineData(4)] // Unbounded country line
+    public async Task LoadAsync_InvalidReloadPreservesDatabase(int corruption)
+    {
+        using var first = CreateDatabase();
+        var geo = new FastIpToCountry();
+        geo.Load(first);
+        using var invalid = new MemoryStream();
+        invalid.Write(Encoding.ASCII.GetBytes(corruption == 4 ? new string('X', 4097) + "\n\n" : "SE\n\n"));
+        WriteEntry(invalid, 0, 0x4545);
+        WriteEntry(invalid, corruption == 2 ? 0x02000000u : 0x01010000u, corruption == 1 ? (ushort)5 : (ushort)0);
+        if (corruption == 3) WriteEntry(invalid, 0x01000000, 0);
+        WriteEntry(invalid, 0, 0x4545);
+        if (corruption == 0) invalid.SetLength(invalid.Length - 1);
+        invalid.Position = 0;
+        await geo.LoadAsync(invalid);
+        Assert.Equal("GB", geo.GetCountry(IPAddress.Parse("1.11.0.1")));
+    }
+
+    private sealed class ShortReadStream(byte[] data) : MemoryStream(data)
+    {
+        public override int Read(Span<byte> buffer) => base.Read(buffer[..Math.Min(buffer.Length, 1)]);
+    }
+
+    [Fact]
     public void GetCountry_FindsCorrectCountry()
     {
         // Construct a mock database

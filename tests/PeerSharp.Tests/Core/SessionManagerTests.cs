@@ -274,6 +274,48 @@ public class SessionManagerTests
         Assert.Equal(hash, _persistence.LastDeletedHash);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task DeleteWaitsForAnInFlightSaveAndStaleSavesCannotRecreateTheEntry()
+    {
+        await using var torrent = TorrentTestUtility.CreateMinimal();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _persistence.SaveGate = release;
+        var saving = _sessionManager.SaveTorrentEntryAsync(torrent);
+        await TorrentTestUtility.WaitUntilAsync(() => _persistence.PeakConcurrentSaves == 1);
+        var deleting = _sessionManager.DeleteAsync(torrent.SessionHash, CancellationToken.None);
+        Assert.False(_persistence.DeleteCalled);
+        release.SetResult();
+        await Task.WhenAll(saving, deleting);
+        await _sessionManager.SaveTorrentEntryAsync(torrent);
+        Assert.Empty(_persistence.SavedEntries);
+        _sessionManager.RegisterTorrentData(torrent.SessionHash, [2], null);
+        await _sessionManager.SaveTorrentEntryAsync(torrent);
+        Assert.Equal(new byte[] { 2 }, Assert.Single(_persistence.SavedEntries).TorrentFileData);
+    }
+
+    [Fact]
+    public async Task AutoSaveCannotBeRestartedAfterDisposal()
+    {
+        await _sessionManager.DisposeAsync();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => _sessionManager.InitializeAutoSaveAsync(10));
+    }
+
+    [Fact]
+    public async Task OldTorrentCleanupCannotDeleteOrOverwriteItsReplacement()
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Hash = InfoHash.CreateRandom();
+        await using var old = TorrentTestUtility.CreateMinimal(metadata);
+        await using var replacement = TorrentTestUtility.CreateMinimal(metadata);
+        _registry.Add(replacement);
+        _sessionManager.RegisterTorrentData(replacement.SessionHash, [2], null);
+        await _sessionManager.SaveTorrentEntryAsync(replacement);
+        await _sessionManager.DeleteAsync(old, CancellationToken.None);
+        await _sessionManager.SaveTorrentEntryAsync(old, [1]);
+        Assert.Equal(new byte[] { 2 }, Assert.Single(_persistence.SavedEntries).TorrentFileData);
+        Assert.False(_persistence.DeleteCalled);
+    }
+
     [Fact]
     public async Task Dispose_CancelsAutoSaveLoop()
     {

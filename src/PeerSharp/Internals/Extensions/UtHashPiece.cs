@@ -182,14 +182,13 @@ internal class UtHashPiece : IUtHashPiece
         var hashes = hashesData.Value;
         int hashCount = hashes.Length / MerkleTreeSha1.HashSize;
 
-        if (hashCount < 1)
+        if (hashes.Length % MerkleTreeSha1.HashSize != 0 || hashCount != _merkleTree.GetDepth())
         {
             return;
         }
 
         // First hash is the piece hash
         byte[] pieceHash = hashes[..MerkleTreeSha1.HashSize].ToArray();
-        _merkleTree.SetPieceHash(pieceIndex, pieceHash);
 
         // Remaining hashes are uncle hashes
         var uncles = new List<byte[]>();
@@ -199,14 +198,17 @@ internal class UtHashPiece : IUtHashPiece
             uncles.Add(uncle);
         }
 
-        _merkleTree.SetUncleHashes(pieceIndex, uncles);
+        if (!_merkleTree.TryAddPieceProof(pieceIndex, pieceHash, uncles))
+        {
+            _logger.LogDebug("BEP 30: Rejected invalid proof for piece {PieceIndex}", pieceIndex);
+            return;
+        }
 
         // Also update the shared Merkle tree in Torrent for verification
         var sharedTree = _torrent.MerkleTree;
         if (sharedTree != null)
         {
-            sharedTree.SetPieceHash(pieceIndex, pieceHash);
-            sharedTree.SetUncleHashes(pieceIndex, uncles);
+            sharedTree.TryAddPieceProof(pieceIndex, pieceHash, uncles);
         }
 
         _logger.LogDebug("BEP 30: Received {HashCount} hashes for piece {PieceIndex} from {RemoteEndPoint}", hashCount, pieceIndex, _peer.RemoteEndPoint);

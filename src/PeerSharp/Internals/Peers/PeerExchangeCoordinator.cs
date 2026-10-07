@@ -98,7 +98,7 @@ internal sealed class PeerExchangeCoordinator
             if (peer.PeerPieces != null && peer.PeerPieces.ReceivedCount == peer.PeerPieces.Count) flags |= (byte)UtPex.Peer.Seed;
             if (peer.UtpStream != null) flags |= (byte)UtPex.Peer.Utp;
             if (peer.Stream is EncryptedStream) flags |= (byte)UtPex.Peer.Encryption;
-            if (peer.RemoteExtensions?.MessageIds.ContainsKey(UtHolepunch.Name) == true) flags |= (byte)UtPex.Peer.Holepunch;
+            if (peer.RemoteExtensions?.GetEnabledMessageId(UtHolepunch.Name) != null) flags |= (byte)UtPex.Peer.Holepunch;
             peerData.Add((shareable, flags));
         }
 

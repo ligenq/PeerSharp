@@ -32,34 +32,11 @@ public class StreamingControllerTests
     #region Properties Tests
 
     [Fact]
-    public void DownloadStrategy_DefaultsToRarestFirst()
+    public void NothingIsStreamingUntilAStreamIsOpened()
     {
-        Assert.Equal(DownloadStrategy.RarestFirst, _controller.DownloadStrategy);
-    }
-
-    [Fact]
-    public void DownloadStrategy_CanBeSet()
-    {
-        _controller.DownloadStrategy = DownloadStrategy.Sequential;
-        Assert.Equal(DownloadStrategy.Sequential, _controller.DownloadStrategy);
-
-        _controller.DownloadStrategy = DownloadStrategy.Streaming;
-        Assert.Equal(DownloadStrategy.Streaming, _controller.DownloadStrategy);
-    }
-
-    [Fact]
-    public void PriorityPieces_DefaultsToNull()
-    {
+        Assert.False(_controller.IsStreaming);
         Assert.Null(_controller.PriorityPieces);
-    }
-
-    [Fact]
-    public void PriorityPieces_CanBeSet()
-    {
-        var pieces = new List<int> { 1, 2, 3 };
-        _controller.PriorityPieces = pieces;
-
-        Assert.Equal(pieces, _controller.PriorityPieces);
+        Assert.Equal(DownloadStrategy.RarestFirst, _torrent.EffectiveDownloadStrategy);
     }
 
     #endregion
@@ -131,14 +108,29 @@ public class StreamingControllerTests
     }
 
     [Fact(Timeout = 30000)]
-    public async Task OpenStreamAsync_SetsActiveStream()
+    public async Task OpenStreamAsync_PutsThePickerIntoStreamingMode()
     {
         await _torrent.StartAsync();
 
         await using var stream = await _controller.OpenStreamAsync(0);
 
-        Assert.Equal(DownloadStrategy.Streaming, _controller.DownloadStrategy);
+        Assert.True(_controller.IsStreaming);
+        Assert.Equal(DownloadStrategy.Streaming, _torrent.EffectiveDownloadStrategy);
         Assert.NotNull(_controller.PriorityPieces);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task OpeningAStream_DoesNotChangeTheConfiguredStrategy()
+    {
+        // The configured strategy is what gets saved with the session. Streaming is an override for
+        // as long as a stream is open, and must not be persisted as though it were the user's choice.
+        _torrent.DownloadStrategy = DownloadStrategy.Sequential;
+        await _torrent.StartAsync();
+
+        await using var stream = await _controller.OpenStreamAsync(0);
+
+        Assert.Equal(DownloadStrategy.Sequential, _torrent.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.Streaming, _torrent.EffectiveDownloadStrategy);
     }
 
     [Fact(Timeout = 30000)]
@@ -164,20 +156,56 @@ public class StreamingControllerTests
     }
 
     [Fact(Timeout = 30000)]
-    public async Task OpenStreamAsync_ReplacesActiveStream()
+    public async Task EveryOpenStream_HasItsPiecesPrioritised()
+    {
+        // Two streams at once is ordinary: a player reading the playhead while fetching an index from
+        // the end of the file, or two files played side by side. Neither may lose its priorities.
+        await _torrent.StartAsync();
+
+        await using var video = await _controller.OpenStreamAsync(0);
+        await using var audio = await _controller.OpenStreamAsync(2);
+
+        Assert.Contains(0, _controller.PriorityPieces!);  // video.mp4 starts at piece 0
+        Assert.Contains(15, _controller.PriorityPieces!); // audio.mp3 starts at piece 15
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task TheStreamReadMostRecently_HasItsPiecesFirst()
     {
         await _torrent.StartAsync();
 
-        await using var stream1 = await _controller.OpenStreamAsync(0);
-        await using var stream2 = await _controller.OpenStreamAsync(2);
+        await using var video = await _controller.OpenStreamAsync(0);
+        await using var audio = await _controller.OpenStreamAsync(2);
+        Assert.Equal(15, _controller.PriorityPieces![0]);
 
-        // Second stream should be active, first is replaced
-        Assert.Equal(DownloadStrategy.Streaming, _controller.DownloadStrategy);
+        video.Seek(5000, SeekOrigin.Begin);
+
+        Assert.Equal(5, _controller.PriorityPieces![0]);
     }
 
     #endregion
 
     #region OnPieceVerified Tests
+
+    [Fact(Timeout = 30000)]
+    public async Task OnPieceVerified_WakesAnOlderStreamToo()
+    {
+        await _torrent.StartAsync();
+        await using var older = await _controller.OpenStreamAsync(0);
+        await using var newer = await _controller.OpenStreamAsync(2);
+
+        var buffer = new byte[100];
+        var readTask = older.ReadAsync(buffer, 0, 100);
+        await Task.Delay(50);
+        Assert.False(readTask.IsCompleted);
+
+        _torrent.Pieces.AddPiece(0);
+        _controller.OnPieceVerified(0);
+
+        // Well inside the one-second poll the reader would otherwise fall back on.
+        int read = await readTask.WaitAsync(TimeSpan.FromMilliseconds(500));
+        Assert.Equal(100, read);
+    }
 
     [Fact(Timeout = 30000)]
     public async Task OnPieceVerified_ForwardsToActiveStream()
@@ -222,7 +250,7 @@ public class StreamingControllerTests
     #region OnStreamDisposed Tests
 
     [Fact(Timeout = 30000)]
-    public async Task OnStreamDisposed_ClearsActiveStream()
+    public async Task ClosingTheLastStream_EndsStreamingMode()
     {
         await _torrent.StartAsync();
         var stream = await _controller.OpenStreamAsync(0);
@@ -231,35 +259,162 @@ public class StreamingControllerTests
 
         stream.Dispose();
 
+        Assert.False(_controller.IsStreaming);
         Assert.Null(_controller.PriorityPieces);
-        Assert.Equal(DownloadStrategy.RarestFirst, _controller.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.RarestFirst, _torrent.EffectiveDownloadStrategy);
     }
 
     [Fact(Timeout = 30000)]
-    public async Task OnStreamDisposed_OnlyAffectsMatchingStream()
+    public async Task ClosingTheNewerStream_KeepsTheOlderOneStreaming()
+    {
+        // The regression this design exists for. A Chromecast reads an MP4 from the playhead on one
+        // request and fetches its index from the end on another, then closes that one. Only the
+        // latest stream used to be tracked, so closing it put the whole torrent back on rarest-first
+        // while the playhead's reader was still open - and that reader stalled until it timed out.
+        await _torrent.StartAsync();
+
+        await using var playhead = await _controller.OpenStreamAsync(0);
+        var index = await _controller.OpenStreamAsync(0);
+        index.Seek(-500, SeekOrigin.End);
+
+        await index.DisposeAsync();
+
+        Assert.True(_controller.IsStreaming);
+        Assert.Equal(DownloadStrategy.Streaming, _torrent.EffectiveDownloadStrategy);
+        Assert.Contains(0, _controller.PriorityPieces!);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ClosingTheOlderStreamFirst_AlsoKeepsStreaming()
     {
         await _torrent.StartAsync();
 
-        var stream1 = await _controller.OpenStreamAsync(0);
-        var stream2 = await _controller.OpenStreamAsync(2);
+        var older = await _controller.OpenStreamAsync(0);
+        await using var newer = await _controller.OpenStreamAsync(2);
 
-        // stream2 is now active, stream1 was replaced
-        Assert.Equal(DownloadStrategy.Streaming, _controller.DownloadStrategy);
-        Assert.NotNull(_controller.PriorityPieces);
+        older.Dispose();
 
-        // Dispose stream1 (which is no longer the active stream)
-        stream1.Dispose();
+        Assert.True(_controller.IsStreaming);
+        Assert.DoesNotContain(0, _controller.PriorityPieces!);
+        Assert.Contains(15, _controller.PriorityPieces!);
+    }
 
-        // stream2 is still active, so strategy and priorities should still be set
-        Assert.Equal(DownloadStrategy.Streaming, _controller.DownloadStrategy);
-        Assert.NotNull(_controller.PriorityPieces);
+    [Fact(Timeout = 30000)]
+    public async Task AfterStreaming_TheConfiguredStrategyAppliesAgain()
+    {
+        // Used to be reset to rarest-first regardless, so a torrent added as sequential silently
+        // stopped being sequential the first time anyone streamed from it.
+        _torrent.DownloadStrategy = DownloadStrategy.Sequential;
+        await _torrent.StartAsync();
 
-        // Now dispose the active stream
-        stream2.Dispose();
+        var stream = await _controller.OpenStreamAsync(0);
+        stream.Dispose();
 
-        // Now strategy should be reset
-        Assert.Equal(DownloadStrategy.RarestFirst, _controller.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.Sequential, _torrent.EffectiveDownloadStrategy);
+        Assert.Equal(DownloadStrategy.Sequential, _torrent.DownloadStrategy);
+    }
+
+    [Fact]
+    public async Task TheConfiguredStrategy_SurvivesTheMetadataArriving()
+    {
+        // Initialize runs again when a magnet's metadata arrives. It used to build a new controller,
+        // which started from rarest-first whatever the torrent had been configured with.
+        _torrent.DownloadStrategy = DownloadStrategy.Sequential;
+
+        await _torrent.ReinitializeAfterMetadataAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DownloadStrategy.Sequential, _torrent.EffectiveDownloadStrategy);
+    }
+
+    [Fact]
+    public async Task TheController_SurvivesTheMetadataArriving()
+    {
+        // A stream opened on a magnet link waits for the metadata while registered with this
+        // controller. Replacing the controller when the metadata arrived left that stream's
+        // priorities somewhere the picker no longer looked.
+        var before = _torrent.Streaming;
+
+        await _torrent.ReinitializeAfterMetadataAsync(TestContext.Current.CancellationToken);
+
+        Assert.Same(before, _torrent.Streaming);
+    }
+
+    [Fact]
+    public async Task DisposingAStreamTwice_OnlyForgetsItOnce()
+    {
+        await _torrent.StartAsync(TestContext.Current.CancellationToken);
+        var stream = Assert.IsType<TorrentStream>(await _controller.OpenStreamAsync(0, TestContext.Current.CancellationToken));
+
+        Assert.True(_controller.OnStreamDisposed(stream));
+        Assert.False(_controller.OnStreamDisposed(stream));
+
+        stream.Dispose();
+    }
+
+    [Fact]
+    public async Task AClosedStream_IsNotTrackedAgainByALateRead()
+    {
+        // A read racing its own stream's disposal updates priorities after the controller has let
+        // the stream go. Tracking it again would keep the torrent streaming for nobody.
+        await _torrent.StartAsync(TestContext.Current.CancellationToken);
+        var stream = Assert.IsType<TorrentStream>(await _controller.OpenStreamAsync(0, TestContext.Current.CancellationToken));
+        stream.Dispose();
+
+        _controller.UpdatePriorities(stream, [1, 2, 3]);
+
+        Assert.False(_controller.IsStreaming);
         Assert.Null(_controller.PriorityPieces);
+    }
+
+    #endregion
+
+    #region Metadata Wait Tests
+
+    [Fact]
+    public async Task OpeningAStreamOnAMagnet_TimesOutWhenTheMetadataNeverArrives()
+    {
+        // A timeout, not a cancellation: nobody asked for this to stop, so a caller must be able to
+        // tell "the swarm never answered" from "I gave up".
+        var time = new FakeTimeProvider();
+        var magnet = TorrentTestUtility.CreateMinimal(timeProvider: time);
+        magnet.Settings.Streaming.MetadataWaitTimeoutSeconds = 5;
+        await magnet.StartAsync(TestContext.Current.CancellationToken);
+
+        var opening = magnet.Streaming.OpenStreamAsync(0, TestContext.Current.CancellationToken);
+        time.Advance(TimeSpan.FromSeconds(6));
+
+        await Assert.ThrowsAsync<TimeoutException>(() => opening);
+    }
+
+    [Fact]
+    public async Task OpeningAStreamOnAMagnet_CanBeCancelledByTheCaller()
+    {
+        var magnet = TorrentTestUtility.CreateMinimal(timeProvider: new FakeTimeProvider());
+        await magnet.StartAsync(TestContext.Current.CancellationToken);
+        using var cancel = new CancellationTokenSource();
+
+        var opening = magnet.Streaming.OpenStreamAsync(0, cancel.Token);
+        await cancel.CancelAsync();
+
+        var thrown = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => opening);
+        Assert.IsNotType<TimeoutException>(thrown);
+    }
+
+    [Fact]
+    public async Task AMetadataTimeoutOfZero_WaitsForAsLongAsTheCallerAllows()
+    {
+        var time = new FakeTimeProvider();
+        var magnet = TorrentTestUtility.CreateMinimal(timeProvider: time);
+        magnet.Settings.Streaming.MetadataWaitTimeoutSeconds = 0;
+        await magnet.StartAsync(TestContext.Current.CancellationToken);
+        using var cancel = new CancellationTokenSource();
+
+        var opening = magnet.Streaming.OpenStreamAsync(0, cancel.Token);
+        time.Advance(TimeSpan.FromHours(1));
+        Assert.False(opening.IsCompleted);
+
+        await cancel.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => opening);
     }
 
     #endregion
@@ -267,13 +422,15 @@ public class StreamingControllerTests
     #region Dispose Tests
 
     [Fact]
-    public void Dispose_ClearsActiveStream()
+    public async Task Dispose_ForgetsEveryStream()
     {
-        _controller.PriorityPieces = [1, 2, 3];
+        await _torrent.StartAsync(TestContext.Current.CancellationToken);
+        await using var stream = await _controller.OpenStreamAsync(0, TestContext.Current.CancellationToken);
 
         _controller.Dispose();
 
-        // Active stream reference should be cleared (can't directly test, but Dispose shouldn't throw)
+        Assert.False(_controller.IsStreaming);
+        Assert.Null(_controller.PriorityPieces);
     }
 
     [Fact]
@@ -322,14 +479,14 @@ public class StreamingControllerTests
 
             tasks.Add(Task.Run(() =>
             {
-                _controller.DownloadStrategy = DownloadStrategy.Streaming;
-                _ = _controller.DownloadStrategy;
+                _torrent.DownloadStrategy = DownloadStrategy.Sequential;
+                _ = _torrent.EffectiveDownloadStrategy;
             }));
 
             tasks.Add(Task.Run(() =>
             {
-                _controller.PriorityPieces = [1, 2, 3];
                 _ = _controller.PriorityPieces;
+                _ = _controller.IsStreaming;
             }));
         }
 
@@ -372,7 +529,7 @@ public class StreamingControllerTests
         // Open stream
         await using var stream = await _controller.OpenStreamAsync(0);
 
-        Assert.Equal(DownloadStrategy.Streaming, _controller.DownloadStrategy);
+        Assert.Equal(DownloadStrategy.Streaming, _torrent.EffectiveDownloadStrategy);
         Assert.NotNull(_controller.PriorityPieces);
         Assert.Equal(10000, stream.Length);
 

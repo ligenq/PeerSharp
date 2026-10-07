@@ -6,7 +6,7 @@ namespace PeerSharp.Internals.Transfers;
 internal sealed class RequestTimeoutManager
 {
     private readonly BlockRequestTracker _requestTracker;
-    private readonly Action<int, int, PeerCommunication> _removeBlockRequest;
+    private readonly Action<int, int, PeerCommunication>? _removeBlockRequest;
     private readonly Func<PeerCommunication, int> _getHardTimeoutMs;
     private readonly ILogger<RequestTimeoutManager> _logger;
     private readonly int _maxRequestAttempts;
@@ -47,9 +47,9 @@ internal sealed class RequestTimeoutManager
 
         foreach (var (peer, key, req) in timedOutRequests)
         {
-            if (_requestTracker.TryRemovePeerRequest(peer, key, out _))
+            if (_requestTracker.TryRemovePeerRequest(peer, key, out _, req))
             {
-                _removeBlockRequest(req.PieceIndex, req.Offset, peer);
+                _removeBlockRequest?.Invoke(req.PieceIndex, req.Offset, peer);
 
                 // A peer that lets a request expire is steered towards common pieces until it sends
                 // something. It keeps its slot and its other requests; this only stops a stalled peer

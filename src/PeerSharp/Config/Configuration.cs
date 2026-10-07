@@ -647,6 +647,8 @@ public sealed class ProxySettings
     /// <remarks>
     /// DHT uses a configured proxy. Peer and tracker traffic follow their respective proxy flags.
     /// A SOCKS5 server must still support UDP association for a permitted connection to succeed.
+    /// Proxied DHT bootstrap uses saved nodes or IP addresses in DhtSettings.BootstrapNodes;
+    /// hostname bootstrap is skipped to prevent local DNS lookups outside the proxy.
     /// </remarks>
     public UdpProxyCapabilities GetUdpCapabilities() => new(
         Internals.Network.UdpProxyPolicy.Decide(this, proxyTraffic: true) != Internals.Network.UdpProxyPolicy.Decision.Refuse,
@@ -721,6 +723,8 @@ public sealed class ProxySettings
 /// </summary>
 public sealed class QueueSettings
 {
+    private int _maxActiveDownloads = 3;
+    private int _maxActiveSeeds = 2;
     /// <summary>
     /// Whether queue management is enabled. Default is false.
     /// When enabled, the engine will auto-start/stop torrents to respect limits.
@@ -734,15 +738,23 @@ public sealed class QueueSettings
 
     /// <summary>
     /// Maximum number of active downloading torrents. 0 means unlimited.
-    /// Default is 3.
+    /// Default is 3. Negative values are rejected.
     /// </summary>
-    public int MaxActiveDownloads { get; set; } = 3;
+    public int MaxActiveDownloads
+    {
+        get => Volatile.Read(ref _maxActiveDownloads);
+        set { ArgumentOutOfRangeException.ThrowIfNegative(value); Volatile.Write(ref _maxActiveDownloads, value); }
+    }
 
     /// <summary>
     /// Maximum number of active seeding torrents. 0 means unlimited.
-    /// Default is 2.
+    /// Default is 2. Negative values are rejected.
     /// </summary>
-    public int MaxActiveSeeds { get; set; } = 2;
+    public int MaxActiveSeeds
+    {
+        get => Volatile.Read(ref _maxActiveSeeds);
+        set { ArgumentOutOfRangeException.ThrowIfNegative(value); Volatile.Write(ref _maxActiveSeeds, value); }
+    }
 
     /// <summary>
     /// Queue evaluation interval in seconds. Default is 5.
@@ -792,6 +804,71 @@ public sealed class SessionSettings
     /// </para>
     /// </summary>
     public string SessionPath { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Settings for reading a file while it is still downloading, through
+/// <see cref="ITorrent.OpenStreamAsync(int, CancellationToken)"/> or an HTTP stream server.
+/// </summary>
+/// <remarks>
+/// Read when a stream is opened, so a change applies to streams opened after it.
+/// </remarks>
+public sealed class StreamingSettings
+{
+    /// <summary>
+    /// How far ahead of the read position, in bytes, pieces are fetched ahead of everything else, at
+    /// least. Default is 20 MiB.
+    /// </summary>
+    /// <remarks>
+    /// A reader on a slow or distant device - a TV fetching over Wi-Fi - benefits from more; a device
+    /// short of storage or bandwidth from less. Pieces beyond the window still download at ordinary
+    /// priority. Once the reader's rate is known, <see cref="ReadAheadSeconds"/> can make the window
+    /// larger.
+    /// </remarks>
+    public long ReadAheadBytes { get; set; } = 20L * 1024 * 1024;
+
+    /// <summary>
+    /// How far ahead of the read position, in seconds at the rate the stream is being read, pieces are
+    /// fetched ahead of everything else, when that is more than <see cref="ReadAheadBytes"/>. Default is
+    /// 30. Zero or less fetches <see cref="ReadAheadBytes"/> ahead, whatever the rate.
+    /// </summary>
+    /// <remarks>
+    /// A player reads at the rate its film plays once its own buffer is full, so this is seconds of
+    /// film: 20 MiB is 80 seconds of a DVD rip and 5 of a 4K Blu-ray, where 30 seconds is time to ride
+    /// out a peer going quiet at either. The rate is measured over the last ten seconds of reading, and
+    /// the window is never more than 512 MiB however fast the stream is read.
+    /// </remarks>
+    public int ReadAheadSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Seconds of work each peer is given while a stream has little downloaded ahead of where it is
+    /// read - just opened, just moved, or about to run out - instead of
+    /// <see cref="TransferSettings.RequestQueueTimeSeconds"/>. Default is 1. Zero or less leaves the
+    /// queue as it is.
+    /// </summary>
+    /// <remarks>
+    /// A peer answers requests in the order they came, so a request for what a player is waiting on
+    /// waits behind whatever the peer was already given: three seconds of it, by default. Against
+    /// Debian's swarm, with a player of ExoPlayer's defaults, a one-second queue started playback in
+    /// 4.5 seconds on average instead of 8, but downloaded 7 to 10 percent slower - so it is used only
+    /// while the stream needs it: until twenty seconds are downloaded ahead of the reader, and again
+    /// once fewer than ten are.
+    /// </remarks>
+    public int RequestQueueSecondsWhileBuffering { get; set; } = 1;
+
+    /// <summary>
+    /// Seconds a read waits for the swarm to supply the pieces it needs before throwing
+    /// <see cref="TimeoutException"/>. Default is 60. Zero or less waits for as long as the reader's
+    /// cancellation token allows.
+    /// </summary>
+    public int DataWaitTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// Seconds opening a stream on a magnet link waits for the torrent's metadata before throwing
+    /// <see cref="TimeoutException"/>. Default is 60. Zero or less waits for as long as the caller's
+    /// cancellation token allows.
+    /// </summary>
+    public int MetadataWaitTimeoutSeconds { get; set; } = 60;
 }
 
 /// <summary>
@@ -1159,6 +1236,8 @@ public sealed class AlertSettings
 /// </remarks>
 public sealed class Settings
 {
+    private uint _maxPeersPerTrackerRequest = 200;
+    private byte[] _peerId = new byte[20];
     /// <summary>Settings for the engine's alert queue.</summary>
     public AlertSettings Alerts { get; } = new();
 
@@ -1174,8 +1253,12 @@ public sealed class Settings
     /// <summary>Maximum number of unique known peers to keep in cache.</summary>
     public int MaxKnownPeersCache { get; set; } = 2000;
 
-    /// <summary>Maximum number of peers to request from a tracker in one announce.</summary>
-    public uint MaxPeersPerTrackerRequest { get; set; } = 200;
+    /// <summary>Maximum number of peers to request from a tracker in one announce, up to <see cref="int.MaxValue"/>.</summary>
+    public uint MaxPeersPerTrackerRequest
+    {
+        get => Volatile.Read(ref _maxPeersPerTrackerRequest);
+        set { ArgumentOutOfRangeException.ThrowIfGreaterThan(value, (uint)int.MaxValue); Volatile.Write(ref _maxPeersPerTrackerRequest, value); }
+    }
 
     /// <summary>
     /// Whether UDP announces carry the tracker URL's path and query as BEP 41 options.
@@ -1196,8 +1279,17 @@ public sealed class Settings
     /// </summary>
     public bool SendUdpTrackerUrlData { get; set; } = true;
 
-    /// <summary>The client's unique 20-byte Peer ID (BEP 20).</summary>
-    public byte[] PeerId { get; set; } = new byte[20];
+    /// <summary>The client's unique 20-byte Peer ID (BEP 20). Set before initialization; an all-zero ID is generated automatically.</summary>
+    public byte[] PeerId
+    {
+        get => Volatile.Read(ref _peerId);
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            if (value.Length != 20) throw new ArgumentException("Peer ID must contain exactly 20 bytes.", nameof(value));
+            Volatile.Write(ref _peerId, value.ToArray());
+        }
+    }
 
     /// <summary>Settings for network proxy.</summary>
     public ProxySettings Proxy { get; } = new();
@@ -1207,6 +1299,9 @@ public sealed class Settings
 
     /// <summary>Settings for session persistence (optional, disabled by default).</summary>
     public SessionSettings Session { get; } = new();
+
+    /// <summary>Settings for reading files while they download.</summary>
+    public StreamingSettings Streaming { get; } = new();
 
     /// <summary>Settings for data transfer.</summary>
     public TransferSettings Transfer { get; } = new();

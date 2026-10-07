@@ -348,7 +348,15 @@ public class UtpSackEmissionTests
         public void ReceiveData(ushort seq, bool acknowledgeWrites = true) => Receive(Packet(
             MessageType.ST_DATA, seq, acknowledgeWrites ? (ushort)(Stream.SeqNr - 1) : _initialAck, [1]));
         public void ReceiveAck(ushort ack) => Receive(Packet(MessageType.ST_STATE, (ushort)(Stream.AckNr + 1), ack, []));
-        public void Retry() => _time.Advance(TimeSpan.FromSeconds(10));
+        /// <summary>
+        /// Lets the retransmission timer run out. Where the peer has left a gap and gone silent too, this
+        /// side first goes quiet for a while, to let the peer's own timer run out, and resends after.
+        /// </summary>
+        public void Retry()
+        {
+            _time.Advance(TimeSpan.FromSeconds(10));
+            _time.Advance(UtpStream.QuietPeriod + TimeSpan.FromMilliseconds(500));
+        }
         public void Advance(TimeSpan elapsed) => _time.Advance(elapsed);
 
         public async ValueTask DisposeAsync()

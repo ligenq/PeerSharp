@@ -19,4 +19,5 @@ internal sealed class TorrentNetworkManager
     /// be zero, meaning "any", in which case only the listener knows the real answer.
     /// </summary>
     public IPortListener? PortListener { get; set; }
+    public Func<int>? GetAdvertisedPeerPort { get; set; }
 }

@@ -335,6 +335,58 @@ public class ProxyHelperTests
     private static byte[] Socks5ConnectSuccessHeaderIPv4() => [0x05, 0x00, 0x00, 0x01];
     private static byte[] Socks5IPv4BoundAddrAndPort() => [127, 0, 0, 1, 0x04, 0x38]; // 127.0.0.1:1080
 
+    [Theory]
+    [InlineData("HTTP/1.1 200")]
+    [InlineData("HTTP/1.1 204 Tunnel established")]
+    public async Task HttpConnectAcceptsTheSuccessStatusWithoutMatchingTheReasonPhrase(string status)
+    {
+        using var client = new TcpClient();
+        using var stream = new FakeStream(Encoding.ASCII.GetBytes(status + "\r\n\r\n"));
+        await ProxyHelper.NegotiateHttpProxyAsync(stream, client, "::1", 443, null, null, CancellationToken.None);
+        Assert.Contains("CONNECT [::1]:443 HTTP/1.1", Encoding.ASCII.GetString(stream.WrittenBytes));
+    }
+
+    [Fact]
+    public async Task HttpConnectRejectsAnErrorWhoseReasonContains200AndBoundsHeaders()
+    {
+        using var client = new TcpClient();
+        using var misleading = new FakeStream(Encoding.ASCII.GetBytes("HTTP/1.1 407 error 200 here\r\n\r\n"));
+        await Assert.ThrowsAsync<IOException>(() => ProxyHelper.NegotiateHttpProxyAsync(misleading, client, "example.com", 443, null, null, CancellationToken.None));
+        using var oversized = new FakeStream(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nHeader: " + new string('a', 4096) + "\r\n\r\n"));
+        await Assert.ThrowsAsync<IOException>(() => ProxyHelper.NegotiateHttpProxyAsync(oversized, client, "example.com", 443, null, null, CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SocksRejectsMalformedReplyHeaders(bool udp)
+    {
+        using var client = new TcpClient();
+        using var stream = new FakeStream([5, 0], [4, 0, 1, 1], [127, 0, 0, 1, 1, 1]);
+        if (udp) await Assert.ThrowsAsync<IOException>(() => ProxyHelper.NegotiateSocks5UdpAsync(stream, client, "127.0.0.1", null, null, CancellationToken.None));
+        else await Assert.ThrowsAsync<IOException>(() => ProxyHelper.NegotiateSocks5Async(stream, client, "127.0.0.1", 443, null, null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SocksRejectsCredentialsAndHostsWhoseEncodedLengthDoesNotFit()
+    {
+        using var client = new TcpClient();
+        using var stream = new FakeStream();
+        await Assert.ThrowsAsync<ArgumentException>(() => ProxyHelper.NegotiateSocks5Async(stream, client, "example.com", 443, new string('ü', 128), "pw", CancellationToken.None));
+        await Assert.ThrowsAsync<ArgumentException>(() => ProxyHelper.NegotiateSocks5Async(stream, client, new string('a', 256), 443, null, null, CancellationToken.None));
+        Assert.Empty(stream.WrittenBytes);
+    }
+
+    [Fact]
+    public async Task SocksUdpRejectsUnofferedAuthenticationAndWrongAuthVersion()
+    {
+        using var client = new TcpClient();
+        using var unoffered = new FakeStream([5, 2]);
+        await Assert.ThrowsAsync<IOException>(() => ProxyHelper.NegotiateSocks5UdpAsync(unoffered, client, "127.0.0.1", null, null, CancellationToken.None));
+        using var wrongVersion = new FakeStream([5, 2], [2, 0]);
+        await Assert.ThrowsAsync<IOException>(() => ProxyHelper.NegotiateSocks5Async(wrongVersion, client, "example.com", 443, "u", "p", CancellationToken.None));
+    }
+
     // --- SOCKS5 TCP (NegotiateSocks5Async) ---
 
     [Fact]

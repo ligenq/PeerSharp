@@ -4,6 +4,7 @@ using PeerSharp.Internals;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Trackers;
+using PeerSharp.Internals.Utilities;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
@@ -14,6 +15,87 @@ namespace PeerSharp.Tests.Core.Trackers;
 
 public class UdpTrackerTests
 {
+    [Theory(Timeout = 30000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Socks5Tracker_ResolvesThroughProxy_AndUsesResolvedPeerFamily(bool ipv6)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var ct = cancellation.Token;
+        using var relay = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        var relayEndpoint = (IPEndPoint)relay.Client.LocalEndPoint!;
+        using var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        _torrent.Settings.Proxy.Type = ProxyType.Socks5;
+        _torrent.Settings.Proxy.Host = "127.0.0.1";
+        _torrent.Settings.Proxy.Port = (ushort)((IPEndPoint)server.LocalEndpoint).Port;
+        _torrent.Settings.Proxy.ProxyTrackers = true;
+        _torrent.Settings.Connection.BindAddress = IPAddress.Loopback;
+        int localLookups = 0;
+        using var tracker = new UdpTracker(TimeProvider.System, _socketFactory, NullLoggerFactory.Instance, (_, _) =>
+        {
+            Interlocked.Increment(ref localLookups);
+            return Task.FromResult(Array.Empty<IPAddress>());
+        });
+        tracker.Init("udp://tracker.invalid:80/announce", _torrent, _callback);
+        var announce = tracker.AnnounceAsync(TrackerEvent.None, ct);
+        using var control = await server.AcceptTcpClientAsync(ct);
+        var stream = control.GetStream();
+        await stream.ReadExactlyAsync(new byte[3], ct);
+        await stream.WriteAsync(new byte[] { 5, 0 }, ct);
+        await stream.ReadExactlyAsync(new byte[10], ct);
+        byte[] associate = [5, 0, 0, 1, 127, 0, 0, 1, (byte)(relayEndpoint.Port >> 8), (byte)relayEndpoint.Port];
+        await stream.WriteAsync(associate, ct);
+
+        var connect = await relay.ReceiveAsync(ct);
+        Assert.Equal(3, connect.Buffer[3]);
+        int hostLength = connect.Buffer[4];
+        Assert.Equal("tracker.invalid", Encoding.ASCII.GetString(connect.Buffer, 5, hostLength));
+        var (connectPayload, _) = ProxyHelper.UnwrapSocks5UdpPacket(connect.Buffer);
+        int transId = BinaryPrimitives.ReadInt32BigEndian(connectPayload.Span[12..]);
+        var remote = new IPEndPoint(IPAddress.Parse(ipv6 ? "2001:db8::1" : "192.0.2.1"), 80);
+        byte[] connectResponse = new byte[16];
+        BinaryPrimitives.WriteInt32BigEndian(connectResponse.AsSpan(4), transId);
+        BinaryPrimitives.WriteInt64BigEndian(connectResponse.AsSpan(8), 1234);
+        await relay.SendAsync(ProxyHelper.GetSocks5UdpPacket(connectResponse, remote), connect.RemoteEndPoint, ct);
+
+        var request = await relay.ReceiveAsync(ct);
+        var (requestPayload, target) = ProxyHelper.UnwrapSocks5UdpPacket(request.Buffer);
+        Assert.Equal(remote, target);
+        var peer = IPAddress.Parse(ipv6 ? "2001:db8::2" : "192.0.2.2");
+        byte[] response = new byte[20 + peer.GetAddressBytes().Length + 2];
+        BinaryPrimitives.WriteInt32BigEndian(response, 1);
+        requestPayload.Span.Slice(12, 4).CopyTo(response.AsSpan(4));
+        BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(8), 60);
+        peer.GetAddressBytes().CopyTo(response, 20);
+        BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(response.Length - 2), 6881);
+        await relay.SendAsync(ProxyHelper.GetSocks5UdpPacket(response, remote), request.RemoteEndPoint, ct);
+        await announce;
+        Assert.True(_callback.Success);
+        Assert.Equal(new IPEndPoint(peer, 6881), Assert.Single(_callback.AnnounceResponse!.Peers));
+        Assert.Equal(0, localLookups);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ConnectResponse_FromWrongEndpoint_IsIgnored()
+    {
+        using var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
+        using var cancellation = new CancellationTokenSource();
+        var announce = tracker.AnnounceAsync(TrackerEvent.None, cancellation.Token);
+        var request = await _socketFactory.LastSocket.WaitForPacketAsync(0, TimeSpan.FromSeconds(2));
+        var response = new byte[16];
+        BinaryPrimitives.WriteInt32BigEndian(response.AsSpan(4), BinaryPrimitives.ReadInt32BigEndian(request.AsSpan(12)));
+        BinaryPrimitives.WriteInt64BigEndian(response.AsSpan(8), 1234);
+        _socketFactory.LastSocket.TriggerResponse(response, new IPEndPoint(IPAddress.Loopback, 81));
+        await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(2));
+        Assert.Single(_socketFactory.LastSocket.SentPackets);
+        _socketFactory.LastSocket.TriggerResponse(response);
+        await _socketFactory.LastSocket.WaitForPacketAsync(1, TimeSpan.FromSeconds(2));
+        await cancellation.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => announce);
+    }
+
     private sealed class TestPortListener(int port) : IPortListener
     {
         public int Port { get; } = port;
@@ -26,6 +108,7 @@ public class UdpTrackerTests
     {
         public List<byte[]> SentPackets { get; } = [];
         public bool Closed { get; private set; }
+        private IPEndPoint? _lastDestination;
         private TaskCompletionSource<UdpReceiveResult>? _receiveTcs;
         private readonly Queue<UdpReceiveResult> _queuedResponses = new();
         private readonly Lock _receiveLock = new();
@@ -33,9 +116,9 @@ public class UdpTrackerTests
 
         public Socket Client => throw new NotImplementedException();
 
-        public void TriggerResponse(byte[] data)
+        public void TriggerResponse(byte[] data, IPEndPoint? sender = null)
         {
-            var response = new UdpReceiveResult(data, new IPEndPoint(IPAddress.Loopback, 0));
+            var response = new UdpReceiveResult(data, sender ?? _lastDestination!);
             TaskCompletionSource<UdpReceiveResult>? tcs;
             lock (_receiveLock)
             {
@@ -165,6 +248,7 @@ public class UdpTrackerTests
 
         public ValueTask<int> SendAsync(ReadOnlyMemory<byte> datagram, IPEndPoint endPoint, CancellationToken ct)
         {
+            _lastDestination = endPoint;
             var packet = datagram.ToArray();
             lock (_sentPacketWaiters)
             {
@@ -1710,6 +1794,36 @@ public class UdpTrackerTests
         Assert.Equal(98, packet.Length);
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_HostThatDoesNotResolve_FailsWithoutOpeningASocket()
+    {
+        // Known before anything is sent, so reported as a result rather than thrown and retried per family.
+        var factory = new FamilyUdpSocketFactory();
+        var tracker = new UdpTracker(
+            _timeProvider,
+            factory,
+            NullLoggerFactory.Instance,
+            (_, _) => Task.FromResult(Array.Empty<IPAddress>()));
+        tracker.Init("udp://gone.example:80/announce", _torrent, _callback);
 
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
 
+        Assert.False(_callback.Success);
+        Assert.Contains("gone.example", _callback.AnnounceErrorMessage);
+        Assert.Empty(factory.RequestedFamilies);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_ThroughTheNameCache_TreatsAnUnresolvableHostTheSameWay()
+    {
+        var names = new HostAddressCache(
+            _timeProvider,
+            (_, _) => Task.FromException<IPAddress[]>(new SocketException((int)SocketError.HostNotFound)));
+        var tracker = new UdpTracker(_timeProvider, NullLoggerFactory.Instance, names);
+        tracker.Init("udp://gone.example:80/announce", _torrent, _callback);
+
+        await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.False(_callback.Success);
+    }
 }
