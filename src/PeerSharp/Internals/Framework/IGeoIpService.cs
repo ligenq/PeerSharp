@@ -42,13 +42,20 @@ internal interface IGeoIpService
 internal class GeoIpService : IGeoIpService
 {
     private FastIpToCountry _fastIpToCountry = new();
+    private readonly Lock _loadLock = new();
+    private long _loadGeneration;
+    private bool _enabled;
 
-    public bool Enabled { get; set; }
+    public bool Enabled { get => Volatile.Read(ref _enabled); set => Volatile.Write(ref _enabled, value); }
 
     public void Clear()
     {
-        _fastIpToCountry = new();
-        Enabled = false;
+        lock (_loadLock)
+        {
+            _loadGeneration++;
+            Volatile.Write(ref _fastIpToCountry, new FastIpToCountry());
+            Enabled = false;
+        }
     }
 
     public string GetCountry(IPAddress ip)
@@ -57,18 +64,36 @@ internal class GeoIpService : IGeoIpService
         {
             return string.Empty;
         }
-        return _fastIpToCountry.GetCountry(ip);
+        return Volatile.Read(ref _fastIpToCountry).GetCountry(ip);
     }
 
     public void Load(Stream stream)
     {
-        _fastIpToCountry.Load(stream);
-        Enabled = true;
+        long generation;
+        lock (_loadLock) generation = ++_loadGeneration;
+        var candidate = new FastIpToCountry();
+        candidate.Load(stream);
+        Publish(candidate, generation);
     }
 
     public async Task LoadAsync(Stream stream, CancellationToken cancellationToken = default)
     {
-        await _fastIpToCountry.LoadAsync(stream, cancellationToken).ConfigureAwait(false);
-        Enabled = true;
+        cancellationToken.ThrowIfCancellationRequested();
+        long generation;
+        lock (_loadLock) generation = ++_loadGeneration;
+        var candidate = new FastIpToCountry();
+        await candidate.LoadAsync(stream, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        Publish(candidate, generation);
+    }
+
+    private void Publish(FastIpToCountry candidate, long generation)
+    {
+        lock (_loadLock)
+        {
+            if (generation != _loadGeneration || !candidate.IsLoaded) return;
+            Volatile.Write(ref _fastIpToCountry, candidate);
+            Enabled = true;
+        }
     }
 }

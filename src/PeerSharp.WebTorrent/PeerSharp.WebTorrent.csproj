@@ -22,12 +22,12 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp.WebTorrent 5.0.0 targets PeerSharp 5.0.0. Upgrade both packages together and review the core engine's settings and IAlerts migration notes at https://github.com/ligenq/PeerSharp/blob/v5.0.0/CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp.WebTorrent 5.1.0 targets PeerSharp 5.1.0, with its session, tracker, peer manager and data channel lifecycles tightened. Upgrade both packages together; see https://github.com/ligenq/PeerSharp/blob/v5.1.0/CHANGELOG.md.</PackageReleaseNotes>
 		<IsTrimmable>true</IsTrimmable>
 		<RootNamespace>PeerSharp.WebTorrent</RootNamespace>
 		<AssemblyName>PeerSharp.WebTorrent</AssemblyName>
 		<EnablePackageValidation>true</EnablePackageValidation>
-		<PackageValidationBaselineVersion>4.0.0</PackageValidationBaselineVersion>
+		<PackageValidationBaselineVersion>5.0.0</PackageValidationBaselineVersion>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -41,9 +41,9 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
 		<PackageReference Include="RtcForge" Version="1.0.0" />
-		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.32.0.713">
+		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.35.0.4138">
 			<PrivateAssets>all</PrivateAssets>
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>

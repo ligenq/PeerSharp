@@ -113,8 +113,8 @@ public class MetadataPeerPreferenceTests
         download.Start();
         download.InitializeMetadataBuffer(PieceSize * 4);
 
-        var willing = MakePeer();
-        var silent = Enumerable.Range(0, 8).Select(_ => MakePeer()).ToList();
+        var willing = MakePeer(PieceSize * 4);
+        var silent = Enumerable.Range(0, 8).Select(_ => MakePeer(PieceSize * 4)).ToList();
         InjectActivePeer(download, willing);
         foreach (var peer in silent)
         {
@@ -147,8 +147,8 @@ public class MetadataPeerPreferenceTests
         download.Start();
         download.InitializeMetadataBuffer(PieceSize * 4);
 
-        var untried = MakePeer();
-        var silent = MakePeer();
+        var untried = MakePeer(PieceSize * 4);
+        var silent = MakePeer(PieceSize * 4);
         InjectActivePeer(download, untried);
         InjectActivePeer(download, silent);
 

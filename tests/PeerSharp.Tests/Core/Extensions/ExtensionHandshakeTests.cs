@@ -9,6 +9,38 @@ namespace PeerSharp.Tests.Core.Extensions;
 public class ExtensionHandshakeTests
 {
     [Fact]
+    public void Parse_UpdatePreservesUnchangedCapabilitiesAndCanDisableThem()
+    {
+        var previous = new ExtensionHandshake { IsUploadOnly = true, MetadataSize = 1234, RequestQueueDepth = 99 };
+        previous.MessageIds[UtMetadata.Name] = 7;
+        previous.MessageIds[UtHolepunch.Name] = 8;
+        var update = new BDict();
+        var ids = new BDict();
+        ids.Dict[UtHolepunch.Name] = new BNumber(0);
+        update.Dict["m"] = ids;
+        var merged = ExtensionHandshake.Parse(update, previous);
+        Assert.Equal(7, merged.GetEnabledMessageId(UtMetadata.Name));
+        Assert.Null(merged.GetEnabledMessageId(UtHolepunch.Name));
+        Assert.Equal(1234, merged.MetadataSize);
+        Assert.Equal(99, merged.RequestQueueDepth);
+        Assert.True(merged.IsUploadOnly);
+        Assert.Equal(8, previous.GetEnabledMessageId(UtHolepunch.Name));
+        update.Dict["upload_only"] = new BNumber(0);
+        Assert.False(ExtensionHandshake.Parse(update, merged).IsUploadOnly);
+    }
+
+    [Theory]
+    [InlineData(4294967297L)]
+    [InlineData(long.MaxValue)]
+    [InlineData(-1L)]
+    public void Parse_OversizedMetadataSizeDoesNotWrapIntoAValidSize(long size)
+    {
+        var dictionary = new BDict();
+        dictionary.Dict["metadata_size"] = new BNumber(size);
+        Assert.Null(ExtensionHandshake.Parse(dictionary).MetadataSize);
+    }
+
+    [Fact]
     public void ToBencode_EmptyHandshake_ReturnsMinimalDict()
     {
         // Arrange

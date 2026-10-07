@@ -1,295 +1,157 @@
+using System.Buffers.Binary;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 
 namespace PeerSharp.Internals.Utilities;
 
-/// <summary>
-/// Provides fast IP-to-country lookups using a pre-processed binary database.
-/// The database ("ipclist") consists of a text section with country names followed by
-/// 256 buckets of binary IP range data.
-/// </summary>
+/// <summary>IPv4 country lookups from the ipclist text header and little-endian range buckets.</summary>
 internal class FastIpToCountry
 {
-    private readonly List<(uint StartIp, ushort CountryIdx)>[] _buckets = new List<(uint StartIp, ushort CountryIdx)>[256];
-    private readonly List<string> _countries = [];
+    private Database? _database;
 
-    public FastIpToCountry()
-    {
-        for (int i = 0; i < 256; i++)
-        {
-            _buckets[i] = [];
-        }
-    }
+    internal bool IsLoaded => Volatile.Read(ref _database) != null;
 
-    /// <summary>
-    /// Resolves the country code for a given IPv4 address.
-    /// </summary>
-    /// <param name="address">The IPv4 address to lookup.</param>
-    /// <returns>A country string (e.g. "US", "GB") or an empty string if not found.</returns>
     public string GetCountry(IPAddress address)
     {
-        // Only IPv4 is supported by this database format
-        if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
-        {
-            return "";
-        }
-
-        byte[] bytes = address.GetAddressBytes();
-
-        // Construct a Big-Endian integer representation for comparison.
-        // The first byte of the IP serves as the bucket index.
-        uint ip = (uint)((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]);
-
-        int bucketIdx = bytes[0];
-        var bucket = _buckets[bucketIdx];
-
-        if (bucket.Count == 0)
-        {
-            return "";
-        }
-
-        // Perform binary search to find the largest StartIp that is <= our target IP.
-        // Since ranges are contiguous in this database, this accurately identifies the country.
-        int low = 0, high = bucket.Count - 1;
-        int found = -1;
-
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        var database = Volatile.Read(ref _database);
+        if (database == null || address.AddressFamily != AddressFamily.InterNetwork) return string.Empty;
+        Span<byte> bytes = stackalloc byte[4];
+        address.TryWriteBytes(bytes, out _);
+        uint ip = BinaryPrimitives.ReadUInt32BigEndian(bytes);
+        var bucket = database.Buckets[bytes[0]];
+        int low = 0, high = bucket.Length - 1, found = -1;
         while (low <= high)
         {
             int mid = low + ((high - low) / 2);
-            if (bucket[mid].StartIp <= ip)
-            {
-                found = mid;
-                low = mid + 1;
-            }
-            else
-            {
-                high = mid - 1;
-            }
+            if (bucket[mid].StartIp <= ip) { found = mid; low = mid + 1; }
+            else high = mid - 1;
         }
-
-        if (found != -1)
-        {
-            ushort countryIdx = bucket[found].CountryIdx;
-            if (countryIdx < _countries.Count)
-            {
-                return _countries[countryIdx];
-            }
-        }
-
-        return "";
+        return found < 0 ? string.Empty : database.Countries[bucket[found].CountryIdx];
     }
 
-    /// <summary>
-    /// Loads the GeoIP database from the specified file path.
-    /// </summary>
-    /// <param name="filePath">The full path to the GeoIP database file.</param>
     public void Load(string filePath)
     {
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
-        {
-            return;
-        }
-
         try
         {
-            using var fs = File.OpenRead(filePath);
-            Load(fs);
+            using var stream = File.OpenRead(filePath);
+            Load(stream);
         }
-        catch (Exception)
-        {
-            // Fail silently - GeoIP is optional
-        }
+        catch (Exception) { /* An optional database failure leaves the previous snapshot intact. */ }
     }
 
-    /// <summary>
-    /// Loads the GeoIP database from a stream.
-    /// </summary>
     public void Load(Stream stream)
     {
         try
         {
-            // Format Phase 1: Read country names (plain text, one per line)
-            // Ends with an empty line (double newline)
-            var sb = new StringBuilder();
-            while (true)
-            {
-                int b = stream.ReadByte();
-                if (b == -1)
-                {
-                    break;
-                }
-
-                if (b == '\n')
-                {
-                    string line = sb.ToString().Trim();
-                    sb.Clear();
-                    if (string.IsNullOrEmpty(line))
-                    {
-                        break; // Empty line separator reached
-                    }
-
-                    _countries.Add(line);
-                }
-                else
-                {
-                    sb.Append((char)b);
-                }
-            }
-
-            // Format Phase 2: Read 256 buckets of binary range data
-            // Each entry is 6 bytes: [4 byte uint StartIP (LE)] [2 byte ushort CountryIndex (LE)]
-            // Buckets are separated by a dummy entry with CountryIndex = 0x4545 ("EE")
-            var buffer = new byte[6];
-            int bucket = 0;
-
-            while (bucket < 256 && stream.Read(buffer, 0, 6) == 6)
-            {
-                uint ip = BitConverter.ToUInt32(buffer, 0);
-                ushort country = BitConverter.ToUInt16(buffer, 4);
-
-                if (country == 0x4545) // Bucket separator marker "EE"
-                {
-                    bucket++;
-                }
-                else
-                {
-                    _buckets[bucket].Add((ip, country));
-                }
-            }
+            var parser = new DatabaseParser();
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = stream.Read(buffer)) > 0) parser.Append(buffer.AsSpan(0, count));
+            Volatile.Write(ref _database, parser.Complete());
         }
-        catch (Exception)
-        {
-            // Fail silently
-        }
+        catch (Exception) { /* Keep the last complete database. */ }
     }
 
-    /// <summary>
-    /// Loads the GeoIP database from the specified file path asynchronously.
-    /// </summary>
-    /// <param name="filePath">The full path to the GeoIP database file.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     public async Task LoadAsync(string filePath, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
-        {
-            return;
-        }
-
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            await using var fs = new FileStream(
-                filePath,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                bufferSize: 4096,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            await LoadAsync(fs, cancellationToken).ConfigureAwait(false);
+            await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await LoadAsync(stream, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception)
-        {
-            // Fail silently - GeoIP is optional
-        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception) { /* GeoIP is optional. */ }
     }
 
-    /// <summary>
-    /// Loads the GeoIP database from a stream asynchronously.
-    /// </summary>
     public async Task LoadAsync(Stream stream, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            var buffer = new byte[8192];
-
-            // Phase 1: Read country names (text, one per line, blank line terminator)
-            var countryBuffer = new List<byte>(128);
-            bool foundSeparator = false;
-            int bytesRead;
-            int remainingOffset = 0;
-            int remainingCount = 0;
-            while ((bytesRead = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            var parser = new DatabaseParser();
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
             {
-                int offset = 0;
-                while (offset < bytesRead)
+                cancellationToken.ThrowIfCancellationRequested();
+                parser.Append(buffer.AsSpan(0, count));
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            var database = parser.Complete();
+            cancellationToken.ThrowIfCancellationRequested();
+            Volatile.Write(ref _database, database);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception) { /* Keep the last complete database. */ }
+    }
+
+    private sealed record Database(string[] Countries, (uint StartIp, ushort CountryIdx)[][] Buckets);
+
+    private sealed class DatabaseParser
+    {
+        private const int MaxBytes = 64 * 1024 * 1024;
+        private const int MaxEntries = 4_000_000;
+        private static readonly UTF8Encoding TextEncoding = new(false, true);
+        private readonly List<string> _countries = [];
+        private readonly List<(uint StartIp, ushort CountryIdx)>[] _buckets =
+            Enumerable.Range(0, 256).Select(_ => new List<(uint, ushort)>()).ToArray();
+        private readonly List<byte> _line = [];
+        private readonly byte[] _entry = new byte[6];
+        private bool _headerComplete;
+        private int _bucket, _entryBytes, _bytes, _entries;
+
+        public void Append(ReadOnlySpan<byte> bytes)
+        {
+            if (bytes.Length > MaxBytes - _bytes) throw new InvalidDataException("GeoIP database exceeds 64 MiB.");
+            _bytes += bytes.Length;
+            foreach (byte value in bytes)
+            {
+                if (!_headerComplete)
                 {
-                    byte b = buffer[offset++];
-                    if (b == (byte)'\n')
+                    if (value == '\n')
                     {
-                        string line = Encoding.UTF8.GetString([.. countryBuffer]).Trim();
-                        countryBuffer.Clear();
-                        if (string.IsNullOrEmpty(line))
+                        string country = TextEncoding.GetString(_line.ToArray()).Trim();
+                        _line.Clear();
+                        if (country.Length == 0) _headerComplete = true;
+                        else
                         {
-                            foundSeparator = true;
-                            remainingOffset = offset;
-                            remainingCount = bytesRead - offset;
-                            break;
+                            if (_countries.Count >= ushort.MaxValue) throw new InvalidDataException("Too many countries.");
+                            _countries.Add(country);
                         }
-                        _countries.Add(line);
                     }
                     else
                     {
-                        countryBuffer.Add(b);
+                        if (_line.Count >= 4096) throw new InvalidDataException("GeoIP country name is too long.");
+                        _line.Add(value);
                     }
+                    continue;
                 }
-
-                if (foundSeparator)
-                {
-                    break;
-                }
-            }
-
-            if (!foundSeparator)
-            {
-                return;
-            }
-
-            // Phase 2: Read 6-byte entries: [uint StartIP LE][ushort CountryIndex LE]
-            var entryBuffer = new byte[6];
-            int entryOffset = 0;
-            int bucket = 0;
-
-            ProcessEntries(buffer, remainingOffset, remainingCount, entryBuffer, ref entryOffset, ref bucket);
-            while (bucket < 256 && (bytesRead = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
-            {
-                ProcessEntries(buffer, 0, bytesRead, entryBuffer, ref entryOffset, ref bucket);
+                if (_bucket >= 256) throw new InvalidDataException("Trailing GeoIP data.");
+                _entry[_entryBytes++] = value;
+                if (_entryBytes < 6) continue;
+                _entryBytes = 0;
+                uint ip = BinaryPrimitives.ReadUInt32LittleEndian(_entry);
+                ushort countryIndex = BinaryPrimitives.ReadUInt16LittleEndian(_entry.AsSpan(4));
+                if (countryIndex == 0x4545) { _bucket++; continue; }
+                var bucket = _buckets[_bucket];
+                if (countryIndex >= _countries.Count || ip >> 24 != _bucket
+                    || (bucket.Count > 0 && ip <= bucket[^1].StartIp) || ++_entries > MaxEntries)
+                    throw new InvalidDataException("Invalid GeoIP range.");
+                bucket.Add((ip, countryIndex));
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+
+        public Database Complete()
         {
-            throw;
-        }
-        catch (Exception)
-        {
-            // Fail silently
-        }
-    }
-
-    private void ProcessEntries(byte[] buffer, int offset, int count, byte[] entryBuffer, ref int entryOffset, ref int bucket)
-    {
-        int end = offset + count;
-        while (offset < end && bucket < 256)
-        {
-            int toCopy = Math.Min(6 - entryOffset, end - offset);
-            Buffer.BlockCopy(buffer, offset, entryBuffer, entryOffset, toCopy);
-            entryOffset += toCopy;
-            offset += toCopy;
-
-            if (entryOffset == 6)
-            {
-                uint ip = BitConverter.ToUInt32(entryBuffer, 0);
-                ushort country = BitConverter.ToUInt16(entryBuffer, 4);
-
-                if (country == 0x4545) // Bucket separator marker "EE"
-                {
-                    bucket++;
-                }
-                else
-                {
-                    _buckets[bucket].Add((ip, country));
-                }
-
-                entryOffset = 0;
-            }
+            // A file may omit empty trailing buckets, but every populated bucket must terminate.
+            if (!_headerComplete || _countries.Count == 0 || _entryBytes != 0 || _bucket == 0
+                || (_bucket < 256 && _buckets[_bucket].Count != 0))
+                throw new InvalidDataException("Truncated GeoIP database.");
+            return new Database(_countries.ToArray(), _buckets.Select(bucket => bucket.ToArray()).ToArray());
         }
     }
 }

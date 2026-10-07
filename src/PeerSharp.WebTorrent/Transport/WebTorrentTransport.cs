@@ -70,22 +70,19 @@ internal sealed class WebTorrentTransport : IPeerTransport
         {
             toDispose = _session;
             _session = null;
+            if (toDispose != null) await toDispose.DisposeAsync().ConfigureAwait(false);
         }
         finally
         {
             _gate.Release();
         }
 
-        if (toDispose != null)
-        {
-            await toDispose.DisposeAsync().ConfigureAwait(false);
-        }
     }
 
     public async ValueTask DisposeAsync()
     {
         WebTorrentSession? toDispose;
-        await _gate.WaitAsync().ConfigureAwait(false);
+        await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
             if (_disposed)
@@ -96,17 +93,13 @@ internal sealed class WebTorrentTransport : IPeerTransport
             _disposed = true;
             toDispose = _session;
             _session = null;
+            if (toDispose != null) await toDispose.DisposeAsync().ConfigureAwait(false);
         }
         finally
         {
             _gate.Release();
         }
 
-        if (toDispose != null)
-        {
-            await toDispose.DisposeAsync().ConfigureAwait(false);
-        }
 
-        _gate.Dispose();
     }
 }

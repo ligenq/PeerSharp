@@ -8,11 +8,12 @@ namespace PeerSharp.Internals;
 /// <summary>
 /// File-based implementation of session persistence.
 /// Stores torrent data in a directory structure:
-/// {SessionPath}/torrents/{hash_hex}/
+/// {SessionPath}/torrents/{hash_hex}/current.txt selects an immutable snapshot-{generation}/:
 ///   - torrent.torrent (raw .torrent file)
 ///   - magnet.txt (magnet link if applicable)
 ///   - resume.dat (resume data bytes)
 ///   - options.json (saved options)
+/// Entries saved by older versions without current.txt are read directly from the hash directory.
 /// </summary>
 internal sealed class SessionPersistence : ISessionPersistence
 {
@@ -22,6 +23,8 @@ internal sealed class SessionPersistence : ISessionPersistence
     private const string TorrentFileName = "torrent.torrent";
     private const string TorrentsFolder = "torrents";
     private const string DhtStateFileName = "dht.json";
+    private const string CurrentSnapshotFileName = "current.txt";
+    private const string SnapshotPrefix = "snapshot-";
 
     private readonly Lock _lock = new();
 
@@ -90,6 +93,7 @@ internal sealed class SessionPersistence : ISessionPersistence
 
     public async Task<DhtState?> LoadDhtStateAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var path = Path.Combine(_sessionPath, DhtStateFileName);
         if (!File.Exists(path))
         {
@@ -111,7 +115,8 @@ internal sealed class SessionPersistence : ISessionPersistence
             {
                 try
                 {
-                    nodeId = Convert.FromHexString(dto.NodeId);
+                    var parsed = Convert.FromHexString(dto.NodeId);
+                    nodeId = parsed.Length == 20 ? parsed : null;
                 }
                 catch
                 {
@@ -124,7 +129,7 @@ internal sealed class SessionPersistence : ISessionPersistence
             {
                 foreach (var nodeDto in dto.Nodes)
                 {
-                    if (System.Net.IPAddress.TryParse(nodeDto.Ip, out var ip) &&
+                    if (nodeDto != null && System.Net.IPAddress.TryParse(nodeDto.Ip, out var ip) &&
                         nodeDto.Port > 0 && nodeDto.Port <= 65535)
                     {
                         byte[] id;
@@ -137,14 +142,17 @@ internal sealed class SessionPersistence : ISessionPersistence
                             continue;
                         }
 
-                        nodes.Add(new DhtNode(id, new System.Net.IPEndPoint(ip, nodeDto.Port)));
+                        if (id.Length == 20)
+                        {
+                            nodes.Add(new DhtNode(id, new System.Net.IPEndPoint(ip, nodeDto.Port)));
+                        }
                     }
                 }
             }
 
             return new DhtState(nodeId, nodes);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Failed to load DHT state");
             return null;
@@ -153,6 +161,7 @@ internal sealed class SessionPersistence : ISessionPersistence
 
     public async Task<IReadOnlyList<SavedTorrentEntry>> LoadAllAsync(CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var torrentsPath = GetTorrentsPath();
 
         if (!Directory.Exists(torrentsPath))
@@ -182,7 +191,20 @@ internal sealed class SessionPersistence : ISessionPersistence
         {
             try
             {
-                var entry = await LoadEntryAsync(torrentDir, ct).ConfigureAwait(false);
+                var dirName = Path.GetFileName(torrentDir);
+                if (!InfoHash.TryFromHex(dirName, out var hash))
+                {
+                    return;
+                }
+                var gate = RentEntryGate(hash);
+                SavedTorrentEntry? entry;
+                try
+                {
+                    await gate.Semaphore.WaitAsync(ct).ConfigureAwait(false);
+                    try { entry = await LoadEntryAsync(torrentDir, ct).ConfigureAwait(false); }
+                    finally { gate.Semaphore.Release(); }
+                }
+                finally { ReturnEntryGate(hash, gate); }
                 if (entry != null)
                 {
                     bag.Add(entry);
@@ -228,43 +250,76 @@ internal sealed class SessionPersistence : ISessionPersistence
                     EnsureDirectoryExists(torrentDir);
                 }
 
-                var writes = new List<Task>(4);
-
-                if (entry.TorrentFileData != null)
+                // Publish all files with a single pointer swap. Per-file atomic writes alone can
+                // leave new options paired with an old resume file after a crash or cancellation.
+                var previous = File.Exists(Path.Combine(torrentDir, CurrentSnapshotFileName))
+                    || File.Exists(Path.Combine(torrentDir, TorrentFileName)) || File.Exists(Path.Combine(torrentDir, MagnetFileName))
+                    ? await LoadEntryAsync(torrentDir, cancellationToken).ConfigureAwait(false) : null;
+                entry = entry with
                 {
-                    writes.Add(WriteAllBytesAtomicAsync(
-                        Path.Combine(torrentDir, TorrentFileName),
-                        entry.TorrentFileData,
-                        cancellationToken));
-                }
-
-                if (!string.IsNullOrEmpty(entry.MagnetLink))
+                    TorrentFileData = entry.TorrentFileData ?? previous?.TorrentFileData,
+                    MagnetLink = string.IsNullOrEmpty(entry.MagnetLink) ? previous?.MagnetLink : entry.MagnetLink,
+                    ResumeData = entry.ResumeData ?? previous?.ResumeData,
+                    Options = entry.Options ?? previous?.Options
+                };
+                string snapshotName = SnapshotPrefix + Guid.NewGuid().ToString("N");
+                string snapshotDir = Path.Combine(torrentDir, snapshotName);
+                Directory.CreateDirectory(snapshotDir);
+                bool published = false;
+                try
                 {
-                    writes.Add(WriteAllTextAtomicAsync(
-                        Path.Combine(torrentDir, MagnetFileName),
-                        entry.MagnetLink,
-                        cancellationToken));
-                }
+                    // Serialization can fail (for example, a non-finite ratio). Finish it before
+                    // starting writes so no unobserved writes outlive this snapshot's cleanup.
+                    var optionsJson = entry.Options != null
+                        ? JsonSerializer.Serialize(entry.Options, PeerSharpJsonContext.Default.SavedTorrentOptions) : null;
+                    var writes = new List<Task>(4);
 
-                if (entry.ResumeData != null)
+                    if (entry.TorrentFileData != null)
+                    {
+                        writes.Add(WriteAllBytesAtomicAsync(
+                            Path.Combine(snapshotDir, TorrentFileName),
+                            entry.TorrentFileData,
+                            cancellationToken));
+                    }
+
+                    if (!string.IsNullOrEmpty(entry.MagnetLink))
+                    {
+                        writes.Add(WriteAllTextAtomicAsync(
+                            Path.Combine(snapshotDir, MagnetFileName),
+                            entry.MagnetLink,
+                            cancellationToken));
+                    }
+
+                    if (entry.ResumeData != null)
+                    {
+                        writes.Add(WriteAllBytesAtomicAsync(
+                            Path.Combine(snapshotDir, ResumeFileName),
+                            entry.ResumeData.Data,
+                            cancellationToken));
+                    }
+
+                    if (optionsJson != null)
+                    {
+                        writes.Add(WriteAllTextAtomicAsync(
+                            Path.Combine(snapshotDir, OptionsFileName),
+                            optionsJson,
+                            cancellationToken));
+                    }
+
+                    await Task.WhenAll(writes).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await WriteAllTextAtomicAsync(Path.Combine(torrentDir, CurrentSnapshotFileName), snapshotName, cancellationToken).ConfigureAwait(false);
+                    published = true;
+                    foreach (string oldSnapshot in Directory.EnumerateDirectories(torrentDir, SnapshotPrefix + "*"))
+                    {
+                        if (oldSnapshot != snapshotDir) TryDeleteSnapshot(oldSnapshot);
+                    }
+                    _logger.LogDebug("Saved torrent entry {Hash}", entry.Hash);
+                }
+                finally
                 {
-                    writes.Add(WriteAllBytesAtomicAsync(
-                        Path.Combine(torrentDir, ResumeFileName),
-                        entry.ResumeData.Data,
-                        cancellationToken));
+                    if (!published) TryDeleteSnapshot(snapshotDir);
                 }
-
-                if (entry.Options != null)
-                {
-                    var optionsJson = JsonSerializer.Serialize(entry.Options, PeerSharpJsonContext.Default.SavedTorrentOptions);
-                    writes.Add(WriteAllTextAtomicAsync(
-                        Path.Combine(torrentDir, OptionsFileName),
-                        optionsJson,
-                        cancellationToken));
-                }
-
-                await Task.WhenAll(writes).ConfigureAwait(false);
-                _logger.LogDebug("Saved torrent entry {Hash}", entry.Hash);
             }
             finally
             {
@@ -349,6 +404,7 @@ internal sealed class SessionPersistence : ISessionPersistence
                 stream.Flush(flushToDisk: true);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporaryPath, path, overwrite: true);
         }
         finally
@@ -430,6 +486,13 @@ internal sealed class SessionPersistence : ISessionPersistence
         }
     }
 
+    private static void TryDeleteSnapshot(string path)
+    {
+        try { Directory.Delete(path, recursive: true); }
+        catch (IOException) { /* A committed snapshot must remain usable even if old snapshots cannot be removed. */ }
+        catch (UnauthorizedAccessException) { /* Same best-effort rule applies to permission failures. */ }
+    }
+
     private string GetTorrentPath(InfoHash hash)
     {
         return Path.Combine(GetTorrentsPath(), hash.ToHexStringUpper());
@@ -449,6 +512,18 @@ internal sealed class SessionPersistence : ISessionPersistence
         {
             _logger.LogWarning("Invalid torrent directory name: {Name}", dirName);
             return null;
+        }
+
+        var currentPath = Path.Combine(torrentDir, CurrentSnapshotFileName);
+        if (File.Exists(currentPath))
+        {
+            string snapshot = await File.ReadAllTextAsync(currentPath, cancellationToken).ConfigureAwait(false);
+            if (!snapshot.StartsWith(SnapshotPrefix, StringComparison.Ordinal)
+                || !Guid.TryParseExact(snapshot.AsSpan(SnapshotPrefix.Length), "N", out _))
+            {
+                throw new InvalidDataException("Invalid session snapshot pointer.");
+            }
+            torrentDir = Path.Combine(torrentDir, snapshot);
         }
 
         // Load .torrent file if it exists

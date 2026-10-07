@@ -75,8 +75,7 @@ public sealed class PortMapperFallbackTests
     [Fact(Timeout = 30_000)]
     public async Task CancellingAMappingIsNotReportedAsAFault()
     {
-        // Shutdown while a mapping is in flight. The cancellation is the caller's, so it must come
-        // back as a plain failure rather than escaping into the engine's startup path.
+        // Caller cancellation must propagate; the network manager treats it as normal shutdown.
         using var silent = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         int port = ((IPEndPoint)silent.Client.LocalEndPoint!).Port;
 
@@ -93,7 +92,7 @@ public sealed class PortMapperFallbackTests
 
         await cts.CancelAsync();
 
-        Assert.False(await mapping);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => mapping);
     }
 
     [Fact(Timeout = 30_000)]

@@ -3,7 +3,233 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
-## Unreleased
+## 5.1.0 — 2026-10-05
+
+Streaming to other devices - a TV, a cast receiver - and a broad hardening pass. No binary breaks
+against 5.0.0; one source break, noted under Changed.
+
+### Added
+
+- **`HttpStreamServer` can serve other devices.** `HttpStreamServerOptions` sets the address, the
+  port and an access token. A server bound to anything but loopback always requires a token in its
+  path, generated when none is given. `ContentType` reports the MIME type the file is served as,
+  for a cast sender's load request.
+- **`Settings.Streaming`** configures how far ahead a stream fetches (`ReadAheadBytes`) and how long a
+  read waits for data (`DataWaitTimeoutSeconds`) or a magnet for its metadata
+  (`MetadataWaitTimeoutSeconds`). Both waits were a fixed 60 seconds; zero now waits for as long as
+  the caller's token allows.
+- **`StreamingSettings.RequestQueueSecondsWhileBuffering`** gives each peer a shorter queue of work - one
+  second by default, instead of `RequestQueueTimeSeconds`' three - while a stream has little downloaded
+  ahead of where it is read: from when it opens or moves until twenty seconds are, and again once fewer
+  than ten are. A peer answers requests in order, so what a player waits on waits behind the peer's
+  queue. Against Debian's swarm with a player of ExoPlayer's defaults, it started playing after 5.1
+  seconds on average instead of 8.9, faster in all six pairs, at the same download rate.
+- **`StreamingSettings.ReadAheadSeconds`** fetches that many seconds ahead of a stream's read position,
+  at the rate it is being read - 30 by default - where that is more than `ReadAheadBytes`, which is now
+  the least fetched ahead. 20 MiB is five seconds of a 4K Blu-ray; with a 32 Mbit/s film and the fast
+  seeder of a local swarm slowing to a crawl for six seconds, the player no longer stalled, where it
+  stalled for about a second every time.
+- `.m4v`, `.ts`, `.m2ts`, `.mpg`, `.mpeg`, `.flv`, `.m4a`, `.aac` and `.opus` are served with their
+  media type instead of `application/octet-stream`, and subtitles (`.vtt`, `.srt`) can be served.
+- **`HttpStreamServer.AddFile`** serves a small file beside the stream, under the same token - such as
+  subtitles converted to WebVTT for a cast receiver, which only shows subtitles it fetches itself. The
+  content is produced on each request and served with CORS headers and without caching, so a file
+  that changes is fetched afresh.
+
+### Changed
+
+- Add-time options and their collections are copied before asynchronous setup begins. Changing the
+  original options afterward no longer changes a torrent's pending file selection or resume data.
+- Invalid peer ID lengths, overflowing tracker peer counts, negative queue limits and invalid
+  torrent strategy, ratio or seeding-time limits are rejected. Use null to disable ratio/time limits.
+- **`HttpStreamServer` no longer uses `HttpListener`.** It is built on a socket, so it can bind to a
+  network address on Windows without an administrator-granted URL reservation, and it serves
+  HTTP/1.1 keep-alive, `HEAD`, CORS preflight and CORS headers for cast receivers. Methods other than
+  `GET`, `HEAD` and `OPTIONS` are refused with 405 instead of being served as `GET`. A request that
+  stalls before its first byte is answered with 503 instead of a truncated body.
+- **`ITorrent.DownloadStrategy` reports the configured strategy while a stream is open.** Streaming is
+  applied on top of it and no longer overwrites it, so the configured strategy is what session
+  persistence saves.
+- The library declares `IsAotCompatible`, and builds with the AOT analyzers without warnings.
+- Passing a bare `null` as the third `HttpStreamServer` constructor argument is now ambiguous; cast it
+  to `ILoggerFactory` or `HttpStreamServerOptions`.
+- **A stream's next pieces are fetched first, from every peer that has them.** The pieces open
+  streams need are started and offered to each peer ahead of any other piece, in the order the streams
+  need them, and the two a stream needs soonest are asked of several peers at once, as at the end of a
+  download, instead of waiting on whichever peer started them. Against a local swarm of one fast and
+  three slow seeders, a player at 16 Mbit/s waited 2.2 to 2.3 seconds for its first byte instead of up
+  to 7.7, and 1.5 seconds after a seek instead of up to 8.6; it no longer stalled in ten playbacks,
+  where before it stalled in most.
+- **Blocks a stream is waiting on are asked of peers delivering well, and asked again when they keep
+  it waiting.** A block of the next pieces was asked of up to four peers, whichever had room first -
+  mostly slow ones - and those requests counted against the four until answered or timed out. Now
+  only a peer delivering well is asked for one already owed, and a request left unanswered for two
+  seconds no longer counts, so another fast peer can be. Streaming from Debian's swarm, four runs
+  each on the same day, a player stalled for 13 seconds in all across eight playbacks instead of 29,
+  at the same download rate.
+- **A stream fetches the start of its file after its read position, not before.** The start is now the
+  file's first megabyte, where a container keeps what a player reads first, rather than its first three
+  pieces - up to 48 MB of a film - and it comes after the pieces the reader needs next. A player
+  opening a film part-way in, with none of it downloaded, waited 2.1 to 2.5 seconds for its first byte
+  instead of 3.2 to 3.8.
+- **Far fewer exceptions are thrown in ordinary operation.** Measured over a ninety-second streaming
+  session, about one in twenty of the exceptions that used to be raised still are, and none of them
+  passes from PeerSharp into framework code - which is what stops a debugger with Just My Code on:
+  - Tracker host names are resolved through a cache that also remembers names that do not resolve, and
+    an announce goes out only over the address families the host has. A tracker without an IPv6
+    address, or whose name no longer resolves, used to throw on every announce.
+  - Datagrams to addresses a socket refuses (0.0.0.0, multicast, the reserved 240/4 block, port 0)
+    are dropped before sending, and those peers are no longer dialled. After a send finds no route to a
+    destination, that address is left alone for a minute; other addresses remain usable.
+  - A peer resetting its connection ends the read as end of input instead of an `IOException`
+    rethrown through each stream layer. Closing a connection ends its loops by closing the stream
+    rather than by cancelling them, so the receive loop's read no longer throws from PeerSharp's
+    streams into `System.IO.Pipelines` - an exception per disconnect that stopped the debugger with
+    Just My Code on. A read that closing does not end is still cancelled, after five seconds.
+  - Pending dials given up when a magnet's metadata arrives end as failed attempts rather than one
+    cancellation exception each.
+  - Peer TCP connections, and the streaming server's, read their socket through
+    `SocketAsyncEventArgs`, so a reset, an abort or our own close ends the read as end of input with
+    no exception at all; the reason is kept for logging. A uTP connection that is reset or times out
+    now ends its reads the same way instead of throwing, and a uTP dial the peer resets is a failed
+    attempt.
+  - A handshake that stalls is given up by closing the connection when its deadline passes, rather
+    than by cancelling the read - one exception fewer for every peer that connects and says nothing.
+    After an encryption handshake times out the connection is closed rather than retried in plaintext
+    on the same socket, which was never going to succeed: the peer had already been sent the key.
+  - Waiting for room in a peer's send queue reports running out of time as a result instead of a
+    cancelled wait.
+  - An HTTP tracker announce over one address family is sent to one of the tracker's addresses in
+    that family, with its name in the Host header (which HttpClient also uses for the TLS server name
+    and certificate check), instead of choosing the family in a connect callback. A callback can
+    report a refused connection only by throwing from PeerSharp into HttpClient, which stopped the
+    debugger with Just My Code on for every tracker that was down. Up to three of the tracker's
+    addresses are tried, and redirects are followed by the tracker itself, each location resolved
+    again; like HttpClient, an https tracker is not followed to plain http. The connect callback
+    remains only for a configured bind address.
+- **A stream's pieces are spread across the swarm.** A stream hands its reader only whole, verified
+  pieces, so a piece is as late as its slowest block. A peer whose rate was not yet known was given a
+  queue sized for a fast one - often all of a 4 MiB piece - and a slow peer could keep a whole streamed
+  piece for many seconds while others had none of it to send. Each peer now gets only as many blocks
+  of streamed pieces as it can deliver within two seconds at the rate it has shown (16 before it has
+  shown one), the rest of its queue going to pieces nobody waits on; and a stream's pieces may open
+  beyond the active-piece limit, up to twice it, since with 4 MiB pieces that byte budget leaves only
+  eight. In a local swarm with 4 MiB pieces, a player's first read waited under 0.6 seconds instead of
+  7 to 20, and no read waited more than 4; against Debian's swarm, a seek played after 3.3 seconds
+  instead of 7.4.
+- **Web seeds fetch what streams need first, and race slow sources.** They took pieces in index order,
+  skipping any peers were fetching; they now take the pieces open streams need, in order - the two a
+  stream waits on most even when peers have them. Each source's time per piece is measured, the most
+  wanted piece goes to the fastest free source, and a piece a slower source has held as long as a faster
+  one takes for a whole piece is asked of the faster one too.
+- The HTTP stream server logs, for each range, how long its reads of the torrent and its writes to the
+  player took and how long the connection had been silent when it ended, and every read that waits
+  half a second or more: enough to tell a torrent that kept a player waiting from a player whose buffer
+  was full.
+
+### Fixed
+
+- **`AddTorrentOptions.FileSelections` is applied**, and adding a torrent file applies
+  `AdditionalTrackers` and `AdditionalWebSeeds`, which only the magnet path did. The selection is
+  applied before the torrent starts and over resume data and a magnet's `so=`; for a magnet it waits
+  for the metadata. A list of the wrong length is an `ArgumentException` for a torrent file, and is
+  ignored with a warning for a magnet.
+- **Handshakes and encryption.** An incoming MSE connection reads the rest of a handshake its first
+  payload did not hold and keeps the bytes after it; a plaintext reply to an outgoing MSE attempt is
+  handled, and refused when encryption is required; incoming connections honour `Require` and
+  `Refuse`; MSE uses the truncated v2 hash for v2 and hybrid torrents (BEP 52). One deadline bounds a
+  whole handshake attempt, and connection slots cannot be over-subscribed by concurrent callers.
+- **uTP.** An incoming SYN is ignored when incoming uTP is disabled; a disposed stream keeps retrying
+  its FIN until it closes or times out; SACK loss evidence counts only packets that were sent; each UDP
+  send owns its packet buffer; a FIN drained from the reorder buffer always delivers its end of stream.
+- **Verification and storage.** BEP 30 proofs are authenticated against the trusted root before any
+  peer-supplied hash is stored; hybrid torrents verify each piece against both its v2 and v1 hashes;
+  pieces are checked for complete blocks before hashing. Bytes of a verified piece in a deselected file
+  are written rather than dropped; reads of missing or short files fail instead of returning zeros.
+  Resume data records each file's length and modification time and is not trusted for a file changed
+  since; invalid resume data is rejected. A full disk is reported as such.
+- **Requests and peer input.** Request bookkeeping removes only the request it was given; uploads to a
+  choked peer honour the allowed-fast set, computed per BEP 6. Fixed-length messages, bitfields, Have
+  indices, fast-extension, `ut_metadata` and extension handshake messages are validated, and a peer
+  that breaks them is disconnected. Web seed blocks cancel peers' requests for them, and web seed
+  downloads stop once their piece is verified however it was won.
+- **Web seeds (BEP 19)** are HTTP and HTTPS only, requested as identity with a 30-second timeout; a 206
+  must carry the range asked for; each piece is verified before it is handed over, and a source whose
+  piece fails is retired.
+- **Streaming.** A stream starts at its file's recorded offset, so v2 files after padding read the right
+  bytes; reads are single-flight and disposing a stream cancels the read in progress; stopping a torrent
+  closes its streams. The HTTP server rejects malformed requests - bad tokens, control characters,
+  conflicting or duplicate length, host or range headers.
+- **Lifecycles.** Engine initialize, stop, remove and dispose are serialized, and dispose waits for
+  every torrent to drain; stopping a torrent attempts every component and reports the failures
+  together; the metadata rebuild settles before `MetadataReceived` fires; one event subscriber that
+  throws no longer keeps the others from hearing.
+- **DHT, trackers and discovery.** DHT replies must come from the queried endpoint, and node IDs,
+  targets, info hashes and ports are validated; BEP 44 items are stored as snapshots with bounded salts
+  and put counters, and Ed25519 rejects small-order points; BEP 51 crawling cannot cycle forever or
+  outlive the DHT. UDP tracker replies must come from the tracker. Private torrents take no peers from
+  DHT or LSD (BEP 27), and hole-punching cannot bridge public peers into a local network or bypass
+  connection limits.
+- **Proxies.** `ForceProxy` is honoured by peers, web seeds, HTTP trackers and magnet fetches, disables
+  NAT-PMP and LSD as well as UPnP, and fails rather than connecting directly; SOCKS5 resolves tracker
+  names remotely and accepts UDP replies only from the relay.
+- **NAT mappings.** UPnP and NAT-PMP mappings retry lost datagrams, reject malformed or unrelated
+  replies, renew at the granted lifetime and port, and announce the mapped external port. UPnP
+  descriptions are parsed without external entities or oversized documents.
+- **Bandwidth limiting** is fair and exact: requests are checked and reserved as one operation, a new
+  request cannot spend quota ahead of waiters, and granted users go behind blocked ones each round.
+  Web seed downloads are metered. v2 file trees and hybrid layouts are validated, and v2-only torrents
+  get bandwidth channels of their own.
+- Blocklists distinguish IPv4 and IPv6 ranges and normalize mapped IPv4 addresses, closing a filter
+  bypass. IPv6 text ranges are parsed correctly; reversed or mixed-family ranges are ignored.
+- GeoIP reloads replace the entire database atomically. Invalid, truncated or cancelled loads keep
+  the previous database, and clearing either database during a load prevents it from being restored
+  by that load. Parsing bounds limit oversized inputs and accept streams that return short reads.
+- Stream rate history stays bounded for tiny reads, EOF releases priorities, and deadlines use the
+  supplied clock.
+- Release builds and dry runs have read-only permissions; only publishing receives write/OIDC
+  permissions. Release candidates are checked against their hashes, retries can finish asset uploads,
+  and SBOM generation uses fresh staging directories and follows dependencies in each target graph.
+- **uTP connections no longer stop receiving for up to a minute.** Streaming from Debian's swarm, a
+  quarter to a third of the peers delivering over uTP - 22 to 26 in each one-minute run - went silent
+  for 5 to 54 seconds while still being sent requests. Two causes, both fixed; in the same runs it is
+  now none to two, for at most 18 seconds:
+  - A packet that arrived while the connection's reader was behind was dropped for the peer to send
+    again, and the packets waiting behind a gap were passed on only when the next packet in order
+    arrived. A copy sent again of one already waiting then stopped everything behind it for good. The
+    packet is now kept, what waits is passed on as soon as the reader catches up - with the window
+    announced open again - and a copy already delivered is set aside.
+  - libtorrent, qBittorrent's, resends a lost packet at once only the first time, then waits for a
+    timer that every packet it receives restarts - and a downloader sends a steady stream of requests
+    and HAVEs. When a gap has stood a second with nothing arriving, the connection now sends nothing
+    for a second and a half, which lets that timer run out, and libtorrent resends what is missing.
+
+- **A block cancelled once is sent when it is asked for again.** A peer's cancel was remembered for as
+  long as the connection lasted, so a later request for the same block - from a client making room for
+  what its player needs, or retrying a piece that failed its hash - was refused every time. A cancel
+  now applies to the request waiting when it arrives, and is ignored when none is.
+
+- **A torrent stopped and started again dials the peers it knew.** Stopping closed their connections
+  and dropped the dials still queued, and nothing brought them back but the next tracker announce or
+  DHT lookup - so a peer only a magnet link's `x.pe` or `AdditionalPeers` named was never found again.
+  A restart now redials the best of the known peers, as a batch of new ones would be.
+- HTTP tracker proxying keeps DNS resolution at the proxy even when a local bind address is set.
+- HTTP tracker URLs and redirects containing IPv6 literals retain brackets in the Host header.
+- An unreachable UDP destination no longer suppresses reachable destinations in the same address
+  family. Destination backoff is bounded to 256 addresses.
+- Concurrent tracker DNS cache misses share one lookup, including when refreshing an expired entry.
+- **Closing one of several open streams no longer stops the others streaming.** Only the most recently
+  opened stream was tracked, and closing it put the torrent back on rarest-first while any other
+  stream was still reading. A player that fetched an MP4's index from the end of the file on a second
+  request could stall at the playhead until the read timed out. Every open stream now keeps its
+  pieces prioritised, the most recently read first, and every one is woken when a piece arrives.
+- **A stream opened on a magnet before its metadata arrived was not prioritised.** Metadata arriving
+  replaced the torrent's streaming state, so the waiting stream's priorities went where the piece
+  picker no longer looked.
+- **A torrent's configured download strategy was lost** when its metadata arrived, and when any
+  stream on it closed; both reset it to rarest-first.
+- Opening a stream on a magnet whose metadata never arrives throws `TimeoutException` rather than
+  `TaskCanceledException`, so it can be told apart from the caller cancelling.
 
 ## 5.0.0 — 2026-09-09
 

@@ -6,6 +6,8 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Xml.Linq;
+using System.Xml;
+using System.Security;
 
 namespace PeerSharp.Internals.Utilities;
 
@@ -62,6 +64,8 @@ internal static class UpnpDiscovery
         var gateways = new List<UpnpGateway>();
         var clients = new List<UdpClient>();
         var tasks = new List<Task>();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3), timeProvider);
+        using var scope = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
 
         try
         {
@@ -75,7 +79,7 @@ internal static class UpnpDiscovery
                     };
                     clients.Add(client);
 
-                    tasks.Add(ReceiveLoopAsync(client, gateways, ip, parseDescriptionAsync, logger, ct));
+                    tasks.Add(ReceiveLoopAsync(client, gateways, ip, parseDescriptionAsync, logger, scope.Token));
 
                     // Send M-SEARCH
                     var data = Encoding.ASCII.GetBytes(SsdpMessage);
@@ -85,13 +89,14 @@ internal static class UpnpDiscovery
                         await client.SendAsync(data, ssdpEndpoint, ct).ConfigureAwait(false);
                     }
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch (Exception ex)
                 {
                     logger.LogError(ex, "Bind error on {Ip}", ip);
                 }
             }
 
-            await Task.WhenAny(Task.WhenAll(tasks), Task.Delay(TimeSpan.FromSeconds(3), timeProvider, ct)).ConfigureAwait(false);
+            await Task.WhenAll(tasks).ConfigureAwait(false);
         }
         finally
         {
@@ -101,6 +106,7 @@ internal static class UpnpDiscovery
             }
         }
 
+        ct.ThrowIfCancellationRequested();
         return gateways;
     }
 
@@ -114,8 +120,12 @@ internal static class UpnpDiscovery
     {
         try
         {
-            var xml = await HttpClient.GetStringAsync(location, ct).ConfigureAwait(false);
-            var doc = XDocument.Parse(xml);
+            if (!Uri.TryCreate(location, UriKind.Absolute, out var descriptionUri) || descriptionUri.Scheme is not ("http" or "https")) return null;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(2));
+            using var response = await HttpClient.GetAsync(descriptionUri, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            var doc = await ReadXmlAsync(response, timeout.Token).ConfigureAwait(false);
             var ns = doc.Root?.GetDefaultNamespace() ?? XNamespace.None;
 
             var device = doc.Descendants(ns + "device").FirstOrDefault();
@@ -125,13 +135,11 @@ internal static class UpnpDiscovery
             }
 
             var friendlyName = device.Element(ns + "friendlyName")?.Value ?? "Unknown";
-            var serviceList = doc.Descendants(ns + "serviceList").FirstOrDefault();
-            if (serviceList == null)
-            {
-                return null;
-            }
+            var baseUri = descriptionUri;
+            string? urlBase = doc.Root?.Element(ns + "URLBase")?.Value;
+            if (!string.IsNullOrWhiteSpace(urlBase) && Uri.TryCreate(urlBase, UriKind.Absolute, out var advertisedBase)) baseUri = advertisedBase;
 
-            foreach (var service in serviceList.Elements(ns + "service"))
+            foreach (var service in doc.Descendants(ns + "service"))
             {
                 var serviceType = service.Element(ns + "serviceType")?.Value;
                 var controlUrl = service.Element(ns + "controlURL")?.Value;
@@ -139,23 +147,12 @@ internal static class UpnpDiscovery
                 if (serviceType != null && controlUrl != null &&
                     (serviceType.Contains(":WANIPConnection:") || serviceType.Contains(":WANPPPConnection:")))
                 {
-                    if (!controlUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var uri = new Uri(location);
-                        if (controlUrl.StartsWith('/'))
-                        {
-                            controlUrl = uri.Scheme + "://" + uri.Host + ":" + uri.Port + controlUrl;
-                        }
-                        else
-                        {
-                            controlUrl = uri.Scheme + "://" + uri.Host + ":" + uri.Port + "/" + controlUrl;
-                        }
-                    }
+                    if (!Uri.TryCreate(baseUri, controlUrl.Trim(), out var controlUri) || controlUri.Scheme is not ("http" or "https")) continue;
 
                     return new UpnpGateway
                     {
                         Name = friendlyName,
-                        ControlUrl = controlUrl,
+                        ControlUrl = controlUri.AbsoluteUri,
                         ServiceType = serviceType,
                         LocalAddress = localIp
                     };
@@ -166,7 +163,8 @@ internal static class UpnpDiscovery
         {
             logger.LogWarning(ex, "UPnP HTTP error fetching {Location}", location);
         }
-        catch (TaskCanceledException ex)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException ex)
         {
             // Timeout - common for UPnP discovery
             logger.LogDebug(ex, "UPnP timeout fetching {Location}", location);
@@ -180,6 +178,24 @@ internal static class UpnpDiscovery
             logger.LogError(ex, "UPnP error parsing {Location}", location);
         }
         return null;
+    }
+
+    internal static async Task<XDocument> ReadXmlAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        const int maxBytes = 1024 * 1024;
+        if (response.Content.Headers.ContentLength > maxBytes) throw new XmlException("UPnP XML response is too large.");
+        using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var buffer = new MemoryStream();
+        byte[] chunk = new byte[8192];
+        int count;
+        while ((count = await stream.ReadAsync(chunk, ct).ConfigureAwait(false)) > 0)
+        {
+            if (buffer.Length + count > maxBytes) throw new XmlException("UPnP XML response is too large.");
+            await buffer.WriteAsync(chunk.AsMemory(0, count), ct).ConfigureAwait(false);
+        }
+        buffer.Position = 0;
+        using var reader = XmlReader.Create(buffer, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = maxBytes });
+        return XDocument.Load(reader);
     }
 
     private static string? GetHeaderValue(string response, string header)
@@ -213,6 +229,7 @@ internal static class UpnpDiscovery
         ILogger logger,
         CancellationToken ct)
     {
+        var locations = new HashSet<string>(StringComparer.Ordinal);
         while (client.Client != null && !ct.IsCancellationRequested)
         {
             try
@@ -223,21 +240,20 @@ internal static class UpnpDiscovery
                 string? location = GetHeaderValue(response, "LOCATION");
                 if (!string.IsNullOrEmpty(location))
                 {
-                    // Check if we already found this gateway
+                    // Bound unsolicited discovery results and don't fetch the same description twice.
                     lock (gateways)
                     {
-                        if (gateways.Any(g => g.ControlUrl.Contains(location) || location.Contains(g.ControlUrl)))
-                        {
-                            continue;
-                        }
+                        if (gateways.Count >= 64) break;
                     }
+                    if (locations.Count >= 64 || !locations.Add(location)) continue;
 
                     var gateway = await parseDescriptionAsync(location, localIp, ct).ConfigureAwait(false);
+                    ct.ThrowIfCancellationRequested();
                     if (gateway != null)
                     {
                         lock (gateways)
                         {
-                            if (!gateways.Any(g => g.ControlUrl == gateway.ControlUrl))
+                            if (gateways.Count < 64 && !gateways.Any(g => g.ControlUrl == gateway.ControlUrl))
                             {
                                 gateways.Add(gateway);
                             }
@@ -245,6 +261,7 @@ internal static class UpnpDiscovery
                     }
                 }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (ObjectDisposedException)
             {
                 // Socket closed - expected during shutdown
@@ -278,8 +295,9 @@ internal class UpnpPortMapping : IPortMapper
     private readonly Func<CancellationToken, Task<List<UpnpGateway>>> _discoverGatewaysAsync;
     private readonly ILogger<UpnpPortMapping> _logger;
     private readonly List<(int Port, string Protocol, string Description)> _mappings = [];
-    private readonly Dictionary<UpnpGateway, (PortMappingResult MappingResult, string? Error)> _status = [];
+    private readonly Dictionary<UpnpGateway, (PortMappingResult MappingResult, string? Error, int? ExternalPort)> _status = [];
     private List<UpnpGateway> _gateways = [];
+    private readonly HashSet<(UpnpGateway Gateway, int Port, string Protocol)> _successfulMappings = [];
 
     public UpnpPortMapping()
         : this(UpnpDiscovery.DiscoverAsync, NullLoggerFactory.Instance)
@@ -304,6 +322,11 @@ internal class UpnpPortMapping : IPortMapper
 
     public string Name => "UPnP";
 
+    public int? GetExternalPort(int internalPort, string protocol)
+    {
+        lock (_status) return _successfulMappings.Any(mapping => mapping.Port == internalPort && mapping.Protocol == protocol) ? internalPort : null;
+    }
+
     public IReadOnlyList<PortMappingStatus> GetStatus()
     {
         var result = new List<PortMappingStatus>();
@@ -320,7 +343,7 @@ internal class UpnpPortMapping : IPortMapper
                     result.Add(new PortMappingStatus(
                         $"{Name} ({kvp.Key.Name})",
                         kvp.Value.MappingResult,
-                        _mappings.LastOrDefault().Port != 0 ? _mappings.LastOrDefault().Port : null,
+                        kvp.Value.ExternalPort,
                         kvp.Value.Error));
                 }
             }
@@ -330,24 +353,32 @@ internal class UpnpPortMapping : IPortMapper
 
     public async Task<bool> MapPortAsync(int port, string protocol, string description, CancellationToken ct)
     {
-        if (_gateways.Count == 0)
+        ArgumentOutOfRangeException.ThrowIfLessThan(port, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(port, ushort.MaxValue);
+        protocol = protocol.ToUpperInvariant();
+        if (protocol is not ("TCP" or "UDP")) throw new ArgumentException("Expected TCP or UDP.", nameof(protocol));
+        UpnpGateway[] gateways;
+        lock (_status) gateways = [.. _gateways];
+        if (gateways.Length == 0)
         {
             return false;
         }
 
         lock (_mappings)
         {
-            _mappings.Add((port, protocol, description));
+            if (!_mappings.Any(mapping => mapping.Port == port && mapping.Protocol == protocol)) _mappings.Add((port, protocol, description));
         }
 
-        var results = await Task.WhenAll(_gateways.Select(async gateway =>
+        var results = await Task.WhenAll(gateways.Select(async gateway =>
         {
             bool success = await MapOnGatewayAsync(gateway, port, protocol, description, ct).ConfigureAwait(false);
             lock (_status)
             {
+                if (success) _successfulMappings.Add((gateway, port, protocol));
+                else _successfulMappings.Remove((gateway, port, protocol));
                 _status[gateway] = success
-                    ? (PortMappingResult.Success, null)
-                    : (PortMappingResult.Failed, "Mapping failed");
+                    ? (PortMappingResult.Success, null, port)
+                    : (PortMappingResult.Failed, "Mapping failed", null);
             }
             return success;
         })).ConfigureAwait(false);
@@ -356,19 +387,21 @@ internal class UpnpPortMapping : IPortMapper
 
     public async Task StartAsync(CancellationToken ct)
     {
-        _gateways = await _discoverGatewaysAsync(ct).ConfigureAwait(false);
+        var gateways = await _discoverGatewaysAsync(ct).ConfigureAwait(false);
         lock (_status)
         {
+            _gateways = gateways;
+            _successfulMappings.RemoveWhere(mapping => !gateways.Contains(mapping.Gateway));
             _status.Clear();
             foreach (var g in _gateways)
             {
-                _status[g] = (PortMappingResult.Pending, null);
+                _status[g] = (PortMappingResult.Pending, null, null);
             }
         }
 
-        if (_gateways.Count > 0)
+        if (gateways.Count > 0)
         {
-            foreach (var g in _gateways)
+            foreach (var g in gateways)
             {
                 _logger.LogInformation("UPnP: Found gateway {GatewayName} at {GatewayAddress}", g.Name, g.LocalAddress);
             }
@@ -381,11 +414,6 @@ internal class UpnpPortMapping : IPortMapper
 
     public async Task UnmapAllAsync(CancellationToken ct)
     {
-        if (_gateways.Count == 0)
-        {
-            return;
-        }
-
         List<(int Port, string Protocol, string Description)> toUnmap;
         lock (_mappings)
         {
@@ -397,7 +425,13 @@ internal class UpnpPortMapping : IPortMapper
         // single gateway sequential. A flat mappings x gateways fan-out is exactly the burst
         // that consumer routers rate-limit or silently drop, turning a slow-but-reliable
         // teardown into a flaky one.
-        UpnpGateway[] gateways = [.. _gateways];
+        UpnpGateway[] gateways;
+        lock (_status)
+        {
+            gateways = [.. _gateways];
+            _successfulMappings.Clear();
+            foreach (var gateway in gateways) _status[gateway] = (PortMappingResult.NotAttempted, null, null);
+        }
         await Task.WhenAll(gateways.Select(async gateway =>
         {
             foreach (var (port, protocol, _) in toUnmap)
@@ -413,14 +447,14 @@ internal class UpnpPortMapping : IPortMapper
         sb.Append("<?xml version=\"1.0\"?>");
         sb.Append("<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">");
         sb.Append("<s:Body>");
-        sb.Append(CultureInfo.InvariantCulture, $"<u:AddPortMapping xmlns:u=\"{gateway.ServiceType}\">");
+        sb.Append(CultureInfo.InvariantCulture, $"<u:AddPortMapping xmlns:u=\"{SecurityElement.Escape(gateway.ServiceType)}\">");
         sb.Append("<NewRemoteHost></NewRemoteHost>");
         sb.Append(CultureInfo.InvariantCulture, $"<NewExternalPort>{port}</NewExternalPort>");
         sb.Append(CultureInfo.InvariantCulture, $"<NewProtocol>{protocol}</NewProtocol>");
         sb.Append(CultureInfo.InvariantCulture, $"<NewInternalPort>{port}</NewInternalPort>");
         sb.Append(CultureInfo.InvariantCulture, $"<NewInternalClient>{gateway.LocalAddress}</NewInternalClient>");
         sb.Append("<NewEnabled>1</NewEnabled>");
-        sb.Append(CultureInfo.InvariantCulture, $"<NewPortMappingDescription>{description}</NewPortMappingDescription>");
+        sb.Append(CultureInfo.InvariantCulture, $"<NewPortMappingDescription>{SecurityElement.Escape(description)}</NewPortMappingDescription>");
         sb.Append("<NewLeaseDuration>0</NewLeaseDuration>");
         sb.Append("</u:AddPortMapping>");
         sb.Append("</s:Body>");
@@ -445,11 +479,16 @@ internal class UpnpPortMapping : IPortMapper
     {
         try
         {
-            var content = new StringContent(body, Encoding.UTF8, "text/xml");
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            using var content = new StringContent(body, Encoding.UTF8, "text/xml");
             content.Headers.Add("SOAPACTION", $"\"{gateway.ServiceType}#{action}\"");
 
-            var response = await SoapClient.PostAsync(gateway.ControlUrl, content, ct).ConfigureAwait(false);
-            return response.IsSuccessStatusCode;
+            using var request = new HttpRequestMessage(HttpMethod.Post, gateway.ControlUrl) { Content = content };
+            using var response = await SoapClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return false;
+            var document = await UpnpDiscovery.ReadXmlAsync(response, timeout.Token).ConfigureAwait(false);
+            return !document.Descendants(XName.Get("Fault", "http://schemas.xmlsoap.org/soap/envelope/")).Any();
         }
         catch (Exception ex)
         {
@@ -467,7 +506,7 @@ internal class UpnpPortMapping : IPortMapper
         sb.Append("<?xml version=\"1.0\"?>");
         sb.Append("<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">");
         sb.Append("<s:Body>");
-        sb.Append(CultureInfo.InvariantCulture, $"<u:DeletePortMapping xmlns:u=\"{gateway.ServiceType}\">");
+        sb.Append(CultureInfo.InvariantCulture, $"<u:DeletePortMapping xmlns:u=\"{SecurityElement.Escape(gateway.ServiceType)}\">");
         sb.Append("<NewRemoteHost></NewRemoteHost>");
         sb.Append(CultureInfo.InvariantCulture, $"<NewExternalPort>{port}</NewExternalPort>");
         sb.Append(CultureInfo.InvariantCulture, $"<NewProtocol>{protocol}</NewProtocol>");

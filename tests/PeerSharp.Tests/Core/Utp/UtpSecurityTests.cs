@@ -1,5 +1,6 @@
 using System.Net;
 using System.Reflection;
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utp;
 using PeerSharp.Internals.Framework;
@@ -8,6 +9,41 @@ namespace PeerSharp.Tests.Core.Utp;
 
 public class UtpSecurityTests
 {
+    [Fact(Timeout = 10000)]
+    public async Task IncomingSynIsIgnoredWhenOnlyOutgoingUtpIsEnabled()
+    {
+        var settings = new ConnectionSettings { EnableUtpIn = false, EnableUtpOut = true };
+        using var listener = new MockUdpListener();
+        await using var manager = new UtpManager(TimeProvider.System, NullLoggerFactory.Instance, settings);
+        manager.Start(listener);
+        int accepted = 0;
+        manager.OnNewConnection = _ => accepted++;
+        byte[] syn = new byte[20];
+        syn[0] = 0x41;
+        syn[3] = 42;
+        syn[17] = 1;
+
+        manager.Receive(syn, new IPEndPoint(IPAddress.Loopback, 6000));
+
+        Assert.Equal(0, accepted);
+        Assert.Empty(listener.SentPackets);
+
+        var remote = new IPEndPoint(IPAddress.Loopback, 6000);
+        var outgoing = manager.CreateStream(remote);
+        var connect = outgoing.ConnectAsync(TimeSpan.FromSeconds(2));
+        byte[] state = new byte[20];
+        state[0] = 0x21;
+        UtpManager.WriteUInt16BigEndian(state, 2, outgoing.ConnectionIdRecv);
+        UtpManager.WriteUInt32BigEndian(state, 12, 65536);
+        UtpManager.WriteUInt16BigEndian(state, 16, 10);
+        UtpManager.WriteUInt16BigEndian(state, 18, (ushort)(outgoing.SeqNr - 1));
+        manager.Receive(state, remote);
+        await connect.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        Assert.Equal(UtpState.Connected, outgoing.State);
+        Assert.Equal(0, accepted);
+    }
+
     [Fact(Timeout = 30000)]
     public async Task TestConnectionHijacking_ResetInjection()
     {

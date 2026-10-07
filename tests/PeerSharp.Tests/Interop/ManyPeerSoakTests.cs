@@ -30,6 +30,7 @@ namespace PeerSharp.Tests.Interop;
 /// <para>
 /// Opt-in like the rest of this namespace: set <c>PEERSHARP_SOAK=1</c>. Peer count and payload size
 /// come from <c>PEERSHARP_SOAK_PEERS</c> and <c>PEERSHARP_SOAK_SIZE_MIB</c>.
+/// Set <c>PEERSHARP_SOAK_ROUNDS</c> to repeat full engine startup, transfer, verification, and disposal.
 /// </para>
 /// </summary>
 public sealed class ManyPeerSoakTests : IAsyncLifetime
@@ -71,11 +72,25 @@ public sealed class ManyPeerSoakTests : IAsyncLifetime
             Assert.Skip("Set PEERSHARP_SOAK=1 to run the many-peer soak.");
         }
 
+        int rounds = IntFromEnvironment("PEERSHARP_SOAK_ROUNDS", 1);
+        using var process = Process.GetCurrentProcess();
+        for (int round = 0; round < rounds; round++)
+        {
+            await RunRoundAsync(Path.Combine(_root, "round-" + round));
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            process.Refresh();
+            _output.WriteLine($"After round {round + 1}: heap={GC.GetTotalMemory(true) / 1024 / 1024} MiB, handles={process.HandleCount}");
+        }
+    }
+
+    private async Task RunRoundAsync(string roundRoot)
+    {
         int peerCount = IntFromEnvironment("PEERSHARP_SOAK_PEERS", 24);
         int sizeMiB = IntFromEnvironment("PEERSHARP_SOAK_SIZE_MIB", 16);
         var timeout = TimeSpan.FromMinutes(IntFromEnvironment("PEERSHARP_SOAK_TIMEOUT_MINUTES", 10));
 
-        var seedDir = Path.Combine(_root, "seed");
+        var seedDir = Path.Combine(roundRoot, "seed");
         Directory.CreateDirectory(seedDir);
 
         const string fileName = "soak-payload.bin";
@@ -119,7 +134,7 @@ public sealed class ManyPeerSoakTests : IAsyncLifetime
         {
             for (int i = 0; i < peerCount; i++)
             {
-                var dir = Path.Combine(_root, "leech-" + i);
+                var dir = Path.Combine(roundRoot, "leech-" + i);
                 Directory.CreateDirectory(dir);
                 leechDirs.Add(dir);
 
@@ -182,12 +197,11 @@ public sealed class ManyPeerSoakTests : IAsyncLifetime
                 completed == peerCount,
                 $"Only {completed} of {peerCount} leechers finished within {clock.Elapsed.TotalSeconds:F0}s.");
 
-            // Spot-check rather than every copy: hashing peerCount payloads costs more than it proves.
-            // Shared read because the leecher still holds the file open until its engine is disposed.
-            var sample = Path.Combine(leechDirs[0], fileName);
-            await using var stream = new FileStream(
-                sample, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            Assert.Equal(expectedHash, Convert.ToHexString(await SHA256.HashDataAsync(stream)));
+            foreach (string directory in leechDirs)
+            {
+                await using var stream = new FileStream(Path.Combine(directory, fileName), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                Assert.Equal(expectedHash, Convert.ToHexString(await SHA256.HashDataAsync(stream)));
+            }
         }
         finally
         {

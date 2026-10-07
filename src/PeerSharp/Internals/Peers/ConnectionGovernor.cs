@@ -16,43 +16,57 @@ internal sealed class ConnectionGovernor : IConnectionGovernor
 
     public void ReleaseConnectionSlot()
     {
-        int newVal = Interlocked.Decrement(ref _activeConnections);
-        if (newVal < 0)
-        {
-            Interlocked.Exchange(ref _activeConnections, 0);
-        }
+        ReleaseSlot(ref _activeConnections);
     }
 
     public void ReleasePendingSlot()
     {
-        int newVal = Interlocked.Decrement(ref _pendingConnections);
-        if (newVal < 0)
-        {
-            Interlocked.Exchange(ref _pendingConnections, 0);
-        }
+        ReleaseSlot(ref _pendingConnections);
     }
 
     public bool TryAcquireConnectionSlot()
     {
-        int current = Interlocked.CompareExchange(ref _activeConnections, 0, 0);
-        if (current >= _settings.Connection.MaxConnections)
+        while (true)
         {
-            return false;
-        }
+            int current = Volatile.Read(ref _activeConnections);
+            if (current >= _settings.Connection.MaxConnections)
+            {
+                return false;
+            }
 
-        Interlocked.Increment(ref _activeConnections);
-        return true;
+            if (Interlocked.CompareExchange(ref _activeConnections, current + 1, current) == current)
+            {
+                return true;
+            }
+        }
     }
 
     public bool TryAcquirePendingSlot()
     {
-        int current = Interlocked.CompareExchange(ref _pendingConnections, 0, 0);
-        if (current >= _settings.Connection.MaxPendingConnections)
+        while (true)
         {
-            return false;
-        }
+            int current = Volatile.Read(ref _pendingConnections);
+            if (current >= _settings.Connection.MaxPendingConnections)
+            {
+                return false;
+            }
 
-        Interlocked.Increment(ref _pendingConnections);
-        return true;
+            if (Interlocked.CompareExchange(ref _pendingConnections, current + 1, current) == current)
+            {
+                return true;
+            }
+        }
+    }
+
+    private static void ReleaseSlot(ref int slots)
+    {
+        while (true)
+        {
+            int current = Volatile.Read(ref slots);
+            if (current == 0 || Interlocked.CompareExchange(ref slots, current - 1, current) == current)
+            {
+                return;
+            }
+        }
     }
 }

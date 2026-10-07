@@ -2,6 +2,8 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Utp;
+using System.Net.NetworkInformation;
+using System.Threading.Channels;
 
 namespace PeerSharp.Internals.Network;
 
@@ -30,6 +32,8 @@ internal class NetworkManager : INetworkManager
     private AtomicDisposal _disposal = new();
     private CancellationTokenSource? _portMappingCts;
     private Task? _portMappingTask;
+    private readonly TimeProvider _timeProvider;
+    private readonly Action? _onAdvertisedPortChanged;
 
     public NetworkManager(
         Settings settings,
@@ -44,17 +48,41 @@ internal class NetworkManager : INetworkManager
         Action<UtpStream> onUtpConnection,
         NetworkServices services,
         ILoggerFactory loggerFactory)
+        : this(settings, onUtpConnection, services, loggerFactory, TimeProvider.System)
+    {
+    }
+
+    public NetworkManager(
+        Settings settings,
+        Action<UtpStream> onUtpConnection,
+        NetworkServices services,
+        ILoggerFactory loggerFactory,
+        TimeProvider timeProvider,
+        Action? onAdvertisedPortChanged = null)
     {
         _logger = loggerFactory.CreateLogger<NetworkManager>();
         _settings = settings;
         _onUtpConnection = onUtpConnection;
         _services = services;
+        _timeProvider = timeProvider;
+        _onAdvertisedPortChanged = onAdvertisedPortChanged;
         Blocklist = new IpBlocklist(loggerFactory);
     }
 
     public IpBlocklist Blocklist { get; }
     public int BoundTcpPort => PortListener.Port;
     public int BoundUdpPort => UdpListener.Port;
+    public int AdvertisedPeerPort
+    {
+        get
+        {
+            bool tcp = _settings.Connection.EnableTcpIn && BoundTcpPort > 0;
+            int localPort = tcp ? BoundTcpPort : BoundUdpPort;
+            if (localPort <= 0) return _settings.Connection.TcpPort;
+            return _portMappers.Select(mapper => mapper.GetExternalPort(localPort, tcp ? "TCP" : "UDP"))
+                .FirstOrDefault(port => port.HasValue) ?? localPort;
+        }
+    }
     public IDhtManager Dht => _services.Dht;
     public ILsdManager Lsd => _services.Lsd;
     public IPortListener PortListener => _services.PortListener;
@@ -94,7 +122,7 @@ internal class NetworkManager : INetworkManager
         // Initialize packet handlers
         if (settings.Connection.EnableUtpIn || settings.Connection.EnableUtpOut)
         {
-            Utp.OnNewConnection = _onUtpConnection;
+            Utp.OnNewConnection = settings.Connection.EnableUtpIn ? _onUtpConnection : null;
             Utp.Start(UdpListener);
         }
 
@@ -132,13 +160,13 @@ internal class NetworkManager : INetworkManager
             if (_portMappingCts != null)
             {
                 await _portMappingCts.CancelAsync().ConfigureAwait(false);
+                if (_portMappingTask != null) await _portMappingTask.ConfigureAwait(false);
                 _portMappingCts.Dispose();
             }
 
             _portMappingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _portMappingCts.CancelAfter(TimeSpan.FromSeconds(10));
-
-            _portMappingTask = StartPortMappingSafeAsync(BoundTcpPort, sharedUdpEnabled ? BoundUdpPort : 0, _portMappingCts.Token);
+            _portMappingTask = MaintainPortMappingsAsync(settings.Connection.EnableTcpIn ? BoundTcpPort : 0,
+                sharedUdpEnabled ? BoundUdpPort : 0, _portMappingCts.Token);
             _ = _portMappingTask.ContinueWith(t =>
             {
                 if (t.IsFaulted)
@@ -238,33 +266,48 @@ internal class NetworkManager : INetworkManager
         _logger.LogDebug("Network shutdown port unmapping completed in {ElapsedMs} ms", stopwatch.ElapsedMilliseconds);
     }
 
-    private async Task StartPortMappingSafeAsync(int tcpPort, int udpPort, CancellationToken ct)
+    private async Task MaintainPortMappingsAsync(int tcpPort, int udpPort, CancellationToken ct)
     {
-        foreach (var mapper in _portMappers)
+        var changes = Channel.CreateBounded<bool>(1);
+        void OnAddressChanged(object? sender, EventArgs args) => changes.Writer.TryWrite(true);
+        NetworkChange.NetworkAddressChanged += OnAddressChanged;
+        int advertisedPort = AdvertisedPeerPort;
+        try
         {
-            try
+            while (!ct.IsCancellationRequested)
             {
-                await mapper.StartAsync(ct).ConfigureAwait(false);
-                await mapper.MapPortAsync(tcpPort, "TCP", "PeerSharp TCP", ct).ConfigureAwait(false);
-                if (udpPort <= 0)
+                await Task.WhenAll(_portMappers.Select(async mapper =>
                 {
-                    continue;
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10), _timeProvider);
+                    using var round = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+                    try
+                    {
+                        await mapper.StartAsync(round.Token).ConfigureAwait(false);
+                        if (tcpPort > 0) await mapper.MapPortAsync(tcpPort, "TCP", "PeerSharp TCP", round.Token).ConfigureAwait(false);
+                        if (udpPort > 0) await mapper.MapPortAsync(udpPort, "UDP", "PeerSharp UDP", round.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (round.IsCancellationRequested) { /* Bounded refresh or shutdown. */ }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Port mapping refresh failed for {Mapper}", mapper.Name); }
+                })).ConfigureAwait(false);
+
+                int currentPort = AdvertisedPeerPort;
+                if (!ct.IsCancellationRequested && currentPort != advertisedPort)
+                {
+                    advertisedPort = currentPort;
+                    try { _onAdvertisedPortChanged?.Invoke(); }
+                    catch (Exception ex) { _logger.LogDebug(ex, "Could not announce changed external port"); }
                 }
 
-                if (udpPort != tcpPort)
-                {
-                    await mapper.MapPortAsync(udpPort, "UDP", "PeerSharp UDP", ct).ConfigureAwait(false);
-                }
-                else
-                {
-                    await mapper.MapPortAsync(tcpPort, "UDP", "PeerSharp UDP", ct).ConfigureAwait(false);
-                }
-            }
-            catch
-            {
-                // Non-critical mapping failure
+                using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var delay = Task.Delay(_portMappers.Min(mapper => mapper.RenewalInterval), _timeProvider, wait.Token);
+                var changed = changes.Reader.WaitToReadAsync(wait.Token).AsTask();
+                await Task.WhenAny(delay, changed).ConfigureAwait(false);
+                await wait.CancelAsync().ConfigureAwait(false);
+                while (changes.Reader.TryRead(out _)) { /* Coalesce address changes. */ }
             }
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { /* Normal shutdown. */ }
+        finally { NetworkChange.NetworkAddressChanged -= OnAddressChanged; }
     }
 
     private async Task UnmapPortsSafeAsync(CancellationToken ct)

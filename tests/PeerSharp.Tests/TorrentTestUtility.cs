@@ -356,7 +356,8 @@ internal static class TorrentTestUtility
         ITrackerFactory? trackerFactory = null,
         TimeProvider? timeProvider = null,
         IAlertsManager? alerts = null,
-        TorrentResumeData? resumeData = null)
+        TorrentResumeData? resumeData = null,
+        IBandwidthManager? bandwidth = null)
     {
         metadata ??= new TorrentFileMetadata();
         if (metadata.Info.PieceSize == 0)
@@ -372,7 +373,7 @@ internal static class TorrentTestUtility
         return Torrent.Create(
             metadata,
             settings,
-            new MockBandwidthManager(),
+            bandwidth ?? new MockBandwidthManager(),
             alerts ?? new MockAlertsManager(),
             new MockFileSelectionManager(),
             new MockPeerCommunicationFactory(),

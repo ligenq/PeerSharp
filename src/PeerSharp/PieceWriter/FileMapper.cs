@@ -17,8 +17,9 @@ internal class FileMapper
         long offset = 0;
         for (int i = 0; i < _fileSizes.Length; i++)
         {
+            ArgumentOutOfRangeException.ThrowIfNegative(_fileSizes[i]);
             _cumulativeOffsets[i] = offset;
-            offset += _fileSizes[i];
+            offset = checked(offset + _fileSizes[i]);
         }
         _cumulativeOffsets[_fileSizes.Length] = offset;
         TotalSize = offset;
@@ -33,6 +34,10 @@ internal class FileMapper
     /// </summary>
     public (int FileIndex, long FileOffset) MapOffset(long globalOffset)
     {
+        if (globalOffset < 0 || globalOffset > TotalSize || FileCount == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(globalOffset));
+        }
         // Binary search for O(log N) performance with large file lists
         int idx = Array.BinarySearch(_cumulativeOffsets, globalOffset);
 
@@ -104,7 +109,15 @@ internal class FileMapper
     /// compiler-generated iterator was costing an allocation per call on that path - for laziness
     /// no caller wants, since they all drain the result into a list immediately.
     /// </remarks>
-    public RangeEnumerable MapRange(long globalOffset, int length) => new(this, globalOffset, length);
+    public RangeEnumerable MapRange(long globalOffset, int length)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        if (globalOffset < 0 || globalOffset > TotalSize || length > TotalSize - globalOffset)
+        {
+            throw new ArgumentOutOfRangeException(nameof(globalOffset));
+        }
+        return new(this, globalOffset, length);
+    }
 
     /// <summary>Allocation-free enumerable over the file operations covering a global range.</summary>
     public readonly struct RangeEnumerable(FileMapper mapper, long globalOffset, int length)

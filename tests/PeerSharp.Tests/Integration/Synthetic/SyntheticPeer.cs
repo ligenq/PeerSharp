@@ -148,17 +148,23 @@ internal sealed class SyntheticPeer : IAsyncDisposable
             using var stream = client.GetStream();
             connection.AttachStream(stream);
 
-            // The first byte decides what this is. A plaintext handshake opens with the protocol
-            // string's length; anything else is the MSE key exchange, which begins with a Diffie-
-            // Hellman public key and is indistinguishable from random.
-            byte[] first = new byte[1];
-            if (await stream.ReadAsync(first, _stopping.Token).ConfigureAwait(false) == 0)
+            // A DH key can also start with 19. Confirm the whole protocol name before recording
+            // plaintext, including on the path that immediately hangs up. Otherwise a random key
+            // makes the reconnect test report two plaintext attempts roughly once in 256 runs.
+            byte[] prefix = new byte[20];
+            if (await stream.ReadAsync(prefix.AsMemory(0, 1), _stopping.Token).ConfigureAwait(false) == 0)
             {
                 connection.Complete();
                 return;
             }
 
-            bool plaintext = first[0] == 19;
+            bool plaintext = false;
+            if (prefix[0] == 19)
+            {
+                await ReadExactlyAsync(stream, prefix.AsMemory(1), _stopping.Token).ConfigureAwait(false);
+                plaintext = prefix.AsSpan(1).SequenceEqual("BitTorrent protocol"u8);
+            }
+
             connection.RecordOpening(plaintext);
 
             if (_options.HangUpDuringHandshake)
@@ -180,7 +186,8 @@ internal sealed class SyntheticPeer : IAsyncDisposable
             }
 
             byte[] rest = new byte[67];
-            await ReadExactlyAsync(stream, rest, _stopping.Token).ConfigureAwait(false);
+            prefix.AsSpan(1).CopyTo(rest);
+            await ReadExactlyAsync(stream, rest.AsMemory(19), _stopping.Token).ConfigureAwait(false);
             connection.RecordHandshake(rest);
 
             await stream.WriteAsync(BuildHandshake(rest.AsSpan(27, 20)), _stopping.Token).ConfigureAwait(false);
@@ -429,12 +436,12 @@ internal sealed class SyntheticPeer : IAsyncDisposable
         connection.RecordServedMetadataPiece(pieceIndex, connection.Frames.Count);
     }
 
-    private static async Task ReadExactlyAsync(NetworkStream stream, byte[] buffer, CancellationToken cancellationToken)
+    private static async Task ReadExactlyAsync(NetworkStream stream, Memory<byte> buffer, CancellationToken cancellationToken)
     {
         int read = 0;
         while (read < buffer.Length)
         {
-            int received = await stream.ReadAsync(buffer.AsMemory(read), cancellationToken).ConfigureAwait(false);
+            int received = await stream.ReadAsync(buffer[read..], cancellationToken).ConfigureAwait(false);
             if (received == 0)
             {
                 throw new IOException("The peer closed the connection.");

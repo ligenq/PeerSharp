@@ -10,6 +10,7 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
     private readonly BlockCache _blockCache;
     private readonly IStorage _storage;
     private AtomicDisposal _disposal = new();
+    private List<TorrentStateData.FileSnapshotData>? _lastFileSnapshots;
 
     private Files(
         TorrentFileMetadata metadata,
@@ -23,19 +24,32 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
         IBandwidthManager bandwidth,
         string torrentHash,
         ILoggerFactory loggerFactory,
-        IReadOnlyDictionary<int, string>? renamedFiles)
+        IReadOnlyDictionary<int, string>? renamedFiles,
+        IReadOnlyList<TorrentStateData.FileSnapshotData>? resumeFileSnapshots,
+        Func<PiecesProgress> getCompletedPieces)
     {
         DownloadPath = path;
         var diskLimiter = new DiskBandwidthLimiter(bandwidth, torrentHash);
         _storage = new Storage(metadata, path, new PathValidator(path), handleCache, enableSparseFiles, diskLimiter, loggerFactory)
         {
-            RenamedFiles = renamedFiles
+            RenamedFiles = renamedFiles,
+            ResumeFileSnapshots = resumeFileSnapshots,
+            GetCompletedPieces = getCompletedPieces
         };
         _blockCache = new BlockCache(cacheSizeBytes, readAheadBlocks, enableReadAhead, totalSize);
         _blockCache.Initialize(_storage);
     }
 
-    public bool Checking { get; set; }
+    private bool _checking;
+    public bool Checking
+    {
+        get => Volatile.Read(ref _checking);
+        set
+        {
+            Volatile.Write(ref _checking, value);
+            _blockCache.Clear();
+        }
+    }
 
     /// <summary>
     /// The download path for this torrent's files.
@@ -71,9 +85,11 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
             torrent.Settings.Files.EnableReadAhead,
             torrent.InfoFile.Info.FullSize,
             torrent.Bandwidth,
-            torrent.Hash.ToHexStringUpper(),
+            BandwidthManager.GetTorrentChannelKey(torrent),
             loggerFactory,
-            torrent.GetRenamedFileMap());
+            torrent.GetRenamedFileMap(),
+            torrent.LocalState.FileSnapshots,
+            () => torrent.Pieces);
     }
 
     public Task DeleteFilesAsync(CancellationToken ct = default)
@@ -95,11 +111,15 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
     {
         if (_disposal.MarkDisposed())
         {
+            _lastFileSnapshots = GetFileSnapshots();
             _blockCache.Dispose();
             await _storage.DisposeAsync().ConfigureAwait(false);
         }
         GC.SuppressFinalize(this);
     }
+
+    internal List<TorrentStateData.FileSnapshotData>? GetFileSnapshots() =>
+        _storage is Storage storage && storage.IsInitialized ? storage.GetFileSnapshots() : _lastFileSnapshots;
 
     public Task<bool> FlushAsync(CancellationToken ct = default)
     {
@@ -127,7 +147,14 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
 
     public async Task ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct)
     {
-        await _blockCache.ReadAsync(offset, buffer, ct).ConfigureAwait(false);
+        if (Checking)
+        {
+            await _storage.ReadAsync(offset, buffer, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            await _blockCache.ReadAsync(offset, buffer, ct).ConfigureAwait(false);
+        }
     }
 
     public Task StartAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default)

@@ -6,6 +6,73 @@ namespace PeerSharp.Tests.Core.Network;
 public class IpBlocklistTests
 {
     [Fact]
+    public void IsBlocked_SeparatesAddressFamiliesAndNormalizesMappedAddresses()
+    {
+        var blocklist = new IpBlocklist { Enabled = true };
+        blocklist.AddCidr("::/0");
+        Assert.True(blocklist.IsBlocked("::1"));
+        Assert.False(blocklist.IsBlocked("1.2.3.4"));
+        Assert.False(blocklist.IsBlocked("::ffff:1.2.3.4"));
+        blocklist.Clear();
+        blocklist.AddCidr("::ffff:1.2.3.0/120");
+        blocklist.Enabled = true;
+        Assert.True(blocklist.IsBlocked("1.2.3.4"));
+        Assert.True(blocklist.IsBlocked("::ffff:1.2.3.4"));
+        Assert.False(blocklist.IsBlocked("::102:304"));
+    }
+
+    [Theory]
+    [InlineData("2001:db8::1-2001:db8::10")]
+    [InlineData("IPv6 block:2001:db8::1-2001:db8::10")]
+    [InlineData("IPv6:block-list:2001:db8::1-2001:db8::10")]
+    public void LoadFromStream_ParsesIPv6Ranges(string line)
+    {
+        var blocklist = new IpBlocklist();
+        using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(line));
+        Assert.Equal(1, blocklist.LoadFromStream(stream));
+        Assert.True(blocklist.IsBlocked("2001:db8::5"));
+    }
+
+    [Fact]
+    public void AddRange_IgnoresReversedAndMixedFamilyRanges()
+    {
+        var blocklist = new IpBlocklist();
+        blocklist.AddRange(IPAddress.Parse("1.1.1.2"), IPAddress.Parse("1.1.1.1"));
+        blocklist.AddRange(IPAddress.Parse("1.1.1.1"), IPAddress.IPv6Loopback);
+        Assert.Equal(0, blocklist.RangeCount);
+    }
+
+    [Fact]
+    public async Task LoadFromStreamAsync_OversizedLineDoesNotPublishPartialRanges()
+    {
+        var blocklist = new IpBlocklist { Enabled = true };
+        blocklist.AddCidr("1.1.1.0/24");
+        using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes("2.2.2.2\n" + new string('X', 4097)));
+        Assert.Equal(0, await blocklist.LoadFromStreamAsync(stream));
+        Assert.True(blocklist.IsBlocked("1.1.1.1"));
+        Assert.False(blocklist.IsBlocked("2.2.2.2"));
+    }
+
+    [Fact]
+    public async Task LoadFromStreamAsync_ClearDuringLoadDoesNotRestoreRanges()
+    {
+        var blocklist = new IpBlocklist();
+        using var stream = new ClearingStream(blocklist);
+        Assert.Equal(0, await blocklist.LoadFromStreamAsync(stream));
+        Assert.False(blocklist.Enabled);
+        Assert.Equal(0, blocklist.RangeCount);
+    }
+
+    private sealed class ClearingStream(IpBlocklist blocklist) : MemoryStream(System.Text.Encoding.UTF8.GetBytes("1.1.1.1\n"))
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            blocklist.Clear();
+            return base.ReadAsync(buffer, cancellationToken);
+        }
+    }
+
+    [Fact]
     public void IsBlocked_ReturnsFalseWhenDisabled()
     {
         var blocklist = new IpBlocklist { Enabled = false };

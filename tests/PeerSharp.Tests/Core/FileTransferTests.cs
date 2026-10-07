@@ -552,6 +552,42 @@ public class FileTransferTests
         await InvokePrivateAsync(_fileTransfer, "CancelBlockRequestAsync", 99, 0, _peer); // Must not throw
     }
 
+    [Fact]
+    public async Task WebSeedBlockReceivedAsync_CancelsEveryPeerRequestForTheBlockOutsideEndGame()
+    {
+        var peers = new[] { _peer, new PeerCommunication(_torrent, new MockPeerListener(), _timeProvider) };
+        var tracker = GetField<BlockRequestTracker>(_fileTransfer, "_requestTracker");
+        foreach (var peer in peers)
+        {
+            SetField(peer, "_connected", 1);
+            tracker.AddBlockRequest(0, 0, peer, new BlockRequest { PieceIndex = 0, Offset = 0, Length = 16384 });
+            tracker.AddBlockRequest(0, 16384, peer, new BlockRequest { PieceIndex = 0, Offset = 16384, Length = 16384 });
+        }
+
+        Assert.False(_fileTransfer.EndGameMode);
+        await _fileTransfer.WebSeedBlockReceivedAsync(new Block(0, 0, 16384));
+        // A duplicate response must not send the cancels again.
+        await _fileTransfer.WebSeedBlockReceivedAsync(new Block(0, 0, 16384));
+
+        foreach (var peer in peers)
+        {
+            var queue = GetField<MessageQueue>(peer, "_sendQueue");
+            Assert.True(queue.TryDequeue(out var cancel));
+            Assert.Equal(MessageId.Cancel, cancel.Id);
+            Assert.Equal(0, cancel.PieceIndex);
+            Assert.Equal(0, cancel.BlockOffset);
+            Assert.Equal(16384, cancel.BlockLength);
+            Assert.Equal(0, queue.Count);
+
+            Assert.True(tracker.TryGetPeerRequests(peer, out var remaining));
+            Assert.False(remaining.TryGetValue((0, 0), out _));
+            Assert.True(remaining.TryGetValue((0, 16384), out _));
+        }
+
+        Assert.Equal(0, tracker.GetPendingRequestCount(0, 0));
+        Assert.Equal(2, tracker.GetPendingRequestCount(0, 16384));
+    }
+
     // ── RunBackgroundTaskAsync ────────────────────────────────────────────────
 
     [Fact]

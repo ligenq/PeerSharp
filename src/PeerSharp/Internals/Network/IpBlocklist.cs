@@ -2,6 +2,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Utilities;
 using System.Net;
+using System.Net.Sockets;
+using System.Text;
 
 namespace PeerSharp.Internals.Network;
 
@@ -16,6 +18,9 @@ internal class IpBlocklist
     private readonly ILogger<IpBlocklist> _logger;
     private readonly List<IpRange> _ranges = [];
     private bool _sorted;
+    private bool _enabled;
+    private long _clearGeneration;
+    private const int MaxRanges = 1_000_000;
 
     /// <summary>
     /// Immutable published view of <see cref="_ranges"/>, sorted and coalesced. Readers take it
@@ -40,7 +45,7 @@ internal class IpBlocklist
     /// Gets or sets whether the blocklist is enabled.
     /// Defaults to false until data is loaded via <see cref="LoadFromStream"/>.
     /// </summary>
-    public bool Enabled { get; set; }
+    public bool Enabled { get => Volatile.Read(ref _enabled); set => Volatile.Write(ref _enabled, value); }
 
     /// <summary>
     /// Gets the number of IP ranges in the blocklist.
@@ -61,13 +66,13 @@ internal class IpBlocklist
     /// </summary>
     public void AddCidr(string cidr, string? description = null)
     {
-        if (NetworkUtils.TryParseCidr(cidr, out var start, out var end))
+        if (TryParseCidrRange(cidr, description, out var range))
         {
             lock (_lock)
             {
-                _ranges.Add(new IpRange(start, end, description));
+                _ranges.Add(range);
                 _sorted = false;
-                _snapshot = null;
+                Volatile.Write(ref _snapshot, null);
             }
         }
     }
@@ -77,16 +82,18 @@ internal class IpBlocklist
     /// </summary>
     public void AddRange(IPAddress start, IPAddress end, string? description = null)
     {
-        if (start.AddressFamily != end.AddressFamily)
+        start = Normalize(start);
+        end = Normalize(end);
+        if (start.AddressFamily != end.AddressFamily || NetworkUtils.IpToUInt128(start) > NetworkUtils.IpToUInt128(end))
         {
             return;
         }
 
         lock (_lock)
         {
-            _ranges.Add(new IpRange(NetworkUtils.IpToUInt128(start), NetworkUtils.IpToUInt128(end), description));
+            _ranges.Add(new IpRange(start.AddressFamily, NetworkUtils.IpToUInt128(start), NetworkUtils.IpToUInt128(end), description));
             _sorted = false;
-            _snapshot = null;
+            Volatile.Write(ref _snapshot, null);
         }
     }
 
@@ -98,10 +105,11 @@ internal class IpBlocklist
         lock (_lock)
         {
             _ranges.Clear();
+            _clearGeneration++;
             _sorted = true;
-            _snapshot = [];
+            Volatile.Write(ref _snapshot, []);
+            Enabled = false;
         }
-        Enabled = false;
     }
 
     /// <summary>
@@ -116,9 +124,10 @@ internal class IpBlocklist
             return false;
         }
 
+        address = Normalize(address);
         var ip = NetworkUtils.IpToUInt128(address);
         var snapshot = Volatile.Read(ref _snapshot) ?? BuildSnapshot();
-        return BinarySearchContains(snapshot, ip);
+        return BinarySearchContains(snapshot, address.AddressFamily, ip);
     }
 
     /// <summary>
@@ -161,21 +170,18 @@ internal class IpBlocklist
     /// <returns>Number of ranges loaded.</returns>
     public int LoadFromStream(Stream stream)
     {
-        var parsed = new List<IpRange>();
+        long generation;
+        lock (_lock) generation = _clearGeneration;
+        var parser = new BlocklistParser();
         try
         {
             using var reader = new StreamReader(stream, leaveOpen: true);
-            string? line;
-            while ((line = reader.ReadLine()) != null)
-            {
-                if (TryParseLine(line, out var range))
-                {
-                    parsed.Add(range);
-                }
-            }
-
-            Commit(parsed);
-            _logger.LogInformation("Loaded {Count} IP ranges from stream", parsed.Count);
+            char[] buffer = new char[4096];
+            int count;
+            while ((count = reader.Read(buffer)) > 0) parser.Append(buffer.AsSpan(0, count));
+            parser.Complete();
+            if (!Commit(parser.Ranges, generation)) return 0;
+            _logger.LogInformation("Loaded {Count} IP ranges from stream", parser.Ranges.Count);
         }
         catch (Exception ex)
         {
@@ -183,7 +189,7 @@ internal class IpBlocklist
             return 0;
         }
 
-        return parsed.Count;
+        return parser.Ranges.Count;
     }
 
     /// <summary>
@@ -197,21 +203,25 @@ internal class IpBlocklist
         // Ranges are staged in a local list and only published once the whole stream has been
         // read. A cancelled or failed load therefore leaves the existing blocklist untouched,
         // instead of arming filtering with whatever half of the file happened to arrive.
-        var parsed = new List<IpRange>();
+        cancellationToken.ThrowIfCancellationRequested();
+        long generation;
+        lock (_lock) generation = _clearGeneration;
+        var parser = new BlocklistParser();
         try
         {
             using var reader = new StreamReader(stream, leaveOpen: true);
-            string? line;
-            while ((line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false)) != null)
+            char[] buffer = new char[4096];
+            int count;
+            while ((count = await reader.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
             {
-                if (TryParseLine(line, out var range))
-                {
-                    parsed.Add(range);
-                }
+                cancellationToken.ThrowIfCancellationRequested();
+                parser.Append(buffer.AsSpan(0, count));
             }
-
-            Commit(parsed);
-            _logger.LogInformation("Loaded {Count} IP ranges from stream", parsed.Count);
+            cancellationToken.ThrowIfCancellationRequested();
+            parser.Complete();
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Commit(parser.Ranges, generation)) return 0;
+            _logger.LogInformation("Loaded {Count} IP ranges from stream", parser.Ranges.Count);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -223,22 +233,24 @@ internal class IpBlocklist
             return 0;
         }
 
-        return parsed.Count;
+        return parser.Ranges.Count;
     }
 
     /// <summary>
     /// Publishes a fully parsed batch of ranges and enables filtering.
     /// </summary>
-    private void Commit(List<IpRange> parsed)
+    private bool Commit(List<IpRange> parsed, long generation)
     {
         lock (_lock)
         {
+            if (generation != _clearGeneration) return false;
+            if (parsed.Count > MaxRanges - _ranges.Count) throw new InvalidDataException("Blocklist has too many ranges.");
             _ranges.AddRange(parsed);
             _sorted = false;
-            _snapshot = null;
+            Volatile.Write(ref _snapshot, null);
+            Enabled = true;
         }
-
-        Enabled = true;
+        return true;
     }
 
     /// <summary>
@@ -262,7 +274,7 @@ internal class IpBlocklist
         }
     }
 
-    private static bool BinarySearchContains(IpRange[] ranges, UInt128 ip)
+    private static bool BinarySearchContains(IpRange[] ranges, AddressFamily family, UInt128 ip)
     {
         if (ranges.Length == 0)
         {
@@ -277,11 +289,11 @@ internal class IpBlocklist
             int mid = left + ((right - left) / 2);
             var range = ranges[mid];
 
-            if (ip < range.Start)
+            if ((int)family < (int)range.Family || (family == range.Family && ip < range.Start))
             {
                 right = mid - 1;
             }
-            else if (ip > range.End)
+            else if ((int)family > (int)range.Family || (family == range.Family && ip > range.End))
             {
                 left = mid + 1;
             }
@@ -302,7 +314,7 @@ internal class IpBlocklist
             return;
         }
 
-        _ranges.Sort((a, b) => a.Start.CompareTo(b.Start));
+        _ranges.Sort((a, b) => a.Family != b.Family ? a.Family.CompareTo(b.Family) : a.Start.CompareTo(b.Start));
 
         // Coalesce overlapping and adjacent ranges. Binary search over ranges sorted
         // by Start only returns correct results when the ranges are disjoint: with
@@ -317,7 +329,7 @@ internal class IpBlocklist
             // Merge if next starts within, or immediately after, the current range.
             // The `End + 1` adjacency check is guarded against UInt128 overflow.
             bool adjacent = current.End != UInt128.MaxValue && next.Start <= current.End + 1;
-            if (next.Start <= current.End || adjacent)
+            if (next.Family == current.Family && (next.Start <= current.End || adjacent))
             {
                 var mergedEnd = next.End > current.End ? next.End : current.End;
                 _ranges[write] = current with { End = mergedEnd };
@@ -336,67 +348,118 @@ internal class IpBlocklist
         _sorted = true;
     }
 
-    /// <summary>
-    /// Parses one blocklist line into a range without publishing it, so callers can stage a
-    /// whole file and commit it atomically.
-    /// </summary>
-    private static bool TryParseLine(string line, out IpRange range)
+    private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+    private static bool TryParseCidrRange(string cidr, string? description, out IpRange range)
     {
         range = default;
-
-        if (string.IsNullOrWhiteSpace(line))
+        int slash = cidr.IndexOf('/');
+        if (slash <= 0 || !IPAddress.TryParse(cidr[..slash].Trim(), out var address)) return false;
+        if (address.IsIPv4MappedToIPv6 && int.TryParse(cidr[(slash + 1)..], out int prefix) && prefix is >= 96 and <= 128)
         {
-            return false;
+            address = address.MapToIPv4();
+            cidr = $"{address}/{prefix - 96}";
         }
+        if (!NetworkUtils.TryParseCidr(cidr, out var start, out var end)) return false;
+        range = new IpRange(address.AddressFamily, start, end, description);
+        return true;
+    }
 
-        line = line.Trim();
+    private sealed class BlocklistParser
+    {
+        private readonly StringBuilder _line = new();
+        private int _characters;
+        public List<IpRange> Ranges { get; } = [];
 
-        // Skip comments
-        if (line.StartsWith('#') || line.StartsWith("//", StringComparison.Ordinal))
+        /// <summary>
+        /// Parses one blocklist line into a range without publishing it, so callers can stage a
+        /// whole file and commit it atomically.
+        /// </summary>
+        private static bool TryParseLine(string line, out IpRange range)
         {
-            return false;
-        }
+            range = default;
 
-        // Try P2P format: Description:StartIP-EndIP
-        int colonIndex = line.LastIndexOf(':');
-        if (colonIndex > 0)
-        {
-            string ipPart = line[(colonIndex + 1)..];
-            string description = line[..colonIndex];
-
-            int dashIndex = ipPart.IndexOf('-');
-            if (dashIndex > 0)
+            if (string.IsNullOrWhiteSpace(line))
             {
-                string startStr = ipPart[..dashIndex].Trim();
-                string endStr = ipPart[(dashIndex + 1)..].Trim();
+                return false;
+            }
 
-                if (IPAddress.TryParse(startStr, out var startIp) &&
-                    IPAddress.TryParse(endStr, out var endIp) &&
-                    startIp.AddressFamily == endIp.AddressFamily)
+            line = line.Trim();
+
+            // Skip comments
+            if (line.StartsWith('#') || line.StartsWith("//", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            // IPv6 colons belong to the address, so find the range before its optional description.
+            int dashIndex = line.LastIndexOf('-');
+            if (dashIndex > 0 && IPAddress.TryParse(line[(dashIndex + 1)..].Trim(), out var endIp))
+            {
+                string left = line[..dashIndex].Trim();
+                string? description = null;
+                if (!IPAddress.TryParse(left, out var startIp))
                 {
-                    range = new IpRange(NetworkUtils.IpToUInt128(startIp), NetworkUtils.IpToUInt128(endIp), description);
-                    return true;
+                    for (int colon = left.IndexOf(':'); colon >= 0; colon = left.IndexOf(':', colon + 1))
+                    {
+                        if (!IPAddress.TryParse(left[(colon + 1)..].Trim(), out startIp)) continue;
+                        description = left[..colon];
+                        break;
+                    }
+                }
+                if (startIp != null)
+                {
+                    startIp = Normalize(startIp);
+                    endIp = Normalize(endIp);
+                    UInt128 start = NetworkUtils.IpToUInt128(startIp), end = NetworkUtils.IpToUInt128(endIp);
+                    if (startIp.AddressFamily == endIp.AddressFamily && start <= end)
+                    {
+                        range = new IpRange(startIp.AddressFamily, start, end, description);
+                        return true;
+                    }
+                }
+            }
+
+            // Try CIDR format: 192.168.1.0/24
+            if (TryParseCidrRange(line, null, out range)) return true;
+
+            // Try single IP
+            if (IPAddress.TryParse(line, out var singleIp))
+            {
+                singleIp = Normalize(singleIp);
+                var ipValue = NetworkUtils.IpToUInt128(singleIp);
+                range = new IpRange(singleIp.AddressFamily, ipValue, ipValue, null);
+                return true;
+            }
+
+            return false;
+        }
+
+        public void Append(ReadOnlySpan<char> text)
+        {
+            if (text.Length > 64 * 1024 * 1024 - _characters) throw new InvalidDataException("Blocklist exceeds 64 MiB of text.");
+            _characters += text.Length;
+            foreach (char value in text)
+            {
+                if (value == '\n') Complete();
+                else
+                {
+                    if (_line.Length >= 4096) throw new InvalidDataException("Blocklist line is too long.");
+                    _line.Append(value);
                 }
             }
         }
 
-        // Try CIDR format: 192.168.1.0/24
-        if (line.Contains('/') && NetworkUtils.TryParseCidr(line, out var start, out var end))
+        public void Complete()
         {
-            range = new IpRange(start, end, null);
-            return true;
+            if (TryParseLine(_line.ToString(), out var range))
+            {
+                if (Ranges.Count >= MaxRanges) throw new InvalidDataException("Blocklist has too many ranges.");
+                Ranges.Add(range);
+            }
+            _line.Clear();
         }
-
-        // Try single IP
-        if (IPAddress.TryParse(line, out var singleIp))
-        {
-            var ipValue = NetworkUtils.IpToUInt128(singleIp);
-            range = new IpRange(ipValue, ipValue, null);
-            return true;
-        }
-
-        return false;
     }
 
-    private readonly record struct IpRange(UInt128 Start, UInt128 End, string? Description);
+    private readonly record struct IpRange(AddressFamily Family, UInt128 Start, UInt128 End, string? Description);
 }

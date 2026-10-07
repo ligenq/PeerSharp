@@ -3,6 +3,7 @@ namespace PeerSharp.Config;
 /// <summary>
 /// Options for adding a torrent to the client.
 /// </summary>
+/// <remarks>Options and their collections are copied when an add begins. Later changes apply only to subsequent adds.</remarks>
 public sealed class AddTorrentOptions
 {
     /// <summary>
@@ -68,9 +69,16 @@ public sealed class AddTorrentOptions
     public ITorrentEvents? Events { get; set; }
 
     /// <summary>
-    /// Gets or sets the initial file selection/priority settings.
-    /// If null, all files are selected with normal priority.
+    /// Gets or sets the initial file selection/priority settings: one entry per file, in the torrent's
+    /// file order. If null, all files are selected with normal priority.
     /// </summary>
+    /// <remarks>
+    /// Applied before the torrent starts, so nothing deselected is requested - not even by web seeds,
+    /// which fetch from the moment a torrent starts - and over any selection in
+    /// <see cref="ResumeData"/> or a magnet link's "so=" restriction. For a torrent file, a list whose
+    /// length differs from the file count is an <see cref="ArgumentException"/>; for a magnet link it is
+    /// applied once the metadata arrives, and ignored with a warning if the counts differ then.
+    /// </remarks>
     public IReadOnlyList<FileSelection>? FileSelections { get; set; }
 
     /// <summary>
@@ -82,6 +90,7 @@ public sealed class AddTorrentOptions
     /// <summary>
     /// Gets or sets the seeding ratio limit for auto-stop.
     /// If null, no ratio-based auto-stop is applied.
+    /// Non-null values must be finite and non-negative.
     /// </summary>
     public float? RatioLimit { get; set; }
 
@@ -94,6 +103,7 @@ public sealed class AddTorrentOptions
     /// <summary>
     /// Gets or sets the seeding time limit for auto-stop.
     /// If null, no time-based auto-stop is applied.
+    /// Negative values are rejected when the torrent is added.
     /// </summary>
     public TimeSpan? SeedTimeLimit { get; set; }
 
@@ -131,5 +141,35 @@ public sealed class AddTorrentOptions
     /// If null, uses the global limit. Negative values are rejected when the torrent is added.
     /// </summary>
     public long? UploadLimitBytesPerSecond { get; set; }
+
+    internal AddTorrentOptions Snapshot()
+    {
+        var snapshot = (AddTorrentOptions)MemberwiseClone();
+        snapshot.AdditionalTrackers = snapshot.AdditionalTrackers?.ToArray();
+        snapshot.AdditionalWebSeeds = snapshot.AdditionalWebSeeds?.ToArray();
+        snapshot.AdditionalPeers = snapshot.AdditionalPeers?.Select(peer => new System.Net.IPEndPoint(
+            peer.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6
+                ? new System.Net.IPAddress(peer.Address.GetAddressBytes(), peer.Address.ScopeId)
+                : new System.Net.IPAddress(peer.Address.GetAddressBytes()), peer.Port)).ToArray();
+        snapshot.FileSelections = snapshot.FileSelections?.ToArray();
+        if (snapshot.ResumeData is { } resume)
+        {
+            snapshot.ResumeData = new TorrentResumeData { Hash = resume.Hash, Timestamp = resume.Timestamp, Data = resume.Data.ToArray() };
+        }
+        TorrentOptionValidation.ValidateStrategy(snapshot.DownloadStrategy);
+        TorrentOptionValidation.ValidateRatio(snapshot.RatioLimit);
+        TorrentOptionValidation.ValidateSeedTime(snapshot.SeedTimeLimit);
+        if (snapshot.DownloadLimitBytesPerSecond is { } download) ArgumentOutOfRangeException.ThrowIfNegative(download);
+        if (snapshot.UploadLimitBytesPerSecond is { } upload) ArgumentOutOfRangeException.ThrowIfNegative(upload);
+        if (snapshot.FileSelections is { } selections)
+        {
+            foreach (var selection in selections)
+            {
+                ArgumentNullException.ThrowIfNull(selection);
+                if (!Enum.IsDefined(selection.Priority)) throw new ArgumentException("File selection contains an invalid priority.");
+            }
+        }
+        return snapshot;
+    }
 }
 

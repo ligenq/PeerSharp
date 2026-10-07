@@ -21,6 +21,8 @@ internal sealed class SystemWebSocketConnectionFactory : IWebSocketConnectionFac
 internal sealed class SystemWebSocketConnection : IWebSocketConnection
 {
     private readonly ClientWebSocket _webSocket = new();
+    private readonly Lock _disposeLock = new();
+    private Task? _disposeTask;
     private readonly int _maxMessageBytes;
 
     public SystemWebSocketConnection(int maxMessageBytes)
@@ -49,9 +51,10 @@ internal sealed class SystemWebSocketConnection : IWebSocketConnection
             var result = await _webSocket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
             if (result.MessageType == WebSocketMessageType.Close)
             {
-                return string.Empty;
+                throw new EndOfStreamException("The WebTorrent tracker closed its WebSocket.");
             }
 
+            if (result.MessageType != WebSocketMessageType.Text) throw new InvalidDataException("A tracker message must be text.");
             await ms.WriteAsync(buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
             if (result.EndOfMessage)
             {
@@ -62,15 +65,25 @@ internal sealed class SystemWebSocketConnection : IWebSocketConnection
         return Encoding.UTF8.GetString(ms.ToArray());
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        lock (_disposeLock)
+        {
+            _disposeTask ??= DisposeCoreAsync();
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
     {
         if (_webSocket.State == WebSocketState.Open || _webSocket.State == WebSocketState.CloseReceived)
         {
             try
             {
-                await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", CancellationToken.None).ConfigureAwait(false);
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", timeout.Token).ConfigureAwait(false);
             }
-            catch (WebSocketException)
+            catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException or InvalidOperationException)
             {
                 // Best-effort close during disposal.
             }

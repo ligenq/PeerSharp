@@ -21,11 +21,15 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp 5.0.0 is a major release. Breaking: Settings sub-objects are get-only; mutate their properties instead of replacing them. ConnectionSettings.PreferUtpRatioPercent and UtpWarmupSeconds were removed. Custom IAlerts implementations must provide DroppedAlertCount. Adds torrent identity and magnet helpers, transfer and lifetime statistics, proxy capability reporting, and configurable transfer and alert policies. Fixes uTP SACK emission, congestion and timeout recovery, transport fallback, request limits, and web-seed retries. See https://github.com/ligenq/PeerSharp/blob/v5.0.0/CHANGELOG.md for migration notes.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp 5.1.0 makes streaming to other devices work well: HttpStreamServer is socket-based and can serve a TV or cast receiver on the network, with an access token, CORS and files served beside the stream; Settings.Streaming tunes read-ahead and waits; a stream's pieces are fetched first, from every peer and web seed that has them, and spread across the swarm. It fixes uTP connections that stopped receiving, and hardens handshakes and encryption, piece verification, peer and DHT input, proxies, NAT mappings, bandwidth limiting, resume data and engine lifecycles. Passing a bare null as HttpStreamServer's third constructor argument is now ambiguous. See https://github.com/ligenq/PeerSharp/blob/v5.1.0/CHANGELOG.md.</PackageReleaseNotes>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<IsTrimmable>true</IsTrimmable>
+		<!-- iOS allows no code generation at run time, so an app there is compiled ahead of time in
+		     full. This turns on the AOT analyzers, and with warnings as errors any reflection or
+		     dynamic code that would fail under AOT fails the build instead. -->
+		<IsAotCompatible>true</IsAotCompatible>
 		<EnablePackageValidation>true</EnablePackageValidation>
-		<PackageValidationBaselineVersion>4.0.0</PackageValidationBaselineVersion>
+		<PackageValidationBaselineVersion>5.0.0</PackageValidationBaselineVersion>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -35,26 +39,13 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
-		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.32.0.713">
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
+		<PackageReference Include="SonarAnalyzer.CSharp" Version="10.35.0.4138">
 			<PrivateAssets>all</PrivateAssets>
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 		</PackageReference>
 	</ItemGroup>
 
-	<ItemGroup>
-		<Compile Remove="Types\**\*.cs" />
-		<Compile Remove="Internals\Utilities\Bencode\**\*.cs" />
-		<Compile Remove="Internals\Peers\MessageId.cs" />
-		<Compile Remove="Internals\Peers\PeerMessage.cs" />
-		<Compile Remove="Internals\Pieces\PiecePicker.cs" />
-		<Compile Remove="Internals\Pieces\IPiecePickerContext.cs" />
-		<Compile Remove="Internals\Pieces\PiecesProgress.cs" />
-		<Compile Remove="Internals\Pieces\PieceChecker.cs" />
-		<Compile Remove="Internals\Pieces\Block.cs" />
-		<Compile Remove="Internals\IO\**\*.cs" />
-		<Compile Remove="Internals\Streaming\**\*.cs" />
-	</ItemGroup>
 
 	<ItemGroup>
 		<AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">

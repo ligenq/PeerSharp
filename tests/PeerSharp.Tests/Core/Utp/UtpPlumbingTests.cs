@@ -355,4 +355,79 @@ public class UtpStreamTests
         public void Start(IUdpListener listener) { }
         public void Stop() { }
     }
+
+    [Fact(Timeout = 30000)]
+    public async Task ClosingForGoodEndsAPendingReadAsEndOfInput()
+    {
+        // A connection being torn down has stopped reading. Leaving the read to be cancelled instead made
+        // every local hang-up an exception thrown up through each layer above.
+        var stream = CreateStream();
+
+        var reading = stream.ReadAsync(new byte[16], TestContext.Current.CancellationToken);
+        Assert.False(reading.IsCompleted);
+        stream.CloseAndStopReading();
+
+        Assert.Equal(0, await reading);
+    }
+
+    [Fact(Timeout = 30000)]
+    public void AHalfCloseKeepsReading()
+    {
+        // Close is a FIN, after which what the peer still sends must be readable.
+        var stream = CreateStream();
+
+        var reading = stream.ReadAsync(new byte[16], TestContext.Current.CancellationToken);
+        stream.Close();
+
+        Assert.False(reading.IsCompleted);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task DisposingAsynchronouslyEndsAPendingReadToo()
+    {
+        var stream = CreateStream();
+
+        var reading = stream.ReadAsync(new byte[16], TestContext.Current.CancellationToken);
+        await stream.DisposeAsync();
+
+        Assert.Equal(0, await reading);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnAbandonedConnectIsAFailureRatherThanAnException()
+    {
+        // For the peer manager, which gives up every pending dial at once when a magnet's metadata
+        // arrives and handles that exactly like a peer that never answered.
+        var stream = CreateStream();
+        using var cts = new CancellationTokenSource();
+
+        var connecting = stream.ConnectOrAbandonAsync(TimeSpan.FromMinutes(5), cts.Token);
+        await cts.CancelAsync();
+
+        Assert.False(await connecting);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ClosingWhileConnecting_ReportsTheWayTheCallerAsked()
+    {
+        var abandoning = CreateStream();
+        var abandoned = abandoning.ConnectOrAbandonAsync(TimeSpan.FromMinutes(5), TestContext.Current.CancellationToken);
+        abandoning.CloseAndStopReading();
+
+        var cancelling = CreateStream();
+        var cancelled = cancelling.ConnectAsync(TimeSpan.FromMinutes(5), TestContext.Current.CancellationToken);
+        cancelling.CloseAndStopReading();
+
+        Assert.False(await abandoned);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AConnectAbandonedBeforeItStarts_SendsNothing()
+    {
+        var stream = CreateStream();
+
+        Assert.False(await stream.ConnectOrAbandonAsync(TimeSpan.FromMinutes(5), new CancellationToken(canceled: true)));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.ConnectAsync(TimeSpan.FromMinutes(5), new CancellationToken(canceled: true)));
+    }
 }

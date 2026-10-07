@@ -102,6 +102,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private int _connectedPeersCount = 0;
     private int _knownPeersCacheCount = 0;
 
+    /// <summary>How many times <see cref="StartAsync"/> has run: after the first, each is a restart.</summary>
+    private int _starts;
+
     private int _connectingPeersCount = 0;
     private Task? _connectionQueueTask;
     private AtomicDisposal _disposal = new();
@@ -121,6 +124,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private int _utpEverSucceeded;
 
     private int _holepunchCount = 0;
+    private readonly Lock _holepunchLock = new();
 
     private long _holepunchWindowStart = Environment.TickCount64;
 
@@ -214,6 +218,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         ProtocolEncryption? encryption = null)
     {
         remote = NetworkUtils.NormalizeEndPoint(remote);
+
+        if (!AcceptsIncomingEncryption(encryption))
+        {
+            stream.Close();
+            return;
+        }
 
         // Reject if force proxy is enabled (incoming connections are not proxied)
         if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
@@ -337,6 +347,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private async Task AddIncomingTcpPeerCoreAsync(System.Net.Sockets.TcpClient client, byte[] handshake, ProtocolEncryption? encryption)
     {
+        if (!AcceptsIncomingEncryption(encryption))
+        {
+            client.Close();
+            return;
+        }
+
         // Reject if force proxy is enabled (incoming connections are not proxied)
         if (_torrent.Settings.Proxy.ForceProxy && _torrent.Settings.Proxy.Type != ProxyType.None)
         {
@@ -430,7 +446,19 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _connectedPeers.TryAdd(peer, 0);
         Interlocked.Increment(ref _connectedPeersCount);
 
-        peer.Start(client.GetStream(), encryption);
+        // The factory gave the peer its stream over this socket; starting on a second one would read the
+        // same socket through two wrappers.
+        peer.Start(peer.Stream!, encryption);
+    }
+
+    private bool AcceptsIncomingEncryption(ProtocolEncryption? encryption)
+    {
+        return _settings.Connection.Encryption switch
+        {
+            Encryption.Require => encryption != null,
+            Encryption.Refuse => encryption == null,
+            _ => true
+        };
     }
 
     public void AddPeers(IEnumerable<IPEndPoint> peers, PeerSourceKind sourceKind = PeerSourceKind.Unknown, PeerCommunication? source = null)
@@ -678,6 +706,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
+        // The same for addresses: 0.0.0.0, multicast and the reserved 240/4 block cannot be dialled,
+        // and trying costs a socket error for nothing.
+        if (IPAddress.TryParse(ip, out var dialled) && !NetworkUtils.IsDeliverableUnicast(new IPEndPoint(dialled, port)))
+        {
+            _logger.LogDebug("Not dialling {Ip}:{Port} - not an address a peer can listen on", ip, port);
+            return;
+        }
+
         // Check blocklist first
         if (_torrent.Blocklist?.IsBlocked(ip) == true)
         {
@@ -707,66 +743,26 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         int currentConnecting = Interlocked.CompareExchange(ref _connectingPeersCount, 0, 0);
 
         // Limit active connections
-        if (currentConnections >= MaxPeersForThisTorrent && !forceUtp)
+        if (currentConnections >= MaxPeersForThisTorrent)
         {
             return;
         }
 
         // Limit pending/half-open connections (prevents router saturation)
-        if (currentConnecting >= MaxPendingConnectionsNow(currentConnections) && !forceUtp)
+        if (currentConnecting >= MaxPendingConnectionsNow(currentConnections))
         {
             return;
         }
 
-        // Check global governor limits (unless forceUtp/holepunch)
-        if (!forceUtp)
-        {
-            if (_governor.ActiveConnections >= _settings.Connection.MaxConnections)
-            {
-                return;
-            }
-
-            if (_governor.PendingConnections >= _settings.Connection.MaxPendingConnections)
-            {
-                return;
-            }
-        }
+        // Holepunch dials are immediate, but still count against resource limits.
+        if (_governor.ActiveConnections >= _settings.Connection.MaxConnections
+            || _governor.PendingConnections >= _settings.Connection.MaxPendingConnections) return;
 
         // For holepunch (forceUtp=true), connect immediately - it's time-sensitive
         if (forceUtp)
         {
-            // Rate limit holepunch attempts to prevent DoS via Relay
-            long tickCount = Environment.TickCount64;
-            long windowStart = Interlocked.Read(ref _holepunchWindowStart);
-            if (tickCount - windowStart > 60000)
-            {
-                int refused = Interlocked.Exchange(ref _holepunchRefused, 0);
-                if (refused > 1)
-                {
-                    _logger.LogDebug(
-                        "Refused {Count} further holepunch requests over the last minute", refused - 1);
-                }
-
-                Interlocked.Exchange(ref _holepunchWindowStart, tickCount);
-                Interlocked.Exchange(ref _holepunchCount, 0);
-            }
-
-            if (Interlocked.Increment(ref _holepunchCount) > _settings.Connection.MaxHolepunchPerMinute)
-            {
-                // One line per window, not per refusal. A relay that has hit the limit goes on asking,
-                // so this reported every rejection: several hundred warnings in a few minutes, all
-                // saying the same thing about a limit that was doing its job. The rest are counted and
-                // summarised when the window rolls over.
-                if (Interlocked.Increment(ref _holepunchRefused) == 1)
-                {
-                    _logger.LogWarning(
-                        "Holepunch rate limit of {Limit}/minute reached; refusing further rendezvous this minute (first was {Ip}:{Port})",
-                        _settings.Connection.MaxHolepunchPerMinute,
-                        ip,
-                        port);
-                }
-                return;
-            }
+            if (IPAddress.TryParse(ip, out var address) && _connectedEndpoints.ContainsKey(new IPEndPoint(address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address, port))) return;
+            if (!TryConsumeHolepunchBudget(ip, port)) return;
 
             ConnectToInternal(ip, port, forceUtp);
             return;
@@ -928,6 +924,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 FireAndForget(p.SetInterestedAsync(true), "SetInterested (Metadata)");
             }
         }
+        catch (InvalidDataException ex)
+        {
+            _logger.LogDebug(ex, "Invalid metadata handshake from {RemoteEndPoint}", p.RemoteEndPoint);
+            return p.CloseAsync();
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "ExtendedHandshakeFinished error for {RemoteEndPoint}", p.RemoteEndPoint);
@@ -947,25 +948,32 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 int consumed = Consumed;
                 if (node is BDict dict)
                 {
-                    var msgType = dict.GetLong("msg_type") ?? 0;
-                    var piece = (int)(dict.GetLong("piece") ?? 0);
-                    var totalSize = (int?)dict.GetLong("total_size");
-
-                    if (totalSize.HasValue && _torrent.MetadataDownloadInternal != null)
+                    var msgType = dict.GetLong("msg_type") ?? throw new InvalidDataException("Missing metadata message type");
+                    if (msgType is < 0 or > 2)
                     {
-                        try { _torrent.MetadataDownloadInternal.InitializeMetadataBuffer(totalSize.Value); }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Metadata buffer init error");
-                            _torrent.FireErrorEvent(new TorrentException("Metadata buffer initialization error.", _torrent.Hash, ex));
-                        }
+                        return; // BEP 9: unknown message types must be ignored.
                     }
+                    var pieceValue = dict.GetLong("piece");
+                    if (pieceValue is null or < 0 or > int.MaxValue)
+                    {
+                        throw new InvalidDataException("Invalid metadata piece index");
+                    }
+                    int piece = (int)pieceValue.Value;
 
                     if (msgType == (int)UtMetadata.MessageType.Data)
                     {
+                        var totalSize = dict.GetLong("total_size");
+                        if (totalSize is null or <= 0 or > int.MaxValue ||
+                            totalSize > Math.Max(1, _torrent.Settings.Transfer.MaxMetadataSizeBytes) ||
+                            (long)piece * UtMetadata.PieceSize >= totalSize ||
+                            data.Length - consumed != Math.Min(UtMetadata.PieceSize, totalSize.Value - (long)piece * UtMetadata.PieceSize))
+                        {
+                            throw new InvalidDataException("Invalid metadata data size");
+                        }
                         byte[] payload = data.Length > consumed ? data[consumed..] : [];
                         if (_torrent.MetadataDownloadInternal != null)
                         {
+                            _torrent.MetadataDownloadInternal.InitializeMetadataBuffer((int)totalSize.Value);
                             await _torrent.MetadataDownloadInternal.MetadataPieceReceivedAsync(p, piece, payload).ConfigureAwait(false);
                         }
                     }
@@ -979,50 +987,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     }
                 }
             }
-            else if (_torrent.MetadataDownloadInternal?.Active == true)
-            {
-                // Fallback: some peers may respond with mismatched ext IDs. Detect ut_metadata by payload shape.
-                var (Node, Consumed) = BencodeParser.ParseWithConsumed(data);
-                if (Node is BDict dict && dict.GetLong("msg_type") is long msgTypeVal)
-                {
-                    var msgType = (int)msgTypeVal;
-                    var piece = (int)(dict.GetLong("piece") ?? 0);
-                    var totalSize = (int?)dict.GetLong("total_size");
-
-                    _logger.LogWarning(
-                        "Received ut_metadata message with mismatched ext id {ExtId} (expected {ExpectedId}) from {RemoteEndPoint}",
-                        type,
-                        p.UtMetadata.LocalMessageId,
-                        p.RemoteEndPoint);
-
-                    if (totalSize.HasValue && _torrent.MetadataDownloadInternal != null)
-                    {
-                        try { _torrent.MetadataDownloadInternal.InitializeMetadataBuffer(totalSize.Value); }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Metadata buffer init error");
-                            _torrent.FireErrorEvent(new TorrentException("Metadata buffer initialization error.", _torrent.Hash, ex));
-                        }
-                    }
-
-                    if (msgType == (int)UtMetadata.MessageType.Data)
-                    {
-                        byte[] payload = data.Length > Consumed ? data[Consumed..] : [];
-                        if (_torrent.MetadataDownloadInternal != null)
-                        {
-                            await _torrent.MetadataDownloadInternal.MetadataPieceReceivedAsync(p, piece, payload).ConfigureAwait(false);
-                        }
-                    }
-                    else if (msgType == (int)UtMetadata.MessageType.Request)
-                    {
-                        _torrent.MetadataDownloadInternal?.MetadataRequestReceived(p, piece);
-                    }
-                    else if (msgType == (int)UtMetadata.MessageType.Reject)
-                    {
-                        _torrent.MetadataDownloadInternal?.MetadataRejectReceived(p, piece);
-                    }
-                }
-            }
+        }
+        catch (Exception ex) when (ex is InvalidDataException or FormatException)
+        {
+            _logger.LogDebug(ex, "Invalid metadata message from {RemoteEndPoint}", p.RemoteEndPoint);
+            await p.CloseAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -1241,16 +1210,59 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     public Task HolepunchMessageReceivedAsync(IPeerCommunication peer, UtHolepunch.MsgId id, IPEndPoint endpoint, UtHolepunch.ErrorCode error)
     {
+        if (_torrent.InfoFile.Info.IsPrivate || !_settings.Connection.EnableUtpOut || _settings.Proxy.ForceProxy || !peer.UtHolepunch.RemoteMessageId.HasValue) return Task.CompletedTask;
+        endpoint = NetworkUtils.NormalizeEndPoint(endpoint);
         var p = (PeerCommunication)peer;
+        if (!NetworkUtils.IsDeliverableUnicast(endpoint)) return Task.CompletedTask;
+        bool targetLocal = NetworkUtils.IsLocalAddress(endpoint.Address);
+        bool sourceLocal = p.RemoteEndPoint != null && NetworkUtils.IsLocalAddress(p.RemoteEndPoint.Address);
+        if (targetLocal && !sourceLocal) return Task.CompletedTask;
         _logger.LogDebug("Holepunch msg from {RemoteEndPoint}: {MsgId} {Endpoint} {ErrorCode}", p.RemoteEndPoint, id, endpoint, error);
 
-        if (id == UtHolepunch.MsgId.Connect)
+        if (id == UtHolepunch.MsgId.Rendezvous)
+        {
+            if (targetLocal != sourceLocal || p.RemoteEndPoint == null || !TryConsumeHolepunchBudget(endpoint.Address.ToString(), endpoint.Port)) return Task.CompletedTask;
+            var target = _connectedPeers.Keys.FirstOrDefault(candidate => endpoint.Equals(candidate.RemoteEndPoint) || endpoint.Equals(candidate.RemoteListenEndPoint));
+            if (ReferenceEquals(target, p)) p.UtHolepunch.SendError(endpoint, UtHolepunch.ErrorCode.NoSelf);
+            else if (target == null) p.UtHolepunch.SendError(endpoint, UtHolepunch.ErrorCode.NotConnected);
+            else if (!target.UtHolepunch.RemoteMessageId.HasValue) p.UtHolepunch.SendError(endpoint, UtHolepunch.ErrorCode.NoSupport);
+            else
+            {
+                p.UtHolepunch.SendConnect(endpoint);
+                target.UtHolepunch.SendConnect(p.RemoteEndPoint);
+            }
+        }
+        else if (id == UtHolepunch.MsgId.Connect)
         {
             // Relay told us to connect to 'endpoint' via uTP to punch a hole
             _logger.LogDebug("Initiating holepunch connection to {Endpoint}", endpoint);
             ConnectTo(endpoint.Address.ToString(), endpoint.Port, true);
         }
         return Task.CompletedTask;
+    }
+
+    private bool TryConsumeHolepunchBudget(string ip, int port)
+    {
+        lock (_holepunchLock)
+        {
+            long now = Environment.TickCount64;
+            if (now - _holepunchWindowStart > 60000)
+            {
+                if (_holepunchRefused > 1) _logger.LogDebug("Refused {Count} further holepunch requests over the last minute", _holepunchRefused - 1);
+                _holepunchWindowStart = now;
+                _holepunchCount = 0;
+                _holepunchRefused = 0;
+            }
+            if (_holepunchCount >= _settings.Connection.MaxHolepunchPerMinute)
+            {
+                // Saturating counters keep a hostile long-running relay from overflowing the limit.
+                if (_holepunchRefused < int.MaxValue) _holepunchRefused++;
+                if (_holepunchRefused == 1) _logger.LogWarning("Holepunch rate limit of {Limit}/minute reached; refusing further rendezvous this minute (first was {Ip}:{Port})", _settings.Connection.MaxHolepunchPerMinute, ip, port);
+                return false;
+            }
+            _holepunchCount++;
+            return true;
+        }
     }
 
     public async Task MessageReceivedAsync(IPeerCommunication peer, PeerMessage msg)
@@ -1418,7 +1430,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     public Task PortReceivedAsync(IPeerCommunication peer, ushort dhtPort)
     {
         var p = (PeerCommunication)peer;
-        if (p.RemoteEndPoint == null || _torrent.DhtManager == null)
+        if (_torrent.InfoFile.Info.IsPrivate || dhtPort == 0 || p.RemoteEndPoint == null || _torrent.DhtManager == null)
         {
             return Task.CompletedTask;
         }
@@ -1433,8 +1445,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    public async Task StartAsync()
+    public Task StartAsync()
     {
+        _disposal.ThrowIfDisposed(this);
+        if (_mainLoopCts is { IsCancellationRequested: false })
+        {
+            return Task.CompletedTask;
+        }
         _mainLoopCts?.Dispose();
         _mainLoopCts = new CancellationTokenSource();
 
@@ -1444,36 +1461,22 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // Start the connection queue processor
         _connectionQueueTask = ProcessConnectionQueueAsync(_mainLoopCts.Token);
 
-        try
+        // A torrent stopped and started again carries on with the peers it knew. Stopping closes their
+        // connections and drops the dials still queued; nothing brought any of them back but the next
+        // tracker announce or DHT lookup, and a peer only a magnet link's x.pe - or AdditionalPeers -
+        // named was never found again at all. libtorrent keeps its peer list across a pause for the
+        // same reason.
+        if (Interlocked.Increment(ref _starts) > 1)
         {
-            if (_torrent.TrackerManager != null)
-            {
-                await _torrent.TrackerManager.StartAsync().ConfigureAwait(false);
-            }
+            RedialKnownPeers();
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to start tracker manager");
-            _torrent.FireErrorEvent(new TorrentException("Failed to start tracker manager.", _torrent.Hash, ex));
-        }
+
+        return Task.CompletedTask;
     }
 
     public async Task StopAsync()
     {
-        // Stop the main loop and connection processor
-        if (_mainLoopCts != null)
-        {
-            await _mainLoopCts.CancelAsync().ConfigureAwait(false);
-        }
-
-        if (_mainLoopTask is { } mainLoopTask)
-        {
-            await mainLoopTask.ConfigureAwait(false);
-        }
-        if (_connectionQueueTask is { } connectionQueueTask)
-        {
-            await connectionQueueTask.ConfigureAwait(false);
-        }
+        await StopSchedulingAsync().ConfigureAwait(false);
 
         // Wait for active connection attempts to finish or fail
         // Use a timeout to avoid hanging indefinitely if a task is stuck
@@ -1537,20 +1540,27 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// </summary>
     internal async Task<IReadOnlyList<PeerCommunication>> DetachConnectedPeersForMetadataRebuildAsync()
     {
+        await StopSchedulingAsync().ConfigureAwait(false);
+        return await DetachPeersAsync().ConfigureAwait(false);
+    }
+
+    private async Task StopSchedulingAsync()
+    {
         if (_mainLoopCts != null)
         {
-            await _mainLoopCts.CancelAsync().ConfigureAwait(false);
+            try { await _mainLoopCts.CancelAsync().ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to cancel peer scheduling"); }
         }
-
-        if (_mainLoopTask is { } mainLoopTask)
+        try
         {
-            await mainLoopTask.ConfigureAwait(false);
+            await Task.WhenAll(_mainLoopTask ?? Task.CompletedTask, _connectionQueueTask ?? Task.CompletedTask).ConfigureAwait(false);
         }
-        if (_connectionQueueTask is { } connectionQueueTask)
-        {
-            await connectionQueueTask.ConfigureAwait(false);
-        }
+        catch (OperationCanceledException) when (_mainLoopCts?.IsCancellationRequested == true) { /* Expected during shutdown. */ }
+        catch (Exception ex) { _logger.LogWarning(ex, "Peer scheduling failed during shutdown"); }
+    }
 
+    private async Task<IReadOnlyList<PeerCommunication>> DetachPeersAsync()
+    {
         try
         {
             if (!_activeConnectionTasks.IsEmpty)
@@ -1668,7 +1678,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         return adopted;
     }
 
-    private async Task ReleaseTransferredPeerAsync(PeerCommunication peer)
+    internal async Task ReleaseTransferredPeerAsync(PeerCommunication peer)
     {
         // The old manager deliberately retained this slot and this peer has not been registered in the
         // new manager, so CloseAsync cannot release it through ConnectionClosedAsync.
@@ -1710,6 +1720,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private void AddPeersInternal(IEnumerable<IPEndPoint> peers, PeerSourceKind sourceKind, PeerCommunication? source, List<byte>? flags)
     {
+        if (_torrent.InfoFile.Info.IsPrivate && sourceKind is PeerSourceKind.Dht or PeerSourceKind.Pex or PeerSourceKind.Lpd) return;
         if (peers == null)
         {
             return;
@@ -1731,7 +1742,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             // Dropped here as well as in ConnectTo so the known-peer cache never holds one. 519 of
             // them turned up in one run against a cache bounded at 2000, which is a quarter of the
             // room given to addresses that can never be dialled.
-            if (endpoint is null or { Port: <= 0 } or { Port: > ushort.MaxValue })
+            if (endpoint is null || !NetworkUtils.IsDeliverableUnicast(endpoint))
             {
                 index++;
                 continue;
@@ -1760,6 +1771,32 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             index++;
         }
 
+        DialBest(candidates);
+    }
+
+    /// <summary>
+    /// Dials the best of the peers already known - each by its listening address, since an incoming
+    /// connection's source port is nothing anyone can dial - as a batch of fresh discoveries would be.
+    /// </summary>
+    private void RedialKnownPeers()
+    {
+        bool isSeeding = _torrent.Finished;
+        var now = _timeProvider.GetUtcNow();
+        var candidates = new List<(PeerHistory History, long Score)>();
+        foreach (var history in _knownPeersCache.Values)
+        {
+            if (history.IsListenAddress && !_connectedEndpoints.ContainsKey(history.EndPoint))
+            {
+                candidates.Add((history, history.GetScore(isSeeding, Priority.Normal, now)));
+            }
+        }
+
+        DialBest(candidates);
+    }
+
+    /// <summary>Dials the best-scoring candidates, as many as one tracker response is allowed to bring.</summary>
+    private void DialBest(List<(PeerHistory History, long Score)> candidates)
+    {
         candidates.Sort((a, b) => a.Score.CompareTo(b.Score));
         int max = (int)_settings.MaxPeersPerTrackerRequest;
         foreach (var (history, _) in candidates.Take(max))
@@ -1815,6 +1852,14 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         // before it has served the peers downloading from us - so the swarm lost its seeds while
         // uploads were still in flight. The periodic sweep costs at most five seconds of one
         // connection slot, against the two minutes this replaced, and leaves the uploads alone.
+    }
+
+    internal void AnnounceListenPort()
+    {
+        foreach (var peer in _connectedPeers.Keys)
+        {
+            FireAndForget(peer.RefreshExtendedHandshakeAfterMetadataAsync(), "Announce changed listen port");
+        }
     }
     private void ReleasePendingConnection(ConnectionRequest request)
     {
@@ -1887,6 +1932,28 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     /// another rendezvous when it fails, or a peer that is simply unreachable is retried forever.
     /// </para>
     /// </summary>
+    /// <summary>Undoes a dial that did not run its course, whether it threw or was given up on.</summary>
+    private async Task AbandonConnectionAttemptAsync(PeerCommunication peer, bool useGovernor)
+    {
+        if (_connectingPeers.TryRemove(peer, out _))
+        {
+            Interlocked.Decrement(ref _connectingPeersCount);
+        }
+        if (_connectedPeers.TryRemove(peer, out _))
+        {
+            Interlocked.Decrement(ref _connectedPeersCount);
+            UnregisterConnectedEndpoint(peer);
+            // The peer is only ever added to _connectedPeers after the governor
+            // connection slot is acquired, so removing it here means the slot would
+            // otherwise leak (ConnectionClosedAsync won't run for a peer we just removed).
+            if (useGovernor)
+            {
+                _governor.ReleaseConnectionSlot();
+            }
+        }
+        await peer.CloseAsync().ConfigureAwait(false);
+    }
+
     private async Task ConnectAndHandleAsync(PeerCommunication peer, string ip, int port, IReadOnlyList<TransportPreference> transportPlan, bool useGovernor, bool isHolepunch, ConnectionRequest? pendingRequest, CancellationToken cancellationToken)
     {
         IPEndPoint? endpoint = null;
@@ -1972,8 +2039,23 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                     : fallbackTimeoutMs;
                 int attemptTimeoutMs = ConnectionBudgetCalculator.ForAttempt(
                     remainingTimeoutMs, hasFallback, capMs);
-                success = await peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, cancellationToken)
-                    .WaitAsync(cancellationToken).ConfigureAwait(false);
+                // Waited on without throwing when the manager gives up - every pending dial at once, when
+                // a magnet's metadata arrives. The dial ends itself on the same token; this only stops
+                // waiting for one that is slow to notice.
+                var connecting = peer.ConnectAsync(ip, port, attemptUtp, attemptTimeoutMs, offerEncryption: offerEncryption, cancellationToken);
+                if (!connecting.IsCompleted)
+                {
+                    await ((Task)connecting).WaitAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                }
+
+                if (!connecting.IsCompleted || (cancellationToken.IsCancellationRequested && !connecting.IsCompletedSuccessfully))
+                {
+                    _logger.LogDebug("Connection attempt canceled for {Ip}:{Port}", ip, port);
+                    await AbandonConnectionAttemptAsync(peer, useGovernor).ConfigureAwait(false);
+                    return;
+                }
+
+                success = await connecting.ConfigureAwait(false);
 
                 if (attemptUtp)
                 {
@@ -2089,7 +2171,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 var ep = endpoint ?? new IPEndPoint(IPAddress.Parse(ip), port);
                 if (!isHolepunch
                     && _peerSources.TryGetValue(ep, out var source)
-                    && source.RemoteExtensions?.MessageIds.ContainsKey(UtHolepunch.Name) == true)
+                    && source.RemoteExtensions?.GetEnabledMessageId(UtHolepunch.Name) != null)
                 {
                     _logger.LogDebug("Connection failed to {Endpoint}, attempting holepunch via {Via}", ep, source.RemoteEndPoint);
                     source.UtHolepunch.SendRendezvous(ep);
@@ -2160,24 +2242,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             else
                 _logger.LogError(ex, "Connection continuation error for {Ip}:{Port}", ip, port);
 
-            // Cleanup on exception
-            if (_connectingPeers.TryRemove(peer, out _))
-            {
-                Interlocked.Decrement(ref _connectingPeersCount);
-            }
-            if (_connectedPeers.TryRemove(peer, out _))
-            {
-                Interlocked.Decrement(ref _connectedPeersCount);
-                UnregisterConnectedEndpoint(peer);
-                // The peer is only ever added to _connectedPeers after the governor
-                // connection slot is acquired, so removing it here means the slot would
-                // otherwise leak (ConnectionClosedAsync won't run for a peer we just removed).
-                if (useGovernor)
-                {
-                    _governor.ReleaseConnectionSlot();
-                }
-            }
-            await peer.CloseAsync().ConfigureAwait(false);
+            await AbandonConnectionAttemptAsync(peer, useGovernor).ConfigureAwait(false);
         }
         finally
         {
@@ -2256,11 +2321,11 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             }
 
             // Acquire global pending slot
-            if (!forceUtp && !_governor.TryAcquirePendingSlot())
+            if (!_governor.TryAcquirePendingSlot())
             {
                 return;
             }
-            pendingSlotHeld = !forceUtp;
+            pendingSlotHeld = true;
 
             var peer = _peerFactory.Create(_torrent, this, _timeProvider);
 
@@ -2273,7 +2338,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             _logger.LogDebug("Initiating connection to {Ip}:{Port} (plan={Plan}), connecting={Connecting}, connected={Connected}", ip, port, string.Join("->", transportPlan), _connectingPeersCount, _connectedPeersCount);
 
             // Track the connection task
-            var task = ConnectAndHandleAsync(peer, ip, port, transportPlan, !forceUtp, isHolepunch: forceUtp,
+            var task = ConnectAndHandleAsync(peer, ip, port, transportPlan, true, isHolepunch: forceUtp,
                 pendingRequest, _mainLoopCts?.Token ?? CancellationToken.None);
             handedOff = true;
             _activeConnectionTasks.TryAdd(task, 0);
@@ -2306,63 +2371,58 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        int numPieces = _torrent.Pieces.Count;
-        if (numPieces == 0)
+        foreach (int pieceIndex in GenerateAllowedFastSet(remoteEndPoint.Address,
+            _torrent.InfoFile.Info.GetTrackerInfoHash().Span, _torrent.Pieces.Count, AllowedFastSetSize))
         {
-            return;
+            await peer.SendAllowedFastAsync(pieceIndex).ConfigureAwait(false);
         }
+    }
 
-        // BEP-6: SHA1(IP_bytes + info_hash) generates deterministic piece indices for the allowed-fast set.
-        var ip = remoteEndPoint.Address;
+    internal static IReadOnlyList<int> GenerateAllowedFastSet(IPAddress ip, ReadOnlySpan<byte> infoHash, int numPieces, int setSize)
+    {
         if (ip.IsIPv4MappedToIPv6)
         {
             ip = ip.MapToIPv4();
         }
 
+        // BEP 6 defines this algorithm for IPv4, using the peer's /24 subnet.
+        if (ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork || numPieces <= 0 || setSize <= 0 || infoHash.Length != InfoHash.V1Length)
+        {
+            return [];
+        }
         byte[] ipBytes = ip.GetAddressBytes();
-
-        byte[] input = new byte[ipBytes.Length + InfoHash.V1Length];
+        ipBytes[3] = 0;
+        byte[] input = new byte[4 + InfoHash.V1Length];
         ipBytes.CopyTo(input, 0);
-        _torrent.Hash.Span.CopyTo(input.AsSpan(ipBytes.Length));
+        infoHash.CopyTo(input.AsSpan(4));
 
         byte[] hash = SHA1.HashData(input);
         var sent = new HashSet<int>();
-        int attempts = 0;
-        int loops = 0;
+        var result = new List<int>();
+        int count = Math.Min(setSize, numPieces);
 
-        while (true)
+        while (result.Count < count)
         {
             for (int i = 0; i < hash.Length / 4; i++)
             {
-                loops++;
                 uint raw = (uint)hash[i * 4] << 24 | (uint)hash[(i * 4) + 1] << 16
                          | (uint)hash[(i * 4) + 2] << 8 | hash[(i * 4) + 3];
                 int pieceIndex = (int)(raw % (uint)numPieces);
 
-                if (sent.Contains(pieceIndex))
+                if (!sent.Add(pieceIndex))
                 {
-                    if (++loops > 500)
-                    {
-                        return;
-                    }
-
                     continue;
                 }
-
-                if (_torrent.Pieces.HasPiece(pieceIndex))
+                result.Add(pieceIndex);
+                if (result.Count == count)
                 {
-                    await peer.SendAllowedFastAsync(pieceIndex).ConfigureAwait(false);
-                    sent.Add(pieceIndex);
-                }
-
-                if (++attempts >= AllowedFastSetSize)
-                {
-                    return;
+                    return result;
                 }
             }
 
             hash = SHA1.HashData(hash);
         }
+        return result;
     }
 
     private void FireAndForget(Task task, string context)
@@ -2727,7 +2787,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     /// <summary>
     /// Revalidates a normal queued dial immediately before it becomes a half-open connection.
-    /// Holepunch requests do not use the queue and deliberately bypass these limits.
+    /// Holepunch requests bypass the queue but still obey the connection and pending-slot limits.
     /// </summary>
     private bool CanStartQueuedConnection(ConnectionRequest request)
     {

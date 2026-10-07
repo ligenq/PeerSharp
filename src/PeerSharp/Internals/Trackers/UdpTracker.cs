@@ -38,6 +38,7 @@ internal class UdpTracker : TrackerBase, IDisposable
     private DateTimeOffset _connectionIdTimestamp = DateTimeOffset.MinValue;
     private AtomicDisposal _disposal = new();
     private IPEndPoint? _endpoint;
+    private string? _proxyTargetHost;
     private AddressFamily? _connectedAddressFamily;
     private AddressFamily? _requestedAddressFamily;
     private TcpClient? _proxyControlClient; // Keep TCP connection alive for SOCKS5 UDP association
@@ -50,6 +51,11 @@ internal class UdpTracker : TrackerBase, IDisposable
 
     public UdpTracker(TimeProvider timeProvider, ILoggerFactory loggerFactory)
         : this(timeProvider, new UdpSocketFactory(), loggerFactory)
+    {
+    }
+
+    public UdpTracker(TimeProvider timeProvider, ILoggerFactory loggerFactory, HostAddressCache hostAddresses)
+        : this(timeProvider, new UdpSocketFactory(), loggerFactory, hostAddresses.ResolveAsync)
     {
     }
 
@@ -75,8 +81,21 @@ internal class UdpTracker : TrackerBase, IDisposable
         _resolveAddressesAsync = resolveAddressesAsync;
     }
 
-    private static Task<IPAddress[]> ResolveAddressesAsync(string host, CancellationToken ct) =>
-        Dns.GetHostAddressesAsync(host, ct);
+    /// <summary>
+    /// A name that does not resolve comes back as no addresses, the way <see cref="HostAddressCache"/>
+    /// reports it, so both resolvers mean the same thing by an empty answer.
+    /// </summary>
+    private static async Task<IPAddress[]> ResolveAddressesAsync(string host, CancellationToken ct)
+    {
+        try
+        {
+            return await Dns.GetHostAddressesAsync(host, ct).ConfigureAwait(false);
+        }
+        catch (SocketException)
+        {
+            return [];
+        }
+    }
 
     public override async Task AnnounceAsync(TrackerEvent evt, CancellationToken ct)
     {
@@ -85,7 +104,18 @@ internal class UdpTracker : TrackerBase, IDisposable
         {
             var responses = new List<AnnounceResponse>();
             var errors = new List<Exception>();
-            foreach (var addressFamily in GetAnnounceAddressFamilies())
+            var families = await GetReachableAddressFamiliesAsync(ct).ConfigureAwait(false);
+            if (families.Count == 0)
+            {
+                // Known before sending anything, so it is reported as the result it is rather than thrown
+                // and caught once per family and retry.
+                _connectionId = 0;
+                _logger.LogDebug("Tracker {Url} announce skipped - its host has no usable address", Url);
+                RaiseAnnounceResult(false, new AnnounceResponse(), $"Tracker host {new Uri(Url).Host} has no usable address");
+                return;
+            }
+
+            foreach (var addressFamily in families)
             {
                 if (_client != null && _connectedAddressFamily != addressFamily)
                 {
@@ -171,18 +201,36 @@ internal class UdpTracker : TrackerBase, IDisposable
         ResetClientUnsafe();
     }
 
-    private IReadOnlyList<AddressFamily?> GetAnnounceAddressFamilies()
+    /// <summary>
+    /// The families to announce over, less those the tracker's host has no address in. A tracker with
+    /// no AAAA record is the common case, not an error, and asking it over IPv6 anyway used to fail
+    /// with an exception on every announce. When a proxy chooses the route, the proxy resolves the
+    /// name and nothing is filtered here.
+    /// </summary>
+    private async Task<IReadOnlyList<AddressFamily?>> GetReachableAddressFamiliesAsync(CancellationToken ct)
     {
-        var bindAddress = Torrent.Settings.Connection.BindAddress;
-        if (bindAddress != null)
+        var families = GetAnnounceAddressFamilies();
+        if (families.Any(family => family == null))
         {
-            return [bindAddress.AddressFamily];
+            return families;
         }
 
+        var addresses = await _resolveAddressesAsync(new Uri(Url).DnsSafeHost, ct).ConfigureAwait(false);
+        return [.. families.Where(family => addresses.Any(address => address.AddressFamily == family))];
+    }
+
+    private IReadOnlyList<AddressFamily?> GetAnnounceAddressFamilies()
+    {
         var proxy = Torrent.Settings.Proxy;
         if (UdpProxyPolicy.Decide(proxy, proxy.ProxyTrackers) != UdpProxyPolicy.Decision.BindDirectly)
         {
             return [null];
+        }
+
+        var bindAddress = Torrent.Settings.Connection.BindAddress;
+        if (bindAddress != null)
+        {
+            return [bindAddress.AddressFamily];
         }
 
         if (IPAddress.TryParse(new Uri(Url).Host, out var literal))
@@ -231,6 +279,7 @@ internal class UdpTracker : TrackerBase, IDisposable
         _proxyControlClient = null;
         _proxyUdpEndPoint = null;
         _endpoint = null;
+        _proxyTargetHost = null;
         _connectedAddressFamily = null;
         _connectionId = 0;
         _connectionIdTimestamp = DateTimeOffset.MinValue;
@@ -261,9 +310,7 @@ internal class UdpTracker : TrackerBase, IDisposable
                         await Task.Delay(TimeSpan.FromMilliseconds(delayMs), _timeProvider, ct).ConfigureAwait(false);
 
                         // Reset client on retry to get fresh connection
-                        _client?.Close();
-                        _client = null;
-                        _connectionId = 0;
+                        ResetClientUnsafe();
                     }
 
                     await EnsureConnectedAsyncUnsafeAsync(ct).ConfigureAwait(false);
@@ -343,9 +390,7 @@ internal class UdpTracker : TrackerBase, IDisposable
                         _logger.LogDebug("Multi-scrape retry {Attempt}/{MaxRetries} after {Delay}ms delay", attempt, MaxRetries, delayMs);
                         await Task.Delay(TimeSpan.FromMilliseconds(delayMs), _timeProvider, ct).ConfigureAwait(false);
 
-                        _client?.Close();
-                        _client = null;
-                        _connectionId = 0;
+                        ResetClientUnsafe();
                     }
 
                     await EnsureConnectedAsyncUnsafeAsync(ct).ConfigureAwait(false);
@@ -429,9 +474,7 @@ internal class UdpTracker : TrackerBase, IDisposable
                         _logger.LogDebug("Multi-scrape retry {Attempt}/{MaxRetries} after {Delay}ms delay", attempt, MaxRetries, delayMs);
                         await Task.Delay(TimeSpan.FromMilliseconds(delayMs), _timeProvider, ct).ConfigureAwait(false);
 
-                        _client?.Close();
-                        _client = null;
-                        _connectionId = 0;
+                        ResetClientUnsafe();
                     }
 
                     await EnsureConnectedAsyncUnsafeAsync(ct).ConfigureAwait(false);
@@ -560,9 +603,17 @@ internal class UdpTracker : TrackerBase, IDisposable
                     _proxyUdpEndPoint = result.ProxyUdpEndPoint;
                     _proxyControlClient = result.ControlClient;
 
-                    var ips = await _resolveAddressesAsync(uri.Host, ct).ConfigureAwait(false);
-                    var preferredIp = ips.FirstOrDefault(ip => ip.AddressFamily == result.ProxyUdpEndPoint.AddressFamily) ?? ips[0];
-                    _endpoint = new IPEndPoint(preferredIp, uri.Port);
+                    if (IPAddress.TryParse(uri.DnsSafeHost, out var literal))
+                    {
+                        _endpoint = new IPEndPoint(literal, uri.Port);
+                    }
+                    else
+                    {
+                        // SOCKS5 resolves the target name. The first matching response establishes
+                        // its IP address and the peer-list family, without a local DNS lookup.
+                        _proxyTargetHost = uri.IdnHost;
+                        _endpoint = new IPEndPoint(IPAddress.Any, uri.Port);
+                    }
                 }
                 else
                 {
@@ -599,7 +650,13 @@ internal class UdpTracker : TrackerBase, IDisposable
             }
             catch (SocketException ex)
             {
+                ResetClientUnsafe();
                 throw new UdpTrackerException($"DNS resolution failed for {uri.Host}: {ex.Message}", ex, isTransient: true);
+            }
+            catch
+            {
+                ResetClientUnsafe();
+                throw;
             }
         }
     }
@@ -647,27 +704,33 @@ internal class UdpTracker : TrackerBase, IDisposable
             throw new InvalidOperationException("Not connected");
         }
 
-        var now = _timeProvider.GetUtcNow();
-        while ((_timeProvider.GetUtcNow() - now) < _requestTimeout)
+        using var timeoutCts = new CancellationTokenSource(_requestTimeout, _timeProvider);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ct);
+        while (!timeoutCts.IsCancellationRequested)
         {
             try
             {
-                using var timeoutCts = new CancellationTokenSource(_requestTimeout);
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, ct);
                 var res = await _client.ReceiveAsync(linkedCts.Token).ConfigureAwait(false);
 
+                var expectedSender = _proxyUdpEndPoint ?? _endpoint;
+                if (expectedSender == null || !NetworkUtils.NormalizeEndPoint(res.RemoteEndPoint).Equals(NetworkUtils.NormalizeEndPoint(expectedSender)))
+                {
+                    continue;
+                }
+
                 var buffer = res.Buffer;
+                IPEndPoint? proxyRemote = null;
                 if (_proxyUdpEndPoint != null)
                 {
-                    var (Payload, _) = ProxyHelper.UnwrapSocks5UdpPacket(buffer);
-                    if (Payload.IsEmpty)
+                    var (Payload, remote) = ProxyHelper.UnwrapSocks5UdpPacket(buffer);
+                    if (Payload.IsEmpty || _endpoint == null || remote.Port != _endpoint.Port
+                        || (_proxyTargetHost == null && !NetworkUtils.NormalizeEndPoint(remote).Equals(NetworkUtils.NormalizeEndPoint(_endpoint))))
                     {
                         continue;
                     }
 
                     buffer = Payload.ToArray();
-                    // Use the unwrapped remote endpoint if needed, but for tracker response
-                    // we usually just care about the transaction ID in the payload.
+                    proxyRemote = remote;
                 }
 
                 if (buffer.Length >= 8) // Header is at least 8 bytes (Action + TransID)
@@ -683,12 +746,24 @@ internal class UdpTracker : TrackerBase, IDisposable
                             throw new InvalidDataException("Response too short");
                         }
 
+                        if (_proxyTargetHost != null && proxyRemote != null)
+                        {
+                            // Do not let a stale transaction select the resolved destination.
+                            // A domain envelope cannot tell us which address family its peers use.
+                            if (res.Buffer[3] == 0x03)
+                            {
+                                continue;
+                            }
+                            _endpoint = proxyRemote;
+                            _proxyTargetHost = null;
+                        }
+
                         return _proxyUdpEndPoint != null ? new UdpReceiveResult(buffer, res.RemoteEndPoint) : res;
                     }
                     // Else: Stale packet, ignore and loop
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 break;
             }
@@ -765,7 +840,7 @@ internal class UdpTracker : TrackerBase, IDisposable
             numwant = -1;
         }
         BinaryPrimitives.WriteInt32BigEndian(span[92..], numwant);
-        int listenPort = Torrent.PortListener?.Port ?? Torrent.Settings.Connection.TcpPort;
+        int listenPort = Torrent.AdvertisedPeerPort;
         BinaryPrimitives.WriteUInt16BigEndian(span[96..], checked((ushort)listenPort));
 
         await SendPacketAsync(req, ct).ConfigureAwait(false);
@@ -836,11 +911,22 @@ internal class UdpTracker : TrackerBase, IDisposable
         if (_proxyUdpEndPoint != null)
         {
             int headerLength = _endpoint.AddressFamily == AddressFamily.InterNetwork ? 10 : 22;
+            if (_proxyTargetHost != null)
+            {
+                headerLength = 7 + Encoding.ASCII.GetByteCount(_proxyTargetHost);
+            }
             int totalLength = headerLength + data.Length;
             byte[] buffer = ArrayPool<byte>.Shared.Rent(totalLength);
             try
             {
-                ProxyHelper.WriteSocks5UdpPacket(data.Span, _endpoint, buffer.AsSpan(0, totalLength));
+                if (_proxyTargetHost != null)
+                {
+                    ProxyHelper.WriteSocks5UdpPacket(data.Span, _proxyTargetHost, _endpoint.Port, buffer.AsSpan(0, totalLength));
+                }
+                else
+                {
+                    ProxyHelper.WriteSocks5UdpPacket(data.Span, _endpoint, buffer.AsSpan(0, totalLength));
+                }
                 await _client.SendAsync(buffer.AsMemory(0, totalLength), _proxyUdpEndPoint, ct).ConfigureAwait(false);
             }
             finally

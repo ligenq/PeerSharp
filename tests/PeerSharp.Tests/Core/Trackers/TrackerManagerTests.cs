@@ -8,6 +8,55 @@ namespace PeerSharp.Tests.Core.Trackers;
 
 public class TrackerManagerTests
 {
+    [Fact(Timeout = 30000)]
+    public async Task Stop_TrackerIgnoringCancellation_RemainsBounded()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        manager.AddTracker("http://tracker.com/announce");
+        var tracker = Assert.Single(_factory.Trackers).Value;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tracker.AnnounceHandler = (_, _) => release.Task;
+        await manager.StartAsync();
+        await TorrentTestUtility.WaitUntilAsync(() => tracker.AnnounceCount == 1);
+        var stop = manager.StopAsync();
+        await TorrentTestUtility.AdvanceUntilAsync(_timeProvider, () => stop.IsCompleted, TimeSpan.FromSeconds(2));
+        await stop;
+        release.SetResult();
+        await manager.DisposeAsync(sendStoppedAnnounce: false);
+    }
+    [Fact(Timeout = 30000)]
+    public async Task OverlappingAnnounce_CoalescesRequestsAndPreservesCompletedEvent()
+    {
+        await using var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        const string url = "http://tracker.com/announce";
+        manager.AddTracker(url);
+        var tracker = _factory.Trackers[url];
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tracker.AnnounceHandler = (evt, _) => evt == TrackerEvent.Started ? release.Task : Task.CompletedTask;
+        await manager.StartAsync();
+        await TorrentTestUtility.WaitUntilAsync(() => tracker.AnnounceCount == 1);
+        await manager.StartAsync();
+        await manager.AnnounceAsync();
+        manager.AnnounceCompleted();
+        Assert.Equal(1, tracker.AnnounceCount);
+        release.SetResult();
+        await TorrentTestUtility.WaitUntilAsync(() => tracker.AnnounceCount == 2);
+        Assert.Equal(TrackerEvent.Completed, tracker.LastEvent);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Dispose_DeinitializesTrackersAndRejectsRestart()
+    {
+        var manager = new TrackerManager(_torrent, _factory, _timeProvider);
+        manager.AddTracker("http://tracker.com/announce");
+        var tracker = Assert.Single(_factory.Trackers).Value;
+        await manager.DisposeAsync();
+        Assert.Equal(1, tracker.DeinitCount);
+        Assert.Empty(manager.GetTrackers());
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => manager.StartAsync());
+        await manager.DisposeAsync();
+        Assert.Equal(1, tracker.DeinitCount);
+    }
     /// <summary>
     /// Records the BEP 24 addresses the tracker layer forwards for BEP 42 voting.
     /// </summary>

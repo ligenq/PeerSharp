@@ -318,4 +318,18 @@ public class UtpStreamStateTests
         // 1 is "after" 65535 in circular sequence space
         Assert.True(Utils.CompareSeq(1, 65535) > 0);
     }
+
+    [Fact]
+    public async Task ResetInSynSend_IsAFailedAttempt_ForACallerThatAskedForOne()
+    {
+        // A reset in answer to a SYN is a closed port, which a TCP dial reports as a value too.
+        var (stream, _, _) = CreateStream();
+
+        var connecting = stream.ConnectOrAbandonAsync(TimeSpan.FromMinutes(5), TestContext.Current.CancellationToken);
+        var resetHeader = MakeHeader(MessageType.ST_RESET, seqNr: 1, ackNr: (ushort)(stream.SeqNr - 1));
+        stream.ProcessPacketWithSack(resetHeader, [], 0, null, null, RemoteEndPoint);
+
+        Assert.False(await connecting);
+        Assert.IsType<IOException>(stream.EndedBy);
+    }
 }

@@ -326,6 +326,50 @@ public class SuperSeedManagerTests
         }
     }
 
+    [Fact]
+    public async Task DuplicateHaveDoesNotInflateSightingsAndDisconnectedPeersAreNotReassigned()
+    {
+        var ctx = CreateTorrentContext(3);
+        var manager = new SuperSeedManager(ctx.Torrent) { Enabled = true };
+        var a = new TestPeer(new IPEndPoint(IPAddress.Loopback, 1));
+        var b = new TestPeer(new IPEndPoint(IPAddress.Loopback, 2));
+        try
+        {
+            manager.HandlePeerConnected(a); manager.HandlePeerConnected(b);
+            await manager.AssignPieceToPeerAsync(a);
+            int first = a.SentMessages[0].HavePieceIndex;
+            await manager.HandlePeerHaveAsync(b, first);
+            int advertised = a.SentMessages.Count;
+            await manager.HandlePeerHaveAsync(b, first);
+            Assert.Equal(advertised, a.SentMessages.Count);
+            manager.HandlePeerDisconnected(a);
+            await manager.AssignPieceToPeerAsync(a);
+            Assert.Equal(advertised, a.SentMessages.Count);
+        }
+        finally { Cleanup(ctx); }
+    }
+
+    [Fact]
+    public async Task ABitfieldReleasesTheOriginalPeerAndIgnoresExtraPieces()
+    {
+        var ctx = CreateTorrentContext(3);
+        var manager = new SuperSeedManager(ctx.Torrent) { Enabled = true };
+        var a = new TestPeer(new IPEndPoint(IPAddress.Loopback, 1));
+        var b = new TestPeer(new IPEndPoint(IPAddress.Loopback, 2));
+        try
+        {
+            manager.HandlePeerConnected(a); manager.HandlePeerConnected(b);
+            await manager.AssignPieceToPeerAsync(a);
+            var bitfield = new PiecesProgress(20);
+            bitfield.AddPiece(a.SentMessages[0].HavePieceIndex); bitfield.AddPiece(19);
+            manager.HandlePeerBitfield(b, bitfield);
+            Assert.Equal(2, a.SentMessages.Count);
+            manager.HandlePeerBitfield(b, bitfield);
+            Assert.Equal(2, a.SentMessages.Count);
+        }
+        finally { Cleanup(ctx); }
+    }
+
     private static (Torrent Torrent, string Path) CreateTorrentContext(int pieceCount)
     {
         var metadata = new TorrentFileMetadata();
