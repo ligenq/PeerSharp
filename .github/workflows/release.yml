@@ -152,7 +152,7 @@ jobs:
           sbom-path: packages/PeerSharp.WebTorrent.${{ needs.build.outputs.version }}.spdx.json
 
       - name: NuGet login (OIDC -> temp API key)
-        uses: NuGet/login@ebc737b6fc418a6ca0073cf116ec8dc156d8b81e # v1
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
         id: nuget-login
         with:
           user: ligenq
