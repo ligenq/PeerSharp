@@ -3,6 +3,21 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
+## Unreleased
+
+- Read-ahead reuses bounded buffers sized for its full window, avoiding a new large array on
+  every prefetch. Request tracking uses smaller concurrent dictionaries for the usual single-peer
+  block request while preserving duplicate requests and concurrent readers.
+
+- Session autosaves stream resume JSON into the atomic snapshot file and encode unfinished-piece
+  data in bounded chunks. Updating a snapshot copies unchanged files directly, avoiding a second
+  large resume allocation just to merge the previous entry. The resume format and custom
+  `ISessionPersistence` contract remain compatible.
+- Restored stopped torrents keep unfinished-piece data in private temporary files until started.
+  Their progress and exported resume data remain available, with snapshot leases protecting data
+  during concurrent saves and starts. Temporary storage is released on start or disposal; if it
+  cannot be created, restoration falls back to memory.
+
 ## 5.1.0 — 2026-10-05
 
 Streaming to other devices - a TV, a cast receiver - and a broad hardening pass. No binary breaks

@@ -615,12 +615,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public TorrentResumeData GetResumeData() => SerializeResumeState(GetResumeState());
 
-    internal TorrentStateData GetResumeState()
+    internal TorrentStateData GetResumeState(bool streamed = false)
     {
         var state = new TorrentStateData
         {
             Pieces = Pieces.ToBitfield(),
-            UnfinishedPieces = FileTransferInternal?.GetUnfinishedPiecesState() ?? [],
             Downloaded = (ulong)(FileTransferInternal?.Downloader?.Downloaded ?? 0),
             Uploaded = (ulong)(FileTransferInternal?.Uploader?.Uploaded ?? 0),
             SeedTimeSeconds = (long)GetSeedingTime(Services.TimeProvider.GetUtcNow()).TotalSeconds,
@@ -639,6 +638,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             }
         };
 
+        if (FileTransferInternal != null)
+        {
+            var capture = FileTransferInternal.CaptureUnfinishedPieces(streamed);
+            state.UnfinishedPieces = capture.Pieces;
+            state.DeferredDataLease = capture.Lease;
+        }
         return state;
     }
 
@@ -1207,6 +1212,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             EnsureFileTransferInitialized();
 
             await FilesInternal.StartAsync(GetFileSelectionSnapshot(), cancellationToken).ConfigureAwait(false);
+
+            FileTransferInternal.RestoreDeferredPieces();
 
             Interlocked.Exchange(ref _started, 1);
             Interlocked.Exchange(ref _activityTimeTicks, Services.TimeProvider.GetUtcNow().Ticks);
@@ -1785,7 +1792,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
         if (LocalState.UnfinishedPieces != null)
         {
-            FileTransferInternal?.LoadUnfinishedPiecesState(LocalState.UnfinishedPieces);
+            FileTransferInternal?.DeferUnfinishedPiecesState(LocalState.UnfinishedPieces);
             // Free the large byte[] data now that it's been copied into PieceState blocks
             LocalState.UnfinishedPieces.Clear();
         }

@@ -5,7 +5,9 @@ namespace PeerSharp.Internals.Transfers;
 
 internal sealed class PeerRequestCollection
 {
-    private readonly ConcurrentDictionary<(int Piece, int Offset), BlockRequest> _requests = new();
+    // Tracker mutations are already serialized. One stripe also keeps frequent Count and
+    // snapshot operations from acquiring a processor-count-sized array of locks.
+    private readonly ConcurrentDictionary<(int Piece, int Offset), BlockRequest> _requests = new(concurrencyLevel: 1, capacity: 31);
 
     public int Count => _requests.Count;
     public bool IsEmpty => Count == 0;
@@ -102,7 +104,9 @@ internal sealed class BlockRequestTracker
         lock (_mutationLock)
         {
             GetOrAddPeerRequests(peer)[(piece, offset)] = request;
-            _blockRequestIndex.GetOrAdd((piece, offset), _ => new())[peer] = request;
+            // Normally one peer owes a block. Let endgame duplicates grow this map as needed;
+            // preallocating a lock and bucket per processor for every block wastes memory.
+            _blockRequestIndex.GetOrAdd((piece, offset), static _ => new(concurrencyLevel: 1, capacity: 1))[peer] = request;
         }
     }
 

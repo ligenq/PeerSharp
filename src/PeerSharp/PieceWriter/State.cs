@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+using PeerSharp.Internals;
+
 namespace PeerSharp.PieceWriter;
 
 /// <summary>
@@ -6,6 +9,8 @@ namespace PeerSharp.PieceWriter;
 /// </summary>
 internal class TorrentStateData
 {
+    // Only streamed persistence snapshots retain a lease on deferred, disk-backed piece data.
+    internal IDisposable? DeferredDataLease { get; set; }
     public long AddedTime { get; set; }
 
     public ulong Downloaded { get; set; }
@@ -55,10 +60,14 @@ internal class TorrentStateData
 
     internal sealed record FileSnapshotData(int Index, long Length, long LastWriteTimeUtcTicks);
 
+    [JsonConverter(typeof(ResumePieceJsonConverter))]
     internal class UnfinishedPieceData
     {
         public bool[] Blocks { get; set; } = [];
         public byte[] Data { get; set; } = [];
         public int Index { get; set; }
+
+        internal DeferredPieceStore.Slice? DeferredData { get; set; }
+        internal CancellationToken SerializationCancellationToken { get; set; }
     }
 }
