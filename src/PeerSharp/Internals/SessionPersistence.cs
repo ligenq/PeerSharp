@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using PeerSharp.PieceWriter;
 
 namespace PeerSharp.Internals;
 
@@ -234,7 +235,9 @@ internal sealed class SessionPersistence : ISessionPersistence
         await Parallel.ForEachAsync(entries, options, (entry, ct) => new ValueTask(SaveAsync(entry, ct))).ConfigureAwait(false);
     }
 
-    public async Task SaveAsync(SavedTorrentEntry entry, CancellationToken cancellationToken = default)
+    public Task SaveAsync(SavedTorrentEntry entry, CancellationToken cancellationToken = default) => SaveAsync(entry, null, cancellationToken);
+
+    internal async Task SaveAsync(SavedTorrentEntry entry, TorrentStateData? resumeState, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(entry);
 
@@ -252,16 +255,9 @@ internal sealed class SessionPersistence : ISessionPersistence
 
                 // Publish all files with a single pointer swap. Per-file atomic writes alone can
                 // leave new options paired with an old resume file after a crash or cancellation.
-                var previous = File.Exists(Path.Combine(torrentDir, CurrentSnapshotFileName))
-                    || File.Exists(Path.Combine(torrentDir, TorrentFileName)) || File.Exists(Path.Combine(torrentDir, MagnetFileName))
-                    ? await LoadEntryAsync(torrentDir, cancellationToken).ConfigureAwait(false) : null;
-                entry = entry with
-                {
-                    TorrentFileData = entry.TorrentFileData ?? previous?.TorrentFileData,
-                    MagnetLink = string.IsNullOrEmpty(entry.MagnetLink) ? previous?.MagnetLink : entry.MagnetLink,
-                    ResumeData = entry.ResumeData ?? previous?.ResumeData,
-                    Options = entry.Options ?? previous?.Options
-                };
+                // Reuse unchanged files directly. Loading the previous entry here used to allocate
+                // its entire resume JSON, even when this save was about to replace all of it.
+                string previousDir = await ResolveSnapshotDirectoryAsync(torrentDir, cancellationToken).ConfigureAwait(false);
                 string snapshotName = SnapshotPrefix + Guid.NewGuid().ToString("N");
                 string snapshotDir = Path.Combine(torrentDir, snapshotName);
                 Directory.CreateDirectory(snapshotDir);
@@ -281,6 +277,7 @@ internal sealed class SessionPersistence : ISessionPersistence
                             entry.TorrentFileData,
                             cancellationToken));
                     }
+                    else writes.Add(CopySnapshotFileAsync(previousDir, snapshotDir, TorrentFileName, cancellationToken));
 
                     if (!string.IsNullOrEmpty(entry.MagnetLink))
                     {
@@ -289,14 +286,27 @@ internal sealed class SessionPersistence : ISessionPersistence
                             entry.MagnetLink,
                             cancellationToken));
                     }
+                    else writes.Add(CopySnapshotFileAsync(previousDir, snapshotDir, MagnetFileName, cancellationToken));
 
-                    if (entry.ResumeData != null)
+                    if (resumeState != null)
+                    {
+                        writes.Add(WriteAtomicAsync(Path.Combine(snapshotDir, ResumeFileName),
+                            (stream, ct) => Task.Run(() =>
+                            {
+                                foreach (var piece in resumeState.UnfinishedPieces)
+                                    piece.SerializationCancellationToken = ct;
+                                using var writer = new Utf8JsonWriter(stream);
+                                JsonSerializer.Serialize(writer, resumeState, PeerSharpJsonContext.Default.TorrentStateData);
+                            }, ct), cancellationToken));
+                    }
+                    else if (entry.ResumeData != null)
                     {
                         writes.Add(WriteAllBytesAtomicAsync(
                             Path.Combine(snapshotDir, ResumeFileName),
                             entry.ResumeData.Data,
                             cancellationToken));
                     }
+                    else writes.Add(CopySnapshotFileAsync(previousDir, snapshotDir, ResumeFileName, cancellationToken));
 
                     if (optionsJson != null)
                     {
@@ -305,6 +315,7 @@ internal sealed class SessionPersistence : ISessionPersistence
                             optionsJson,
                             cancellationToken));
                     }
+                    else writes.Add(CopySnapshotFileAsync(previousDir, snapshotDir, OptionsFileName, cancellationToken));
 
                     await Task.WhenAll(writes).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
@@ -381,7 +392,26 @@ internal sealed class SessionPersistence : ISessionPersistence
     /// result survive a crash. Without it the rename can publish whatever the OS write cache
     /// happened to contain - i.e. truncated resume data replacing a perfectly good copy.
     /// </summary>
-    private static async Task WriteAllBytesAtomicAsync(string path, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    private static Task WriteAllBytesAtomicAsync(string path, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        WriteAtomicAsync(path, (stream, ct) => stream.WriteAsync(data, ct).AsTask(), data.Length, cancellationToken);
+
+    private static async Task CopySnapshotFileAsync(string sourceDir, string destinationDir, string name, CancellationToken ct)
+    {
+        string sourcePath = Path.Combine(sourceDir, name);
+        if (!File.Exists(sourcePath)) return;
+        await WriteAtomicAsync(Path.Combine(destinationDir, name), async (destination, token) =>
+        {
+            await using var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 1, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await source.CopyToAsync(destination, 32 * 1024, token).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false);
+    }
+
+    private static Task WriteAtomicAsync(string path, Func<FileStream, CancellationToken, Task> write,
+        CancellationToken cancellationToken) => WriteAtomicAsync(path, write, 0, cancellationToken);
+
+    private static async Task WriteAtomicAsync(string path, Func<FileStream, CancellationToken, Task> write,
+        long preallocationSize, CancellationToken cancellationToken)
     {
         string temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
         try
@@ -392,12 +422,12 @@ internal sealed class SessionPersistence : ISessionPersistence
                 Access = FileAccess.Write,
                 Share = FileShare.None,
                 Options = FileOptions.Asynchronous,
-                PreallocationSize = data.Length
+                PreallocationSize = preallocationSize
             };
 
             await using (var stream = new FileStream(temporaryPath, options))
             {
-                await stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+                await write(stream, cancellationToken).ConfigureAwait(false);
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 // No async equivalent exists for the flush-to-disk barrier, and this path runs
                 // once per entry per periodic save rather than per block.
@@ -514,17 +544,7 @@ internal sealed class SessionPersistence : ISessionPersistence
             return null;
         }
 
-        var currentPath = Path.Combine(torrentDir, CurrentSnapshotFileName);
-        if (File.Exists(currentPath))
-        {
-            string snapshot = await File.ReadAllTextAsync(currentPath, cancellationToken).ConfigureAwait(false);
-            if (!snapshot.StartsWith(SnapshotPrefix, StringComparison.Ordinal)
-                || !Guid.TryParseExact(snapshot.AsSpan(SnapshotPrefix.Length), "N", out _))
-            {
-                throw new InvalidDataException("Invalid session snapshot pointer.");
-            }
-            torrentDir = Path.Combine(torrentDir, snapshot);
-        }
+        torrentDir = await ResolveSnapshotDirectoryAsync(torrentDir, cancellationToken).ConfigureAwait(false);
 
         // Load .torrent file if it exists
         byte[]? torrentFileData = null;
@@ -579,11 +599,22 @@ internal sealed class SessionPersistence : ISessionPersistence
             }
         }
 
-        return new SavedTorrentEntry(
-            hash,
-            torrentFileData,
-            magnetLink,
-            resumeData,
-            options);
+        return new SavedTorrentEntry(hash, torrentFileData, magnetLink, resumeData, options);
+    }
+
+    private static async Task<string> ResolveSnapshotDirectoryAsync(string torrentDir, CancellationToken cancellationToken)
+    {
+        var currentPath = Path.Combine(torrentDir, CurrentSnapshotFileName);
+        if (File.Exists(currentPath))
+        {
+            string snapshot = await File.ReadAllTextAsync(currentPath, cancellationToken).ConfigureAwait(false);
+            if (!snapshot.StartsWith(SnapshotPrefix, StringComparison.Ordinal)
+                || !Guid.TryParseExact(snapshot.AsSpan(SnapshotPrefix.Length), "N", out _))
+            {
+                throw new InvalidDataException("Invalid session snapshot pointer.");
+            }
+            return Path.Combine(torrentDir, snapshot);
+        }
+        return torrentDir;
     }
 }

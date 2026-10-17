@@ -2,8 +2,54 @@ using PeerSharp.PieceWriter;
 
 namespace PeerSharp.Tests.Core.IO;
 
+// Allocation checks exercise process-wide bounded pools; other collections must not drain them.
+[Collection("Concurrency")]
 public class BlockCacheTests
 {
+    [Theory]
+    [InlineData(4)]
+    [InlineData(64)]
+    public async Task ReadAhead_ReusesWindowBuffersAcrossCacheMisses(int readAheadBlocks)
+    {
+        const int blockSize = 16 * 1024;
+        var storage = new MockStorage(2 * 1024 * 1024);
+        byte[] data = new byte[(readAheadBlocks + 1) * blockSize];
+        new Random(1741).NextBytes(data);
+        await storage.WriteAsync(0, data, TestContext.Current.CancellationToken);
+        using var cache = new BlockCache(data.Length, readAheadBlocks, true, 2 * 1024 * 1024);
+        cache.Initialize(storage);
+        byte[] buffer = new byte[blockSize];
+
+        // The fake storage completes synchronously, so all allocations stay on this thread.
+        for (int i = 0; i < 8; i++)
+        {
+            await cache.ReadAsync(0, buffer, TestContext.Current.CancellationToken);
+            cache.Clear();
+        }
+        int readsBefore = storage.ReadCount;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 128; i++)
+        {
+            await cache.ReadAsync(0, buffer, TestContext.Current.CancellationToken);
+            cache.Clear();
+        }
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        TestContext.Current.TestOutputHelper!.WriteLine($"{readAheadBlocks}-block read-ahead: {allocated:N0} bytes for 128 windows.");
+        Assert.Equal(256, storage.ReadCount - readsBefore);
+        // Allows cache nodes and a 16 KB block per window when the small-block pool is full,
+        // but catches allocating every 64 KB / 1 MB read-ahead buffer again.
+        Assert.True(allocated < 6 * 1024 * 1024, $"Read-ahead allocated {allocated:N0} bytes.");
+
+        await cache.ReadAsync(0, buffer, TestContext.Current.CancellationToken);
+        int cachedReads = storage.ReadCount;
+        for (int block = 1; block <= readAheadBlocks; block++)
+        {
+            await cache.ReadAsync(block * blockSize, buffer, TestContext.Current.CancellationToken);
+            Assert.Equal(data.AsSpan(block * blockSize, blockSize).ToArray(), buffer);
+        }
+        Assert.Equal(cachedReads, storage.ReadCount);
+    }
+
     /// <summary>
     /// Read-ahead has to cost one disk operation, not one per block.
     /// </summary>

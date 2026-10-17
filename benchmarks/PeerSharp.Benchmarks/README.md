@@ -56,6 +56,8 @@ Payloads and results are retained under the printed `artifacts/transport-loopbac
 the default run uses about 3.25 GiB. A timeout or hash mismatch fails the command.
 
 See [the uTP investigation](UTP-INVESTIGATION.md) for the initial measurements and recovery fixes.
+See [the allocation investigation](ALLOCATION-PROFILING.md) for the read-ahead buffer and request-map
+changes, verified transfer comparisons, and profiling commands.
 
 ### Microbenchmarks
 

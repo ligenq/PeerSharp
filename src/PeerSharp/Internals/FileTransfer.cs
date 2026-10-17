@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
@@ -458,6 +458,8 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// dropped is only the least-complete partial pieces - blocks that get re-requested.
     /// </summary>
     private const long MaxSavedPieceBytes = 16L * 1024 * 1024;
+    private readonly Lock _resumeStateLock = new();
+    private DeferredPieceStore? _deferredPieces;
 
     // ADAPTIVE TIMEOUTS: sized from each peer's own smoothed round trip and the variance around it,
     // within configured bounds. The soft timeout offers a block to a second peer; the hard one gives
@@ -990,43 +992,60 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     public long GetUnfinishedBytes()
     {
-        long bytes = 0;
-        foreach (var p in _pieceStateManager.ActivePieces.Values)
+        lock (_resumeStateLock)
         {
-            bytes += (long)p.ReceivedCount * BlockSize;
+            long bytes = 0;
+            foreach (var p in _pieceStateManager.ActivePieces.Values)
+            {
+                bytes += (long)p.ReceivedCount * BlockSize;
+            }
+            return bytes + (_deferredPieces?.GetReceivedBytes(0, _torrent.InfoFile.Info.FullSize, _torrent.InfoFile.Info.PieceSize) ?? 0);
         }
-        return bytes;
     }
 
     public long GetUnfinishedBytesForFile(int fileIndex)
     {
-        if (fileIndex < 0 || fileIndex >= _torrent.InfoFile.Info.Files.Count)
+        lock (_resumeStateLock)
         {
-            return 0;
-        }
-
-        var file = _torrent.InfoFile.Info.Files[fileIndex];
-        var (firstPiece, lastPiece) = _torrent.InfoFile.Info.GetPieceRangeForFile(fileIndex);
-        if (firstPiece == -1)
-        {
-            return 0;
-        }
-
-        long bytes = 0;
-        uint pieceSize = _torrent.InfoFile.Info.PieceSize;
-        long fullSize = _torrent.InfoFile.Info.FullSize;
-
-        for (int i = firstPiece; i <= lastPiece; i++)
-        {
-            if (_pieceStateManager.TryGetPiece(i, out var p))
+            if (fileIndex < 0 || fileIndex >= _torrent.InfoFile.Info.Files.Count)
             {
-                bytes += p.GetReceivedBytes(i * pieceSize, pieceSize, fullSize, file.Offset, file.Size);
+                return 0;
             }
+
+            var file = _torrent.InfoFile.Info.Files[fileIndex];
+            var (firstPiece, lastPiece) = _torrent.InfoFile.Info.GetPieceRangeForFile(fileIndex);
+            if (firstPiece == -1)
+            {
+                return 0;
+            }
+
+            long bytes = 0;
+            uint pieceSize = _torrent.InfoFile.Info.PieceSize;
+            long fullSize = _torrent.InfoFile.Info.FullSize;
+
+            for (int i = firstPiece; i <= lastPiece; i++)
+            {
+                if (_pieceStateManager.TryGetPiece(i, out var p))
+                {
+                    bytes += p.GetReceivedBytes(i * pieceSize, pieceSize, fullSize, file.Offset, file.Size);
+                }
+            }
+            return bytes + (_deferredPieces?.GetReceivedBytes(file.Offset, file.Size, pieceSize) ?? 0);
         }
-        return bytes;
     }
 
-    public List<TorrentStateData.UnfinishedPieceData> GetUnfinishedPiecesState()
+    public List<TorrentStateData.UnfinishedPieceData> GetUnfinishedPiecesState() => CaptureUnfinishedPieces(streamed: false).Pieces;
+
+    internal (List<TorrentStateData.UnfinishedPieceData> Pieces, IDisposable? Lease) CaptureUnfinishedPieces(bool streamed)
+    {
+        lock (_resumeStateLock)
+        {
+            if (_deferredPieces != null) return _deferredPieces.Capture(streamed, MaxSavedPieces, MaxSavedPieceBytes);
+            return (CaptureActivePieces(), null);
+        }
+    }
+
+    private List<TorrentStateData.UnfinishedPieceData> CaptureActivePieces()
     {
         // Prioritize pieces with the most progress (highest received block count).
         var snapshot = _pieceStateManager.ActivePieces.Values.ToList();
@@ -1076,15 +1095,62 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             return GetUnfinishedBytes();
         }
 
-        long bytes = 0;
-        foreach (var p in _pieceStateManager.ActivePieces.Values)
+        lock (_resumeStateLock)
         {
-            if (_torrent.InfoFile.Info.IsPieceNeeded(p.Index, selection))
+            long bytes = 0;
+            foreach (var p in _pieceStateManager.ActivePieces.Values)
             {
-                bytes += (long)p.ReceivedCount * BlockSize;
+                if (_torrent.InfoFile.Info.IsPieceNeeded(p.Index, selection))
+                {
+                    bytes += (long)p.ReceivedCount * BlockSize;
+                }
+            }
+            return bytes + (_deferredPieces?.GetReceivedBytes(0, _torrent.InfoFile.Info.FullSize, _torrent.InfoFile.Info.PieceSize,
+                index => _torrent.InfoFile.Info.IsPieceNeeded(index, selection)) ?? 0);
+        }
+    }
+
+    internal void DeferUnfinishedPiecesState(List<TorrentStateData.UnfinishedPieceData> pieces)
+    {
+        lock (_resumeStateLock)
+        {
+            var valid = pieces.Where(piece => IsUsableResumePiece(piece) && piece.Blocks.Contains(true)).ToList();
+            if (valid.Count == 0) return;
+            try
+            {
+                var store = DeferredPieceStore.Create(valid);
+                _deferredPieces?.Dispose();
+                _deferredPieces = store;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // A full/unwritable temporary volume must not silently throw away partial progress.
+                Logger.LogWarning(ex, "Could not defer unfinished pieces; restoring them in memory");
+                LoadUnfinishedPiecesState(valid);
             }
         }
-        return bytes;
+    }
+
+    internal void RestoreDeferredPieces()
+    {
+        lock (_resumeStateLock)
+        {
+            if (_deferredPieces == null) return;
+            var pieces = _deferredPieces.Capture(streamed: false).Pieces;
+            LoadUnfinishedPiecesState(pieces);
+            _deferredPieces.Dispose();
+            _deferredPieces = null;
+        }
+    }
+
+    private bool IsUsableResumePiece(TorrentStateData.UnfinishedPieceData piece)
+    {
+        if (piece == null || (uint)piece.Index >= (uint)_torrent.Pieces.Count || _torrent.Pieces.HasPiece(piece.Index)) return false;
+        long size = _torrent.InfoFile.Info.GetPieceSize(piece.Index);
+        int blocks = (int)((size + BlockSize - 1) / BlockSize);
+        if (piece.Blocks != null && piece.Data != null && piece.Blocks.Length == blocks && piece.Data.Length == size) return true;
+        Logger.LogWarning("Ignoring resumed piece {PieceIndex}: invalid block flags or piece data length", piece.Index);
+        return false;
     }
 
     public void IncrementAvailability(int pieceIndex)
@@ -1110,36 +1176,8 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         foreach (var p in pieces)
         {
-            if (p == null)
-            {
-                continue;
-            }
-            if (_torrent.Pieces.HasPiece(p.Index))
-            {
-                continue;
-            }
-
-            // Everything below indexes arrays off numbers that came out of a file. A truncated
-            // write, a hand-edited resume file or a torrent whose metadata has moved on all produce
-            // the same shapes, so check them rather than letting Array.Copy report it as a crash.
-            if ((uint)p.Index >= (uint)_torrent.Pieces.Count)
-            {
-                Logger.LogWarning("Ignoring resumed piece {PieceIndex}: outside this torrent's {PieceCount} pieces", p.Index, _torrent.Pieces.Count);
-                continue;
-            }
-
+            if (!IsUsableResumePiece(p)) continue;
             long pieceSize = _torrent.InfoFile.Info.GetPieceSize(p.Index);
-            int expectedBlocks = (int)((pieceSize + BlockSize - 1) / BlockSize);
-            if (p.Blocks == null || p.Data == null || p.Blocks.Length != expectedBlocks || p.Data.Length != pieceSize)
-            {
-                Logger.LogWarning(
-                    "Ignoring resumed piece {PieceIndex}: {Blocks} block flags and {DataLength} bytes do not describe a {PieceSize}-byte piece",
-                    p.Index,
-                    p.Blocks?.Length ?? 0,
-                    p.Data?.Length ?? 0,
-                    pieceSize);
-                continue;
-            }
 
             var state = new PieceState(p.Index, p.Blocks.Length);
             Array.Copy(p.Blocks, state.Blocks, p.Blocks.Length);
@@ -1387,6 +1425,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             }
 
             await _uploadQueueManager.DisposeAsync().ConfigureAwait(false);
+            lock (_resumeStateLock)
+            {
+                _deferredPieces?.Dispose();
+                _deferredPieces = null;
+            }
             _pieceStateManager.Dispose();
             _cts.Dispose();
             _overflowProcessingSemaphore.Dispose();
