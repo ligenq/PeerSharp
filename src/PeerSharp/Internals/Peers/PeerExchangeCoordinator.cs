@@ -61,7 +61,7 @@ internal sealed class PeerExchangeCoordinator
 
     public void Broadcast(IEnumerable<PeerCommunication> connectedPeers)
     {
-        if (_torrent.InfoFile.Info.IsPrivate)
+        if (_torrent.InfoFile.Info.IsPrivate || _torrent.IsI2p)
         {
             return;
         }

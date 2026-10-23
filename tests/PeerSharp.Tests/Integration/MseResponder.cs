@@ -70,6 +70,7 @@ internal sealed class MseResponder
 
     /// <summary>What the initiator asked for and sent in its first encrypted block.</summary>
     public uint CryptoProvide { get; private set; }
+    public bool EncryptPayload { get; init; } = true;
 
     /// <summary>The initial payload the initiator attached, which carries its BitTorrent handshake.</summary>
     public byte[] InitialPayload { get; private set; } = [];
@@ -171,10 +172,15 @@ internal sealed class MseResponder
             await ReadDecryptedAsync(stream, InitialPayload, iaLength, ct);
         }
 
-        // 8. ENCRYPT(VC, crypto_select, len(PadD), PadD). RC4 is selected, so the stream stays encrypted.
+        // 8. The handshake header always uses RC4; subsequent bytes use the selected mode.
+        uint selected = EncryptPayload ? CryptoRc4 : CryptoPlaintext;
+        if ((CryptoProvide & selected) == 0)
+        {
+            throw new InvalidOperationException("The initiator did not offer the selected payload mode.");
+        }
         var response = new byte[8 + 4 + 2 + trailingPayload.Length];
         Vc.CopyTo(response, 0);
-        BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(8), CryptoRc4);
+        BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(8), selected);
         BinaryPrimitives.WriteUInt16BigEndian(response.AsSpan(12), 0);
 
         // Anything the caller wants carried in the same write as the handshake's last block. Real
@@ -183,7 +189,12 @@ internal sealed class MseResponder
         trailingPayload.Span.CopyTo(response.AsSpan(14));
 
         byte[] encrypted = new byte[response.Length];
-        _outgoing.Process(response, encrypted);
+        int encryptedLength = EncryptPayload ? response.Length : 14;
+        _outgoing.Process(response.AsSpan(0, encryptedLength), encrypted.AsSpan(0, encryptedLength));
+        if (!EncryptPayload)
+        {
+            response.AsSpan(14).CopyTo(encrypted.AsSpan(14));
+        }
         await stream.WriteAsync(encrypted, ct);
         await stream.FlushAsync(ct);
     }
@@ -191,14 +202,28 @@ internal sealed class MseResponder
     /// <summary>Decrypts payload bytes arriving after the handshake.</summary>
     public async Task ReadPayloadAsync(NetworkStream stream, byte[] buffer, int count, CancellationToken ct = default)
     {
-        await ReadDecryptedAsync(stream, buffer, count, ct);
+        if (EncryptPayload)
+        {
+            await ReadDecryptedAsync(stream, buffer, count, ct);
+        }
+        else
+        {
+            await ReadExactlyAsync(stream, buffer, count, ct);
+        }
     }
 
     /// <summary>Encrypts and sends payload bytes.</summary>
     public async Task WritePayloadAsync(NetworkStream stream, byte[] plain, CancellationToken ct = default)
     {
         byte[] encrypted = new byte[plain.Length];
-        _outgoing!.Process(plain, encrypted);
+        if (EncryptPayload)
+        {
+            _outgoing!.Process(plain, encrypted);
+        }
+        else
+        {
+            plain.CopyTo(encrypted, 0);
+        }
         await stream.WriteAsync(encrypted, ct);
         await stream.FlushAsync(ct);
     }

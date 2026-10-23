@@ -13,6 +13,7 @@ internal class PortListener : IPortListener
     private readonly IPAddress? _bindAddress;
     private readonly ITorrentResolver _resolver;
     private readonly ITcpListenerFactory _tcpFactory;
+    private readonly ConnectionSettings _connectionSettings;
     private CancellationTokenSource? _acceptCts;
     private AtomicDisposal _disposal = new();
     private bool _running;
@@ -33,6 +34,11 @@ internal class PortListener : IPortListener
     {
     }
 
+    internal PortListener(ITorrentResolver resolver, ILoggerFactory loggerFactory, IPAddress? bindAddress, ConnectionSettings connectionSettings)
+        : this(resolver, new TcpListenerFactory(), loggerFactory, bindAddress, connectionSettings)
+    {
+    }
+
     internal PortListener(ITorrentResolver resolver, ITcpListenerFactory tcpFactory)
         : this(resolver, tcpFactory, NullLoggerFactory.Instance, null)
     {
@@ -44,11 +50,17 @@ internal class PortListener : IPortListener
     }
 
     internal PortListener(ITorrentResolver resolver, ITcpListenerFactory tcpFactory, ILoggerFactory loggerFactory, IPAddress? bindAddress)
+        : this(resolver, tcpFactory, loggerFactory, bindAddress, new ConnectionSettings())
+    {
+    }
+
+    internal PortListener(ITorrentResolver resolver, ITcpListenerFactory tcpFactory, ILoggerFactory loggerFactory, IPAddress? bindAddress, ConnectionSettings connectionSettings)
     {
         _resolver = resolver;
         _tcpFactory = tcpFactory;
         _logger = loggerFactory.CreateLogger<PortListener>();
         _bindAddress = bindAddress;
+        _connectionSettings = connectionSettings;
     }
 
     public int Port { get; private set; }
@@ -168,16 +180,29 @@ internal class PortListener : IPortListener
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            // MSE opens with random bytes. Check a complete TLS record prefix, not just
+            // 0x16, which otherwise misclassifies one in 256 encrypted connections.
+            using var stream = new SocketStream(client.Client, ownsSocket: false);
+            byte[] opening = new byte[6];
+            await stream.ReadExactlyAsync(opening, cts.Token).ConfigureAwait(false);
+            var prefixed = new PrefixedStream(opening, stream, leaveInnerOpen: true);
+            if (TorrentTls.IsClientHello(opening))
+            {
+                var accepted = await TorrentTls.AcceptAsync(new PrefixedStream(opening, new SocketStream(client.Client)), _resolver, cts.Token).ConfigureAwait(false);
+                await accepted.Torrent.PeersInternal.AddConnectedPeerAsync(accepted.Stream, initiator: false,
+                    client.Client.RemoteEndPoint as IPEndPoint, cancellationToken: cts.Token).ConfigureAwait(false);
+                ownershipTransferred = true;
+                return;
+            }
             // Not owned: the socket passes to the peer if negotiation succeeds, and is closed below if not.
             // Its read ends the negotiation's deadline by closing the socket rather than by throwing.
-            using var stream = new SocketStream(client.Client, ownsSocket: false);
-
             // Shared with the inbound uTP path, so the two cannot drift apart. They already had:
             // this one negotiated MSE, that one assumed plaintext and rejected every encrypted peer.
             var negotiated = await IncomingHandshakeNegotiator.NegotiateAsync(
-                stream,
+                prefixed,
                 _resolver,
                 _logger,
+                _connectionSettings,
                 cts.Token).ConfigureAwait(false);
 
             if (!negotiated.Success)

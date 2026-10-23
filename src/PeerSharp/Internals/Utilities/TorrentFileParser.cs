@@ -44,7 +44,7 @@ internal static class TorrentFileParser
     private static TorrentFileMetadata ParseCore(byte[] data, ILoggerFactory? loggerFactory)
     {
         var logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger(nameof(TorrentFileParser));
-        if (BencodeParser.Parse(data, requireCanonical: true) is not BDict root)
+        if (BencodeParser.Parse(data, requireCanonical: true, torrentMetadata: true) is not BDict root)
         {
             throw new FormatException("Invalid torrent file");
         }
@@ -129,6 +129,16 @@ internal static class TorrentFileParser
             metadata.WebSeedUrls.Add(singleUrl.Text);
         }
 
+        if (root.Get("httpseeds") is BList httpSeeds)
+        {
+            metadata.HttpSeedUrls.AddRange(httpSeeds.List.OfType<BString>()
+                .Select(seed => seed.Text).Where(url => !string.IsNullOrWhiteSpace(url)));
+        }
+        else if (root.Get("httpseeds") is BString httpSeed && !string.IsNullOrWhiteSpace(httpSeed.Text))
+        {
+            metadata.HttpSeedUrls.Add(httpSeed.Text);
+        }
+
         if (root.Get("info") is not BDict info)
         {
             throw new FormatException("Missing info dictionary");
@@ -144,7 +154,7 @@ internal static class TorrentFileParser
     private static TorrentFileMetadata ParseInfoBytesCore(byte[] infoBytes, ILoggerFactory? loggerFactory)
     {
         var logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger(nameof(TorrentFileParser));
-        if (BencodeParser.Parse(infoBytes, requireCanonical: true) is not BDict info)
+        if (BencodeParser.Parse(infoBytes, requireCanonical: true, torrentMetadata: true) is not BDict info)
         {
             throw new FormatException("Invalid info dictionary");
         }
@@ -453,6 +463,9 @@ internal static class TorrentFileParser
         }
 
         metadata.Info.Name = info.GetString("name") ?? "Unknown";
+        metadata.Info.SslCertificateAuthority = info.GetString("ssl-cert");
+        if (metadata.Info.IsSsl && string.IsNullOrWhiteSpace(metadata.Info.SslCertificateAuthority))
+            throw new FormatException("SSL torrent has an empty certificate authority.");
         metadata.Info.PieceSize = RequireValidPieceLength(info);
 
         // BEP 27: Parse the "private" flag from info dictionary
@@ -560,6 +573,10 @@ internal static class TorrentFileParser
 
         if (metadata.Info.IsV2 && metadata.Info.Files.Count == 0) throw new FormatException("The v2 file tree contains no files.");
         if (metadata.Info.Version == TorrentVersion.Hybrid) ValidateHybridLayout(info, metadata);
+
+        // Validate geometry before allocating bitfields or Merkle trees, including torrents
+        // which have a root hash instead of an explicit V1 pieces list.
+        _ = metadata.Info.MerklePieceCount;
 
         // Parse V1 piece hashes after file sizes are known so the count can be validated.
         if (metadata.Info.IsV1 && !metadata.Info.IsMerkle)

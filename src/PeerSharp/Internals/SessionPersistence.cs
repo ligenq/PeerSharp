@@ -297,7 +297,7 @@ internal sealed class SessionPersistence : ISessionPersistence
                                     piece.SerializationCancellationToken = ct;
                                 using var writer = new Utf8JsonWriter(stream);
                                 JsonSerializer.Serialize(writer, resumeState, PeerSharpJsonContext.Default.TorrentStateData);
-                            }, ct), cancellationToken));
+                            }, ct), preallocationSize: 0, FileOptions.None, cancellationToken));
                     }
                     else if (entry.ResumeData != null)
                     {
@@ -410,8 +410,12 @@ internal sealed class SessionPersistence : ISessionPersistence
     private static Task WriteAtomicAsync(string path, Func<FileStream, CancellationToken, Task> write,
         CancellationToken cancellationToken) => WriteAtomicAsync(path, write, 0, cancellationToken);
 
-    private static async Task WriteAtomicAsync(string path, Func<FileStream, CancellationToken, Task> write,
+    private static Task WriteAtomicAsync(string path, Func<FileStream, CancellationToken, Task> write,
         long preallocationSize, CancellationToken cancellationToken)
+        => WriteAtomicAsync(path, write, preallocationSize, FileOptions.Asynchronous, cancellationToken);
+
+    private static async Task WriteAtomicAsync(string path, Func<FileStream, CancellationToken, Task> write,
+        long preallocationSize, FileOptions fileOptions, CancellationToken cancellationToken)
     {
         string temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
         try
@@ -421,7 +425,9 @@ internal sealed class SessionPersistence : ISessionPersistence
                 Mode = FileMode.Create,
                 Access = FileAccess.Write,
                 Share = FileShare.None,
-                Options = FileOptions.Asynchronous,
+                // Chunked JSON serialization writes synchronously on its worker. A synchronous
+                // handle avoids an overlapped-I/O completion and wait for each chunk on Windows.
+                Options = fileOptions,
                 PreallocationSize = preallocationSize
             };
 

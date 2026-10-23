@@ -459,7 +459,16 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// </summary>
     private const long MaxSavedPieceBytes = 16L * 1024 * 1024;
     private readonly Lock _resumeStateLock = new();
+    private readonly Func<int, bool> _includeUnfinishedPiece;
     private DeferredPieceStore? _deferredPieces;
+
+    /// <summary>
+    /// Where deferred piece data is spooled, or null for the system temporary directory. Scoped to
+    /// this transfer so a test can point one store at an unusable directory to exercise the
+    /// creation-failure fallback, without redirecting the temporary directory for the whole
+    /// process - every concurrently running test that creates a temporary file reads that.
+    /// </summary>
+    internal string? ResumeSpoolDirectory { get; set; }
 
     // ADAPTIVE TIMEOUTS: sized from each peer's own smoothed round trip and the variance around it,
     // within configured bounds. The soft timeout offers a block to a second peer; the hard one gives
@@ -535,6 +544,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     internal FileTransfer(Torrent torrent, TimeProvider timeProvider, ILoggerFactory loggerFactory)
     {
         _torrent = torrent;
+        _includeUnfinishedPiece = index => !_torrent.Pieces.HasPiece(index);
         _timeProvider = timeProvider;
         Logger = loggerFactory.CreateLogger<FileTransfer>();
         _piecePicker = new PiecePicker(new TorrentPiecePickerContext(torrent), _timeProvider, Random.Shared, loggerFactory);
@@ -858,11 +868,9 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         Block? block = null;
         try
         {
-            long pieceOffset = item.PieceIndex * _torrent.InfoFile.Info.PieceSize;
-            long globalOffset = pieceOffset + item.Offset;
 
             block = new Block(item.PieceIndex, item.Offset, item.Length);
-            await _torrent.FilesInternal.ReadAsync(globalOffset, block.Buffer.AsMemory(0, item.Length), ct).ConfigureAwait(false);
+            await ReadUploadBlockAsync(item.PieceIndex, item.Offset, block.Buffer.AsMemory(0, item.Length), ct).ConfigureAwait(false);
 
             var response = new PeerMessage(MessageId.Piece)
             {
@@ -934,6 +942,20 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         }
     }
 
+    internal async Task ReadUploadBlockAsync(int pieceIndex, int offset, Memory<byte> buffer, CancellationToken ct)
+    {
+        var info = _torrent.InfoFile.Info;
+        // Storage only maps real v2 files. Clear the hybrid v1 padding explicitly, including
+        // requests entirely inside it; never expose the unused part of a pooled buffer.
+        int contentLength = (int)Math.Min(buffer.Length, Math.Max(0, info.GetPieceSize(pieceIndex) - offset));
+        if (contentLength > 0)
+        {
+            await _torrent.FilesInternal.ReadAsync((long)pieceIndex * info.PieceSize + offset,
+                buffer[..contentLength], ct).ConfigureAwait(false);
+        }
+        buffer.Span[contentLength..].Clear();
+    }
+
     private bool IsValidUploadRequest(PeerMessage msg)
     {
         if (msg.PieceIndex < 0 || msg.PieceIndex >= _torrent.Pieces.Count)
@@ -941,7 +963,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             return false;
         }
 
-        return IsValidUploadRequestRange(msg.BlockOffset, msg.BlockLength, _torrent.InfoFile.Info.GetPieceSize(msg.PieceIndex));
+        return IsValidUploadRequestRange(msg.BlockOffset, msg.BlockLength, _torrent.InfoFile.Info.GetUploadPieceSize(msg.PieceIndex));
     }
 
     internal static bool IsValidUploadRequestRange(int offset, int length, long pieceSize)
@@ -997,9 +1019,12 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             long bytes = 0;
             foreach (var p in _pieceStateManager.ActivePieces.Values)
             {
-                bytes += (long)p.ReceivedCount * BlockSize;
+                if (!_includeUnfinishedPiece(p.Index)) continue;
+                bytes += p.GetReceivedBytes((long)p.Index * _torrent.InfoFile.Info.PieceSize,
+                    _torrent.InfoFile.Info.PieceSize, _torrent.InfoFile.Info.FullSize, 0, _torrent.InfoFile.Info.FullSize);
             }
-            return bytes + (_deferredPieces?.GetReceivedBytes(0, _torrent.InfoFile.Info.FullSize, _torrent.InfoFile.Info.PieceSize) ?? 0);
+            return bytes + (_deferredPieces?.GetReceivedBytes(0, _torrent.InfoFile.Info.FullSize,
+                _torrent.InfoFile.Info.PieceSize, _includeUnfinishedPiece) ?? 0);
         }
     }
 
@@ -1025,12 +1050,12 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
             for (int i = firstPiece; i <= lastPiece; i++)
             {
-                if (_pieceStateManager.TryGetPiece(i, out var p))
+                if (_includeUnfinishedPiece(i) && _pieceStateManager.TryGetPiece(i, out var p))
                 {
                     bytes += p.GetReceivedBytes(i * pieceSize, pieceSize, fullSize, file.Offset, file.Size);
                 }
             }
-            return bytes + (_deferredPieces?.GetReceivedBytes(file.Offset, file.Size, pieceSize) ?? 0);
+            return bytes + (_deferredPieces?.GetReceivedBytes(file.Offset, file.Size, pieceSize, _includeUnfinishedPiece) ?? 0);
         }
     }
 
@@ -1040,7 +1065,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     {
         lock (_resumeStateLock)
         {
-            if (_deferredPieces != null) return _deferredPieces.Capture(streamed, MaxSavedPieces, MaxSavedPieceBytes);
+            if (_deferredPieces != null) return _deferredPieces.Capture(streamed, MaxSavedPieces, MaxSavedPieceBytes, _includeUnfinishedPiece);
             return (CaptureActivePieces(), null);
         }
     }
@@ -1062,7 +1087,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 break;
             }
 
-            if (piece.ReceivedCount > 0)
+            if (_includeUnfinishedPiece(piece.Index) && piece.ReceivedCount > 0)
             {
                 long pSize = _torrent.InfoFile.Info.GetPieceSize(piece.Index);
 
@@ -1100,13 +1125,14 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             long bytes = 0;
             foreach (var p in _pieceStateManager.ActivePieces.Values)
             {
-                if (_torrent.InfoFile.Info.IsPieceNeeded(p.Index, selection))
+                if (_includeUnfinishedPiece(p.Index) && _torrent.InfoFile.Info.IsPieceNeeded(p.Index, selection))
                 {
-                    bytes += (long)p.ReceivedCount * BlockSize;
+                    bytes += p.GetReceivedBytes((long)p.Index * _torrent.InfoFile.Info.PieceSize,
+                        _torrent.InfoFile.Info.PieceSize, _torrent.InfoFile.Info.FullSize, 0, _torrent.InfoFile.Info.FullSize);
                 }
             }
             return bytes + (_deferredPieces?.GetReceivedBytes(0, _torrent.InfoFile.Info.FullSize, _torrent.InfoFile.Info.PieceSize,
-                index => _torrent.InfoFile.Info.IsPieceNeeded(index, selection)) ?? 0);
+                index => _includeUnfinishedPiece(index) && _torrent.InfoFile.Info.IsPieceNeeded(index, selection)) ?? 0);
         }
     }
 
@@ -1116,11 +1142,18 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         {
             var valid = pieces.Where(piece => IsUsableResumePiece(piece) && piece.Blocks.Contains(true)).ToList();
             if (valid.Count == 0) return;
+            // Replacement must release the old owner even if creation of the new store fails.
+            // Existing snapshot leases keep their old data alive independently.
+            _deferredPieces?.Dispose();
+            _deferredPieces = null;
             try
             {
-                var store = DeferredPieceStore.Create(valid);
-                _deferredPieces?.Dispose();
+                var store = DeferredPieceStore.Create(valid, ResumeSpoolDirectory);
                 _deferredPieces = store;
+                foreach (var piece in valid)
+                {
+                    if (_pieceStateManager.TryRemovePiece(piece.Index, out var active)) active.Dispose();
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -1136,7 +1169,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         lock (_resumeStateLock)
         {
             if (_deferredPieces == null) return;
-            var pieces = _deferredPieces.Capture(streamed: false).Pieces;
+            var pieces = _deferredPieces.Capture(streamed: false, includePiece: _includeUnfinishedPiece).Pieces;
             LoadUnfinishedPiecesState(pieces);
             _deferredPieces.Dispose();
             _deferredPieces = null;
@@ -1145,17 +1178,20 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     private bool IsUsableResumePiece(TorrentStateData.UnfinishedPieceData piece)
     {
-        if (piece == null || (uint)piece.Index >= (uint)_torrent.Pieces.Count || _torrent.Pieces.HasPiece(piece.Index)) return false;
+        if (piece == null) return false;
+        if ((uint)piece.Index >= (uint)_torrent.Pieces.Count)
+        {
+            Logger.LogWarning("Ignoring resumed piece {PieceIndex}: outside this torrent's {PieceCount} pieces",
+                piece.Index, _torrent.Pieces.Count);
+            return false;
+        }
+        if (_torrent.Pieces.HasPiece(piece.Index)) return false;
         long size = _torrent.InfoFile.Info.GetPieceSize(piece.Index);
         int blocks = (int)((size + BlockSize - 1) / BlockSize);
         if (piece.Blocks != null && piece.Data != null && piece.Blocks.Length == blocks && piece.Data.Length == size) return true;
-        Logger.LogWarning("Ignoring resumed piece {PieceIndex}: invalid block flags or piece data length", piece.Index);
+        Logger.LogWarning("Ignoring resumed piece {PieceIndex}: {Blocks} block flags and {DataLength} bytes do not describe a {PieceSize}-byte piece (expected {ExpectedBlocks} flags)",
+            piece.Index, piece.Blocks?.Length, piece.Data?.Length, size, blocks);
         return false;
-    }
-
-    public void IncrementAvailability(int pieceIndex)
-    {
-        _piecePicker.IncrementAvailability(pieceIndex);
     }
 
     public void InvalidateSelection()
@@ -1221,6 +1257,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     public void RegisterPeerAvailability(PeerCommunication peer)
     {
         _piecePicker.RegisterPeerAvailability(peer);
+    }
+
+    public void UpdatePeerAvailability(PeerCommunication peer, int pieceIndex, bool available)
+    {
+        _piecePicker.UpdatePeerAvailability(peer, pieceIndex, available);
     }
 
     public async Task RequestBlocksAsync(PeerCommunication peer)
@@ -1366,6 +1407,9 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         return _blockProcessor.HandlePeerBlockAsync(peer, block);
     }
 
+    // The timed waits below diagnose slow shutdown; they are not disposal ceilings. Workers may
+    // retain buffers and write files after cancellation. Returning early would permit those buffers
+    // to be reused or a new transfer to race the old writer. Non-cooperative I/O must finish first.
     protected virtual async ValueTask DisposeAsyncCore()
     {
         if (_disposal.MarkDisposed())
@@ -1389,13 +1433,17 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             {
                 if (_backgroundTasks.Count > 0)
                 {
+                    Task workers = Task.WhenAll(_backgroundTasks);
                     try
                     {
-                        await Task.WhenAll(_backgroundTasks).WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None).ConfigureAwait(false);
+                        await workers.WaitAsync(TimeSpan.FromSeconds(3), CancellationToken.None).ConfigureAwait(false);
                     }
                     catch (TimeoutException ex)
                     {
-                        Logger.LogTrace(ex, "Background tasks did not complete within timeout during disposal");
+                        Logger.LogTrace(ex, "Waiting for background tasks before releasing transfer buffers");
+                        // Cancellation is cooperative. An outstanding I/O operation still owns
+                        // its buffers, and must finish before cleanup or a subsequent start.
+                        await workers.ConfigureAwait(false);
                     }
                 }
             }
@@ -1409,13 +1457,15 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 var overflowTasksSnapshot = _overflowTasks.Keys.ToArray();
                 if (overflowTasksSnapshot.Length > 0)
                 {
+                    Task workers = Task.WhenAll(overflowTasksSnapshot);
                     try
                     {
-                        await Task.WhenAll(overflowTasksSnapshot).WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
+                        await workers.WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
                     }
                     catch (TimeoutException ex)
                     {
-                        Logger.LogTrace(ex, "Overflow tasks did not complete within timeout during disposal");
+                        Logger.LogTrace(ex, "Waiting for overflow tasks before releasing transfer buffers");
+                        await workers.ConfigureAwait(false);
                     }
                 }
             }
@@ -1716,6 +1766,8 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
             using (outcome)
             {
+                ct.ThrowIfCancellationRequested();
+
                 if (!outcome.HashSuccess && !outcome.HashFailed)
                 {
                     pieceToProcess.ReleaseWriting(_timeProvider.GetUtcNow() + HashRequestRetryInterval);
@@ -1747,6 +1799,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                         _writeSemaphore.Release();
                     }
                 }
+
+                // A storage operation may finish successfully despite cancellation. Do not
+                // publish its result into a torrent whose transfer has already been stopped.
+                ct.ThrowIfCancellationRequested();
 
                 if (outcome.HashFailed || outcome.HashSuccess || writeFailed)
                 {

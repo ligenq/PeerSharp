@@ -26,6 +26,32 @@ namespace PeerSharp.Tests.Integration;
 [Collection("Integration")]
 public class MseConformanceTests : IDisposable
 {
+    [Fact(Timeout = 90000)]
+    public async Task PlaintextPayloadAfterMse_IsReadableByAnIndependentImplementation()
+    {
+        var result = await RunAsync(false, TestContext.Current.CancellationToken, preferRc4: false);
+
+        Assert.Null(result.Failure);
+        Assert.True(result.HandshakeCompleted);
+        Assert.Equal(3u, result.CryptoProvide);
+        Assert.Equal(19, result.InitialPayload[0]);
+        Assert.Equal(result.InfoHash, result.InitialPayload.AsSpan(28, 20).ToArray());
+        Assert.NotEmpty(result.Messages);
+        Assert.Contains(result.Messages, message => message.Id is 5 or 14 or 15);
+    }
+
+    [Theory(Timeout = 90000)]
+    [InlineData(true, Encryption.Allow, 2u)]
+    [InlineData(false, Encryption.Allow, 3u)]
+    [InlineData(false, Encryption.Require, 2u)]
+    public async Task OutgoingOfferHonorsTheConfiguredRc4Preference(bool preferRc4, Encryption policy, uint expectedOffer)
+    {
+        var result = await RunAsync(true, TestContext.Current.CancellationToken, preferRc4, policy);
+        Assert.Null(result.Failure);
+        Assert.True(result.HandshakeCompleted);
+        Assert.Equal(expectedOffer, result.CryptoProvide);
+    }
+
     private readonly string _path;
     private readonly ILoggerFactory _loggerFactory;
 
@@ -127,7 +153,9 @@ public class MseConformanceTests : IDisposable
         IReadOnlyList<(byte Id, int Length)> Messages,
         string? Failure);
 
-    private async Task<Result> RunAsync(CancellationToken cancellationToken)
+    private Task<Result> RunAsync(CancellationToken cancellationToken) => RunAsync(true, cancellationToken);
+
+    private async Task<Result> RunAsync(bool encrypted, CancellationToken cancellationToken, bool preferRc4 = true, Encryption? policy = null)
     {
         const string fileName = "mse.bin";
         byte[] payload = new byte[256 * 1024];
@@ -162,7 +190,7 @@ public class MseConformanceTests : IDisposable
                 using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 idle.CancelAfter(TimeSpan.FromSeconds(20));
 
-                var mse = new MseResponder(infoHash);
+                var mse = new MseResponder(infoHash) { EncryptPayload = encrypted };
                 await mse.AcceptAsync(stream, idle.Token);
 
                 completed = true;
@@ -231,7 +259,8 @@ public class MseConformanceTests : IDisposable
                 NatPmpPortMapping = false,
 
                 // Require, so the connection can only proceed over MSE.
-                Encryption = Encryption.Require
+                Encryption = policy ?? (encrypted ? Encryption.Require : Encryption.Allow),
+                PreferRc4 = preferRc4
             },
             Dht = { Enabled = false }
         };

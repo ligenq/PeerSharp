@@ -28,7 +28,7 @@ internal class TrackerFactory : ITrackerFactory
         {
             return new HttpTracker(_loggerFactory, _httpClientFactory, _hostAddresses ?? new HostAddressCache(timeProvider));
         }
-        else if (url.StartsWith("udp://", StringComparison.OrdinalIgnoreCase))
+        else if (!I2pSamSession.IsI2pUrl(url) && url.StartsWith("udp://", StringComparison.OrdinalIgnoreCase))
         {
             return new UdpTracker(timeProvider, _loggerFactory, _hostAddresses ?? new HostAddressCache(timeProvider));
         }

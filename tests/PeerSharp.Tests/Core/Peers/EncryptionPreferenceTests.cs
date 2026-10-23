@@ -57,10 +57,10 @@ public class EncryptionPreferenceTests
         Assert.False(history.OfferEncryptionNext);
 
         // Plaintext got through, so keep using it rather than alternating back.
-        history.RegisterHandshakeSuccess(wasEncrypted: false);
+        history.RegisterHandshakeSuccess(usedMse: false);
         Assert.False(history.OfferEncryptionNext);
 
-        history.RegisterHandshakeSuccess(wasEncrypted: false);
+        history.RegisterHandshakeSuccess(usedMse: false);
         Assert.False(history.OfferEncryptionNext);
     }
 
@@ -69,10 +69,10 @@ public class EncryptionPreferenceTests
     {
         var history = NewHistory();
 
-        history.RegisterHandshakeSuccess(wasEncrypted: true);
+        history.RegisterHandshakeSuccess(usedMse: true);
         Assert.True(history.OfferEncryptionNext);
 
-        history.RegisterHandshakeSuccess(wasEncrypted: true);
+        history.RegisterHandshakeSuccess(usedMse: true);
         Assert.True(history.OfferEncryptionNext);
     }
 
@@ -89,7 +89,7 @@ public class EncryptionPreferenceTests
         history.RegisterHandshakeFailure();
 
         Assert.False(history.OfferEncryptionNext);  // second attempt: plaintext, accepted
-        history.RegisterHandshakeSuccess(wasEncrypted: false);
+        history.RegisterHandshakeSuccess(usedMse: false);
 
         Assert.False(history.OfferEncryptionNext);  // and it stays there
     }
@@ -103,7 +103,7 @@ public class EncryptionPreferenceTests
         history.RegisterHandshakeFailure();
         Assert.Equal(2, history.HandshakeFailureCount);
 
-        history.RegisterHandshakeSuccess(wasEncrypted: true);
+        history.RegisterHandshakeSuccess(usedMse: true);
         Assert.Equal(0, history.HandshakeFailureCount);
     }
 }

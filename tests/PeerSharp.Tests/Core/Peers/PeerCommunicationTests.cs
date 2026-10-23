@@ -1071,11 +1071,36 @@ public class PeerCommunicationTests
         CleanupPath(path);
     }
 
-    /// <summary>
-    /// Messages are accepted up to 2 MB and the deferred copy is held for the life of the connection,
-    /// so a peer can pin that much before the torrent knows its own piece count. No real bitfield
-    /// comes close: the metadata cap works out at about 420,000 pieces, or a 52 KB bitfield.
-    /// </summary>
+    [Theory]
+    [InlineData(30 * 1024 * 1024, 64 * 1024 + 1, true)]
+    [InlineData(30 * 1024 * 1024, 192 * 1024, true)]
+    [InlineData(30 * 1024 * 1024, 192 * 1024 + 1, false)]
+    [InlineData(80 * 1024 * 1024, 512 * 1024, true)]
+    [InlineData(80 * 1024 * 1024, 512 * 1024 + 1, false)]
+    [InlineData(int.MaxValue, 2 * 1024 * 1024, false)]
+    public async Task DeferredBitfieldsFollowTheMetadataBudgetWithinTheWireLimit(int metadataBudget, int bytes, bool expected)
+    {
+        var metadata = CreateMetadataV1();
+        metadata.Info.Pieces.Clear();
+        metadata.Info.FullSize = 0;
+        metadata.Info.Files.Clear();
+        await using var torrent = TorrentTestUtility.CreateMinimal(metadata, Path.GetTempPath());
+        torrent.Settings.Transfer.MaxMetadataSizeBytes = metadataBudget;
+        await using var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        byte[] bitfield = new byte[bytes];
+        bitfield[0] = 0x80;
+        bitfield[^1] = 1;
+        await InvokePrivate<Task>(peer, "ProcessMessageAsync", new PeerMessage(MessageId.Bitfield) { Data = bitfield });
+        Assert.Equal(expected, peer.TryApplyDeferredAvailability(bytes * 8));
+        if (expected)
+        {
+            Assert.True(peer.PeerPieces.HasPiece(0));
+            Assert.True(peer.PeerPieces.HasPiece(bytes * 8 - 1));
+            Assert.Equal(2, peer.PeerPieces.ReceivedCount);
+        }
+    }
+
+    /// <summary>Default metadata limits still reject a peer trying to retain a 1 MiB bitfield.</summary>
     [Fact]
     public async Task DeferredMagnetBitfield_OversizedPayload_IsNotRetained()
     {

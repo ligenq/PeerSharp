@@ -357,7 +357,9 @@ internal static class TorrentTestUtility
         TimeProvider? timeProvider = null,
         IAlertsManager? alerts = null,
         TorrentResumeData? resumeData = null,
-        IBandwidthManager? bandwidth = null)
+        IBandwidthManager? bandwidth = null,
+        bool loadResumePiecesForStart = false,
+        Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null)
     {
         metadata ??= new TorrentFileMetadata();
         if (metadata.Info.PieceSize == 0)
@@ -383,7 +385,9 @@ internal static class TorrentTestUtility
             new MockConnectionGovernor(),
             new HttpClientFactory(),
             timeProvider ?? TimeProvider.System,
-            resumeData: resumeData
+            resumeData: resumeData,
+            loggerFactory: loggerFactory,
+            loadResumePiecesForStart: loadResumePiecesForStart
         );
     }
 }

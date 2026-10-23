@@ -16,6 +16,142 @@ namespace PeerSharp.Tests.Core.Transfers;
 
 public class TransferIntegrityRegressionTests
 {
+    [Theory(Timeout = 15000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ShutdownWaitsForAnInFlightWriterBeforeReturningItsBuffers(bool overflowWorker)
+    {
+        byte[] data = new byte[ProtocolConstants.BlockSize];
+        await using var torrent = CreateTorrent(data.Length);
+        torrent.InfoFile.Info.Pieces.Add(SHA1.HashData(data));
+        var storage = new DelayedStorage();
+        var cache = (BlockCache)typeof(Files).GetField("_blockCache", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(torrent.FilesInternal)!;
+        cache.Initialize(storage);
+        using var piece = CompletePiece(data);
+        await using var transfer = new FileTransfer(torrent, TimeProvider.System);
+        var manager = (PieceStateManager)typeof(FileTransfer).GetField("_pieceStateManager", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(transfer)!;
+        manager.TryAddPiece(piece);
+        var token = (CancellationToken)typeof(FileTransfer).GetField("_stoppingToken", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(transfer)!;
+        var process = typeof(FileTransfer).GetMethod("ProcessSinglePieceAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        Task processing = (Task)process.Invoke(transfer, [piece, token])!;
+        if (overflowWorker)
+        {
+            var tasks = (System.Collections.Concurrent.ConcurrentDictionary<Task, byte>)typeof(FileTransfer)
+                .GetField("_overflowTasks", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(transfer)!;
+            tasks.TryAdd(processing, 0);
+        }
+        else
+        {
+            var tasks = (List<Task>)typeof(FileTransfer).GetField("_backgroundTasks", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(transfer)!;
+            tasks.Add(processing);
+        }
+        await storage.WriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Task shutdown = transfer.DisposeAsync().AsTask();
+        try
+        {
+            await Task.WhenAny(shutdown, Task.Delay(TimeSpan.FromMilliseconds(overflowWorker ? 2300 : 3300), TestContext.Current.CancellationToken));
+            Assert.False(shutdown.IsCompleted, "Shutdown returned while a worker still owned piece buffers.");
+            Assert.NotNull(piece.BlockData[0]);
+            Assert.False(piece.BlockData[0]!.Data.IsEmpty);
+        }
+        finally
+        {
+            storage.ReleaseWrite.TrySetResult();
+            await shutdown;
+        }
+        Assert.False(torrent.Pieces.HasPiece(0));
+        Assert.Equal(0, manager.Count);
+    }
+
+    [Fact]
+    public async Task WriteCompletingAfterCancellationCannotPublishAPiece()
+    {
+        byte[] data = new byte[ProtocolConstants.BlockSize];
+        await using var torrent = CreateTorrent(data.Length);
+        torrent.InfoFile.Info.Pieces.Add(SHA1.HashData(data));
+        var storage = new DelayedStorage();
+        var cache = (BlockCache)typeof(Files).GetField("_blockCache", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(torrent.FilesInternal)!;
+        cache.Initialize(storage);
+        using var piece = CompletePiece(data);
+        await using var transfer = new FileTransfer(torrent, TimeProvider.System);
+        using var cancellation = new CancellationTokenSource();
+        var process = typeof(FileTransfer).GetMethod("ProcessSinglePieceAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        Task processing = (Task)process.Invoke(transfer, [piece, cancellation.Token])!;
+        try
+        {
+            await storage.WriteStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            await cancellation.CancelAsync();
+        }
+        finally
+        {
+            storage.ReleaseWrite.TrySetResult();
+        }
+        await processing;
+
+        Assert.False(torrent.Pieces.HasPiece(0));
+        Assert.False(piece.IsWriting);
+        Assert.Equal(1, piece.ReceivedCount);
+    }
+
+    [Fact]
+    public void HybridUploadIncludesAlignmentPaddingAfterEitherHandshakeVersion()
+    {
+        var metadata = Metadata(2 * ProtocolConstants.BlockSize);
+        metadata.Info.Version = TorrentVersion.Hybrid;
+        metadata.Info.Files[0].Size = 1000;
+        metadata.Info.Files[0].PieceCount = 1;
+        Assert.Equal(16384, metadata.Info.GetUploadPieceSize(0));
+        Assert.Equal(1000, metadata.Info.GetPieceSize(0));
+        Assert.True(FileTransfer.IsValidUploadRequestRange(0, 16384, metadata.Info.GetUploadPieceSize(0)));
+    }
+
+    [Theory]
+    [InlineData(0, 16384, 1000)]
+    [InlineData(990, 20, 10)]
+    [InlineData(1000, 15384, 0)]
+    public async Task HybridUploadsExplicitlyZeroPaddingInPooledBuffers(int offset, int length, int realBytes)
+    {
+        var metadata = Metadata(2 * ProtocolConstants.BlockSize);
+        metadata.Info.Version = TorrentVersion.Hybrid;
+        metadata.Info.Files[0].Size = 1000;
+        metadata.Info.Files[0].PieceCount = 1;
+        await using var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        var storage = new DelayedStorage();
+        var cache = (BlockCache)typeof(Files).GetField("_blockCache", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(torrent.FilesInternal)!;
+        cache.Initialize(storage);
+        await using var transfer = new FileTransfer(torrent, TimeProvider.System);
+        byte[] buffer = Enumerable.Repeat((byte)0xff, length).ToArray();
+        await transfer.ReadUploadBlockAsync(0, offset, buffer, TestContext.Current.CancellationToken);
+        Assert.All(buffer.Take(realBytes), value => Assert.Equal(42, value));
+        Assert.All(buffer.Skip(realBytes), value => Assert.Equal(0, value));
+    }
+
+    private sealed class DelayedStorage : IStorage
+    {
+        public TaskCompletionSource WriteStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseWrite { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct = default)
+        {
+            WriteStarted.TrySetResult();
+            // Some I/O implementations finish successfully even after cancellation is requested.
+            await ReleaseWrite.Task;
+        }
+        public ValueTask ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default) { buffer.Span.Fill(42); return ValueTask.CompletedTask; }
+        public Task<byte[]> ReadAsync(long offset, int length, CancellationToken ct = default) => throw new NotSupportedException();
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public Task InitAsync(IReadOnlyList<FileSelection>? selection = null, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateFileSelectionAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteAllAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task<bool> FlushAsync(CancellationToken ct = default) => Task.FromResult(true);
+        public Task MoveAsync(string newRootPath, CancellationToken ct = default) => Task.CompletedTask;
+        public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
     [Fact]
     public async Task ACompleteResumedPieceIsQueuedForVerificationWithoutAnotherBlock()
     {

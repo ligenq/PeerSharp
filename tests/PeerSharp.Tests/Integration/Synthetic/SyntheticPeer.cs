@@ -39,21 +39,23 @@ internal sealed class SyntheticPeer : IAsyncDisposable
     {
         _listener = listener;
         _options = options;
-        Port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        EndPoint = (IPEndPoint)listener.LocalEndpoint;
         _acceptLoop = Task.Run(AcceptLoopAsync);
     }
 
     /// <summary>Binds a loopback port and begins accepting.</summary>
-    public static SyntheticPeer Start(SyntheticPeerOptions options)
+    public static SyntheticPeer Start(SyntheticPeerOptions options, IPAddress? listenAddress = null)
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listenAddress ??= IPAddress.Loopback;
+        if (!IPAddress.IsLoopback(listenAddress)) throw new ArgumentException("Synthetic peers must bind loopback.", nameof(listenAddress));
+        var listener = new TcpListener(listenAddress, 0);
         listener.Start();
         return new SyntheticPeer(listener, options);
     }
 
-    public int Port { get; }
+    public int Port => EndPoint.Port;
 
-    public IPEndPoint EndPoint => new(IPAddress.Loopback, Port);
+    public IPEndPoint EndPoint { get; }
 
     /// <summary>How many times PeerSharp has dialled, including attempts this peer then abandoned.</summary>
     public int ConnectionCount
@@ -224,7 +226,10 @@ internal sealed class SyntheticPeer : IAsyncDisposable
             handshake[25] |= 0x10; // BEP 10 extension protocol.
         }
 
-        handshake[27] |= 0x04; // BEP 6 fast extension.
+        if (_options.AdvertiseFastExtension)
+        {
+            handshake[27] |= 0x04; // BEP 6 fast extension.
+        }
 
         infoHash.CopyTo(handshake.AsSpan(28));
         _peerId.CopyTo(handshake.AsSpan(48));

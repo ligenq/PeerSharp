@@ -59,6 +59,9 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// </summary>
     public bool IsPrivate => Metadata.Info.IsPrivate;
 
+    /// <summary>Whether this torrent requires mutually authenticated TLS peer connections.</summary>
+    public bool IsSsl => Metadata.Info.IsSsl;
+
     /// <summary>
     /// Gets whether this is a V1 torrent.
     /// </summary>
@@ -105,6 +108,9 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     /// Gets the list of web seed URLs (BEP 19).
     /// </summary>
     public IReadOnlyList<string> WebSeeds => Metadata.WebSeedUrls;
+
+    /// <summary>Gets BEP 17 HTTP seed endpoints (distinct from BEP 19 file URLs).</summary>
+    public IReadOnlyList<string> HttpSeeds => Metadata.HttpSeedUrls;
 
     /// <summary>
     /// Gets the internal metadata. For internal use only.

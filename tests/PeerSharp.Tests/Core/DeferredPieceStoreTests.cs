@@ -7,6 +7,35 @@ namespace PeerSharp.Tests.Core;
 public sealed class DeferredPieceStoreTests
 {
     [Fact]
+    public void TemporaryPathIsUnlinkedOnUnixWhileLeasesKeepTheHandleReadable()
+    {
+        var store = DeferredPieceStore.Create([new() { Index = 0, Blocks = [true], Data = new byte[] { 42 } }]);
+        var stream = (FileStream)typeof(DeferredPieceStore).GetField("_stream", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(store)!;
+        string path = stream.Name;
+        if (!OperatingSystem.IsWindows()) Assert.False(File.Exists(path));
+        var capture = store.Capture(streamed: true);
+        store.Dispose();
+        Assert.Equal(new byte[] { 42 }, Assert.Single(capture.Pieces).DeferredData!.Value.Read());
+        capture.Lease!.Dispose();
+        Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public void CaptureUsesStableCompletionOrderAndFiltersBeforeApplyingLimits()
+    {
+        bool[] firstFlags = [true, false];
+        using var store = DeferredPieceStore.Create([
+            new() { Index = 0, Blocks = firstFlags, Data = new byte[32768] },
+            new() { Index = 1, Blocks = [true, true], Data = new byte[32768] },
+            new() { Index = 2, Blocks = [true, true], Data = new byte[32768] }
+        ]);
+        firstFlags[1] = true; // Store metadata and its ordering must be independent of caller mutation.
+        Assert.Equal(new[] { 1, 2, 0 }, store.Capture(streamed: false).Pieces.Select(p => p.Index));
+        var filtered = store.Capture(streamed: false, maxPieces: 1, maxBytes: 32768, includePiece: index => index != 1);
+        Assert.Equal(2, Assert.Single(filtered.Pieces).Index);
+    }
+
+    [Fact]
     public void CapturingWhileDisposingEitherFailsOrReturnsAnIntactLeasedSnapshot()
     {
         for (int i = 0; i < 50; i++)
