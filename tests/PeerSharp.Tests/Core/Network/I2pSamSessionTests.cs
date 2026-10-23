@@ -352,6 +352,10 @@ public sealed class I2pSamSessionTests
                 }
             }
             catch (OperationCanceledException) { }
+            // Stopping a Windows listener can abort AcceptAsync with a socket error instead
+            // of cancellation. Only suppress it while this fixture is shutting down.
+            catch (SocketException) when (_stop.IsCancellationRequested) { }
+            catch (ObjectDisposedException) when (_stop.IsCancellationRequested) { }
         }
         private async Task HandleAsync(TcpClient client)
         {
