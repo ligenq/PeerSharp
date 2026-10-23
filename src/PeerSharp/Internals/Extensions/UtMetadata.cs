@@ -85,9 +85,8 @@ internal class UtMetadata : IUtMetadata
     /// duplicate is suppressed when the ids match, and nothing was ever sent twice.
     /// </para>
     /// <para>
-    /// Removing it is correct on its own terms and is not yet known to be sufficient: a metadata
-    /// fetch from libtorrent still ends with the peer closing the connection, for a reason that build
-    /// cannot be asked for because it is compiled without logging.
+    /// The current implementation is covered by a libtorrent interop regression in both
+    /// directions, including multi-block metadata. The historical disconnect is no longer reproduced.
     /// </para>
     /// </remarks>
     public void SendRequest(int piece)

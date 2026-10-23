@@ -9,6 +9,59 @@ namespace PeerSharp.Tests.Core.Utilities;
 public class TorrentFileParserTests
 {
     [Fact]
+    public void LargeTorrentMetadataUsesItsOwnBoundedParserProfile()
+    {
+        // Larger than both the old 8 MiB fetch cap and the 10 MiB bencode string cap.
+        const int pieceCount = 530_000;
+        var info = new PeerSharp.BEncoding.BDict();
+        info.Dict["length"] = new PeerSharp.BEncoding.BNumber((long)pieceCount * 16384);
+        info.Dict["name"] = new PeerSharp.BEncoding.BString(System.Text.Encoding.UTF8.GetBytes("large.bin"));
+        info.Dict["piece length"] = new PeerSharp.BEncoding.BNumber(16384);
+        info.Dict["pieces"] = new PeerSharp.BEncoding.BString(new byte[pieceCount * 20]);
+        byte[] bytes = PeerSharp.BEncoding.BencodeWriter.Write(info);
+        var metadata = TorrentFileParser.ParseInfoBytes(bytes);
+        Assert.Equal(pieceCount, metadata.Info.GetPieceCount());
+        Assert.Throws<FormatException>(() => PeerSharp.BEncoding.BencodeParser.Parse(bytes));
+        Assert.Equal(30 * 1024 * 1024, new TransferSettings().MaxMetadataSizeBytes);
+    }
+
+    [Fact]
+    public void HttpSeedsRemainDistinctFromFileUrlWebSeeds()
+    {
+        var root = new PeerSharp.BEncoding.BDict();
+        var info = new PeerSharp.BEncoding.BDict();
+        info.Dict["length"] = new PeerSharp.BEncoding.BNumber(1);
+        info.Dict["name"] = new PeerSharp.BEncoding.BString(System.Text.Encoding.UTF8.GetBytes("seed.bin"));
+        info.Dict["piece length"] = new PeerSharp.BEncoding.BNumber(16384);
+        info.Dict["pieces"] = new PeerSharp.BEncoding.BString(new byte[20]);
+        root.Dict["info"] = info;
+        root.Dict["httpseeds"] = new PeerSharp.BEncoding.BString(System.Text.Encoding.UTF8.GetBytes("https://example.com/seed.php?token=abc"));
+        root.Dict["url-list"] = new PeerSharp.BEncoding.BString(System.Text.Encoding.UTF8.GetBytes("https://example.com/file.bin"));
+        var file = PeerSharp.Core.TorrentFile.Parse(PeerSharp.BEncoding.BencodeWriter.Write(root));
+        Assert.Equal(["https://example.com/seed.php?token=abc"], file.HttpSeeds);
+        Assert.Equal(["https://example.com/file.bin"], file.WebSeeds);
+    }
+
+    [Theory]
+    [InlineData(70368744194048L, false)]
+    [InlineData(70368744194048L, true)]
+    [InlineData(long.MaxValue, false)]
+    [InlineData(long.MaxValue, true)]
+    public void Parse_PieceCountExceedingIndexRange_IsRejected(long length, bool merkle)
+    {
+        var info = new BDict();
+        info.Dict["name"] = new BString("oversized.bin"u8.ToArray());
+        info.Dict["piece length"] = new BNumber(16384);
+        info.Dict["length"] = new BNumber(length);
+        info.Dict[merkle ? "root hash" : "pieces"] = new BString(new byte[20]);
+        var root = new BDict();
+        root.Dict["info"] = info;
+
+        Assert.Throws<TorrentMetadataException>(() => TorrentFileParser.Parse(BencodeWriter.Write(root)));
+        Assert.Throws<TorrentMetadataException>(() => TorrentFileParser.ParseInfoBytes(BencodeWriter.Write(info)));
+    }
+
+    [Fact]
     public void Parse_SingleFileV1_ParsesCorrectly()
     {
         var info = new BDict();

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
 using PeerSharp.BEncoding;
@@ -797,6 +798,115 @@ public class MetadataDownloadTests
 
         download.Update(); // should not throw or do anything
         Assert.False(download.Active);
+    }
+
+    /// <summary>
+    /// SECURITY: metadata that fails its info hash must be thrown away before the bencode parser
+    /// sees it. The payload here is not bencode at all, so a parse is observable: it would report an
+    /// invalid info dictionary instead of a hash mismatch. Order matters because the parser's limits
+    /// for torrent metadata are deliberately generous - a peer that can make us parse first can
+    /// spend that budget on bytes which were never going to be accepted.
+    /// </summary>
+    [Fact]
+    public async Task MetadataPieceReceivedAsync_WrongHash_IsRejectedWithoutParsingThePayload()
+    {
+        var warnings = new List<string>();
+        using var loggerFactory = new RecordingLoggerFactory(warnings);
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var wrongHash = new byte[20];
+        wrongHash[0] = 0x7F;
+        torrent.InfoFile.Info.Hash = new InfoHash(wrongHash);
+        using var download = new MetadataDownload(torrent, loggerFactory);
+        download.Start();
+        download.InitializeMetadataBuffer(1000);
+
+        // Not bencode, so reaching the parser cannot go unnoticed.
+        await download.MetadataPieceReceivedAsync(MakePeer(1000), 0, new byte[1000]);
+
+        Assert.False(download.Finished);
+        Assert.Equal(0.0f, download.Progress);
+        Assert.Contains(warnings, message => message.Contains("hash does not match", StringComparison.Ordinal));
+        Assert.DoesNotContain(warnings, message => message.Contains("info dictionary", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(0, 0, false)] // No identity must never authenticate peer-owned metadata.
+    [InlineData(1, 1, false)]
+    [InlineData(2, 2, false)]
+    [InlineData(3, 1, false)] // Matching v2 cannot excuse a mismatching v1.
+    [InlineData(3, 2, false)] // Matching v1 cannot excuse a mismatching v2.
+    [InlineData(3, 3, false)]
+    [InlineData(1, 0, true)]
+    [InlineData(2, 0, true)]
+    [InlineData(3, 0, true)]
+    public async Task RawMetadataMustMatchEveryKnownHashBeforeTheParserRuns(int knownHashes, int wrongHashes, bool reachesParser)
+    {
+        byte[] bytes = "not a bencoded dictionary"u8.ToArray();
+        byte[] v1 = SHA1.HashData(bytes), v2 = SHA256.HashData(bytes);
+        if ((wrongHashes & 1) != 0) v1[0] ^= 0xff;
+        if ((wrongHashes & 2) != 0) v2[0] ^= 0xff;
+        await using var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.InfoFile.Info.Hash = (knownHashes & 1) != 0 ? new InfoHash(v1) : InfoHash.Empty;
+        torrent.InfoFile.Info.HashV2 = (knownHashes & 2) != 0 ? new InfoHash(v2) : InfoHash.EmptyV2;
+        var warnings = new List<string>();
+        using var logs = new RecordingLoggerFactory(warnings);
+        using var download = new MetadataDownload(torrent, logs);
+        download.Start();
+        download.InitializeMetadataBuffer(bytes.Length);
+
+        await download.MetadataPieceReceivedAsync(MakePeer(bytes.Length), 0, bytes);
+
+        Assert.False(download.Finished);
+        Assert.Equal(0f, download.Progress);
+        Assert.Equal(reachesParser, warnings.Any(message => message.Contains("not a valid info dictionary", StringComparison.Ordinal)));
+        Assert.Equal(!reachesParser, warnings.Any(message => message.Contains("hash does not match", StringComparison.Ordinal)));
+    }
+
+    [Theory(Timeout = 15000)]
+    [InlineData(PeerSharp.Core.TorrentFileVersion.V1, 1)]
+    [InlineData(PeerSharp.Core.TorrentFileVersion.V2, 2)]
+    [InlineData(PeerSharp.Core.TorrentFileVersion.Hybrid, 1)]
+    [InlineData(PeerSharp.Core.TorrentFileVersion.Hybrid, 2)]
+    [InlineData(PeerSharp.Core.TorrentFileVersion.Hybrid, 3)]
+    public async Task AuthenticatedV1V2AndHybridMetadataStillCompletes(PeerSharp.Core.TorrentFileVersion version, int knownHashes)
+    {
+        var file = new PeerSharp.Core.TorrentFileBuilder().WithName("authenticated.bin")
+            .WithVersion(version).WithPieceLength(16384).AddFile("authenticated.bin", new byte[1000]).Build();
+        byte[] bytes = file.Metadata.InfoBytes!;
+        await using var torrent = TorrentTestUtility.CreateMinimal(downloadPath: Path.Combine(Path.GetTempPath(), "PeerSharpMetadataHash_" + Guid.NewGuid().ToString("N")));
+        torrent.InfoFile.Info.Hash = (knownHashes & 1) != 0 ? file.InfoHash : InfoHash.Empty;
+        torrent.InfoFile.Info.HashV2 = (knownHashes & 2) != 0 ? file.InfoHashV2 : InfoHash.EmptyV2;
+        using var download = new MetadataDownload(torrent);
+        download.Start();
+        download.InitializeMetadataBuffer(bytes.Length);
+
+        await download.MetadataPieceReceivedAsync(MakePeer(bytes.Length), 0, bytes);
+        await torrent.WaitForMetadataAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(download.Finished);
+        Assert.Equal(1f, download.Progress);
+        Assert.Equal("authenticated.bin", torrent.Name);
+        Assert.Equal(file.InfoHash, torrent.InfoFile.Info.Hash);
+        Assert.Equal(file.InfoHashV2, torrent.InfoFile.Info.HashV2);
+        Assert.Equal(1, torrent.Pieces.Count);
+    }
+
+    private sealed class RecordingLoggerFactory(List<string> messages) : ILoggerFactory
+    {
+        public void AddProvider(ILoggerProvider provider) { }
+        public ILogger CreateLogger(string categoryName) => new RecordingLogger(messages);
+        public void Dispose() { }
+    }
+
+    private sealed class RecordingLogger(List<string> messages) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (!IsEnabled(logLevel)) return;
+            lock (messages) messages.Add(formatter(state, exception));
+        }
     }
 }
 

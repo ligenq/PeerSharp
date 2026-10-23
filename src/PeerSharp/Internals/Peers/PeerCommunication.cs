@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Bandwidth;
 using PeerSharp.Internals.Framework;
@@ -276,14 +276,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     ///
     /// <para>
     /// Messages are accepted up to <see cref="ProtocolConstants.MaxMessageSize"/>, which is 2 MB, and
-    /// the deferred copy is held for the life of the connection - so without a ceiling a peer can pin
-    /// 2 MB per connection before the torrent knows anything at all. A real bitfield cannot approach
-    /// that: metadata is capped at <see cref="TransferSettings.MaxMetadataSizeBytes"/> (8 MiB by
-    /// default), which at twenty bytes per piece hash is about 420,000 pieces, or a 52 KB bitfield.
-    /// 64 KiB clears that comfortably while leaving nothing like 2 MB on the table.
+    /// the deferred copy is held for the life of the connection. For v1, twenty metadata bytes per
+    /// piece hash and eight pieces per bitfield byte require at most one byte per 160 metadata
+    /// bytes: the default 30 MiB metadata budget needs 192 KiB. Retain the old 64 KiB floor and
+    /// cap custom budgets at the wire-message limit (less its message ID). V2 geometry is not
+    /// bounded by a v1 hash list; larger maps take the close-and-rediscover path after metadata.
     /// </para>
     /// </summary>
-    private const int MaxDeferredBitfieldBytes = 64 * 1024;
+    private int MaxDeferredBitfieldBytes => (int)Math.Clamp(
+        ((long)Math.Max(1, _torrent.Settings.Transfer.MaxMetadataSizeBytes) + 159) / 160,
+        64 * 1024, ProtocolConstants.MaxMessageSize - 1);
 
     /// <summary>
     /// Bytes that arrived after the handshake but were pulled off the socket along with it.
@@ -374,6 +376,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// timeouts kept flipping the flag.
     /// </remarks>
     public bool OfferedAnEncryptionChoice { get; private set; }
+    internal bool UsedMseHandshake { get; private set; }
 
     /// <summary>
     /// Whether the uTP handshake completed during this outgoing attempt. This remains true after
@@ -526,15 +529,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     }
 
     /// <summary>
-    /// Remembers a HAVE that arrived before the piece count did, up to
-    /// <see cref="MaxDeferredHavePieces"/>. Past that, or for an index that cannot be a piece at all,
-    /// the record is dropped and marked unusable so the peer is rediscovered rather than adopted with
-    /// availability that was only partly kept.
-    /// </summary>
-    /// <summary>
-    /// Keeps a bitfield that arrived before the piece count did, unless it is larger than any real
-    /// torrent could produce. An oversized one is discarded and the peer marked for rediscovery, the
-    /// same as an unusable HAVE record.
+    /// Keeps a bitfield that arrived before the piece count did within the metadata-based budget.
+    /// An oversized one is discarded and the peer marked for rediscovery, like an unusable HAVE record.
     /// </summary>
     private void RecordDeferredBitfield(ReadOnlySpan<byte> bitfield)
     {
@@ -556,6 +552,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _deferredAvailabilityKind = DeferredAvailabilityKind.Bitfield;
     }
 
+    /// <summary>
+    /// Remembers a HAVE before the piece count is known, up to <see cref="MaxDeferredHavePieces"/>.
+    /// An invalid index or excess entry makes the record unusable rather than adopting partial data.
+    /// </summary>
     private void RecordDeferredHave(int pieceIndex)
     {
         if (_deferredAvailabilityUnusable)
@@ -681,6 +681,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     public bool RemoteSupportsV2 { get; internal set; }
 
+    // Capability bits alone do not select the v2 swarm (BEP 52).
+    internal bool UsesV2WireProtocol { get; private set; }
+
     public long SmoothedDownloadSpeed => Volatile.Read(ref _smoothedDownloadSpeed);
 
     public int SmoothedRttMs => Interlocked.CompareExchange(ref _smoothedRttMs, 0, 0);
@@ -762,6 +765,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     internal void MarkUsefulDataExchanged() => Volatile.Write(ref _usefulDataExchanged, 1);
 
     private Stream? _stream;
+    private bool _usesTls;
+    internal bool UsesTls => _usesTls;
     private TcpClient? _client;
     private UtpStream? _utpStream;
 
@@ -779,7 +784,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     internal Stream? Stream
     {
         get => _stream;
-        set => _stream = WrapRateLimited(value);
+        set
+        {
+            _usesTls = value is System.Net.Security.SslStream { IsMutuallyAuthenticated: true }
+                || (value is RateLimitedStream && _usesTls);
+            _stream = WrapRateLimited(value);
+        }
     }
 
     /// <summary>
@@ -789,7 +799,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     private Stream? WrapRateLimited(Stream? stream)
     {
-        if (stream is null or RateLimitedStream or EncryptedStream)
+        if (stream is null or RateLimitedStream or EncryptedStream
+            || (stream is System.Net.Security.SslStream && _stream is RateLimitedStream))
         {
             return stream;
         }
@@ -953,6 +964,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _logger.LogDebug("Connecting to {Ip}:{Port} (uTP: {UseUtp}, encryption: {Encryption}, timeout: {Timeout}ms)", ip, port, useUtp, offerEncryption, timeoutMs);
         IsOutgoing = true;
         UtpTransportEstablished = false;
+        UsedMseHandshake = false;
 
         // Record start time for adaptive timeout tracking
         _connectionStartTicks = Stopwatch.GetTimestamp();
@@ -1110,6 +1122,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
             }
 
+            if (_torrent.InfoFile.Info.IsSsl)
+            {
+                Stream = await TorrentTls.ConnectAsync(Stream!, _torrent, linkedCts.Token).ConfigureAwait(false);
+            }
+
             linkedCts.Token.ThrowIfCancellationRequested();
             _connected = 1;
 
@@ -1118,11 +1135,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             OfferedAnEncryptionChoice = true;
             _logger.LogDebug("Connected to {Ip}:{Port}", ip, port);
 
-            var encryptionSetting = _torrent.Settings.Connection.Encryption;
+            var encryptionSetting = _torrent.Settings.Connection.EffectiveOutgoingEncryption;
 
             // Require and Refuse are absolute. Allow leaves the choice to the caller, which is where the
             // peer's remembered preference lives.
-            bool tryEncryption = encryptionSetting switch
+            bool tryEncryption = !_torrent.InfoFile.Info.IsSsl && encryptionSetting switch
             {
                 Encryption.Require => true,
                 Encryption.Refuse => false,
@@ -1253,6 +1270,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 #pragma warning disable S6667 // Deliberately no stack trace: see note above.
             _logger.LogDebug("Connect timeout {Ip}:{Port} - peer unresponsive after {Elapsed}ms ({Message})", ip, port, elapsedMs, ex.Message);
 #pragma warning restore S6667
+            await CloseAsync().ConfigureAwait(false);
+            return false;
+        }
+        catch (System.Security.Authentication.AuthenticationException ex)
+        {
+            _logger.LogDebug(ex, "TLS peer authentication failed for {Ip}:{Port}", ip, port);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
@@ -1681,6 +1704,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         RemoteSupportsExtensions = parsed.SupportsExtensions;
         RemoteSupportsFastExtension = parsed.SupportsFastExtension;
         RemoteSupportsV2 = parsed.SupportsV2;
+        UsesV2WireProtocol = _torrent.InfoFile.Info.IsV2
+            && handshake.AsSpan(28, InfoHash.V1Length).SequenceEqual(_torrent.InfoFile.Info.HashV2.Span[..InfoHash.V1Length]);
         _logger.LogDebug("Peer {PeerName} capabilities: extensions={RemoteSupportsExtensions}, fast={RemoteSupportsFastExtension}, v2={RemoteSupportsV2}", Name, RemoteSupportsExtensions, RemoteSupportsFastExtension, RemoteSupportsV2);
 
         // A handshake carrying an id we issued on an outgoing connection is our own connection coming
@@ -1922,7 +1947,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     private byte[] CreateHandshakeBuffer()
     {
-        return PeerHandshake.Create(_torrent.InfoFile.Info, OurPeerId);
+        byte[] handshake = PeerHandshake.Create(_torrent.InfoFile.Info, OurPeerId);
+        if (_torrent.IsI2p) handshake[27] &= 0xfe;
+        if (UsesV2WireProtocol)
+        {
+            _torrent.InfoFile.Info.HashV2.Span[..InfoHash.V1Length].CopyTo(handshake.AsSpan(28));
+        }
+        return handshake;
     }
 
     private int GetAdaptiveSendQueueLimit()
@@ -2030,7 +2061,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // receiving a Choke" - a description of what the peer will do, namely never answer -
                 // and reclaiming them early would mean a new hook on IPeerListener for a latency
                 // refinement the timeout path already covers.
-                LtDontHave.HandleMessage(payload);
+                if (LtDontHave.HandleMessage(payload) is { } retractedPiece)
+                {
+                    _torrent.FileTransferInternal.UpdatePeerAvailability(this, retractedPiece, available: false);
+                }
             }
             else
             {
@@ -2044,7 +2078,8 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(DefaultConnectionTimeoutMs);
         using var abandon = deadline.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
-        var encryptionSetting = _torrent.Settings.Connection.Encryption;
+        var encryptionSetting = _usesTls || _torrent.IsI2p
+            ? Encryption.Refuse : _torrent.Settings.Connection.EffectiveIncomingEncryption;
         if ((_encryptionHandshakeComplete && encryptionSetting == Encryption.Refuse)
             || (_handshakePreRead && !_encryptionHandshakeComplete && encryptionSetting == Encryption.Require))
         {
@@ -2209,7 +2244,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             var info = _torrent.InfoFile.Info;
             using var pe = new ProtocolEncryptionHandshake(
-                (info.IsV1 ? info.Hash : info.HashV2.TruncateToV1()).ToArray(), initiator);
+                (info.IsV1 ? info.Hash : info.HashV2.TruncateToV1()).ToArray(), initiator)
+            {
+                AllowPlaintextPayload = (initiator ? _torrent.Settings.Connection.EffectiveOutgoingEncryption : _torrent.Settings.Connection.EffectiveIncomingEncryption) == Encryption.Allow
+                    && (!initiator || !_torrent.Settings.Connection.PreferRc4),
+                PreferRc4 = _torrent.Settings.Connection.PreferRc4
+            };
 
             if (initiator)
             {
@@ -2275,13 +2315,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 return EncryptionHandshakeResult.Failed;
             }
 
-            // IA is already decrypted; any bytes beyond Pe3/Pe4 still need decryption.
+            // IA always uses RC4, but bytes following Pe3/Pe4 use the negotiated payload mode.
             var trailing = pe.TrailingData;
             if (pe.Encryption == null)
             {
                 return EncryptionHandshakeResult.Failed;
             }
-            pe.Encryption.Decrypt(trailing);
+            if (pe.EncryptPayload)
+            {
+                pe.Encryption.Decrypt(trailing);
+            }
             _plaintextBuffer = [.. pe.ReceivedPayload ?? [], .. trailing];
 
             // Re-check the property: if CloseAsync ran while we were handshaking,
@@ -2289,12 +2332,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             // so wrapping it in EncryptedStream would be pointless.
             if (Stream is not null)
             {
+                UsedMseHandshake = true;
                 // "stream" is the captured Stream property, so the rate limiter is already underneath,
                 // and owning it makes one Dispose cascade down to the socket.
-                Stream = new EncryptedStream(
-                    stream,
-                    pe.Encryption,
-                    leaveInnerOpen: false);
+                if (pe.EncryptPayload)
+                {
+                    Stream = new EncryptedStream(
+                        stream,
+                        pe.Encryption,
+                        leaveInnerOpen: false);
+                }
 
                 if (!initiator && !await ReadHandshakeAsync().ConfigureAwait(false))
                 {
@@ -2762,7 +2809,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // at one block.
         //
         // This is a throughput change and nothing more. It was first tried as a mitigation for the
-        // Transmission fault in FUTURE_IMPROVEMENTS.md, on the theory that draining a peer faster would
+        // Transmission Windows send-buffer fault, on the theory that draining a peer faster would
         // keep its send backlog below the size that trips it. One run came back clean and that turned
         // out to be an outlier: repeated runs show the failure rate unchanged within noise. It is kept
         // only because reading at the protocol's natural size is right regardless of that bug.
@@ -3057,23 +3104,23 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 // the listener that knows what was actually bound. Without it a peer we dialled sees
                 // only our ephemeral source port and can neither reconnect to us nor tell anyone else
                 // how to reach us.
-                ListenPort = _torrent.AdvertisedPeerPort is > 0 and var bound ? bound : null,
+                ListenPort = !_torrent.IsI2p && _torrent.AdvertisedPeerPort is > 0 and var bound ? bound : null,
 
                 // BEP 10 'yourip'. The peer cannot see its own external address; we can, and telling it
                 // is how it learns. Costs four bytes and is the same courtesy we want in return.
-                YourIp = RemoteEndPoint?.Address.GetAddressBytes()
+                YourIp = _torrent.IsI2p ? null : RemoteEndPoint?.Address.GetAddressBytes()
             };
             handshake.MessageIds[UtMetadata.Name] = 1;
             UtMetadata.SetLocalMessageId(1);
 
             // BEP 27: Don't advertise PEX support for private torrents
-            if (!_torrent.InfoFile.Info.IsPrivate)
+            if (!_torrent.InfoFile.Info.IsPrivate && !_torrent.IsI2p)
             {
                 handshake.MessageIds[Extensions.UtPex.Name] = 2;
                 UtPex.SetLocalMessageId(2);
             }
 
-            if (!_torrent.InfoFile.Info.IsPrivate && _torrent.Settings.Connection.EnableUtpOut && !_torrent.Settings.Proxy.ForceProxy)
+            if (!_torrent.InfoFile.Info.IsPrivate && !_torrent.IsI2p && _torrent.Settings.Connection.EnableUtpOut && !_torrent.Settings.Proxy.ForceProxy)
             {
                 handshake.MessageIds[UtHolepunch.Name] = 3;
                 UtHolepunch.SetLocalMessageId(3);

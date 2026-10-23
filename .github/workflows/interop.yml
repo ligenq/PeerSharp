@@ -1,4 +1,4 @@
-# Interop, on a schedule rather than per-PR.
+# Interop, run manually through workflow_dispatch.
 #
 # These are the most valuable tests in the repository and the only lane no CI job ran. They are what
 # found the late bitfield that made every strict client ignore us, the plaintext fallback reusing a
@@ -7,10 +7,8 @@
 # Until now that record depended on someone remembering to run them by hand, on one machine, against
 # whatever client version happened to be installed.
 #
-# Nightly rather than per-PR because they need real client binaries and real transfers: minutes per
-# run, and an apt mirror or a client release is enough to fail a job for reasons that have nothing to
-# do with the change under review. Nightly puts a bound on how long a real interop regression can sit
-# unnoticed without putting a flaky gate in front of every pull request.
+# Run manually because these tests need real client binaries and real transfers. A missing
+# package mirror or external client release should not gate every pull request.
 #
 # Every test that needs an external client skips itself when the binary is absent, so a failed
 # install degrades this job to the loopback interop tests rather than reporting a false failure. Read
@@ -18,9 +16,6 @@
 name: Interop
 
 on:
-  schedule:
-    # 04:00 UTC daily, well clear of the working day in the maintainer's timezone.
-    - cron: '0 4 * * *'
   workflow_dispatch:
 
 env:

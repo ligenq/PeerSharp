@@ -9,6 +9,32 @@ namespace PeerSharp.Tests.Core.Extensions;
 
 public class UtHashPieceTests
 {
+    [Theory]
+    [InlineData(0L, 4294967296L)]
+    [InlineData(0L, -4294967296L)]
+    [InlineData(4294967296L, 0L)]
+    [InlineData(-4294967296L, 0L)]
+    public async Task HandleMessage_OutOfRangeIntegers_DoNotWrapIntoValidRequest(long messageType, long pieceIndex)
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.MerkleRootHash = new byte[20];
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384 * 2;
+        await using var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        await torrent.ReinitializeAfterMetadataAsync();
+        torrent.Pieces.AddPiece(0);
+        var peer = new MockPeerCommunication();
+        var extension = new UtHashPiece(peer, torrent) { RemoteMessageId = 5 };
+        extension.SetPieceHash(0, new byte[20]);
+        var request = new BDict();
+        request.Dict["msg_type"] = new BNumber(messageType);
+        request.Dict["piece"] = new BNumber(pieceIndex);
+
+        extension.HandleMessage(BencodeWriter.Write(request));
+
+        Assert.Empty(peer.SentMessages);
+    }
+
     private class MockPeerCommunication : IPeerCommunication
     {
         public byte[] PeerId { get; set; } = new byte[20];

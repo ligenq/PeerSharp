@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Framework;
+using PeerSharp.Internals.Utp;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
 using System.Collections.Concurrent;
@@ -219,7 +220,8 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     {
         remote = NetworkUtils.NormalizeEndPoint(remote);
 
-        if (!AcceptsIncomingEncryption(encryption))
+        if (_torrent.InfoFile.Info.IsSsl || (_torrent.IsI2p && remote != null && !_settings.Connection.I2pAllowMixedNetworks)
+            || (!_torrent.IsI2p && !AcceptsIncomingEncryption(encryption)))
         {
             stream.Close();
             return;
@@ -347,7 +349,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private async Task AddIncomingTcpPeerCoreAsync(System.Net.Sockets.TcpClient client, byte[] handshake, ProtocolEncryption? encryption)
     {
-        if (!AcceptsIncomingEncryption(encryption))
+        if (_torrent.InfoFile.Info.IsSsl || (_torrent.IsI2p && !_settings.Connection.I2pAllowMixedNetworks) || !AcceptsIncomingEncryption(encryption))
         {
             client.Close();
             return;
@@ -453,7 +455,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private bool AcceptsIncomingEncryption(ProtocolEncryption? encryption)
     {
-        return _settings.Connection.Encryption switch
+        return _settings.Connection.EffectiveIncomingEncryption switch
         {
             Encryption.Require => encryption != null,
             Encryption.Refuse => encryption == null,
@@ -470,7 +472,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(stream);
 
-        return AddConnectedPeerCoreAsync(stream, initiator, remote, sourceKind, cancellationToken);
+        return AddConnectedPeerCoreAsync(stream, initiator, remote, sourceKind, utp: null, cancellationToken);
     }
 
     public async Task BroadcastHaveAsync(int pieceIndex)
@@ -1018,7 +1020,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 peer.PeerChoking,
                 peer.PeerInterested,
                 peer.UtpStream != null,
-                peer.Stream is EncryptedStream,
+                peer.UsesTls || peer.Stream is EncryptedStream,
                 peer.PeerPieces.ReceivedCount / (float)Math.Max(1, _torrent.Pieces.Count),
                 peer.SmoothedRttMs)
             {
@@ -1314,7 +1316,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 // BEP 16: Track HAVE messages for superseed distribution tracking
                 FireAndForget(_torrent.SuperSeedManager.HandlePeerHaveAsync(p, msg.HavePieceIndex), "SuperSeed HandlePeerHave");
 
-                _torrent.FileTransferInternal.IncrementAvailability(msg.HavePieceIndex);
+                _torrent.FileTransferInternal.UpdatePeerAvailability(p, msg.HavePieceIndex, available: true);
                 if (p.PeerChoking)
                 {
                     FireAndForget(p.SetInterestedAsync(true), "SetInterested (Have)");
@@ -1720,6 +1722,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private void AddPeersInternal(IEnumerable<IPEndPoint> peers, PeerSourceKind sourceKind, PeerCommunication? source, List<byte>? flags)
     {
+        if (_torrent.IsI2p && !_settings.Connection.I2pAllowMixedNetworks) return;
         if (_torrent.InfoFile.Info.IsPrivate && sourceKind is PeerSourceKind.Dht or PeerSourceKind.Pex or PeerSourceKind.Lpd) return;
         if (peers == null)
         {
@@ -2107,7 +2110,9 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 // other seeds forever: the handshake succeeded every time, so the count reset every
                 // time, so the backoff never grew past its first step. What the connection was worth
                 // is only known when it closes, and ConnectionClosedAsync settles it there.
-                history.RegisterHandshakeSuccess(peer.Stream is EncryptedStream);
+                // Negotiated plaintext still proves MSE support. Keep offering MSE on reconnect
+                // even when this connection does not need an RC4 payload wrapper.
+                history.RegisterHandshakeSuccess(peer.UsedMseHandshake || peer.Stream is EncryptedStream);
             }
             else
             {
@@ -3375,7 +3380,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
     }
 
-    private Task AddConnectedPeerCoreAsync(Stream stream, bool initiator, IPEndPoint? remote, PeerSourceKind sourceKind, CancellationToken cancellationToken)
+    internal Task AddConnectedUtpPeerAsync(Stream stream, UtpStream utp, CancellationToken cancellationToken)
+        => AddConnectedPeerCoreAsync(stream, false, utp.RemoteEndPoint, PeerSourceKind.Unknown, utp, cancellationToken);
+
+    private Task AddConnectedPeerCoreAsync(Stream stream, bool initiator, IPEndPoint? remote, PeerSourceKind sourceKind, UtpStream? utp, CancellationToken cancellationToken)
     {
         // Cancelling the attach means the caller no longer wants this connection, so the stream
         // is closed on the way out - exactly as on the reject paths below, which also take
@@ -3384,6 +3392,18 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         {
             stream.Close();
             cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        if (_torrent.IsI2p && remote != null && !_settings.Connection.I2pAllowMixedNetworks)
+        {
+            stream.Close();
+            return Task.CompletedTask;
+        }
+
+        if (_torrent.InfoFile.Info.IsSsl && stream is not System.Net.Security.SslStream { IsMutuallyAuthenticated: true })
+        {
+            stream.Close();
+            return Task.CompletedTask;
         }
 
         remote = NetworkUtils.NormalizeEndPoint(remote);
@@ -3432,6 +3452,7 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             ? _peerFactory.Create(_torrent, this, _timeProvider, stream, remote)
             : _peerFactory.Create(_torrent, this, _timeProvider, stream);
         peer.IsOutgoing = initiator;
+        peer.UtpStream = utp;
 
         // Authoritative duplicate gate: claim the endpoint before registering anything else.
         if (!TryRegisterConnectedEndpoint(peer))

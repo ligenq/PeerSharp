@@ -7,11 +7,37 @@ The unit and integration tests need no setup and run on every build; everything 
 |---|---|---|
 | Unit, integration, architecture, property-based | none - runs on every build | `tests/PeerSharp.Tests` |
 | Coverage-guided fuzzing | AFL++ and a corpus | [PeerSharp.Fuzz](PeerSharp.Fuzz/README.md) |
-| Local counterpart-client interop | real client binaries; nightly in CI | `tests/PeerSharp.Tests/Interop` |
+| Local counterpart-client interop | real client binaries; manual CI workflow | `tests/PeerSharp.Tests/Interop` |
 | Live DHT probes | `PEERSHARP_INTEROP=1` | `tests/PeerSharp.Tests/Interop` |
 | Real-swarm soak | `PEERSHARP_SOAK=1` plus content you choose | `tests/PeerSharp.Tests/Interop` |
 | Real-swarm streaming with longer and shorter request queues | `PEERSHARP_SOAK=1` plus content you choose; `PEERSHARP_STREAMING_QUEUES`, `_ROUNDS`, `_BITRATE`, `_SECONDS`, `_REPORT`; `_PLAYERS` (`strict`, `exoplayer`) the player profiles; `_FROM_START=1` plays from the file's start, as a film is watched, uncapped, and reports every stall | `tests/PeerSharp.Tests/Interop/RealSwarmStreamingTests.cs` |
 | Streaming from a mixed local swarm: first byte and stalls, from the start and after a seek | `PEERSHARP_STREAMING=1`; `PEERSHARP_STREAMING_REPORT` names a file the numbers are appended to, `PEERSHARP_STREAMING_LOG` one the player's engine logs to in detail, `PEERSHARP_STREAMING_SWARM` the big-piece test's seeders, as `24x384` (two dozen at 384 KiB/s) or several such groups separated by commas | `tests/PeerSharp.Tests/Integration/StreamingSwarmTests.cs` |
+
+## Mutation and concurrency testing
+
+The manually triggered mutation workflow uses `stryker-config.json` and Stryker's MTP runner. Run the same
+configuration locally after installing the tool version pinned in `.github/workflows/mutation.yml`:
+
+```powershell
+$env:StrykerRun = 'true'
+try { dotnet stryker --test-runner mtp }
+finally { Remove-Item Env:StrykerRun }
+```
+
+`StrykerRun` excludes the integration lane from mutation builds and relaxes nullable errors for
+mutated code; ordinary builds keep both. Keep `coverage-analysis` set to `off` until coverage
+attribution is verified with a known covered mutant. Otherwise covered code can be reported as
+`NoCoverage`. Excluding more test lanes also removes their coverage, including the concurrency
+tests for lifetime counters. The mutation score applies only to the units listed in the config.
+
+`ConcurrencyStress` repeats scenarios on real threads; it is stress testing, not systematic
+schedule exploration or proof of race freedom. When adding concurrency or property tests,
+check that they detect a deliberately broken implementation before relying on a clean result.
+
+The allocation checks in `ResumePersistenceMemoryTests` run in a child test process using the
+current build. Their process-wide allocation counter must exclude runner activity, other test
+assemblies and background work from earlier tests. Collection isolation alone cannot do that.
+The parent verifies that the selected child test executed and passed, and reports its output.
 
 ## Real-Swarm Interop and Soak Testing
 
@@ -37,10 +63,9 @@ opt-in: each requires `PEERSHARP_SOAK=1`, separately from the DHT probes' `PEERS
 because they transfer real data for a long time against a swarm of strangers.
 
 The rest of `PeerSharp.Tests.Interop` — the local counterpart-client tests and the loopback ones —
-runs nightly in CI (`.github/workflows/interop.yml`), not on pull requests. It needs real client
-binaries and real transfers, which is too slow and too dependent on an apt mirror to sit in front of
-every change, but leaving it entirely to a human meant an interop regression could sit unnoticed for
-as long as nobody happened to run it. A test whose counterpart client is not installed skips rather
+runs through the manual Interop workflow (`.github/workflows/interop.yml`). It needs real client
+binaries and real transfers, so it does not run on every pull request. Trigger it when validating
+changes to protocol handling or transport behavior. A test whose counterpart client is not installed skips rather
 than fails, so read the skip count: a run where everything skipped proves nothing.
 
 **You choose the content.** Nothing is hardcoded; the tests skip until you point them somewhere.
@@ -122,6 +147,10 @@ format real clients would ignore.
 - `EncryptedUtpTests` and `EncryptionFallbackTests` — encryption and transport are independent
   choices, so both transports share one negotiator and every combination of the two is covered,
   including the plaintext fallback that follows a refused MSE handshake.
+- `TorrentTlsTests` checks SSL torrent transfers over TCP/uTP and certificate rejection using real
+  TLS sockets. `I2pSamSessionTests` and `I2pPeerTransportTests` use a simulated SAM router for
+  session lifecycle, discovery and peer transfers. These do not establish compatibility with
+  external SSL peers or a live Java I2P/i2pd network.
 - `KeepAliveTests` — pins the ordering between the protocol keepalive interval, the peer idle policy
   and the uTP inactivity timeout, rather than their literal values, so no layer can start giving up
   before the one above it.

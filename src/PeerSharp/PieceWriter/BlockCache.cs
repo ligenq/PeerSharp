@@ -12,6 +12,11 @@ internal class BlockCache : IBlockCache
     private static readonly ArrayPool<byte> CachePool =
         ArrayPool<byte>.Create(maxArrayLength: BlockSize, maxArraysPerBucket: 64);
 
+    // Read-ahead windows exceed the small-block pool's limit. Keep a separate, bounded pool
+    // so a contiguous read reuses its buffer without retaining 64 large arrays per bucket.
+    private static readonly ArrayPool<byte> ReadAheadPool =
+        ArrayPool<byte>.Create(maxArrayLength: MaxReadAheadBlocks * BlockSize, maxArraysPerBucket: 2);
+
     // Key: Global Torrent Offset (must be aligned to BlockSize)
     // Value: Cached Block
     private readonly Dictionary<long, CachedBlock> _blocks = [];
@@ -274,7 +279,7 @@ internal class BlockCache : IBlockCache
                 }
 
                 int length = blocks * BlockSize;
-                byte[] buffer = CachePool.Rent(length);
+                byte[] buffer = ReadAheadPool.Rent(length);
                 try
                 {
                     long writeGeneration = Volatile.Read(ref _writeGeneration);
@@ -290,7 +295,7 @@ internal class BlockCache : IBlockCache
                 }
                 finally
                 {
-                    CachePool.Return(buffer);
+                    ReadAheadPool.Return(buffer);
                 }
             }
             finally

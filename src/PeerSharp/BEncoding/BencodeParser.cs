@@ -16,6 +16,11 @@ internal static class BencodeParser
     // SECURITY: Maximum total elements across entire structure to prevent DoS
     private const int MaxTotalElements = 500000;
 
+    // Torrent metadata needs larger bounded containers than tracker/peer messages.
+    private readonly record struct Limits(int CollectionItems, int StringLength, int TotalElements);
+    private static readonly Limits MessageLimits = new(MaxCollectionItems, MaxStringLength, MaxTotalElements);
+    private static readonly Limits TorrentLimits = new(2_500_000, 30 * 1024 * 1024, 2_500_000);
+
     private static readonly KeyValuePair<byte[], string>[] CommonKeys = [.. new string[]
     {
         "length", "path", "name", "piece length", "pieces", "files", "info",
@@ -37,11 +42,11 @@ internal static class BencodeParser
         return Encoding.Latin1.GetString(span);
     }
 
-    public static IBNode Parse(byte[] data, bool requireCanonical = false)
+    public static IBNode Parse(byte[] data, bool requireCanonical = false, bool torrentMetadata = false)
     {
         int pos = 0;
         int elementCount = 0;
-        var node = Parse(data, ref pos, 0, ref elementCount, requireCanonical);
+        var node = Parse(data, ref pos, 0, ref elementCount, requireCanonical, torrentMetadata ? TorrentLimits with { StringLength = Math.Max(TorrentLimits.StringLength, data.Length) } : MessageLimits);
         if (requireCanonical && pos != data.Length)
         {
             throw new FormatException("Trailing data after bencoded value");
@@ -54,11 +59,11 @@ internal static class BencodeParser
     {
         int pos = 0;
         int elementCount = 0;
-        var node = Parse(data, ref pos, 0, ref elementCount, requireCanonical: false);
+        var node = Parse(data, ref pos, 0, ref elementCount, requireCanonical: false, MessageLimits);
         return (node, pos);
     }
 
-    private static IBNode Parse(byte[] data, ref int pos, int depth, ref int elementCount, bool requireCanonical)
+    private static IBNode Parse(byte[] data, ref int pos, int depth, ref int elementCount, bool requireCanonical, Limits limits)
     {
         // SECURITY: Prevent stack overflow from deeply nested structures
         if (depth > MaxRecursionDepth)
@@ -68,9 +73,9 @@ internal static class BencodeParser
 
         // SECURITY: Prevent memory exhaustion from huge structures
         elementCount++;
-        if (elementCount > MaxTotalElements)
+        if (elementCount > limits.TotalElements)
         {
-            throw new FormatException($"SECURITY: Bencode total element count exceeds maximum ({MaxTotalElements}). Possible attack.");
+            throw new FormatException($"SECURITY: Bencode total element count exceeds maximum ({limits.TotalElements}). Possible attack.");
         }
 
         if (pos >= data.Length)
@@ -86,21 +91,21 @@ internal static class BencodeParser
         }
         else if (c == 'l')
         {
-            return ParseList(data, ref pos, depth, ref elementCount, requireCanonical);
+            return ParseList(data, ref pos, depth, ref elementCount, requireCanonical, limits);
         }
         else if (c == 'd')
         {
-            return ParseDictionary(data, ref pos, depth, ref elementCount, requireCanonical);
+            return ParseDictionary(data, ref pos, depth, ref elementCount, requireCanonical, limits);
         }
         else if (c >= '0' && c <= '9')
         {
-            return ParseString(data, ref pos);
+            return ParseString(data, ref pos, limits);
         }
 
         throw new FormatException($"Invalid bencode data (unexpected byte 0x{c:X2})");
     }
 
-    private static BDict ParseDictionary(byte[] data, ref int pos, int depth, ref int elementCount, bool requireCanonical)
+    private static BDict ParseDictionary(byte[] data, ref int pos, int depth, ref int elementCount, bool requireCanonical, Limits limits)
     {
         pos++; // 'd'
         var dict = new BDict();
@@ -108,12 +113,12 @@ internal static class BencodeParser
         while (pos < data.Length && data[pos] != 'e')
         {
             // SECURITY: Limit items in a single dictionary
-            if (dict.Dict.Count >= MaxCollectionItems)
+            if (dict.Dict.Count >= limits.CollectionItems)
             {
-                throw new FormatException($"SECURITY: Bencode dictionary exceeds maximum items ({MaxCollectionItems}). Possible attack.");
+                throw new FormatException($"SECURITY: Bencode dictionary exceeds maximum items ({limits.CollectionItems}). Possible attack.");
             }
 
-            var keyNode = ParseString(data, ref pos);
+            var keyNode = ParseString(data, ref pos, limits);
             if (requireCanonical && previousKey.HasValue
                 && previousKey.Value.Span.SequenceCompareTo(keyNode.Value.Span) >= 0)
             {
@@ -123,7 +128,7 @@ internal static class BencodeParser
             // Use Latin1 encoding for dictionary keys because bencode keys are arbitrary
             // byte strings (not UTF8). Latin1 preserves all byte values 0-255.
             var key = GetDictionaryKey(keyNode.Value.Span);
-            dict.Dict[key] = Parse(data, ref pos, depth + 1, ref elementCount, requireCanonical);
+            dict.Dict[key] = Parse(data, ref pos, depth + 1, ref elementCount, requireCanonical, limits);
         }
 
         if (pos >= data.Length)
@@ -222,19 +227,19 @@ internal static class BencodeParser
         return new BNumber(val);
     }
 
-    private static BList ParseList(byte[] data, ref int pos, int depth, ref int elementCount, bool requireCanonical)
+    private static BList ParseList(byte[] data, ref int pos, int depth, ref int elementCount, bool requireCanonical, Limits limits)
     {
         pos++; // 'l'
         var list = new BList();
         while (pos < data.Length && data[pos] != 'e')
         {
             // SECURITY: Limit items in a single list
-            if (list.List.Count >= MaxCollectionItems)
+            if (list.List.Count >= limits.CollectionItems)
             {
-                throw new FormatException($"SECURITY: Bencode list exceeds maximum items ({MaxCollectionItems}). Possible attack.");
+                throw new FormatException($"SECURITY: Bencode list exceeds maximum items ({limits.CollectionItems}). Possible attack.");
             }
 
-            list.List.Add(Parse(data, ref pos, depth + 1, ref elementCount, requireCanonical));
+            list.List.Add(Parse(data, ref pos, depth + 1, ref elementCount, requireCanonical, limits));
         }
 
         if (pos >= data.Length)
@@ -246,7 +251,7 @@ internal static class BencodeParser
         return list;
     }
 
-    private static BString ParseString(byte[] data, ref int pos)
+    private static BString ParseString(byte[] data, ref int pos, Limits limits)
     {
         long len = 0;
         int start = pos;
@@ -277,9 +282,9 @@ internal static class BencodeParser
             }
 
             // SECURITY: Limit string length to prevent memory exhaustion
-            if (len > MaxStringLength)
+            if (len > limits.StringLength)
             {
-                throw new FormatException($"SECURITY: Bencode string length {len} exceeds maximum ({MaxStringLength}). Possible attack.");
+                throw new FormatException($"SECURITY: Bencode string length {len} exceeds maximum ({limits.StringLength}). Possible attack.");
             }
 
             pos++;

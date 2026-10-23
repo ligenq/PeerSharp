@@ -151,12 +151,12 @@ internal sealed class PeerHistory
     public int FastReconnects { get; set; }
 
     /// <summary>
-    /// Records that a handshake completed, and settles the encryption choice on whatever worked.
+    /// Records that a handshake completed, remembering MSE support independently of payload encryption.
     /// </summary>
-    public void RegisterHandshakeSuccess(bool wasEncrypted)
+    public void RegisterHandshakeSuccess(bool usedMse)
     {
         HandshakeFailureCount = 0;
-        OfferEncryptionNext = wasEncrypted;
+        OfferEncryptionNext = usedMse;
     }
 
     /// <summary>

@@ -22,6 +22,29 @@ public class WebSeedManagerTests
         _timeProvider.Advance(TimeSpan.FromSeconds(1));
         Assert.Equal(0, manager.SampleDownloadSpeed());
     }
+    [Fact]
+    public async Task HttpSeedUsesBep17QueryAndHonorsTheServerRetryInterval()
+    {
+        await using var manager = new WebSeedManager(_torrent, [], _timeProvider);
+        manager.SetTestClient(_mockHttp);
+        var source = new WebSeedManager.WebSeedSource("http://seed.com/seed.php?token=abc", true) { IsHttpSeed = true };
+        _mockHttp.StatusCode = HttpStatusCode.OK;
+        _mockHttp.ResponseBytes = new byte[1000];
+        Assert.Equal(1000, (await manager.DownloadHttpSeedPieceAsync(source, 1, 1000, TestContext.Current.CancellationToken))!.Length);
+        var request = _mockHttp.SentRequests.Last();
+        Assert.Null(request.Headers.Range);
+        Assert.Contains("token=abc&info_hash=", request.RequestUri!.OriginalString);
+        Assert.Contains("&piece=1&ranges=0-999", request.RequestUri.OriginalString);
+        _mockHttp.StatusCode = HttpStatusCode.ServiceUnavailable;
+        _mockHttp.ResponseBytes = "120"u8.ToArray();
+        Assert.Null(await manager.DownloadHttpSeedPieceAsync(source, 0, 1000, TestContext.Current.CancellationToken));
+        Assert.False(source.IsAvailable(_timeProvider));
+        _timeProvider.Advance(TimeSpan.FromSeconds(119));
+        Assert.False(source.IsAvailable(_timeProvider));
+        _timeProvider.Advance(TimeSpan.FromSeconds(1));
+        Assert.True(source.IsAvailable(_timeProvider));
+    }
+
     private class MockHttpClient : IHttpClient
     {
         public Func<HttpRequestMessage, HttpResponseMessage>? Handler { get; set; }

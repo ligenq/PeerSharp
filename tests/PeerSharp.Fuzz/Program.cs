@@ -98,11 +98,8 @@ static void FuzzTorrentMetadata(Stream stream)
     }
     catch (TorrentMetadataException)
     {
-        // The contract this target exists to check. MetadataDownload parses a peer's ut_metadata
-        // response before it can verify the hash - it has to, because computing the hash is what
-        // parsing produces - and catches FormatException and nothing else. Any other exception type
-        // escapes into the peer loop from bytes a stranger chose, so any other exception type
-        // reaching here is a finding rather than a malformed torrent.
+        // Exercise the parser directly, without MetadataDownload's raw-byte hash authentication.
+        // Malformed metadata has this domain exception; any other type is a finding.
     }
 }
 

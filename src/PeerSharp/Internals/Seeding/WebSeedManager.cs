@@ -75,6 +75,13 @@ internal sealed class WebSeedManager : IAsyncDisposable
                 _logger.LogWarning("Skipping invalid web seed URL: {Url}", url);
             }
         }
+        foreach (string url in torrent.InfoFile.HttpSeedUrls)
+        {
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && (uri.Scheme == "http" || uri.Scheme == "https"))
+            {
+                _sources.Add(new WebSeedSource(url, isMultiFile) { IsHttpSeed = true });
+            }
+        }
     }
 
     /// <summary>
@@ -127,7 +134,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
 
     private static bool Matches(WebSeedSource source, string url)
         => Uri.TryCreate(url, UriKind.Absolute, out var uri)
-            && source.IsDirectory == WebSeedSource.IsDirectoryUrl(url)
+            && !source.IsHttpSeed && source.IsDirectory == WebSeedSource.IsDirectoryUrl(url)
             && source.Url.Equals(uri.AbsoluteUri, StringComparison.Ordinal);
 
     /// <summary>The URLs currently in use.</summary>
@@ -135,7 +142,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     {
         lock (_lock)
         {
-            return [.. _sources.Select(source => source.OriginalUrl)];
+            return [.. _sources.Where(source => !source.IsHttpSeed).Select(source => source.OriginalUrl)];
         }
     }
 
@@ -310,6 +317,45 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
 
         return resultOffset == pieceLength ? result : null!;
+    }
+
+    internal async Task<byte[]?> DownloadHttpSeedPieceAsync(WebSeedSource source, int pieceIndex, int length, CancellationToken ct)
+    {
+        // BEP 17 addresses torrent pieces rather than files. Ranges are piece-relative and
+        // allow a hybrid torrent to request only the real file bytes before its v1 padding.
+        var info = _torrent.InfoFile.Info;
+        var uri = new UriBuilder(source.Url) { Fragment = string.Empty };
+        string query = uri.Query.TrimStart('?');
+        string hash = string.Concat(info.GetTrackerInfoHash().Span.ToArray().Select(value => $"%{value:X2}"));
+        uri.Query = (query.Length == 0 ? "" : query + "&") + $"info_hash={hash}&piece={pieceIndex}&ranges=0-{length - 1}";
+        using var timeout = new CancellationTokenSource(RequestTimeout, _timeProvider);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri.Uri);
+        request.Headers.AcceptEncoding.ParseAdd("identity");
+        using var response = await GetClient().SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.OK)
+        {
+            return await ReadExactContentAsync(response.Content, length, linked.Token).ConfigureAwait(false);
+        }
+        if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+        {
+            // The retry interval is an ASCII integer in a small response, not Retry-After.
+            await using var body = await response.Content.ReadAsStreamAsync(linked.Token).ConfigureAwait(false);
+            byte[] retry = new byte[32];
+            int count = 0;
+            while (count < retry.Length)
+            {
+                int read = await body.ReadAsync(retry.AsMemory(count), linked.Token).ConfigureAwait(false);
+                if (read == 0) break;
+                count += read;
+            }
+            if (int.TryParse(System.Text.Encoding.ASCII.GetString(retry, 0, count).Trim(),
+                System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int seconds) && seconds > 0)
+            {
+                lock (_lock) { source.RetryAt = _timeProvider.GetUtcNow().AddSeconds(Math.Min(seconds, 86400)); }
+            }
+        }
+        return null;
     }
 
     internal async Task<byte[]?> DownloadSingleFilePieceAsync(WebSeedSource source, long offset, int length, CancellationToken ct)
@@ -619,7 +665,11 @@ internal sealed class WebSeedManager : IAsyncDisposable
             _logger.LogDebug("Downloading piece {PieceIndex} ({Size} bytes) from {Url}", pieceIndex, actualPieceSize, source.Url);
 
             byte[]? data;
-            if (source.IsMultiFile)
+            if (source.IsHttpSeed)
+            {
+                data = await DownloadHttpSeedPieceAsync(source, pieceIndex, (int)actualPieceSize, ct).ConfigureAwait(false);
+            }
+            else if (source.IsMultiFile)
             {
                 data = await DownloadMultiFilePieceAsync(source, pieceIndex, pieceStart, (int)actualPieceSize, ct).ConfigureAwait(false);
             }
@@ -1071,6 +1121,8 @@ internal sealed class WebSeedManager : IAsyncDisposable
             return (query < 0 ? url : url[..query]).EndsWith('/');
         }
 
+        public bool IsHttpSeed { get; init; }
+        public DateTimeOffset RetryAt { get; set; }
         public int ActiveDownloads { get; set; }
         public int FailureCount { get; set; }
 
@@ -1100,7 +1152,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
             // A source that has told us it does not hold what we want is not waiting on a backoff,
             // it is answered. Retrying it costs a request and a warning per attempt for the length
             // of the download and cannot ever succeed.
-            if (IsRetired)
+            if (IsRetired || timeProvider.GetUtcNow() < RetryAt)
             {
                 return false;
             }

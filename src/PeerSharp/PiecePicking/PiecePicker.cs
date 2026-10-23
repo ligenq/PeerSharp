@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
+using System.Runtime.CompilerServices;
 
 namespace PeerSharp.PiecePicking;
 
@@ -27,6 +28,15 @@ internal class PiecePicker : IDisposable
 
     private readonly IPiecePickerContext _context;
     private int[] _pieceAvailability;
+    // Count each connection's contribution, not its number of announcements. Weak keys retain
+    // a retired marker for late callbacks without retaining disconnected peers indefinitely.
+    private readonly ConditionalWeakTable<PeerCommunication, PeerContribution> _peerContributions = new();
+
+    private sealed class PeerContribution
+    {
+        public byte[] Pieces { get; set; } = [];
+        public bool Retired { get; set; }
+    }
 
     private readonly Random _random;
     private readonly Lock _selectionLock = new();
@@ -413,52 +423,68 @@ internal class PiecePicker : IDisposable
         lock (_selectionLock)
         {
             EnsureCapacity(_context.PieceCount);
-            int count = Math.Min(_pieceAvailability.Length, peerPieces.Count);
-
-            if (peerPieces.IsFull)
+            var contribution = GetPeerContribution(peer);
+            if (contribution.Retired) return;
+            int count = Math.Min(_context.PieceCount, peerPieces.Count);
+            int trackedCount = Math.Min(_pieceAvailability.Length, contribution.Pieces.Length * 8);
+            for (int i = 0; i < trackedCount; i++)
             {
-                for (int i = 0; i < count; i++)
-                {
-                    _pieceAvailability[i]++;
-                }
-                return;
-            }
-
-            for (int i = 0; i < count; i++)
-            {
-                if (peerPieces.HasPiece(i))
-                {
-                    _pieceAvailability[i]++;
-                }
+                UpdateContribution(contribution, i, i < count && peerPieces.HasPiece(i));
             }
         }
     }
 
-    public void UnregisterPeerAvailability(PeerCommunication peer)
+    public void UpdatePeerAvailability(PeerCommunication peer, int pieceIndex, bool available)
     {
-        var peerPieces = peer.PeerPieces;
-
         lock (_selectionLock)
         {
+            if ((uint)pieceIndex >= (uint)_context.PieceCount) return;
             EnsureCapacity(_context.PieceCount);
-            int count = Math.Min(_pieceAvailability.Length, peerPieces.Count);
+            var contribution = GetPeerContribution(peer);
+            if (contribution.Retired) return;
+            UpdateContribution(contribution, pieceIndex, available);
+        }
+    }
 
-            if (peerPieces.IsFull)
-            {
-                for (int i = 0; i < count; i++)
-                {
-                    _pieceAvailability[i]--;
-                }
-                return;
-            }
+    private PeerContribution GetPeerContribution(PeerCommunication peer)
+    {
+        var contribution = _peerContributions.GetValue(peer, static _ => new PeerContribution());
+        int bytes = (_context.PieceCount + 7) / 8;
+        if (!contribution.Retired && contribution.Pieces.Length < bytes)
+        {
+            byte[] pieces = contribution.Pieces;
+            Array.Resize(ref pieces, bytes);
+            contribution.Pieces = pieces;
+        }
+        return contribution;
+    }
 
+    private void UpdateContribution(PeerContribution contribution, int pieceIndex, bool available)
+    {
+        int byteIndex = pieceIndex >> 3;
+        byte mask = (byte)(1 << (pieceIndex & 7));
+        bool previous = (contribution.Pieces[byteIndex] & mask) != 0;
+        if (previous == available) return;
+        if (available) contribution.Pieces[byteIndex] |= mask;
+        else contribution.Pieces[byteIndex] &= (byte)~mask;
+        _pieceAvailability[pieceIndex] += available ? 1 : -1;
+    }
+
+    public void UnregisterPeerAvailability(PeerCommunication peer)
+    {
+        lock (_selectionLock)
+        {
+            // The live bitfield may already have changed while disconnect races its callback.
+            // Remove only what we counted, once, and ignore later advertisements on this connection.
+            var contribution = _peerContributions.GetValue(peer, static _ => new PeerContribution());
+            if (contribution.Retired) return;
+            int count = Math.Min(_pieceAvailability.Length, contribution.Pieces.Length * 8);
             for (int i = 0; i < count; i++)
             {
-                if (peerPieces.HasPiece(i))
-                {
-                    _pieceAvailability[i]--;
-                }
+                UpdateContribution(contribution, i, available: false);
             }
+            contribution.Pieces = [];
+            contribution.Retired = true;
         }
     }
 
@@ -466,7 +492,7 @@ internal class PiecePicker : IDisposable
     {
         if (_disposal.MarkDisposed() && disposing)
         {
-            // No disposable resources currently
+            lock (_selectionLock) _peerContributions.Clear();
         }
     }
 

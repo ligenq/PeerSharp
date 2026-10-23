@@ -294,7 +294,9 @@ internal sealed class SessionManager : IAsyncDisposable
         // already dirtied a file and the flush that follows necessarily covers it. Flushing first
         // leaves a window instead: a piece finishing between the flush and the snapshot is claimed
         // by a resume file that was never durable.
-        var resumeState = torrent.HasMetadata ? torrent.GetResumeState() : null;
+        var filePersistence = _persistence as SessionPersistence;
+        var resumeState = torrent.HasMetadata ? torrent.GetResumeState(streamed: filePersistence != null) : null;
+        using var deferredDataLease = resumeState?.DeferredDataLease;
         if (resumeState != null
             && torrent.FilesInternal is { } files
             && !await files.FlushAsync(cancellationToken).ConfigureAwait(false))
@@ -312,7 +314,7 @@ internal sealed class SessionManager : IAsyncDisposable
             // the file identities after the same durability barrier that covers those pieces.
             resumeState.FileSnapshots = flushedFiles.GetFileSnapshots() ?? resumeState.FileSnapshots;
         }
-        TorrentResumeData? resumeData = resumeState != null ? torrent.SerializeResumeState(resumeState) : null;
+        TorrentResumeData? resumeData = resumeState != null && filePersistence == null ? torrent.SerializeResumeState(resumeState) : null;
 
         var entry = new SavedTorrentEntry(
             torrent.SessionHash,
@@ -333,7 +335,10 @@ internal sealed class SessionManager : IAsyncDisposable
                 SuperSeeding = torrent.SuperSeeding
             });
 
-        await _persistence.SaveAsync(entry, cancellationToken).ConfigureAwait(false);
+        if (filePersistence != null)
+            await filePersistence.SaveAsync(entry, resumeState, cancellationToken).ConfigureAwait(false);
+        else
+            await _persistence.SaveAsync(entry, cancellationToken).ConfigureAwait(false);
     }
 
     public void UnregisterTorrentData(InfoHash hash)

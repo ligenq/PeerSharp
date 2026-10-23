@@ -105,6 +105,9 @@ internal class TorrentFileInfo
     /// </summary>
     public bool IsPrivate { get; set; }
 
+    public string? SslCertificateAuthority { get; set; }
+    public bool IsSsl => SslCertificateAuthority != null;
+
     /// <summary>
     /// BEP 52: Returns true if this torrent supports V1 protocol
     /// </summary>
@@ -118,7 +121,9 @@ internal class TorrentFileInfo
     /// <summary>
     /// BEP 30: Number of pieces in this torrent (derived from file size and piece size).
     /// </summary>
-    public int MerklePieceCount => PieceSize > 0 ? (int)((FullSize + PieceSize - 1) / PieceSize) : 0;
+    public int MerklePieceCount => PieceSize > 0 && FullSize > 0
+        ? checked((int)(1 + (FullSize - 1) / PieceSize))
+        : 0;
 
     /// <summary>
     /// BEP 30: Merkle root hash (20 bytes SHA-1). Present instead of pieces list.
@@ -320,6 +325,15 @@ internal class TorrentFileInfo
         }
 
         return spans;
+    }
+
+    /// <summary>Hybrid requests include the v1 alignment padding even after a v2 handshake upgrade.</summary>
+    internal long GetUploadPieceSize(int pieceIndex)
+    {
+        if (pieceIndex < 0 || pieceIndex >= GetPieceCount()) return 0;
+        return IsV1
+            ? Math.Min((long)PieceSize, FullSize - (long)pieceIndex * PieceSize)
+            : GetPieceSize(pieceIndex);
     }
 
     public long GetPieceSize(int pieceIndex)
@@ -795,7 +809,7 @@ internal class TorrentFileInfo
             return Pieces.Count;
         }
 
-        return (int)((FullSize + PieceSize - 1) / PieceSize);
+        return MerklePieceCount;
     }
 }
 
@@ -820,6 +834,8 @@ internal class TorrentFileMetadata
     /// BEP 19: List of HTTP/FTP web seed URLs for downloading torrent content.
     /// </summary>
     public List<string> WebSeedUrls { get; set; } = [];
+
+    public List<string> HttpSeedUrls { get; set; } = [];
 
     /// <summary>
     /// Byte array comparer for dictionary keys.

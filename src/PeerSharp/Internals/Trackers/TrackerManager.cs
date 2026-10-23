@@ -238,6 +238,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
 
     private async Task ScrapeOneAsync(TrackerInfo info, CancellationToken cancellationToken)
     {
+        if (!IsTrackerAllowed(info.Url)) return;
         try
         {
             await info.Tracker.ScrapeAsync(cancellationToken).ConfigureAwait(false);
@@ -409,6 +410,7 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
                 try
                 {
                     _torrent.PeersInternal.AddPeers(response.Peers, PeerSourceKind.Tracker, null);
+                    _torrent.I2pTransport?.AddPeers(response.I2pPeers);
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Failed to add peers"); }
 
@@ -752,8 +754,9 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
     /// could only assert that a wall-clock stopwatch landed in a range, and a busy CI machine put it
     /// outside that range.
     /// </summary>
-    private static async Task SendStoppedAnnounceAsync(TrackerInfo info, TimeProvider timeProvider)
+    private async Task SendStoppedAnnounceAsync(TrackerInfo info, TimeProvider timeProvider)
     {
+        if (!IsTrackerAllowed(info.Url)) return;
         // BEP 31: "never send this query again" includes the courtesy Stopped announce.
         if (info.RetryDisabled)
         {
@@ -900,8 +903,12 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             info.Url, info.ConsecutiveFailures, info.CircuitOpenCount, backoffSeconds);
     }
 
+    private bool IsTrackerAllowed(string url) => !_torrent.IsI2p || _torrent.Settings.Connection.I2pAllowMixedNetworks
+        || Network.I2pSamSession.IsI2pUrl(url);
+
     private void TrackedAnnounce(TrackerInfo info, TrackerEvent evt)
     {
+        if (!IsTrackerAllowed(info.Url)) return;
         lock (_lock)
         {
             if (_disposal.IsDisposed)
@@ -1058,6 +1065,8 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         {
             return;
         }
+
+        if (_torrent.IsI2p && !_torrent.Settings.Connection.I2pAllowMixedNetworks && !Network.I2pSamSession.IsI2pUrl(url)) return;
 
         // O(1) deduplication check
         if (!_trackerUrls.Add(url))

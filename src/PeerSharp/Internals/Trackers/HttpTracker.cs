@@ -52,6 +52,11 @@ internal class HttpTracker : TrackerBase, IDisposable
     {
         try
         {
+            if (I2pSamSession.IsI2pUrl(Url))
+                await (Torrent.Network.I2pSession ?? throw new IOException("Configure Connection.I2pSamHost and enable the router SAM bridge for I2P torrents."))
+                    .EnsureStartedAsync(ct).ConfigureAwait(false);
+            if (Torrent.IsI2p && !Torrent.Settings.Connection.I2pAllowMixedNetworks && !I2pSamSession.IsI2pUrl(Url))
+                throw new IOException("Public tracker announces are disabled for I2P torrents.");
             string url = BuildUrl(evt);
             _logger.LogDebug("Announcing to {Url}", url);
 
@@ -232,7 +237,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         CancellationToken ct)
     {
         var responseBytes = await GetResponseBytesAsync(url, addressFamily, ct).ConfigureAwait(false);
-        return ParseResponse(responseBytes);
+        return ParseResponse(responseBytes, I2pSamSession.IsI2pUrl(url));
     }
 
     private async Task<AnnounceAttempt> TryAnnounceOnceAsync(
@@ -266,6 +271,39 @@ internal class HttpTracker : TrackerBase, IDisposable
         AddressFamily? addressFamily,
         CancellationToken ct)
     {
+        if (I2pSamSession.IsI2pUrl(url))
+        {
+            var session = Torrent.Network.I2pSession ?? throw new IOException("I2P SAM bridge is not configured.");
+            using var handler = new SocketsHttpHandler
+            {
+                UseProxy = false,
+                AllowAutoRedirect = false,
+                ConnectCallback = (context, token) =>
+                {
+                    if (!context.DnsEndPoint.Host.EndsWith(".i2p", StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("An I2P tracker cannot redirect to the public network.");
+                    return new ValueTask<Stream>(session.ConnectAsync(context.DnsEndPoint.Host, token));
+                }
+            };
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
+            var target = new Uri(url);
+            for (int redirects = 0; redirects <= MaxRedirects; redirects++)
+            {
+                using var i2pRequest = new HttpRequestMessage(HttpMethod.Get, target);
+                using var i2pResponse = await http.SendAsync(i2pRequest, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                if ((int)i2pResponse.StatusCode is >= 300 and <= 399 && i2pResponse.Headers.Location is { } location)
+                {
+                    target = new Uri(target, location);
+                    if (!I2pSamSession.IsI2pUrl(target.AbsoluteUri) || target.Scheme is not "http" and not "https")
+                        throw new IOException("I2P tracker redirect left the I2P network.");
+                    continue;
+                }
+                i2pResponse.EnsureSuccessStatusCode();
+                return await ReadContentWithLimitAsync(i2pResponse.Content, MaxTrackerResponseBytes, ct).ConfigureAwait(false);
+            }
+            throw new IOException("Too many I2P tracker redirects.");
+        }
+
         if (addressFamily is { } family)
         {
             return await GetResponseBytesOverAsync(new Uri(url), family, ct).ConfigureAwait(false);
@@ -424,7 +462,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         }
     }
 
-    private static AnnounceResponse ParseResponse(byte[] data)
+    internal static AnnounceResponse ParseResponse(byte[] data, bool i2p = false)
     {
         var node = BencodeParser.Parse(data);
         if (node is BDict dict)
@@ -470,7 +508,12 @@ internal class HttpTracker : TrackerBase, IDisposable
             if (peers != null)
             {
                 var span = peers.Value.Span;
-                for (int i = 0; i <= span.Length - 6; i += 6)
+                if (i2p)
+                {
+                    // Like compact IP lists, keep complete entries and ignore an incomplete tail.
+                    for (int i = 0; i <= span.Length - 32; i += 32) resp.I2pPeers.Add(I2pSamSession.HashToHostname(span.Slice(i, 32)));
+                }
+                for (int i = 0; !i2p && i <= span.Length - 6; i += 6)
                 {
                     var ip = new IPAddress(span.Slice(i, 4));
                     int port = System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(span.Slice(i + 4, 2));
@@ -479,7 +522,23 @@ internal class HttpTracker : TrackerBase, IDisposable
             }
 
             // BEP 7: Compact IPv6 peers (18 bytes each: 16 IP + 2 port)
-            var peers6 = dict.GetBytes("peers6");
+            if (i2p && dict.Get("peers") is BList destinations)
+            {
+                foreach (var entry in destinations.List.OfType<BDict>())
+                {
+                    if (entry.GetString("ip") is { } destination)
+                    {
+                        try { I2pSamSession.ValidateDestination(destination); }
+                        catch (ArgumentException)
+                        {
+                            // Ignore this malformed destination while keeping the other tracker peers.
+                            continue;
+                        }
+                        resp.I2pPeers.Add(destination);
+                    }
+                }
+            }
+            var peers6 = i2p ? null : dict.GetBytes("peers6");
             if (peers6 != null)
             {
                 var span = peers6.Value.Span;
@@ -663,7 +722,9 @@ internal class HttpTracker : TrackerBase, IDisposable
 
         AppendParam("info_hash", UrlEncoding.Encode(Torrent.InfoFile.Info.GetTrackerInfoHash().Span));
         AppendParam("peer_id", UrlEncoding.Encode(Torrent.Settings.PeerId));
-        int listenPort = Torrent.AdvertisedPeerPort;
+        if (I2pSamSession.IsI2pUrl(Url) && Torrent.Network.I2pSession?.Destination is { } destination)
+            AppendParam("ip", Uri.EscapeDataString(destination + ".i2p"));
+        int listenPort = I2pSamSession.IsI2pUrl(Url) ? 6881 : Torrent.AdvertisedPeerPort;
         AppendParam("port", listenPort.ToString(CultureInfo.InvariantCulture));
         AppendParam("uploaded", Torrent.FileTransfer.Uploaded.ToString(CultureInfo.InvariantCulture));
         AppendParam("downloaded", Torrent.FileTransfer.Downloaded.ToString(CultureInfo.InvariantCulture));
@@ -719,6 +780,7 @@ internal class HttpTracker : TrackerBase, IDisposable
     /// </summary>
     private async Task<IReadOnlyList<AddressFamily?>> GetReachableAddressFamiliesAsync(CancellationToken ct)
     {
+        if (I2pSamSession.IsI2pUrl(Url)) return [null];
         var families = GetAnnounceAddressFamilies();
         if (families.Any(family => family == null))
         {

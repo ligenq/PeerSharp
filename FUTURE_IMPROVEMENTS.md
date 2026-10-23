@@ -1,25 +1,19 @@
 ﻿# Future Improvements
 
-Known gaps that remain after the August 2026 cleanup. Completed work and measurement history live in
-[`INVESTIGATION_NOTES.md`](INVESTIGATION_NOTES.md).
+Deferred work and the evidence or consumer requirements needed before implementing it.
+Completed changes are recorded in [the changelog](CHANGELOG.md).
 
 These are ordered by likely impact. None should be implemented without the evidence or consumer
 requirement named in its entry: each remaining change is architectural or has an ambiguous public API.
 
 ---
 
-## 1. xUnit1069: 398 Core tests with a timeout that never observe its token
+## 1. Observe cancellation in remaining Core tests
 
-**Impact: low, and deliberately deferred.** `xunit.v3` 4.0 added xUnit1069: a test with `Timeout`
-should reference `TestContext.Current.CancellationToken`, so the timeout can stop the work rather than
-only fail the verdict while it keeps running. 471 tests tripped it; the 73 in the lanes where that
-costs something - integration, interop, concurrency and robustness - are fixed. Those bind sockets,
-spawn client processes and repeat scenarios across threads, so a test that overruns its deadline holds
-a port or a core while the next one starts.
-
-The remaining 398 are in `Core`: in-memory, deterministic, and finishing in milliseconds. The timeout
-rarely fires there, and when it does the abandoned work is a few allocations. The rule is held at
-`suggestion` in `.editorconfig`; new tests should follow it.
+**Impact: low.** Some Core tests declare a timeout without observing
+`TestContext.Current.CancellationToken`. xUnit1069 remains at `suggestion` in `.editorconfig`;
+new tests should observe the token so timed-out work can stop. Prioritize tests that retain
+sockets, files or background work after their deadline.
 
 **How the fixed ones were done**, for whoever picks up the rest: the token is threaded into whichever
 awaited call accepts one, and where a test owns a `CancellationTokenSource` for its own deadline that
@@ -39,10 +33,10 @@ small units. Six more are worth mutating and are left out purely on runtime: `Pi
 `PathValidator`, `DhtSecurity`, `DhtItemStore`, `FileMapper` and `PeerPriority` - roughly 700 mutants
 between them.
 
-The reason is that Stryker's per-test coverage attribution does not work against this suite, so
-`"coverage-analysis": "off"` is mandatory and every mutant runs the whole 46-second lane. Measured
-rather than assumed: identical mutants in `LifetimeByteTotals` report `NoCoverage` under the default
-mode and `Killed` with attribution disabled. `INVESTIGATION_NOTES.md` has the table.
+The current configuration disables per-test coverage attribution because it previously reported
+covered mutants as `NoCoverage`. Every mutant therefore runs the mutation test lane. See the
+[mutation testing instructions](tests/README.md#mutation-and-concurrency-testing) for the required
+runner and build settings.
 
 **Resume when:** a Stryker release attributes coverage correctly here - its Microsoft.Testing Platform
 runner is still marked preview. Check by running the current config with the default coverage mode: if

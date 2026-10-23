@@ -1,4 +1,4 @@
-﻿# Mutation testing, weekly rather than per-PR.
+﻿# Mutation testing, run manually through workflow_dispatch.
 #
 # Coverage says a line ran. Mutation testing asks the question that actually matters: if that line
 # behaved differently, would a test notice? Both times it was applied by hand to this repository it
@@ -14,18 +14,15 @@
 # coverage attribution does not work here - it reported 215 uncovered mutants in PiecePicker, which has
 # 31 passing tests - so stryker-config.json sets "coverage-analysis": "off" and every mutant runs the
 # whole 46-second lane. That is correct but slow, which is why files like PiecePicker, PathValidator
-# and DhtSecurity are left out for now. See INVESTIGATION_NOTES.md; a score produced with the default
+# and DhtSecurity are left out for now. See tests/README.md; a score produced with the default
 # coverage mode is fiction and should be discarded rather than investigated.
 #
-# Weekly and non-blocking: a mutation score is a number to read and act on, not a gate. Stryker also
+# Manual and non-blocking: a mutation score is a number to read and act on, not a gate. Stryker also
 # re-runs the test suite once per surviving mutant, so this is minutes-to-hours of work that has no
 # business sitting in front of a pull request.
 name: Mutation
 
 on:
-  schedule:
-    # Sunday 03:00 UTC, clear of the nightly interop run.
-    - cron: '0 3 * * 0'
   workflow_dispatch:
 
 env:

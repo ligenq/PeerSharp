@@ -1,10 +1,117 @@
 ﻿using PeerSharp.PiecePicking;
 using Microsoft.Extensions.Time.Testing;
+using PeerSharp.Internals;
+using PeerSharp.Internals.Peers;
 
 namespace PeerSharp.Tests.Core.Pieces;
 
 public class PiecePickerTests
 {
+    [Fact]
+    public async Task PeerSnapshotsAreIdempotentAndRetiredConnectionsCannotReturn()
+    {
+        await using var torrent = CreateAvailabilityTorrent(19);
+        await using var peer = new PeerCommunication(torrent, torrent.PeersInternal, TimeProvider.System);
+        using var picker = new PiecePicker(new MockContext { PieceCount = 19 }, _timeProvider, _random);
+        peer.PeerPieces.SetHaveAll();
+        picker.RegisterPeerAvailability(peer);
+        picker.RegisterPeerAvailability(peer);
+        picker.UpdatePeerAvailability(peer, 0, true);
+        Assert.Equal(1, picker.GetAvailability(0));
+        Assert.Equal(1, picker.GetAvailability(18));
+
+        peer.PeerPieces.RemovePiece(0);
+        picker.RegisterPeerAvailability(peer);
+        picker.UpdatePeerAvailability(peer, 0, false);
+        Assert.Equal(0, picker.GetAvailability(0));
+        Assert.Equal(1, picker.GetAvailability(18));
+
+        picker.UnregisterPeerAvailability(peer);
+        picker.UnregisterPeerAvailability(peer);
+        picker.RegisterPeerAvailability(peer);
+        picker.UpdatePeerAvailability(peer, 0, true);
+        for (int i = 0; i < 19; i++) Assert.Equal(0, picker.GetAvailability(i));
+    }
+
+    [Fact]
+    public async Task RetractionAndDisconnectRemoveOnlyTheAnnouncingPeersContribution()
+    {
+        await using var torrent = CreateAvailabilityTorrent(19);
+        await using var first = new PeerCommunication(torrent, torrent.PeersInternal, TimeProvider.System);
+        await using var second = new PeerCommunication(torrent, torrent.PeersInternal, TimeProvider.System);
+        using var picker = new PiecePicker(new MockContext { PieceCount = 19 }, _timeProvider, _random);
+        for (int i = 0; i < 19; i += 2)
+        {
+            picker.UpdatePeerAvailability(first, i, true);
+            picker.UpdatePeerAvailability(second, i, true);
+        }
+        picker.UpdatePeerAvailability(first, 18, false);
+        picker.UpdatePeerAvailability(first, 18, false);
+        picker.UpdatePeerAvailability(first, -1, true);
+        picker.UpdatePeerAvailability(first, 19, true);
+        Assert.Equal(1, picker.GetAvailability(18));
+        Assert.Equal(2, picker.GetAvailability(0));
+
+        // Disconnect must subtract the recorded contribution even if the live map has changed
+        // before its callback. Odd pieces and the retracted piece belong only to the second peer.
+        first.PeerPieces.SetHaveAll();
+        picker.UnregisterPeerAvailability(first);
+        for (int i = 0; i < 19; i++) Assert.Equal(i % 2 == 0 ? 1 : 0, picker.GetAvailability(i));
+        picker.UnregisterPeerAvailability(second);
+        for (int i = 0; i < 19; i++) Assert.Equal(0, picker.GetAvailability(i));
+    }
+
+    [Fact]
+    public async Task DisconnectRacingAnnouncementsCannotLeavePhantomOrNegativeAvailability()
+    {
+        await using var torrent = CreateAvailabilityTorrent(4);
+        using var picker = new PiecePicker(new MockContext { PieceCount = 4 }, _timeProvider, _random);
+        var peers = Enumerable.Range(0, 16)
+            .Select(_ => new PeerCommunication(torrent, torrent.PeersInternal, TimeProvider.System)).ToArray();
+        try
+        {
+            Parallel.ForEach(peers, peer =>
+            {
+                peer.PeerPieces.AddPiece(0);
+                for (int i = 0; i < 500; i++)
+                {
+                    picker.RegisterPeerAvailability(peer);
+                    picker.UpdatePeerAvailability(peer, 0, false);
+                    picker.UpdatePeerAvailability(peer, 0, true);
+                }
+            });
+            Assert.Equal(peers.Length, picker.GetAvailability(0));
+            Parallel.For(0, peers.Length * 3, i =>
+            {
+                var peer = peers[i / 3];
+                if (i % 3 == 0) picker.UnregisterPeerAvailability(peer);
+                else if (i % 3 == 1) picker.RegisterPeerAvailability(peer);
+                else picker.UpdatePeerAvailability(peer, 0, true);
+            });
+            Assert.Equal(0, picker.GetAvailability(0));
+            // Also retire a connection that failed before sending any advertisement.
+            await using var unseen = new PeerCommunication(torrent, torrent.PeersInternal, TimeProvider.System);
+            picker.UnregisterPeerAvailability(unseen);
+            unseen.PeerPieces.AddPiece(0);
+            picker.RegisterPeerAvailability(unseen);
+            picker.UpdatePeerAvailability(unseen, 0, true);
+            Assert.Equal(0, picker.GetAvailability(0));
+        }
+        finally
+        {
+            foreach (var peer in peers) await peer.DisposeAsync();
+        }
+    }
+
+    private static Torrent CreateAvailabilityTorrent(int pieceCount)
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 16 * 1024;
+        metadata.Info.FullSize = pieceCount * metadata.Info.PieceSize;
+        metadata.Info.Files.Add(new PeerSharp.Internals.TorrentFileEntry { Path = "availability.bin", Size = metadata.Info.FullSize });
+        return TorrentTestUtility.CreateMinimal(metadata);
+    }
+
     private class MockContext : IPiecePickerContext
     {
         public int PieceCount { get; set; }
