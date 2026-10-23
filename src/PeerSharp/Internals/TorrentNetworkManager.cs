@@ -12,6 +12,7 @@ internal sealed class TorrentNetworkManager
     public IpBlocklist? Blocklist { get; set; }
     public IDhtManager? Dht { get; set; }
     public ILsdManager? Lsd { get; set; }
+    public I2pSamSession? I2pSession { get; set; }
     public IUtpManager? Utp { get; set; }
 
     /// <summary>

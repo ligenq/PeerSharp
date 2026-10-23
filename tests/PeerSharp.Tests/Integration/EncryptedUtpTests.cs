@@ -7,7 +7,7 @@ using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
 namespace PeerSharp.Tests.Integration;
 
 /// <summary>
-/// Encrypted peers connecting to us over uTP.
+/// MSE peers using encrypted or plaintext payloads over TCP and uTP.
 ///
 /// <para>
 /// Encryption and transport are independent choices. Both reference implementations treat them that
@@ -50,9 +50,21 @@ public class EncryptedUtpTests : IDisposable
     }
 
     [Theory(Timeout = 180000)]
-    [InlineData(Encryption.Require)]
-    [InlineData(Encryption.Allow)]
-    public async Task EncryptedPeerConnectingOverUtp_CanDownload(Encryption encryption)
+    [InlineData(Encryption.Require, false, true)]
+    [InlineData(Encryption.Allow, false, true)]
+    [InlineData(Encryption.Allow, false, false)]
+    [InlineData(Encryption.Require, false, false)]
+    [InlineData(Encryption.Allow, true, false)]
+    [InlineData(Encryption.Require, true, false)]
+    [InlineData(Encryption.Allow, true, true)]
+    public Task MsePayloadModes_CanDownload(Encryption encryption, bool tcp, bool preferRc4)
+        => DownloadAsync(encryption, tcp, preferRc4, directionalOverrides: false);
+
+    [Fact(Timeout = 180000)]
+    public Task DirectionalOverridesAreAppliedToBothIncomingAndOutgoingHandshakes()
+        => DownloadAsync(Encryption.Refuse, tcp: true, preferRc4: true, directionalOverrides: true);
+
+    private async Task DownloadAsync(Encryption encryption, bool tcp, bool preferRc4, bool directionalOverrides)
     {
         const string fileName = "utp-mse.bin";
         byte[] payload = new byte[128 * 1024];
@@ -65,20 +77,20 @@ public class EncryptedUtpTests : IDisposable
             .AddFile(fileName, payload)
             .Build();
 
-        // TCP is disabled on both sides, so the only way through is uTP. With Require, the only way
-        // through is uTP carrying MSE - exactly the combination the inbound path used to refuse.
-        await using var seedEngine = await CreateEngineAsync(_seedPath, encryption);
+        // Enable only the selected transport. Require must keep payloads encrypted even when the
+        // preference is plaintext; Allow exercises both selections after MSE.
+        await using var seedEngine = await CreateEngineAsync(_seedPath, encryption, tcp, preferRc4, directionalOverrides);
         var seed = await seedEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
         Assert.Equal(torrentFile.PieceCount, await seed.ForceRecheckAsync());
         await seed.StartAsync();
 
-        await using var leechEngine = await CreateEngineAsync(_leechPath, encryption);
+        await using var leechEngine = await CreateEngineAsync(_leechPath, encryption, tcp, preferRc4, directionalOverrides);
         var leech = await leechEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = true });
 
-        // uTP rides on UDP, so the seed must be dialled on its bound UDP port rather than its TCP one.
-        // With both configured as 0 they land on different ephemeral ports.
-        Assert.True(seedEngine.BoundUdpPort > 0, "The seed engine did not bind a UDP port, so uTP cannot be reached.");
-        var seedEndpoint = new IPEndPoint(IPAddress.Loopback, seedEngine.BoundUdpPort);
+        // The listener ports are ephemeral, and uTP uses the bound UDP port.
+        int port = tcp ? seedEngine.BoundTcpPort : seedEngine.BoundUdpPort;
+        Assert.True(port > 0);
+        var seedEndpoint = new IPEndPoint(IPAddress.Loopback, port);
 
         var clock = Stopwatch.StartNew();
         while (leech.Peers.ConnectedCount == 0 && clock.Elapsed < ConnectionTimeout)
@@ -89,17 +101,13 @@ public class EncryptedUtpTests : IDisposable
 
         Assert.True(
             leech.Peers.ConnectedCount > 0,
-            $"No uTP connection was established with {encryption} encryption. An encrypted peer's first bytes are " +
-            "a Diffie-Hellman key; if the inbound uTP path assumes plaintext it rejects them as a malformed " +
-            "handshake.");
+            $"No {(tcp ? "TCP" : "uTP")} connection was established with {encryption} policy and PreferRc4={preferRc4}.");
 
         var peer = leech.Peers.GetConnectedPeers()[0];
-        Assert.True(peer.IsUtp, "The connection did not use uTP, so this run did not exercise the inbound uTP path.");
-
-        if (encryption == Encryption.Require)
-        {
-            Assert.True(peer.IsEncrypted, "Encryption was required but the connection was not encrypted.");
-        }
+        Assert.Equal(!tcp, peer.IsUtp);
+        Assert.Equal(encryption != Encryption.Refuse && (encryption == Encryption.Require || preferRc4), peer.IsEncrypted);
+        var internalTorrent = Assert.IsType<Torrent>(leech);
+        Assert.Contains(internalTorrent.PeersInternal.GetConnectedPeersInternal(), connection => connection.IsOutgoing && connection.UsedMseHandshake == (encryption != Encryption.Refuse));
 
         clock.Restart();
         while (!leech.Finished && clock.Elapsed < TransferTimeout)
@@ -107,7 +115,9 @@ public class EncryptedUtpTests : IDisposable
             await Task.Delay(200);
         }
 
-        Assert.True(leech.Finished, $"The download did not complete over encrypted uTP within {TransferTimeout}.");
+        Assert.True(leech.Finished, $"The download did not complete over MSE within {TransferTimeout}.");
+        if (encryption != Encryption.Refuse)
+            Assert.DoesNotContain(internalTorrent.PeersInternal.ExportConnectionPreferences(), preference => !preference.OfferEncryptionNext);
         await leech.StopAsync();
 
         byte[] downloaded = await File.ReadAllBytesAsync(
@@ -119,7 +129,7 @@ public class EncryptedUtpTests : IDisposable
             System.Security.Cryptography.SHA256.HashData(downloaded));
     }
 
-    private async Task<ClientEngine> CreateEngineAsync(string downloadPath, Encryption encryption)
+    private async Task<ClientEngine> CreateEngineAsync(string downloadPath, Encryption encryption, bool tcp, bool preferRc4, bool directionalOverrides)
     {
         var settings = new Settings
         {
@@ -130,18 +140,21 @@ public class EncryptedUtpTests : IDisposable
                 UdpPort = 0,
                 EnableLsd = false,
 
-                // uTP only, so nothing can quietly fall back to TCP and hide the defect.
-                EnableTcpIn = false,
-                EnableTcpOut = false,
-                EnableUtpIn = true,
-                EnableUtpOut = true,
-                PreferUtp = true,
+                // Enable only the transport the case is exercising.
+                EnableTcpIn = tcp,
+                EnableTcpOut = tcp,
+                EnableUtpIn = !tcp,
+                EnableUtpOut = !tcp,
+                PreferUtp = !tcp,
 
                 // uTP is held back for a warmup period unless a peer is known to support it. With TCP
                 // disabled that leaves no transport at all, so the dial never happens.
                 UpnpPortMapping = false,
                 NatPmpPortMapping = false,
-                Encryption = encryption
+                Encryption = directionalOverrides ? Encryption.Require : encryption,
+                IncomingEncryption = directionalOverrides ? Encryption.Refuse : null,
+                OutgoingEncryption = directionalOverrides ? Encryption.Refuse : null,
+                PreferRc4 = preferRc4
             },
             Dht = { Enabled = false }
         };

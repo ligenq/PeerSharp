@@ -4,18 +4,6 @@ These APIs let applications use the engine's torrent semantics without maintaini
 copies. They are available in PeerSharp 5.0.0 and later. See [the changelog](CHANGELOG.md)
 for migration notes when upgrading from 4.0.0.
 
-## Findings from Peerfluence
-
-| Application code | PeerSharp support |
-| --- | --- |
-| `Peerfluence.Core/TorrentIdentity.cs` reads hashes directly so comparison also works with substitutes | `TorrentIdentity.SameTorrent(left, right)` shares the production comparison implementation and does not invoke the interface predicate. |
-| `DownloadsViewModel.CopyMagnetAsync` assembles a v1-only URI | `MagnetLink.FromTorrent`, `FromTorrentFile`, and `Create` produce v1, v2, and hybrid magnets with escaped names and tracker URLs. |
-| `TorrentTransferSnapshots` caches alerts for RPC polling | `ITorrent.GetTransferStats()` reads totals, the latest sampled rates, and peer count without subscribing to alerts. Individual speed and file-transfer properties remain available. |
-| `EngineMetricsReader` subscribes to process-wide meters to read lifetime totals | `engine.GetStats().LifetimeDownloaded` and `.LifetimeUploaded` expose the same counters for that engine, including removed torrents. |
-| `ProxyUdpPolicy` duplicates the engine's UDP routing rules | `settings.Proxy.GetUdpCapabilities()` reports the features permitted by those same rules without changing settings. |
-
-Peerfluence was inspected only. Its source and package references were not changed.
-
 ## Identity and magnet links
 
 ```csharp

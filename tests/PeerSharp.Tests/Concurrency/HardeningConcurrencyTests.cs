@@ -8,26 +8,9 @@ using System.Net;
 namespace PeerSharp.Tests.Concurrency;
 
 /// <summary>
-/// Systematic concurrency tests for the engine hardening work.
-///
-/// <para>
-/// These target invariants no single-threaded test can establish, because they are properties of how
-/// operations interleave rather than of any one of them. Each is scoped to a small in-memory unit,
-/// matching the rest of the Coyote suite: the exploration is only worth as much as the fraction of
-/// the schedule Coyote actually controls, and real file or socket I/O is concurrency it cannot see.
-/// </para>
-///
-/// <para>
-/// <b>Read these for what they currently are.</b> Under an ordinary <c>dotnet test</c> the assembly
-/// is not rewritten, so they run as repeated stress rather than systematic exploration. Even
-/// rewritten, Coyote 1.7.11 does not recognise <see cref="System.Threading.Lock"/>, so it places no
-/// scheduling point inside a critical section guarded by one - which covers most of this engine.
-/// <c>LifetimeByteTotals</c> is the exception, and deliberately: it uses a <c>Monitor</c> lock, so
-/// with both assemblies rewritten the first test below genuinely fails against a broken
-/// implementation - which is how the race it describes was found in the first place. The two
-/// rate-limiter tests and the picker test do not have that property yet and should not be read as
-/// proof of their invariants. <c>INVESTIGATION_NOTES.md</c> has the measurements behind all of this.
-/// </para>
+/// Repeated concurrency stress tests for lifetime counters, rate limits and piece selection.
+/// These run on real threads through <see cref="ConcurrencyStress"/>. They check invariants
+/// across observed interleavings, but do not systematically explore every possible schedule.
 /// </summary>
 [Collection("Concurrency")]
 public class HardeningConcurrencyTests

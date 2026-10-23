@@ -8,51 +8,98 @@ namespace PeerSharp.Internals;
 internal sealed class DeferredPieceStore : IDisposable
 {
     private readonly FileStream _stream;
-    private readonly Dictionary<int, Entry> _entries;
+    private readonly Entry[] _entries;
     private readonly Lock _lifetimeLock = new();
     private int _references = 1;
     private AtomicDisposal _disposal = new();
 
-    private DeferredPieceStore(FileStream stream, Dictionary<int, Entry> entries)
+    private DeferredPieceStore(FileStream stream, Entry[] entries)
     {
         _stream = stream;
         _entries = entries;
     }
 
-    internal static DeferredPieceStore Create(IEnumerable<TorrentStateData.UnfinishedPieceData> pieces)
+    // "directory" places the private file somewhere other than the system temporary directory.
+    // Only the owning transfer passes it, so a test can aim one store at an unusable directory to
+    // exercise the failure path without redirecting the temporary directory for the whole process,
+    // which every concurrently running test that creates a temporary file would read.
+    internal static DeferredPieceStore Create(IEnumerable<TorrentStateData.UnfinishedPieceData> pieces,
+        string? directory = null)
     {
-        string path = Path.Combine(Path.GetTempPath(), "PeerSharpResume-" + Guid.NewGuid().ToString("N") + ".tmp");
-        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read | FileShare.Delete,
-            bufferSize: 1, FileOptions.DeleteOnClose | FileOptions.RandomAccess);
+        string path = Path.Combine(directory ?? Path.GetTempPath(),
+            "PeerSharpResume-" + Guid.NewGuid().ToString("N") + ".tmp");
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.ReadWrite,
+            Share = FileShare.Read | FileShare.Delete,
+            BufferSize = 1,
+            Options = FileOptions.RandomAccess
+        };
+
+        if (OperatingSystem.IsWindows())
+        {
+            options.Options |= FileOptions.DeleteOnClose;
+        }
+        else
+        {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+
+        var stream = new FileStream(path, options);
+        bool namedFile = !OperatingSystem.IsWindows();
         try
         {
+            // Unix DeleteOnClose is implemented by managed disposal. Unlink now so an abrupt
+            // process exit cannot leave partial download data behind; the open handle stays usable.
+            if (namedFile)
+            {
+                File.Delete(path);
+                namedFile = false;
+            }
             var entries = new Dictionary<int, Entry>();
             foreach (var piece in pieces)
             {
                 long offset = stream.Position;
                 stream.Write(piece.Data);
-                entries[piece.Index] = new Entry(piece.Index, (bool[])piece.Blocks.Clone(), offset, piece.Data.Length);
+                bool[] blocks = (bool[])piece.Blocks.Clone();
+                entries[piece.Index] = new Entry(piece.Index, blocks, offset, piece.Data.Length, blocks.Count(static block => block));
             }
-            return new DeferredPieceStore(stream, entries);
+            // Flags never change. Sort once rather than recounting and sorting on every autosave.
+            return new DeferredPieceStore(stream, entries.Values.OrderByDescending(static e => e.ReceivedBlocks).ToArray());
         }
         catch
         {
             stream.Dispose();
+            if (namedFile)
+            {
+                try { File.Delete(path); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* Preserve the creation failure. */ }
+            }
             throw;
         }
     }
 
     internal (List<TorrentStateData.UnfinishedPieceData> Pieces, IDisposable? Lease) Capture(bool streamed,
-        int maxPieces = int.MaxValue, long maxBytes = long.MaxValue)
+        int maxPieces = int.MaxValue, long maxBytes = long.MaxValue, Func<int, bool>? includePiece = null)
     {
         lock (_lifetimeLock)
         {
             _disposal.ThrowIfDisposed(this);
-            var pieces = new List<TorrentStateData.UnfinishedPieceData>(_entries.Count);
+            var pieces = new List<TorrentStateData.UnfinishedPieceData>(_entries.Length);
             long budget = maxBytes;
-            foreach (var entry in _entries.Values.OrderByDescending(e => e.Blocks.Count(block => block)))
+            foreach (var entry in _entries)
             {
-                if (pieces.Count >= maxPieces || budget <= 0 || (entry.Length > budget && pieces.Count > 0)) break;
+                if (includePiece != null && !includePiece(entry.Index))
+                {
+                    continue;
+                }
+
+                if (pieces.Count >= maxPieces || budget <= 0 || (entry.Length > budget && pieces.Count > 0))
+                {
+                    break;
+                }
+
                 budget -= entry.Length;
                 var slice = new Slice(this, entry.Offset, entry.Length);
                 pieces.Add(new TorrentStateData.UnfinishedPieceData
@@ -63,7 +110,11 @@ internal sealed class DeferredPieceStore : IDisposable
                     DeferredData = streamed ? slice : null
                 });
             }
-            if (!streamed) return (pieces, null);
+            if (!streamed)
+            {
+                return (pieces, null);
+            }
+
             Interlocked.Increment(ref _references);
             return (pieces, new Lease(this));
         }
@@ -73,13 +124,21 @@ internal sealed class DeferredPieceStore : IDisposable
     {
         long end = checked(start + length);
         long bytes = 0;
-        foreach (var entry in _entries.Values)
+        foreach (var entry in _entries)
         {
-            if (includePiece != null && !includePiece(entry.Index)) continue;
+            if (includePiece != null && !includePiece(entry.Index))
+            {
+                continue;
+            }
+
             long pieceStart = (long)entry.Index * pieceSize;
             for (int i = 0; i < entry.Blocks.Length; i++)
             {
-                if (!entry.Blocks[i]) continue;
+                if (!entry.Blocks[i])
+                {
+                    continue;
+                }
+
                 long blockStart = pieceStart + (long)i * ProtocolConstants.BlockSize;
                 long blockEnd = Math.Min(blockStart + ProtocolConstants.BlockSize, pieceStart + entry.Length);
                 bytes += Math.Max(0, Math.Min(end, blockEnd) - Math.Max(start, blockStart));
@@ -92,13 +151,19 @@ internal sealed class DeferredPieceStore : IDisposable
     {
         lock (_lifetimeLock)
         {
-            if (_disposal.MarkDisposed()) Release();
+            if (_disposal.MarkDisposed())
+            {
+                Release();
+            }
         }
     }
 
     private void Release()
     {
-        if (Interlocked.Decrement(ref _references) == 0) _stream.Dispose();
+        if (Interlocked.Decrement(ref _references) == 0)
+        {
+            _stream.Dispose();
+        }
     }
 
     private void ReadExactly(Span<byte> destination, long offset)
@@ -106,7 +171,11 @@ internal sealed class DeferredPieceStore : IDisposable
         while (!destination.IsEmpty)
         {
             int read = RandomAccess.Read(_stream.SafeFileHandle, destination, offset);
-            if (read == 0) throw new EndOfStreamException("Deferred resume data was truncated.");
+            if (read == 0)
+            {
+                throw new EndOfStreamException("Deferred resume data was truncated.");
+            }
+
             offset += read;
             destination = destination[read..];
         }
@@ -139,7 +208,7 @@ internal sealed class DeferredPieceStore : IDisposable
         }
     }
 
-    private sealed record Entry(int Index, bool[] Blocks, long Offset, int Length);
+    private sealed record Entry(int Index, bool[] Blocks, long Offset, int Length, int ReceivedBlocks);
 
     private sealed class Lease(DeferredPieceStore store) : IDisposable
     {
@@ -147,7 +216,10 @@ internal sealed class DeferredPieceStore : IDisposable
         private AtomicDisposal _disposal = new();
         public void Dispose()
         {
-            if (_disposal.MarkDisposed()) _store.Release();
+            if (_disposal.MarkDisposed())
+            {
+                _store.Release();
+            }
         }
     }
 }

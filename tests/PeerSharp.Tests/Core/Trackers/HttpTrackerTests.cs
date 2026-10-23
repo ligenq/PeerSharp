@@ -13,6 +13,42 @@ namespace PeerSharp.Tests.Core.Trackers;
 
 public class HttpTrackerTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(31)]
+    public void I2pCompactPeersKeepCompleteDestinationsAndIgnoreATruncatedTail(int trailingBytes)
+    {
+        byte[] first = Enumerable.Repeat((byte)1, 32).ToArray();
+        byte[] second = Enumerable.Repeat((byte)2, 32).ToArray();
+        var body = new BDict();
+        body.Dict["peers"] = new BString([.. first, .. second, .. new byte[trailingBytes]]);
+        var result = HttpTracker.ParseResponse(BencodeWriter.Write(body), i2p: true);
+        Assert.Equal(new[] { I2pSamSession.HashToHostname(first), I2pSamSession.HashToHostname(second) }, result.I2pPeers);
+        Assert.Empty(result.Peers);
+    }
+
+    [Fact]
+    public void I2pDictionaryPeersSkipBadEntriesWithoutLosingTheValidDestinations()
+    {
+        const string first = "first.b32.i2p", second = "second.b32.i2p";
+        var peers = new BList();
+        foreach (string destination in new[] { "bad\nentry", first, "", new string('a', 1025), second })
+        {
+            var peer = new BDict();
+            peer.Dict["ip"] = new BString(Encoding.UTF8.GetBytes(destination));
+            peers.List.Add(peer);
+        }
+        peers.List.Add(new BNumber(7));
+        var body = new BDict();
+        body.Dict["interval"] = new BNumber(120);
+        body.Dict["peers"] = peers;
+        var result = HttpTracker.ParseResponse(BencodeWriter.Write(body), i2p: true);
+        Assert.Equal(new[] { first, second }, result.I2pPeers);
+        Assert.Equal(120u, result.Interval);
+        Assert.Empty(result.Peers);
+    }
+
     private sealed class TestPortListener(int port) : IPortListener
     {
         public int Port { get; } = port;

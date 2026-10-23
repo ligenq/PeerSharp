@@ -1,18 +1,22 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Xml.Linq;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using PeerSharp.PieceWriter;
 
 namespace PeerSharp.Tests.Core;
 
-// Total allocated bytes spans async continuations. Keep other test collections out of the measurement.
+// Allocation assertions run in a child process: collection isolation cannot exclude allocations
+// from a test runner, another assembly, or background work left by a previous test.
 [Collection("Concurrency")]
 public sealed class ResumePersistenceMemoryTests
 {
     [Fact(Timeout = 30000)]
     public async Task StreamingSaveDoesNotAllocateTheWholeOldOrNewResumeJson()
     {
+        if (await RunAllocationCheckInChildAsync(nameof(StreamingSaveDoesNotAllocateTheWholeOldOrNewResumeJson))) return;
         string root = NewRoot();
         try
         {
@@ -49,6 +53,7 @@ public sealed class ResumePersistenceMemoryTests
     [Fact(Timeout = 30000)]
     public async Task UpdatingOptionsCopiesLargeResumeDataWithBoundedManagedMemory()
     {
+        if (await RunAllocationCheckInChildAsync(nameof(UpdatingOptionsCopiesLargeResumeDataWithBoundedManagedMemory))) return;
         string root = NewRoot();
         try
         {
@@ -104,6 +109,60 @@ public sealed class ResumePersistenceMemoryTests
             Assert.Equal(1, saved.Options!.QueuePriority);
             Assert.Empty(Directory.EnumerateFiles(root, "*.tmp", SearchOption.AllDirectories));
             Assert.Single(Directory.EnumerateDirectories(Path.Combine(root, "torrents", hash.ToHexStringUpper())));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    private static async Task<bool> RunAllocationCheckInChildAsync(string method)
+    {
+        const string childVariable = "PEERSHARP_ISOLATED_ALLOCATION_TEST";
+        string test = typeof(ResumePersistenceMemoryTests).FullName + "." + method;
+        if (Environment.GetEnvironmentVariable(childVariable) == test) return false;
+
+        string root = NewRoot();
+        try
+        {
+            string report = Path.Combine(root, "result.xml");
+            var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            start.ArgumentList.Add(typeof(ResumePersistenceMemoryTests).Assembly.Location);
+            start.ArgumentList.Add("-noLogo");
+            start.ArgumentList.Add("-method");
+            start.ArgumentList.Add(test);
+            start.ArgumentList.Add("-result-xml");
+            start.ArgumentList.Add(report);
+            start.Environment[childVariable] = test;
+            using var child = Process.Start(start) ?? throw new InvalidOperationException("Could not start allocation test process.");
+            // Drain both pipes while the child runs; an assertion failure can produce substantial output.
+            Task<string> output = child.StandardOutput.ReadToEndAsync();
+            Task<string> errors = child.StandardError.ReadToEndAsync();
+            try
+            {
+                await child.WaitForExitAsync(TestContext.Current.CancellationToken);
+                string captured = await output + await errors;
+                TestContext.Current.TestOutputHelper!.WriteLine(captured);
+                Assert.True(child.ExitCode == 0, $"Isolated allocation check failed (exit {child.ExitCode}):\n{captured}");
+                // A successful runner exit with no discovered test must not pass this regression.
+                var assembly = Assert.Single(XDocument.Load(report).Root!.Elements("assembly"));
+                Assert.Equal("1", (string?)assembly.Attribute("total"));
+                Assert.Equal("1", (string?)assembly.Attribute("passed"));
+                var result = Assert.Single(assembly.Descendants("test"));
+                Assert.Equal(test, (string?)result.Attribute("type") + "." + (string?)result.Attribute("method"));
+                Assert.Equal("Pass", (string?)result.Attribute("result"));
+            }
+            finally
+            {
+                if (!child.HasExited) child.Kill(entireProcessTree: true);
+                await child.WaitForExitAsync(CancellationToken.None);
+                await Task.WhenAll(output, errors);
+            }
+            return true;
         }
         finally { Directory.Delete(root, recursive: true); }
     }

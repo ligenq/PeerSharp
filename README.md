@@ -1,4 +1,4 @@
-﻿<p align="center">
+<p align="center">
   <img src="https://raw.githubusercontent.com/ligenq/PeerSharp/main/src/PeerSharp/application-icon.png" alt="PeerSharp" width="128" />
 </p>
 
@@ -17,21 +17,21 @@ polling statistics, and proxy capability reporting.
 
 ## Key Features
 
-- **Full BEP Support:** Implements 35 BitTorrent Extension Protocols (see [Supported BEPs](#supported-beps)).
+- **BEP Support:** Implements the protocols listed under [Supported BEPs](#supported-beps).
 - **Hybrid Networking:** Native support for both TCP and uTP (BEP 29) with automatic congestion control.
 - **DHT & Peer Discovery:** Full Mainline DHT (BEP 5), Local Service Discovery (BEP 14), Peer Exchange (PEX), and UDP/HTTP Tracker support.
 - **Torrent Discovery:** Crawl the DHT for the info-hashes it knows about (BEP 51) and resolve them to names via BEP 9 — the building block for a search index.
 - **Magnet Links:** Fast metadata exchange (BEP 9) allowing torrent starts from magnet links alone, with metadata-only fetch for previewing the file list before downloading, and metadata export for caching.
-- **Self-Updating Torrents:** Mutable DHT records (BEP 44) and `xs=urn:btpk:` magnet links (BEP 46), so a publisher can release a new version under the same link and subscribers follow it automatically.
+- **Self-Updating Torrent Links:** Publish and resolve mutable DHT records (BEP 44) and `xs=urn:btpk:` magnet links (BEP 46). Applications decide when to switch downloads to a new version.
 - **BitTorrent v2 & Hybrid Torrents:** Parse, create, announce, and verify v2/hybrid torrents with BEP 52 file trees, piece layers, and Merkle proofs.
 - **Streaming Engine:** Integrated HTTP streaming server for real-time media playback while downloading.
-- **Protocol Encryption:** MSE (Message Stream Encryption) with configurable enforcement modes.
+- **Protocol Encryption:** MSE with RC4 or negotiated plaintext payloads and configurable enforcement.
 - **NAT Traversal:** UPnP, NAT-PMP, and Holepunch (BEP 55) for connectivity behind NATs.
 - **Bandwidth Control:** Per-torrent and global upload/download/disk I/O rate limiting.
 - **Proxy Support:** SOCKS5 and HTTP proxy support with authentication. Only SOCKS5 can carry UDP, so an HTTP proxy selected for that traffic makes DHT and uTP refuse to start and UDP tracker requests fail rather than send around it. SOCKS5 resolves UDP tracker names remotely. Proxied DHT bootstrap requires saved nodes or IP addresses in `Dht.BootstrapNodes`; hostname bootstrap is skipped to prevent local DNS leaks. WebTorrent sessions reject peer proxy configurations because the WebRTC adapter does not support proxy routing.
 - **IP Blocklist & GeoIP:** Block peers by IP range and label connected peers by country.
 - **One Error Model:** Everything the library reports as its own failure derives from `PeerSharpException`, so a malformed torrent, a refused tracker and an unwritable disk are told apart by type rather than by message.
-- **Optimized I/O:** Zero-copy Bencoding, pooled buffers, block caching, and asynchronous disk I/O designed for high-throughput scenarios.
+- **Optimized I/O:** Allocation-aware Bencoding, pooled buffers, block caching, and asynchronous disk I/O.
 - **Thoroughly Tested:** Property-based tests over the parsers, caches and schedulers, repeated concurrency stress over the shared-state paths, architecture tests for design integrity, fuzzing for robustness, byte-for-byte resume and interop checks against real clients, and [BenchmarkDotNet suites](https://github.com/ligenq/PeerSharp/blob/main/benchmarks/PeerSharp.Benchmarks/README.md) covering the engine's hot paths.
 
 ## Getting Started
@@ -39,7 +39,7 @@ polling statistics, and proxy capability reporting.
 ### Installation
 
 ```bash
-dotnet add package PeerSharp --version 5.1.0
+dotnet add package PeerSharp --version 5.2.0
 ```
 
 Requires .NET 10.0 or later.
@@ -49,7 +49,7 @@ Requires .NET 10.0 or later.
 Each GitHub release includes SPDX SBOMs for `PeerSharp` and `PeerSharp.WebTorrent` alongside the NuGet and symbol packages. Release packages have signed GitHub build-provenance and SBOM attestations. After downloading a package, verify its origin with the GitHub CLI:
 
 ```bash
-gh attestation verify PeerSharp.5.1.0.nupkg --repo ligenq/PeerSharp
+gh attestation verify PeerSharp.5.2.0.nupkg --repo ligenq/PeerSharp
 ```
 
 ### Basic Usage
@@ -60,7 +60,7 @@ using PeerSharp.Config;
 using PeerSharp.Core;
 
 // Initialize the engine
-var engine = ClientEngineFactory.Create();
+await using var engine = ClientEngineFactory.Create();
 await engine.InitializeAsync();
 
 // Add a torrent
@@ -116,6 +116,8 @@ Alerts and events tell an application what just happened. For what is happening 
 process, the engine publishes to a `Meter` named `PeerSharp`:
 
 ```csharp
+using PeerSharp.Diagnostics;
+
 builder.Services.AddOpenTelemetry()
     .WithMetrics(metrics => metrics.AddMeter(PeerSharpMetrics.MeterName));
 ```
@@ -130,18 +132,14 @@ builder.Services.AddOpenTelemetry()
 | `peersharp.torrents.active` | {torrent} | Downloading, checking or fetching metadata |
 | `peersharp.peers.connected` | {peer} | Connected peers across all torrents |
 
-Every instrument is observable, so nothing is measured until a collector asks and a process that never
-subscribes pays nothing — which is why there is no switch to turn this on. The gauges read the same
+Every instrument is observable: measurements are collected when a collector polls, with no separate
+enable switch. The gauges read the same
 aggregate `engine.GetStats()` returns, which describes the torrents present now. The two byte counters
 deliberately do not: they cover the engine's whole life, including torrents since removed, because a
 counter that falls when a torrent is removed reads to a metrics backend as a process restart.
 
 Measurements are tagged `peersharp.engine.id`, and each engine's meter carries the engine itself as
 `Meter.Scope`, so several engines in one process stay apart.
-
-Per-piece and per-connection outcomes are deliberately not here yet: they live inside per-torrent
-components with no route to engine-level state, and adding them means plumbing rather than another
-observable instrument.
 
 ### Previewing Magnet Links Before Downloading
 
@@ -226,11 +224,9 @@ Notes:
   do with partially downloaded data from the previous version is an application decision.
 - One identity can publish several torrents by passing a salt to both `ToMagnetLink` and
   `PublishSelfUpdatingTorrentAsync`.
-- Interoperability is verified two ways: byte-for-byte against BEP 44's published test vectors,
-  and against the live Mainline DHT. A survey of 105 walked nodes found 69% answer BEP 44 `get`
-  and every one of those issues a write token; 7.6% return `204 Method Unknown`. See
-  `tests/PeerSharp.Tests/Interop`, which is excluded from CI and gated on `PEERSHARP_INTEROP=1`.
-- A fresh node's routing table commonly takes around 30 seconds to become usable. Publishing waits
+- Tests cover BEP 44's published test vectors. Live Mainline DHT tests are opt-in with
+  `PEERSHARP_INTEROP=1`; see [tests/README.md](tests/README.md).
+- A fresh node's routing table may need time to become usable. Publishing waits
   for six active lookup candidates (up to two minutes, or until its cancellation token is
   cancelled) before reading the current version and writing the update. Resolving remains a
   best-effort lookup and can return null while the table is still cold.
@@ -287,10 +283,8 @@ Notes:
   pre-BEP 51 node. It discloses nothing new — the same hashes are obtainable by asking us `get_peers`
   — but indexing is a choice an operator may want to opt out of. The subset offered is stable for the
   interval advertised and rotates afterwards, and the reported interval counts down to that rotation.
-- Interoperability is verified against the live Mainline DHT: of 55 walked nodes, 87% answered
-  `sample_infohashes` (notably better than the 69% BEP 44 `get` support measured above), 13 had
-  hashes to give, and observed intervals spanned the full permitted 0–21600s range. See
-  `tests/PeerSharp.Tests/Interop`, excluded from CI and gated on `PEERSHARP_INTEROP=1`.
+- Live sampling tests are opt-in with `PEERSHARP_INTEROP=1`; see
+  [tests/README.md](tests/README.md). Availability depends on the nodes reached during a run.
 
 ### Managing a Running Torrent
 
@@ -367,6 +361,76 @@ server.Start();
 // Give the player server.Url, and a cast receiver server.ContentType as well.
 ```
 
+### MSE payload modes
+
+`settings.Connection.Encryption` controls which connections are permitted:
+
+- `Allow` supports ordinary plaintext connections and MSE with either RC4 or plaintext payloads.
+- `Require` permits MSE with RC4-encrypted payloads only.
+- `Refuse` uses ordinary plaintext connections and declines MSE.
+
+The MSE handshake and its initial payload use RC4 in both negotiated modes. Afterward, payloads
+follow the selected mode. With the default `PreferRc4 = true`, outgoing MSE offers RC4 only and
+incoming MSE selects RC4 whenever the peer offers it. Set `settings.Connection.PreferRc4 = false`
+under `Allow` to offer both outgoing methods and prefer plaintext on incoming handshakes. The
+remote peer chooses among the outgoing offer. `PreferRc4` does not weaken `Require`, and `Allow`
+can still fall back to an ordinary plaintext connection. These settings apply to new handshakes.
+
+Incoming and outgoing policies can be set independently. A null override follows `Encryption`, so
+existing configurations keep their behavior:
+
+```csharp
+settings.Connection.OutgoingEncryption = Encryption.Require;
+settings.Connection.IncomingEncryption = Encryption.Allow;
+```
+
+### HTTP seeds, SSL torrents and I2P
+
+BEP 17 `httpseeds` endpoints are supported alongside BEP 19 `url-list` file mirrors. They use
+separate request formats: HTTP seeds receive the info hash, piece index and piece-relative ranges.
+Server retry intervals are honored, and downloaded pieces undergo the normal hash verification.
+`TorrentFile.HttpSeeds` exposes these endpoints; `WebSeeds` continues to expose BEP 19 file URLs.
+
+SSL torrents containing an `info["ssl-cert"]` CA require mutually authenticated TLS on every peer
+connection, over TCP or uTP. Supply a certificate with its private key when adding the torrent:
+
+```csharp
+using System.Security.Cryptography.X509Certificates;
+
+using var certificate = X509Certificate2.CreateFromPemFile("peer.pem", "peer-key.pem");
+var torrent = await client.AddTorrentAsync(torrentFile,
+    new AddTorrentOptions { SslCertificate = certificate });
+```
+
+The client copies and owns its certificate. Both peers must have a certificate issued by the
+embedded CA, with a DNS subject alternative name matching the torrent name exactly, or `*`.
+A common name is accepted when no DNS alternative name exists. Incoming TLS uses the info hash
+in SNI to select the torrent; ordinary peer connections cannot bypass certificate authentication.
+TLS connections use the existing peer listener ports. Certificates and private keys are not saved
+in resume/session files: pass the credentials again when adding an SSL torrent after restart.
+MSE policy applies to ordinary torrents; SSL torrents always use TLS.
+
+For torrents with an I2P tracker, configure a running router's SAM bridge:
+
+```csharp
+settings.Connection.I2pSamHost = "127.0.0.1";
+settings.Connection.I2pSamPort = 7656;
+```
+
+One SAM 3.1 STREAM session per engine carries HTTP tracker announces and incoming/outgoing peer
+streams. Compact destination hashes and non-compact destination lists are supported. The router
+performs I2P name lookups. Java I2P users must enable SAM in their router; i2pd normally enables it.
+I2P torrents keep ordinary IP peers, public trackers, DHT, local discovery, IP peer exchange and
+file web seeds out of their traffic by default. `I2pAllowMixedNetworks` explicitly permits ordinary
+IP peers and trackers. I2P datagram trackers, I2P DHT and `i2p_pex` are not implemented.
+
+SSL torrent tests use PeerSharp peers with real TLS sockets, and I2P tests use a simulated SAM
+router. Compatibility with external SSL peers and live Java I2P/i2pd networks has not been validated.
+
+Magnet metadata accepts up to 30 MiB by default, matching libtorrent 2.0.11. Adjust
+`settings.Transfer.MaxMetadataSizeBytes` for the deployment. Torrent parsing uses a separate,
+bounded metadata profile, so large piece-hash strings do not hit ordinary peer-message limits.
+
 ### Adding Peers Directly
 
 Discovery finds peers on its own, but some are only reachable if you say so — a machine on the same
@@ -401,7 +465,7 @@ magnet's metadata fetch and stop, `--run-for <s>` for an unattended run that exi
 PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
 
 ```bash
-dotnet add package PeerSharp.WebTorrent --version 5.1.0
+dotnet add package PeerSharp.WebTorrent --version 5.2.0
 ```
 
 ```csharp
@@ -437,11 +501,26 @@ Notes for production use:
 
 ## Testing
 
-Unit, integration, architecture and property-based tests run on every build and need no setup.
+Unit, integration, architecture and property-based tests run in CI. To run the core suite locally,
+use the SDK selected by `global.json` (10.0.400 or a compatible patch):
+
+```shell
+dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj --configuration Release
+```
+
 The suites that need more - coverage-guided fuzzing, interop against real client binaries, live
 DHT probes, and soak runs against a real swarm - are described in
 [tests/README.md](https://github.com/ligenq/PeerSharp/blob/main/tests/README.md), along with how
 to read what they report.
+
+For repeatable traffic correctness checks over real loopback sockets, run
+`./tools/Invoke-TrafficAudit.ps1 -Repeat 3` in PowerShell. See the
+[traffic audit guide](tools/TRAFFIC-AUDIT.md) for saved transcripts, extended scenarios, and packet-capture instructions.
+On Windows with Npcap/Wireshark, add `-CapturePackets` to retain loopback PCAPNG files and decoded
+packet summaries alongside those checks.
+
+For a bounded public-swarm capture using a torrent you supply, including a uTP-only run, see
+the [live traffic audit guide](tools/LIVE-TRAFFIC-AUDIT.md). This requires Windows and Npcap/Wireshark.
 
 ### Development quality gates
 
@@ -450,11 +529,11 @@ audits direct and transitive NuGet dependencies during restore, and verifies for
 Pull requests build and test on Linux and Windows, publish Cobertura coverage with an 80% line and
 branch floor for each shipping assembly, validate trimmed output, replay the fuzz corpus, and keep
 every benchmark fixture executable. CodeQL and dependency review cover code and supply-chain
-changes; scheduled workflows run mutation analysis, bounded fuzzing, and real-client
-interoperability.
+changes. Bounded fuzzing, real-client interoperability and mutation analysis run through manual
+workflow triggers. CodeQL also runs on pushes and pull requests.
 
-Shipping packages are validated against the latest stable NuGet release in addition to the
-approved public-API snapshot. Before opening a pull request, run at least:
+Shipping packages are validated against the NuGet baseline configured in each package project
+and the approved public-API snapshot. Before opening a pull request, run at least:
 
 ```powershell
 dotnet restore PeerSharp.slnx
@@ -465,9 +544,6 @@ dotnet test --project tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Test
 dotnet pack src/PeerSharp/PeerSharp.csproj --configuration Release
 dotnet pack src/PeerSharp.WebTorrent/PeerSharp.WebTorrent.csproj --configuration Release
 ```
-
-Configure the `main` branch ruleset to require the stable `CI` check, CodeQL and dependency review,
-require code-owner review and resolved conversations, block force pushes, and disallow bypasses.
 
 ## Supported BEPs
 
@@ -486,7 +562,7 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 14  | Local Service Discovery | Supported |
 | 15  | UDP Tracker Protocol | Supported |
 | 16  | Superseeding | Supported, via `ITorrent.SuperSeeding` or `AddTorrentOptions.SuperSeeding` |
-| 19  | WebSeed - HTTP/FTP Seeding (GetRight style) | Supported |
+| 19  | WebSeed - HTTP/FTP Seeding (GetRight style) | HTTP/HTTPS web seeds supported; FTP is not supported |
 | 20  | Peer ID Conventions | Supported |
 | 21  | Extension for Partial Seeds | Supported, `upload_only` plus `event=paused` while a partial seed |
 | 23  | Tracker Returns Compact Peer Lists | Supported |
@@ -511,32 +587,6 @@ PeerSharp aims for high compatibility with the BitTorrent ecosystem:
 | 54  | The lt_donthave Extension | Supported, sent when a piece turns out to be unreadable |
 | 55  | Holepunch Extension | Supported |
 
-### Deliberate non-goals
-
-Every other BEP on bittorrent.org is an omission on purpose, not a gap. Those marked *deferred* are the
-ones the BEP editors themselves record as no longer progressing toward standardization; the rest are
-live drafts we chose not to implement.
-
-| BEP | Title | Why not |
-|-----|-------|---------|
-| 8   | Tracker Peer Obfuscation *(deferred)* | RC4 keyed on the info-hash, a value every participant already holds — the BEP is explicit that it is obfuscation, not security. An `https://` announce URL does the job properly and already works, with MSE covering peer connections. Also needs tracker-side support that essentially nothing deploys |
-| 17  | HTTP Seeding (Hoffman-style) | Needs a server-side script speaking its own query format; effectively nothing deploys it, and every web seed in the wild is reachable through BEP 19 above |
-| 18  | Search Engine Specification *(deferred)* | An OpenSearch-subset XML file describing a search provider for a client's search box. UI scope, not engine scope — and a consumer can parse `.btsearch` with `System.Xml` in a few lines |
-| 22  | Local Tracker Discovery *(deferred)* | Requires ISPs to publish SRV records under their reverse-DNS domains, which never happened. Were it working, it would announce to a tracker chosen automatically by the network rather than by the user, so it would belong behind an explicit opt-in regardless |
-| 26  | Zeroconf Peer Advertising *(deferred)* | The same LAN discovery job as BEP 14 above, but delegated to a Bonjour/Avahi daemon — a platform dependency where the current LSD is self-contained multicast. Its browsable registry also lets a device enumerate what a host shares retroactively, where LSD only reaches whoever was listening |
-| 28  | Tracker Exchange *(deferred)* | The closest call of these. It is genuinely deployed (libtorrent) and would be cheap here — BEP 10, BEP 12 tiers, `MagnetTrackerMerger` and the circuit breaker are all in place. But a peer-supplied announce URL lets a stranger make us disclose our IP and info-hash to a server of their choosing, and the BEP resolves that with nothing firmer than "a certain amount of suspicion". BEP 27 also excludes private torrents, which is the population that most wants it. Revisit only as opt-in, off by default, capped, and never propagating a tracker that has not worked for us |
-| 34  | DNS Tracker Preferences | Requires tracker operators to publish DNS records; essentially none do |
-| 35  | Torrent Signing | Never deployed. BEP 46 covers the "is this really from the publisher" need with Ed25519 |
-| 36  | Torrent RSS Feeds | Not a wire protocol — an application fetching XML. Belongs above a library, not inside one |
-| 38  | Finding Local Data Via Torrent File Hints | Not ruled out. Worth it only if publishing related torrents is a use case; the matching half needs a local cross-torrent file search |
-| 39  | Updating Torrents Via Feed URL | The feed-based predecessor to BEP 46, which is implemented instead |
-| 45  | Multiple-address Operation for the DHT | IPv4/IPv6 is already covered by BEP 32; this only pays off on genuinely multi-homed hosts |
-| 49  | Distributed Torrent Feeds | Buildable on the BEP 44/46 foundation here, but near-zero deployment means defining an ecosystem rather than joining one |
-| 50  | Publish/Subscribe Protocol | As above, and less finished |
-
-BEPs 0, 1, 2 and 1000 are process documents. BEP 4 is a number registry rather than a feature, and the
-reserved bits and extension message ids used here follow it.
-
 ### A note on BEP 41 and packet size
 
 BEP 41 makes UDP announces longer than the 98 bytes of BEP 15 alone. That is the extension point the
@@ -553,10 +603,7 @@ changed, with the upgrade notes first — the behaviour that moves without a sig
 ## Known Gaps
 
 [FUTURE_IMPROVEMENTS.md](https://github.com/ligenq/PeerSharp/blob/main/FUTURE_IMPROVEMENTS.md)
-records work that was identified and measured but
-deliberately not done — where PeerSharp is known to leave something on the table, what was observed,
-and what would settle each question. Nothing there produces wrong results; it is the difference between
-what the engine does and what it could do.
+tracks deferred work and the evidence or consumer requirements needed before implementing it.
 
 ## Architecture
 

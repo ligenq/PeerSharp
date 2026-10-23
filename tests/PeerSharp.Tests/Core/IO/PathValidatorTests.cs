@@ -4,6 +4,18 @@ namespace PeerSharp.Tests.Core.IO;
 
 public class PathValidatorTests
 {
+    [Fact]
+    public void ValidatePath_DriveRoot_RemainsAnAbsoluteRoot()
+    {
+        string root = Path.GetPathRoot(Path.GetFullPath("."))!;
+        var validator = new PathValidator(root);
+
+        var result = validator.ValidatePath("root-download.bin");
+
+        Assert.True(result.IsValid);
+        Assert.Equal(Path.Combine(root, "root-download.bin"), result.SanitizedPath);
+    }
+
     private readonly string _rootPath;
     private readonly PathValidator _validator;
 

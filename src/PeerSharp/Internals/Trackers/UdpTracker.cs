@@ -28,6 +28,11 @@ internal class UdpTracker : TrackerBase, IDisposable
     private readonly Func<string, CancellationToken, Task<IPAddress[]>> _resolveAddressesAsync;
 
     private readonly SemaphoreSlim _syncLock = new(1, 1);
+    private readonly Lock _lifetimeLock = new();
+    private readonly CancellationTokenSource _operationStop = new();
+    // Includes operations waiting for _syncLock. Their cancellation must finish before its disposal.
+    private int _operations;
+    private bool _resetRequested;
 
     private readonly TimeProvider _timeProvider;
     private IUdpSocket? _client;
@@ -99,12 +104,15 @@ internal class UdpTracker : TrackerBase, IDisposable
 
     public override async Task AnnounceAsync(TrackerEvent evt, CancellationToken ct)
     {
-        await _syncLock.WaitAsync(ct).ConfigureAwait(false);
+        using var operation = await EnterOperationAsync(ct).ConfigureAwait(false);
+        ct = operation.Token;
         try
         {
+            ct.ThrowIfCancellationRequested();
             var responses = new List<AnnounceResponse>();
             var errors = new List<Exception>();
             var families = await GetReachableAddressFamiliesAsync(ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
             if (families.Count == 0)
             {
                 // Known before sending anything, so it is reported as the result it is rather than thrown
@@ -156,7 +164,7 @@ internal class UdpTracker : TrackerBase, IDisposable
         finally
         {
             _requestedAddressFamily = null;
-            _syncLock.Release();
+            ExitOperation(lockHeld: true);
         }
     }
 
@@ -198,7 +206,12 @@ internal class UdpTracker : TrackerBase, IDisposable
     // Exponential backoff
     public override void Deinit()
     {
-        ResetClientUnsafe();
+        lock (_lifetimeLock)
+        {
+            if (_disposal.IsDisposed) return;
+            if (_operations == 0) ResetClientUnsafe();
+            else _resetRequested = true;
+        }
     }
 
     /// <summary>
@@ -293,9 +306,11 @@ internal class UdpTracker : TrackerBase, IDisposable
 
     public override async Task ScrapeAsync(CancellationToken ct)
     {
-        await _syncLock.WaitAsync(ct).ConfigureAwait(false);
+        using var operation = await EnterOperationAsync(ct).ConfigureAwait(false);
+        ct = operation.Token;
         try
         {
+            ct.ThrowIfCancellationRequested();
             // Retry logic for transient failures
             Exception? lastException = null;
             for (int attempt = 0; attempt <= MaxRetries; attempt++)
@@ -355,7 +370,7 @@ internal class UdpTracker : TrackerBase, IDisposable
         }
         finally
         {
-            _syncLock.Release();
+            ExitOperation(lockHeld: true);
         }
     }
 
@@ -376,9 +391,11 @@ internal class UdpTracker : TrackerBase, IDisposable
             return;
         }
 
-        await _syncLock.WaitAsync(ct).ConfigureAwait(false);
+        using var operation = await EnterOperationAsync(ct).ConfigureAwait(false);
+        ct = operation.Token;
         try
         {
+            ct.ThrowIfCancellationRequested();
             Exception? lastException = null;
             for (int attempt = 0; attempt <= MaxRetries; attempt++)
             {
@@ -445,7 +462,7 @@ internal class UdpTracker : TrackerBase, IDisposable
         }
         finally
         {
-            _syncLock.Release();
+            ExitOperation(lockHeld: true);
         }
     }
 
@@ -460,9 +477,11 @@ internal class UdpTracker : TrackerBase, IDisposable
             return new MultiScrapeResponse();
         }
 
-        await _syncLock.WaitAsync(ct).ConfigureAwait(false);
+        using var operation = await EnterOperationAsync(ct).ConfigureAwait(false);
+        ct = operation.Token;
         try
         {
+            ct.ThrowIfCancellationRequested();
             Exception? lastException = null;
             for (int attempt = 0; attempt <= MaxRetries; attempt++)
             {
@@ -502,6 +521,10 @@ internal class UdpTracker : TrackerBase, IDisposable
             _logger.LogError(lastException, "Tracker {Url} multi-scrape failed after {MaxRetries} retries", Url, MaxRetries);
             return new MultiScrapeResponse();
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             _connectionId = 0;
@@ -510,7 +533,7 @@ internal class UdpTracker : TrackerBase, IDisposable
         }
         finally
         {
-            _syncLock.Release();
+            ExitOperation(lockHeld: true);
         }
     }
 
@@ -521,10 +544,67 @@ internal class UdpTracker : TrackerBase, IDisposable
 
     protected virtual void Dispose(bool disposing)
     {
-        if (_disposal.MarkDisposed() && disposing)
+        if (!disposing) return;
+        lock (_lifetimeLock)
         {
-            Deinit();
-            _syncLock.Dispose();
+            if (!_disposal.MarkDisposed()) return;
+            // Keep a reference until Cancel has returned, even if cancellation completes every
+            // operation synchronously. CancellationTokenSource.Dispose must not race Cancel.
+            _operations++;
+        }
+        try { _operationStop.Cancel(); }
+        finally { ExitOperation(lockHeld: false); }
+    }
+
+    private async Task<CancellationTokenSource> EnterOperationAsync(CancellationToken ct)
+    {
+        CancellationTokenSource operation;
+        lock (_lifetimeLock)
+        {
+            _disposal.ThrowIfDisposed(this);
+            operation = CancellationTokenSource.CreateLinkedTokenSource(ct, _operationStop.Token);
+            _operations++;
+        }
+        try
+        {
+            await _syncLock.WaitAsync(operation.Token).ConfigureAwait(false);
+            return operation;
+        }
+        catch
+        {
+            operation.Dispose();
+            ExitOperation(lockHeld: false);
+            throw;
+        }
+    }
+
+    private void ExitOperation(bool lockHeld)
+    {
+        lock (_lifetimeLock)
+        {
+            try
+            {
+                // Deinit may be called while a request is using the socket. Reset it before
+                // releasing the request lock so the next operation starts with a fresh connection.
+                if (_resetRequested && (lockHeld || _operations == 1))
+                {
+                    _resetRequested = false;
+                    ResetClientUnsafe();
+                }
+            }
+            finally
+            {
+                if (lockHeld) _syncLock.Release();
+                if (--_operations == 0 && _disposal.IsDisposed)
+                {
+                    try { ResetClientUnsafe(); }
+                    finally
+                    {
+                        _syncLock.Dispose();
+                        _operationStop.Dispose();
+                    }
+                }
+            }
         }
     }
 
@@ -571,6 +651,7 @@ internal class UdpTracker : TrackerBase, IDisposable
 
     private async Task EnsureConnectedAsyncUnsafeAsync(CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         if (_client == null)
         {
             var uri = new Uri(Url);
@@ -618,6 +699,7 @@ internal class UdpTracker : TrackerBase, IDisposable
                 else
                 {
                     var ips = await _resolveAddressesAsync(uri.Host, ct).ConfigureAwait(false);
+                    ct.ThrowIfCancellationRequested();
                     if (ips.Length == 0)
                     {
                         throw new UdpTrackerException($"DNS resolution failed: no addresses found for {uri.Host}", isTransient: true);

@@ -55,9 +55,18 @@ This is a warm-cache, same-machine ceiling, not a WAN or libtorrent interoperabi
 Payloads and results are retained under the printed `artifacts/transport-loopback` directory;
 the default run uses about 3.25 GiB. A timeout or hash mismatch fails the command.
 
-See [the uTP investigation](UTP-INVESTIGATION.md) for the initial measurements and recovery fixes.
-See [the allocation investigation](ALLOCATION-PROFILING.md) for the read-ahead buffer and request-map
-changes, verified transfer comparisons, and profiling commands.
+For allocation diagnostics, collect a separate trace from a preserved Release build:
+
+```powershell
+dotnet-trace collect --profile dotnet-sampled-thread-time,gc-verbose --buffersize 64 `
+  --output transfer.nettrace --show-child-io -- `
+  dotnet benchmarks/PeerSharp.Benchmarks/bin/Release/net10.0/PeerSharp.Benchmarks.dll --loopback 128 2 both
+```
+
+Tracing changes timing; use untraced runs for speed comparisons. Preserve separate output
+directories for before/after measurements so rebuilding does not replace the baseline DLL.
+`BlockCacheBenchmarks.ReadMiss` isolates cache/read-ahead overhead with synchronous fake storage;
+its allocation figures exclude physical disk latency.
 
 ### Microbenchmarks
 

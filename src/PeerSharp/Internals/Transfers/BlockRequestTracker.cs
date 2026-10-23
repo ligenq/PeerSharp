@@ -10,7 +10,7 @@ internal sealed class PeerRequestCollection
     private readonly ConcurrentDictionary<(int Piece, int Offset), BlockRequest> _requests = new(concurrencyLevel: 1, capacity: 31);
 
     public int Count => _requests.Count;
-    public bool IsEmpty => Count == 0;
+    public bool IsEmpty => _requests.IsEmpty;
 
     public ICollection<(int Piece, int Offset)> Keys => _requests.Keys;
 

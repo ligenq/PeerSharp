@@ -1,9 +1,64 @@
-﻿# Changelog
+# Changelog
 
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
-## Unreleased
+## 5.2.0 — 2026-10-23
+
+Lower memory use for resume persistence and streaming, broader protocol compatibility, and fixes
+for transfer integrity and connection lifecycles. Binary compatible with 5.1.0.
+
+SSL torrent coverage uses PeerSharp peers with real TLS sockets; I2P coverage uses a simulated SAM
+router. External SSL peers and live Java I2P/i2pd networks have not been validated.
+
+- Explicitly null unfinished-piece lists in resume JSON are treated as empty, preserving valid
+  saved state and allowing both normal and deferred restoration to start safely.
+- Deferred peer bitfields scale with the configured metadata budget (192 KiB for the default
+  30 MiB), while retaining a hard wire-message bound. I2P tracker responses keep valid destinations
+  when another entry or the compact list's trailing bytes are malformed. Rejected I2P TLS
+  connections dispose their TLS and SAM resources exactly once.
+
+- Incoming uTP connections that close during the TLS probe are refused without throwing an
+  end-of-stream exception. UDP tracker disposal cancels active and queued requests before releasing
+  their sockets and synchronization resources, preventing disposed-semaphore races.
+- I2P classification follows tracker replacements even when the announce-list length stays the
+  same, preserving the network-isolation policy after tracker edits.
+
+- Hybrid uploads accept v1 requests that include alignment padding and explicitly zero those bytes.
+  Hybrid padding is served after a v2 handshake upgrade too; pure v2 requests keep content bounds.
+- Incoming and outgoing MSE policies can be overridden separately with `IncomingEncryption` and
+  `OutgoingEncryption`. Existing `Encryption` settings remain the fallback for both directions.
+- Magnet metadata accepts 30 MiB by default, with a separate bounded torrent parser profile.
+  Downloaded info bytes must match every known hash before parsing. Multi-block metadata exchange
+  is covered against libtorrent in both directions.
+- BEP 17 HTTP seeds use piece queries and honor server retry intervals. SSL torrents authenticate
+  both peers against their embedded CA over TCP/uTP; supply `AddTorrentOptions.SslCertificate`.
+  I2P torrents can use a shared SAM 3.1 session for HTTP trackers and peer streams, with ordinary
+  network traffic blocked by default. These transports require the corresponding certificate or
+  an enabled SAM bridge; private credentials are not stored in session files.
+
+- MSE handshakes can negotiate plaintext payloads under `Encryption.Allow`; `Encryption.Require`
+  continues to allow RC4 payloads only. `ConnectionSettings.PreferRc4` defaults to true: outgoing
+  MSE offers RC4 only, preserving the previous default, and incoming MSE prefers RC4. Setting it
+  false under Allow offers both outgoing methods and prefers incoming plaintext payloads.
+  Reconnect history retains MSE support in either mode.
+
+- Transfer shutdown waits for piece workers before releasing pooled buffers, and cancelled writes
+  cannot publish completed pieces. Encryption handshakes validate cipher negotiation and padding;
+  malformed Merkle messages and torrent sizes cannot wrap into valid piece indexes. Download paths
+  rooted directly at a filesystem drive are validated correctly.
+
+- Immediate resume restoration loads partial pieces directly into memory, avoiding a temporary-file
+  round trip. Stopped restores retain private temporary storage; on Unix it is unlinked immediately
+  so abrupt termination cannot leave the payload behind. Rechecks exclude verified pieces from
+  partial-progress counts and resume exports, and malformed resume warnings include their geometry.
+  Deferred autosaves reuse their stored completion order and write chunked JSON through synchronous
+  file handles, avoiding per-chunk overlapped-I/O waits on Windows.
+
+- Piece availability counts each connection once, even after repeated HAVE announcements, and
+  follows lt_donthave retractions. Disconnect removes exactly the connection's recorded contribution,
+  including when updates race with shutdown. A repeatable real-socket traffic audit retains message
+  transcripts and checks availability and upload responses (`tools/Invoke-TrafficAudit.ps1`).
 
 - Read-ahead reuses bounded buffers sized for its full window, avoiding a new large array on
   every prefetch. Request tracking uses smaller concurrent dictionaries for the usual single-peer
@@ -13,6 +68,7 @@ history has the reasoning and the measurements behind each one.
   data in bounded chunks. Updating a snapshot copies unchanged files directly, avoiding a second
   large resume allocation just to merge the previous entry. The resume format and custom
   `ISessionPersistence` contract remain compatible.
+
 - Restored stopped torrents keep unfinished-piece data in private temporary files until started.
   Their progress and exported resume data remain available, with snapshot leases protecting data
   during concurrent saves and starts. Temporary storage is released on start or disposal; if it
@@ -876,9 +932,7 @@ new member.
 Verified against Transmission 4.1.3 and qBittorrent, 64 MiB over MSE on loopback. PeerSharp to
 qBittorrent 108.2 MiB/s, qBittorrent to PeerSharp 64.0 MiB/s, PeerSharp to Transmission 31.6 MiB/s.
 Leeching from a stock Transmission 4.1.3 on Windows measures 0.5 MiB/s because of an upstream
-send-buffer bug, fixed upstream on `main` and documented in
-[`INVESTIGATION_NOTES.md`](INVESTIGATION_NOTES.md); against a patched
-build it is 196.5 MiB/s.
+send-buffer bug, fixed upstream on `main`; against a patched build it is 196.5 MiB/s.
 
 ## 3.0.0
 

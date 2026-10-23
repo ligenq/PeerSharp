@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
 using System.Collections;
+using System.Security.Cryptography;
 
 using PeerSharp.Exceptions;
 
@@ -248,6 +249,19 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
 
             if (_receivedPieces.Cast<bool>().All(b => b)) // All pieces received
             {
+                // SECURITY: authenticate the raw bytes before anything parses them. The buffer is
+                // exactly the bencoded info dictionary, so the v1 info hash is its SHA-1 and the v2
+                // info hash its SHA-256 - no parse is needed to tell whether these are the bytes we
+                // asked for. Doing it in this order keeps a peer from spending the parser's element
+                // and allocation budget (tens of megabytes of metadata under the torrent limits) on
+                // bytes that were never going to be accepted.
+                if (!RawMetadataHashMatches())
+                {
+                    _logger.LogWarning("Downloaded metadata hash does not match expected hash. Discarding metadata.");
+                    RejectCompletedMetadata();
+                    return;
+                }
+
                 // Reconstruct TorrentFileMetadata from raw info dictionary bytes
                 TorrentFileMetadata newMetadata;
                 try
@@ -261,7 +275,10 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
                     return;
                 }
 
-                // SECURITY: Verify the downloaded metadata hash matches the requested hash.
+                // SECURITY: Verify the downloaded metadata hash matches the requested hash. The raw
+                // bytes were already checked above; this asks the same question of the parsed
+                // result, so a parser that ever reported a hash other than the one its input
+                // bencodes cannot smuggle metadata past the first check.
                 // Require at least one expected hash to be present: with no known hash we
                 // cannot authenticate attacker-supplied metadata, so it must be rejected
                 // rather than accepted unverified.
@@ -949,6 +966,44 @@ internal class MetadataDownload : IMetadataDownload, IDisposable
     /// is exactly the set that produced the failing hash.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Whether the assembled buffer hashes to an info hash this torrent was added with.
+    /// </summary>
+    /// <remarks>
+    /// The buffer holds the bencoded info dictionary and nothing else, so its SHA-1 is the v1 info
+    /// hash and its SHA-256 the v2 one. A torrent that knows neither hash cannot authenticate
+    /// anything a peer sends it, so this answers no rather than trusting the bytes.
+    /// </remarks>
+    private bool RawMetadataHashMatches()
+    {
+        var expected = _torrent.InfoFile.Info;
+        if (expected.Hash.IsEmpty && expected.HashV2.IsEmpty)
+        {
+            return false;
+        }
+
+        Span<byte> digest = stackalloc byte[InfoHash.V2Length];
+        if (!expected.Hash.IsEmpty)
+        {
+            int written = SHA1.HashData(_metadataBuffer, digest);
+            if (!digest[..written].SequenceEqual(expected.Hash.Span))
+            {
+                return false;
+            }
+        }
+
+        if (!expected.HashV2.IsEmpty)
+        {
+            int written = SHA256.HashData(_metadataBuffer, digest);
+            if (!digest[..written].SequenceEqual(expected.HashV2.Span))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private void RejectCompletedMetadata()
     {
         var suppliers = _pieceSuppliers.Values.Distinct().ToList();

@@ -12,7 +12,6 @@ namespace PeerSharp.Tests.Concurrency;
 /// the scenario's; and Coyote 1.7.11 does not model <see cref="Lock"/>, which this engine uses
 /// almost everywhere, so a critical section guarded by one is atomic as far as the explorer is
 /// concerned. A test passed against an implementation with its synchronisation deleted outright.
-/// The measurements are in <c>INVESTIGATION_NOTES.md</c>.
 /// </para>
 ///
 /// <para>

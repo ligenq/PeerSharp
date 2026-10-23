@@ -93,13 +93,16 @@ internal class UtHashPiece : IUtHashPiece
                 return;
             }
 
-            int msgType = (int)(dict.GetLong("msg_type") ?? -1);
-            int pieceIndex = (int)(dict.GetLong("piece") ?? -1);
+            long messageTypeValue = dict.GetLong("msg_type") ?? -1;
+            long pieceIndexValue = dict.GetLong("piece") ?? -1;
 
-            if (pieceIndex < 0 || pieceIndex >= _merkleTree.PieceCount)
+            if (messageTypeValue is < 0 or > 1 || pieceIndexValue < 0 || pieceIndexValue >= _merkleTree.PieceCount)
             {
                 return;
             }
+
+            int msgType = (int)messageTypeValue;
+            int pieceIndex = (int)pieceIndexValue;
 
             switch (msgType)
             {
