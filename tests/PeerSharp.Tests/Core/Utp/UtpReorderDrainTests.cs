@@ -2,6 +2,7 @@ using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utp;
 using System.Buffers.Binary;
+using System.IO.Pipelines;
 using System.Net;
 using System.Reflection;
 
@@ -67,7 +68,25 @@ public class UtpReorderDrainTests
         var (stream, _) = Connected();
         using (stream)
         {
-            for (int i = 0; i < Packets; i++)
+            // Block the pipe writer before filling its channel. If it starts only after the
+            // channel fills, it can consume part of that channel and then block at a count
+            // below 1000, leaving the old setup waiting for a count it can never reach.
+            int pipePackets = (int)((PipeOptions.Default.PauseWriterThreshold + Payload - 1) / Payload);
+            for (int i = 0; i < pipePackets; i++)
+            {
+                Data(stream, Seq(i));
+            }
+
+            var pipe = (Pipe)typeof(UtpStream).GetField("_pipe", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(stream)!;
+            await TorrentTestUtility.WaitUntilAsync(() =>
+            {
+                if (!pipe.Reader.TryRead(out var result)) return false;
+                bool full = result.Buffer.Length >= PipeOptions.Default.PauseWriterThreshold;
+                pipe.Reader.AdvanceTo(result.Buffer.Start, result.Buffer.Start);
+                return full;
+            });
+
+            for (int i = pipePackets; i < Packets; i++)
             {
                 Data(stream, Seq(i));
             }
