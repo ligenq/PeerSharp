@@ -299,11 +299,13 @@ public class UdpTrackerTests
         public ScrapeResponse? ScrapeResponse { get; private set; }
         public MultiScrapeResponse? MultiScrapeResponse { get; private set; }
         public string? AnnounceErrorMessage { get; private set; }
+        public Action? AfterAnnounce { get; init; }
         public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null)
         {
             Success = success;
             AnnounceResponse = response;
             AnnounceErrorMessage = errorMessage;
+            AfterAnnounce?.Invoke();
         }
 
         public void OnMultiScrapeResult(bool success, MultiScrapeResponse response, ITracker tracker)
@@ -977,6 +979,140 @@ public class UdpTrackerTests
     }
 
     // ---------- Lifecycle ----------
+
+    private Task RunOperationAsync(UdpTracker tracker, int operation, CancellationToken ct) => operation switch
+    {
+        0 => tracker.AnnounceAsync(TrackerEvent.None, ct),
+        1 => tracker.ScrapeAsync(ct),
+        2 => tracker.MultiScrapeAsync([_torrent.Hash], ct),
+        3 => tracker.ScrapeMultipleAsync([_torrent.Hash.ToArray()], ct),
+        _ => throw new ArgumentOutOfRangeException(nameof(operation))
+    };
+
+    [Theory(Timeout = 15000)]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task DisposalAloneCancelsTheActiveReceiveAndQueuedRequests(int operation)
+    {
+        using var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
+        Task active = RunOperationAsync(tracker, operation, CancellationToken.None);
+        await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(2));
+        Task queued = RunOperationAsync(tracker, (operation + 1) % 4, CancellationToken.None);
+
+        tracker.Dispose();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => active.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+
+        Assert.True(_socketFactory.LastSocket.Closed);
+        Assert.Single(_socketFactory.LastSocket.SentPackets);
+        _timeProvider.Advance(TimeSpan.FromMinutes(1));
+        Assert.Single(_socketFactory.LastSocket.SentPackets);
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task DisposalFromTheResultCallbackDefersCleanupUntilTheLockIsReleased()
+    {
+        using var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        var callback = new MockCallback { AfterAnnounce = tracker.Dispose };
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, callback);
+        Task active = tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+        await CompleteConnectAsync(0, 1234);
+        await CompleteAnnounceAsync(1);
+
+        await active.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        Assert.True(callback.Success);
+        Assert.True(_socketFactory.LastSocket.Closed);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => tracker.ScrapeAsync(CancellationToken.None));
+    }
+
+    [Theory(Timeout = 15000)]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task DisposalAndCancellationDoNotDisposeTheLockUnderItsOwnerOrWaiters(int operation)
+    {
+        using var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
+        using var cancellation = new CancellationTokenSource();
+        Task active = RunOperationAsync(tracker, operation, cancellation.Token);
+        await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(2));
+        Task[] queued = [.. Enumerable.Range(0, 4).Select(kind => RunOperationAsync(tracker, kind, cancellation.Token))];
+
+        tracker.Dispose();
+        await cancellation.CancelAsync();
+        foreach (var task in queued.Prepend(active))
+        {
+            Exception? error = await Record.ExceptionAsync(() => task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+            Assert.IsAssignableFrom<OperationCanceledException>(error);
+        }
+        Assert.True(_socketFactory.LastSocket.Closed);
+        Assert.Single(_socketFactory.LastSocket.SentPackets);
+        Assert.Null(_callback.AnnounceResponse);
+        Assert.Null(_callback.ScrapeResponse);
+        Assert.Null(_callback.MultiScrapeResponse);
+    }
+
+    [Theory(Timeout = 15000)]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task DisposalDuringUncooperativeDnsCancelsWaitersAndPreventsSocketCreation(int operation)
+    {
+        var resolving = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var answer = new TaskCompletionSource<IPAddress[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var factory = new FamilyUdpSocketFactory();
+        CancellationToken resolverToken = default;
+        using var tracker = new UdpTracker(_timeProvider, factory, NullLoggerFactory.Instance, (_, ct) =>
+        {
+            resolverToken = ct;
+            resolving.TrySetResult();
+            return answer.Task; // Deliberately do not observe cancellation until DNS returns.
+        });
+        tracker.Init("udp://tracker.example:80/announce", _torrent, _callback);
+        Task active = RunOperationAsync(tracker, operation, CancellationToken.None);
+        await resolving.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        Task queued = RunOperationAsync(tracker, (operation + 1) % 4, TestContext.Current.CancellationToken);
+        try
+        {
+            tracker.Dispose();
+            Assert.True(resolverToken.IsCancellationRequested);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => queued.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+        }
+        finally { answer.TrySetResult([IPAddress.Loopback]); }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => active.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+        Assert.Empty(factory.RequestedFamilies);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => RunOperationAsync(tracker, operation, CancellationToken.None));
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task DeinitDuringAnAnnounceDefersTheResetUntilTheExchangeFinishes()
+    {
+        using var tracker = new UdpTracker(_timeProvider, _socketFactory);
+        tracker.Init("udp://127.0.0.1:80/announce", _torrent, _callback);
+        Task active = tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+        await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(2));
+
+        tracker.Deinit();
+        Assert.False(_socketFactory.LastSocket.Closed);
+        await CompleteConnectAsync(0, 1234);
+        await CompleteAnnounceAsync(1);
+        await active;
+        Assert.True(_callback.Success);
+        Assert.True(_socketFactory.LastSocket.Closed);
+
+        Task next = tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+        await CompleteConnectAsync(2, 5678);
+        await CompleteAnnounceAsync(3);
+        await next;
+        Assert.Equal(4, _socketFactory.LastSocket.SentPackets.Count);
+    }
 
     [Fact]
     public void SetRequestTimeout_OverridesDefault()

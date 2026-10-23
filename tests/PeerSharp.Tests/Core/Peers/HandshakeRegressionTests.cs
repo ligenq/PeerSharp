@@ -103,28 +103,37 @@ public class HandshakeRegressionTests
     }
 
     [Theory(Timeout = 10000)]
-    [InlineData(0, true)]
-    [InlineData(20, true)]
-    [InlineData(68, true)]
-    [InlineData(73, true)]
-    [InlineData(0, false)]
-    [InlineData(20, false)]
-    [InlineData(68, false)]
-    public async Task IncomingMseCompletesPartialPayloadAndPreservesPipelinedMessages(int initialLength, bool pipeline)
+    [InlineData(0, true, true)]
+    [InlineData(20, true, true)]
+    [InlineData(68, true, true)]
+    [InlineData(73, true, true)]
+    [InlineData(0, false, true)]
+    [InlineData(20, false, true)]
+    [InlineData(68, false, true)]
+    [InlineData(0, true, false)]
+    [InlineData(20, true, false)]
+    [InlineData(68, true, false)]
+    [InlineData(73, true, false)]
+    [InlineData(0, false, false)]
+    [InlineData(20, false, false)]
+    [InlineData(68, false, false)]
+    public async Task IncomingMseCompletesPartialPayloadAndPreservesPipelinedMessages(int initialLength, bool pipeline, bool encrypted)
     {
         await using var torrent = TorrentTestUtility.CreateMinimal(downloadPath: Path.GetTempPath());
         byte[] handshake = Handshake(torrent);
         byte[] payload = [.. handshake, .. Unchoke];
         using var initiator = new ProtocolEncryptionHandshake(torrent.Hash.ToArray(), true)
         {
-            InitialPayload = payload[..initialLength]
+            InitialPayload = payload[..initialLength],
+            AllowPlaintextPayload = !encrypted
         };
-        using var stream = new MseStream(initiator, payload[initialLength..], pipeline);
-        var result = await IncomingHandshakeNegotiator.NegotiateAsync(stream, new Resolver(torrent), NullLogger.Instance, TestContext.Current.CancellationToken);
+        using var stream = new MseStream(initiator, payload[initialLength..], pipeline, encrypted);
+        var settings = new ConnectionSettings { Encryption = encrypted ? Encryption.Require : Encryption.Allow, PreferRc4 = encrypted };
+        var result = await IncomingHandshakeNegotiator.NegotiateAsync(stream, new Resolver(torrent), NullLogger.Instance, settings, TestContext.Current.CancellationToken);
 
         Assert.True(result.Success);
         Assert.Equal(handshake, result.Handshake[..68]);
-        Assert.NotNull(result.Encryption);
+        Assert.Equal(encrypted, result.Encryption != null);
         // A fixed-size handshake read may leave the message on the stream; coalesced reads
         // carry it in the returned prefix instead. In either case the next message is intact.
         byte[] message = new byte[5];
@@ -133,12 +142,15 @@ public class HandshakeRegressionTests
         if (buffered < message.Length)
         {
             await stream.ReadExactlyAsync(message.AsMemory(buffered), TestContext.Current.CancellationToken);
-            result.Encryption.Decrypt(message.AsSpan(buffered));
+            result.Encryption?.Decrypt(message.AsSpan(buffered));
         }
         Assert.Equal(Unchoke, message);
         byte[] next = [0, 0, 0, 1, 2];
-        initiator.Encryption!.Encrypt(next);
-        result.Encryption.Decrypt(next);
+        if (encrypted)
+        {
+            initiator.Encryption!.Encrypt(next);
+        }
+        result.Encryption?.Decrypt(next);
         Assert.Equal(new byte[] { 0, 0, 0, 1, 2 }, next);
 
         var peer = new PeerCommunication(torrent, new Listener(), TimeProvider.System);
@@ -251,13 +263,16 @@ public class HandshakeRegressionTests
         Assert.True(PeerHandshake.TryParse(result.Handshake, torrent.InfoFile.Info, out _));
     }
 
-    [Fact(Timeout = 10000)]
-    public async Task OutgoingV2OnlyConnectionUsesTruncatedV2HashForMse()
+    [Theory(Timeout = 10000)]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task OutgoingV2OnlyConnectionUsesTruncatedV2HashForMse(bool encrypted)
     {
         await using var torrent = TorrentTestUtility.CreateMinimal(downloadPath: Path.GetTempPath());
         torrent.InfoFile.Info.Version = TorrentVersion.V2;
         torrent.InfoFile.Info.HashV2 = InfoHash.CreateRandomV2();
-        torrent.Settings.Connection.Encryption = Encryption.Require;
+        torrent.Settings.Connection.Encryption = encrypted ? Encryption.Require : Encryption.Allow;
+        torrent.Settings.Connection.PreferRc4 = encrypted;
         var callbacks = new Listener();
         var peer = new PeerCommunication(torrent, callbacks, TimeProvider.System);
         using var server = new TcpListener(IPAddress.Loopback, 0);
@@ -266,7 +281,11 @@ public class HandshakeRegressionTests
         try
         {
             using var remote = await server.AcceptTcpClientAsync(TestContext.Current.CancellationToken);
-            using var mse = new ProtocolEncryptionHandshake(torrent.HashV2.TruncateToV1().ToArray(), false);
+            using var mse = new ProtocolEncryptionHandshake(torrent.HashV2.TruncateToV1().ToArray(), false)
+            {
+                AllowPlaintextPayload = !encrypted,
+                PreferRc4 = encrypted
+            };
             byte[] buffer = new byte[4096];
             while (!mse.IsComplete && !mse.IsError)
             {
@@ -275,8 +294,11 @@ public class HandshakeRegressionTests
                 byte[] response = mse.HandleIncoming(buffer[..read]);
                 if (mse.IsComplete)
                 {
-                    byte[] handshake = Handshake(torrent);
-                    mse.Encryption!.Encrypt(handshake);
+                    byte[] handshake = [.. Handshake(torrent), .. Unchoke];
+                    if (encrypted)
+                    {
+                        mse.Encryption!.Encrypt(handshake);
+                    }
                     response = [.. response, .. handshake];
                 }
                 await remote.GetStream().WriteAsync(response, TestContext.Current.CancellationToken);
@@ -285,6 +307,8 @@ public class HandshakeRegressionTests
             Assert.True(await connect.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
             Assert.Equal(RemoteId, peer.PeerId);
             Assert.True(peer.RemoteSupportsV2);
+            Assert.Equal(encrypted, peer.Stream is EncryptedStream);
+            Assert.Equal(MessageId.Unchoke, await callbacks.Message.Task.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken));
         }
         finally
         {
@@ -431,7 +455,7 @@ public class HandshakeRegressionTests
 
     // A deterministic duplex exchange keeps Pe3 and following messages in a single read when
     // requested, instead of relying on the operating system to coalesce loopback TCP writes.
-    private sealed class MseStream(ProtocolEncryptionHandshake initiator, byte[] following, bool pipeline) : Stream
+    private sealed class MseStream(ProtocolEncryptionHandshake initiator, byte[] following, bool pipeline, bool encrypted = true) : Stream
     {
         private readonly Queue<byte> _input = new(initiator.Initiate());
         private bool _sentPayload;
@@ -481,7 +505,10 @@ public class HandshakeRegressionTests
             {
                 _sentPayload = true;
                 byte[] data = following.ToArray();
-                initiator.Encryption!.Encrypt(data);
+                if (encrypted)
+                {
+                    initiator.Encryption!.Encrypt(data);
+                }
                 Enqueue(data);
             }
         }

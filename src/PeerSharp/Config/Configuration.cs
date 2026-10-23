@@ -165,6 +165,15 @@ public sealed class ConnectionSettings
     /// </summary>
     public bool EnableWebSeeds { get; set; } = true;
 
+    /// <summary>SAM bridge host for I2P torrents. Null disables SAM connections.</summary>
+    public string? I2pSamHost { get; set; }
+
+    /// <summary>SAM bridge TCP port. Default is 7656.</summary>
+    public int I2pSamPort { get; set; } = 7656;
+
+    /// <summary>Allow ordinary IP peers and trackers for I2P torrents. Default false preserves network separation.</summary>
+    public bool I2pAllowMixedNetworks { get; set; }
+
     /// <summary>
     /// BitTorrent protocol encryption mode. Default is Allow.
     /// <para>
@@ -173,6 +182,25 @@ public sealed class ConnectionSettings
     /// </para>
     /// </summary>
     public Encryption Encryption { get; set; } = Encryption.Allow;
+
+    /// <summary>Incoming encryption policy. Null uses <see cref="Encryption"/>.</summary>
+    public Encryption? IncomingEncryption { get; set; }
+
+    /// <summary>Outgoing encryption policy. Null uses <see cref="Encryption"/>.</summary>
+    public Encryption? OutgoingEncryption { get; set; }
+
+    internal Encryption EffectiveIncomingEncryption => IncomingEncryption ?? Encryption;
+    internal Encryption EffectiveOutgoingEncryption => OutgoingEncryption ?? Encryption;
+
+    /// <summary>
+    /// Prefer RC4-encrypted payloads for MSE. Default is true: outgoing handshakes offer RC4
+    /// only, and incoming handshakes select RC4 when the peer offers it. When false and the
+    /// applicable directional policy is <see cref="Config.Encryption.Allow"/>, outgoing
+    /// handshakes offer both methods and incoming handshakes prefer plaintext payloads.
+    /// The remote peer selects among the outgoing offer. Require always restricts MSE to RC4.
+    /// Changes apply to new handshakes.
+    /// </summary>
+    public bool PreferRc4 { get; set; } = true;
 
     /// <summary>Initial connection timeout in milliseconds for new peers. Default is 10000.</summary>
     public int InitialConnectionTimeoutMs { get; set; } = 10000;
@@ -1088,9 +1116,9 @@ public sealed class TransferSettings
 
     /// <summary>
     /// Maximum accepted ut_metadata size in bytes.
-    /// Default is 8 MiB, which is far above normal torrent metadata while bounding peer-controlled allocations.
+    /// Default is 30 MiB, which is far above normal torrent metadata while bounding peer-controlled allocations.
     /// </summary>
-    public int MaxMetadataSizeBytes { get; set; } = 8 * 1024 * 1024;
+    public int MaxMetadataSizeBytes { get; set; } = 30 * 1024 * 1024;
 
     /// <summary>
     /// Global download speed limit in bytes per second. 0 for unlimited. Negative values are rejected.

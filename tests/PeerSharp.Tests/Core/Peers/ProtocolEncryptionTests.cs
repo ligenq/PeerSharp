@@ -6,6 +6,178 @@ namespace PeerSharp.Tests.Core.Peers;
 
 public class ProtocolEncryptionTests
 {
+    [Theory]
+    [InlineData(false, false, false, true)]
+    [InlineData(true, false, false, true)]
+    [InlineData(false, true, false, true)]
+    [InlineData(true, true, false, false)]
+    [InlineData(true, true, true, true)]
+    public void Handshake_NegotiatesPayloadModeAndPreservesBufferedBytes(bool initiatorAllowsPlaintext, bool responderAllowsPlaintext, bool preferRc4, bool encrypted)
+    {
+        byte[] hash = SHA1.HashData("MSE payload negotiation"u8);
+        using var initiator = new ProtocolEncryptionHandshake(hash, true) { AllowPlaintextPayload = initiatorAllowsPlaintext };
+        using var responder = new ProtocolEncryptionHandshake(hash, false)
+        {
+            AllowPlaintextPayload = responderAllowsPlaintext,
+            PreferRc4 = preferRc4
+        };
+        initiator.InitialPayload = "initial payload always encrypted"u8.ToArray();
+        byte[] pe2 = FeedOneByteAtATime(responder, initiator.Initiate());
+        byte[] pe3 = FeedOneByteAtATime(initiator, pe2);
+        byte[] pe4 = FeedOneByteAtATime(responder, pe3);
+        byte[] application = "bytes immediately after the encrypted handshake"u8.ToArray();
+        byte[] wire = application.ToArray();
+        if (encrypted)
+        {
+            responder.Encryption!.Encrypt(wire);
+        }
+        // Coalesce the negotiated-mode bytes with the final handshake bytes.
+        initiator.HandleIncoming([.. pe4, .. wire]);
+
+        Assert.True(initiator.IsComplete);
+        Assert.True(responder.IsComplete);
+        Assert.Equal(encrypted, initiator.EncryptPayload);
+        Assert.Equal(encrypted, responder.EncryptPayload);
+        Assert.Equal(initiator.InitialPayload, responder.ReceivedPayload);
+        byte[] received = initiator.TrailingData;
+        if (initiator.EncryptPayload)
+        {
+            initiator.Encryption!.Decrypt(received);
+        }
+        Assert.Equal(application, received);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Handshake_PlaintextOnlyOffer_IsAcceptedWhenAllowed(bool preferRc4)
+    {
+        byte[] hash = SHA1.HashData("plaintext-only offer"u8);
+        using var initiator = new ProtocolEncryptionHandshake(hash, true) { AllowPlaintextPayload = true };
+        using var responder = new ProtocolEncryptionHandshake(hash, false) { AllowPlaintextPayload = true, PreferRc4 = preferRc4 };
+        byte[] pe2 = responder.HandleIncoming(initiator.Initiate());
+        byte[] pe3 = initiator.HandleIncoming(pe2);
+        pe3[51] ^= 2; // Offer plaintext alone instead of plaintext plus RC4.
+        byte[] pe4 = responder.HandleIncoming(pe3);
+        initiator.HandleIncoming(pe4);
+
+        Assert.True(initiator.IsComplete);
+        Assert.True(responder.IsComplete);
+        Assert.False(initiator.EncryptPayload);
+        Assert.False(responder.EncryptPayload);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void Handshake_AllowingBothModesStillRejectsInvalidSelections(byte selected)
+    {
+        byte[] hash = SHA1.HashData("invalid dual-mode selection"u8);
+        using var initiator = new ProtocolEncryptionHandshake(hash, true) { AllowPlaintextPayload = true };
+        using var responder = new ProtocolEncryptionHandshake(hash, false);
+        byte[] pe2 = responder.HandleIncoming(initiator.Initiate());
+        byte[] pe3 = initiator.HandleIncoming(pe2);
+        byte[] pe4 = responder.HandleIncoming(pe3);
+        pe4[11] ^= (byte)(2 ^ selected);
+
+        Assert.Throws<InvalidDataException>(() => initiator.HandleIncoming(pe4));
+        Assert.True(initiator.IsError);
+    }
+
+    [Fact]
+    public void Handshake_RejectsOversizedResponderPaddingImmediately()
+    {
+        byte[] hash = SHA1.HashData("padding limit"u8);
+        using var initiator = new ProtocolEncryptionHandshake(hash, true);
+        using var responder = new ProtocolEncryptionHandshake(hash, false);
+        byte[] pe2 = responder.HandleIncoming(initiator.Initiate());
+        byte[] pe3 = initiator.HandleIncoming(pe2);
+        byte[] pe4 = responder.HandleIncoming(pe3);
+        int padding = pe4.Length - 14;
+        pe4[12] ^= (byte)((padding >> 8) ^ 2);
+        pe4[13] ^= (byte)((padding & 255) ^ 1);
+
+        Assert.Throws<InvalidDataException>(() => initiator.HandleIncoming(pe4));
+        Assert.True(initiator.IsError);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Handshake_ByteAtATime_PreservesInitialAndTrailingPayload(bool useResolver)
+    {
+        byte[] hash = SHA1.HashData("fragmented handshake"u8);
+        var resolver = new MockTorrentResolver();
+        resolver.AddTorrent(hash);
+        using var initiator = new ProtocolEncryptionHandshake(hash, true);
+        using var responder = useResolver ? new ProtocolEncryptionHandshake(resolver) : new ProtocolEncryptionHandshake(hash, false);
+        initiator.InitialPayload = "initial payload"u8.ToArray();
+
+        byte[] pe2 = FeedOneByteAtATime(responder, initiator.Initiate());
+        byte[] pe3 = FeedOneByteAtATime(initiator, pe2);
+        // Offering plaintext as well must still let the responder select RC4.
+        pe3[51] ^= 1;
+        byte[] pe4 = FeedOneByteAtATime(responder, pe3);
+        byte[] payload = "application bytes following the handshake"u8.ToArray();
+        byte[] encrypted = payload.ToArray();
+        responder.Encryption!.Encrypt(encrypted, 0, encrypted.Length);
+        Assert.Empty(FeedOneByteAtATime(initiator, [.. pe4, .. encrypted]));
+
+        Assert.True(initiator.IsComplete);
+        Assert.True(responder.IsComplete);
+        Assert.Equal(initiator.InitialPayload, responder.ReceivedPayload);
+        byte[] trailing = initiator.TrailingData;
+        initiator.Encryption!.Decrypt(trailing, 0, trailing.Length);
+        Assert.Equal(payload, trailing);
+    }
+
+    private static byte[] FeedOneByteAtATime(ProtocolEncryptionHandshake handshake, byte[] message)
+    {
+        var response = new List<byte>();
+        foreach (byte value in message)
+        {
+            response.AddRange(handshake.HandleIncoming([value]));
+        }
+        return response.ToArray();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void Handshake_RejectsUnofferedOrAmbiguousCipherSelection(byte selection)
+    {
+        byte[] hash = SHA1.HashData("cipher negotiation"u8);
+        using var initiator = new ProtocolEncryptionHandshake(hash, true);
+        using var responder = new ProtocolEncryptionHandshake(hash, false);
+        byte[] pe2 = responder.HandleIncoming(initiator.Initiate());
+        byte[] pe3 = initiator.HandleIncoming(pe2);
+        byte[] pe4 = responder.HandleIncoming(pe3);
+        pe4[11] ^= (byte)(2 ^ selection);
+
+        Assert.Throws<InvalidDataException>(() => initiator.HandleIncoming(pe4));
+        Assert.True(initiator.IsError);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(4)]
+    public void Handshake_RejectsOfferWithoutSupportedCipher(byte offer)
+    {
+        byte[] hash = SHA1.HashData("cipher negotiation"u8);
+        using var initiator = new ProtocolEncryptionHandshake(hash, true);
+        using var responder = new ProtocolEncryptionHandshake(hash, false);
+        byte[] pe2 = responder.HandleIncoming(initiator.Initiate());
+        byte[] pe3 = initiator.HandleIncoming(pe2);
+        pe3[51] ^= (byte)(2 ^ offer);
+
+        Assert.Throws<InvalidDataException>(() => responder.HandleIncoming(pe3));
+        Assert.True(responder.IsError);
+    }
+
     #region Mock Classes
 
     private class MockTorrent : ITorrent

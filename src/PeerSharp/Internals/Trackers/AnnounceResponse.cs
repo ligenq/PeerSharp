@@ -8,6 +8,7 @@ internal class AnnounceResponse
     public uint? MinInterval { get; set; }
     public uint LeechCount { get; set; } = 0;
     public List<IPEndPoint> Peers { get; set; } = [];
+    public List<string> I2pPeers { get; set; } = [];
     public uint SeedCount { get; set; } = 0;
 
     /// <summary>

@@ -7,10 +7,9 @@ namespace PeerSharp.Benchmarks;
 /// <summary>
 /// Per-piece availability bookkeeping - the data structure behind RarestFirst selection.
 ///
-/// <see cref="PiecePicker.IncrementAvailability"/> is the per-message path: a peer sending
-/// <c>Have</c> costs exactly one call, and a busy swarm produces those continuously. Each call
-/// takes the picker's selection lock on its own, so the lock cost is paid per piece, not
-/// amortised.
+/// These rows measure raw counter arithmetic and locking, not the complete per-peer wire path.
+/// Incoming HAVE and lt_donthave now use UpdatePeerAvailability, which also deduplicates each
+/// connection's contribution. That path is exercised by the real-socket traffic audit tests.
 ///
 /// <see cref="BulkIncrementUnbatched"/> shows what that costs when the same API is driven in a
 /// loop over the whole piece range. Read it as an upper bound on peer connect rather than as the
@@ -52,7 +51,7 @@ public class AvailabilityBenchmarks
     public void Cleanup() => _picker.Dispose();
 
     /// <summary>
-    /// One <c>Have</c> message from one peer. This is the figure that scales with swarm chatter.
+    /// One raw counter increment, excluding connection contribution bookkeeping.
     /// </summary>
     [Benchmark(Baseline = true, Description = "IncrementAvailability, single piece")]
     public void IncrementOne() => _picker.IncrementAvailability(PieceCount / 2);

@@ -16,6 +16,8 @@ internal sealed class SyntheticPeerOptions
     /// <summary>Whether to claim BEP 10 in the reserved bytes and send an extension handshake.</summary>
     public bool AdvertiseExtensionProtocol { get; set; } = true;
 
+    public bool AdvertiseFastExtension { get; set; } = true;
+
     /// <summary>
     /// The extension ids this peer assigns, as sent in its <c>m</c> dictionary. BEP 10 numbers
     /// extensions per receiver, so these are the ids PeerSharp must address us by, and they are

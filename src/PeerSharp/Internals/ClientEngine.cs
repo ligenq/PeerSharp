@@ -48,6 +48,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     private int _paused;
     private int _initialized;
     private INetworkManager? _networkManager;
+    private I2pSamSession? _i2pSession;
+    private readonly Lock _i2pGate = new();
     private CancellationTokenSource? _dhtSaveCts;
 
     /// <summary>Drives the BEP 46 record keep-alive loop.</summary>
@@ -353,6 +355,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 }
                 _logger.LogDebug("Shutdown phase torrents completed in {ElapsedMs} ms for {TorrentCount} torrents", phaseStopwatch.ElapsedMilliseconds, disposeTasks.Count);
 
+                if (_i2pSession != null) await _i2pSession.DisposeAsync().ConfigureAwait(false);
+
                 // Stop and dispose network manager
                 phaseStopwatch.Restart();
                 if (_ownsNetworkManager && _networkManager != null)
@@ -576,14 +580,20 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            bool paused;
             lock (_pauseLock)
             {
-                if (IsPaused)
+                paused = IsPaused;
+                if (paused)
                 {
                     torrent.QueueAutoStart = false;
                     _pausedTorrents.Add(torrent.Hash);
-                    return;
                 }
+            }
+            if (paused)
+            {
+                await torrent.DeferRestoredPiecesAsync(cancellationToken).ConfigureAwait(false);
+                return;
             }
 
             await torrent.StartCoreAsync(cancellationToken).ConfigureAwait(false);
@@ -692,7 +702,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             {
                 _ = torrent.TrackerManager.AnnounceAsync(cancellationToken: CancellationToken.None); // Scheduling completes synchronously.
                 torrent.PeersInternal.AnnounceListenPort();
-                if (!torrent.InfoFile.Info.IsPrivate)
+                if (!torrent.InfoFile.Info.IsPrivate && !torrent.IsI2p)
                 {
                     torrent.DhtManager?.Announce(torrent.InfoFile.Info.GetTrackerInfoHash(), torrent.AdvertisedPeerPort);
                 }
@@ -891,7 +901,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             null);
     }
 
-    private async Task<Torrent> AddMagnetInternal(MagnetLink magnetLink, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false)
+    private async Task<Torrent> AddMagnetInternal(MagnetLink magnetLink, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false, bool loadResumePiecesForStart = false)
     {
         _disposal.ThrowIfDisposed(this);
 
@@ -928,7 +938,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         var fsm = new FileSelectionManager(metadata);
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _httpClientFactory, _timeProvider, events, resumeData, _loggerFactory);
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _httpClientFactory, _timeProvider, events, resumeData, _loggerFactory, loadResumePiecesForStart);
 
         if (!transient)
         {
@@ -940,6 +950,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         torrent.LsdManager = _networkManager?.Lsd;
         torrent.PortListener = _networkManager?.PortListener;
         torrent.Network.GetAdvertisedPeerPort = () => _networkManager?.AdvertisedPeerPort ?? Settings.Connection.TcpPort;
+        ConfigureI2p(torrent);
         torrent.Blocklist = Blocklist;
         torrent.MetadataDownload = new MetadataDownload(torrent, _loggerFactory);
         torrent.MetadataDownload.Start();
@@ -968,13 +979,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         return torrent;
     }
 
-    private async Task<Torrent> AddTorrentInternal(TorrentFileMetadata metadata, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false)
+    private async Task<Torrent> AddTorrentInternal(TorrentFileMetadata metadata, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false, bool loadResumePiecesForStart = false)
     {
         _disposal.ThrowIfDisposed(this);
 
         var fsm = new FileSelectionManager(metadata);
         var alerts = transient ? NullAlertsManager.Instance : _alerts;
-        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _httpClientFactory, _timeProvider, events, resumeData, _loggerFactory);
+        var torrent = Torrent.Create(metadata, Settings, _bandwidth, alerts, fsm, _peerFactory, _trackerFactory, _geoIp, _fileHandleCache, _connectionGovernor, _httpClientFactory, _timeProvider, events, resumeData, _loggerFactory, loadResumePiecesForStart);
         if (!transient)
         {
             torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
@@ -985,6 +996,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         torrent.LsdManager = _networkManager?.Lsd;
         torrent.PortListener = _networkManager?.PortListener;
         torrent.Network.GetAdvertisedPeerPort = () => _networkManager?.AdvertisedPeerPort ?? Settings.Connection.TcpPort;
+        ConfigureI2p(torrent);
         torrent.Blocklist = Blocklist;
 
         await RegisterAsync(torrent, transient).ConfigureAwait(false);
@@ -1096,6 +1108,61 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         public Action<ITorrent, Interfaces.TransferStats>? TransferStats => _inner?.TransferStats;
     }
 
+    private void ConfigureI2p(Torrent torrent)
+    {
+        if (!torrent.IsI2p || torrent.I2pTransport != null || string.IsNullOrWhiteSpace(Settings.Connection.I2pSamHost)) return;
+        lock (_i2pGate)
+        {
+            _i2pSession ??= new I2pSamSession(Settings.Connection.I2pSamHost, Settings.Connection.I2pSamPort,
+                _timeProvider, _logger, HandleIncomingI2pAsync);
+            torrent.Network.I2pSession = _i2pSession;
+            torrent.I2pTransport = new I2pPeerTransport(torrent, _i2pSession);
+            torrent.RegisterPeerTransport(torrent.I2pTransport);
+        }
+    }
+
+    private async Task HandleIncomingI2pAsync(Stream stream, CancellationToken ct)
+    {
+        bool transferred = false;
+        bool tlsOwnsRawStream = false;
+        Stream? tlsStream = null;
+        try
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            deadline.CancelAfter(TimeSpan.FromSeconds(30));
+            byte[] marker = new byte[6];
+            await stream.ReadExactlyAsync(marker, deadline.Token).ConfigureAwait(false);
+            var prefixed = new PrefixedStream(marker, stream);
+            if (TorrentTls.IsClientHello(marker))
+            {
+                // AcceptAsync takes ownership even if authentication fails. On success, retain
+                // its TLS wrapper until the peer manager accepts (or closes) the connection.
+                tlsOwnsRawStream = true;
+                var tls = await TorrentTls.AcceptAsync(prefixed, this, deadline.Token).ConfigureAwait(false);
+                tlsStream = tls.Stream;
+                if (!tls.Torrent.IsI2p) return;
+                await tls.Torrent.PeersInternal.AddConnectedPeerAsync(tls.Stream, false, cancellationToken: deadline.Token).ConfigureAwait(false);
+            }
+            else
+            {
+                byte[] handshake = new byte[68];
+                await prefixed.ReadExactlyAsync(handshake, deadline.Token).ConfigureAwait(false);
+                if (GetTorrent(new InfoHash(handshake.AsSpan(28, 20))) is not Torrent { Started: true, IsI2p: true } torrent || torrent.InfoFile.Info.IsSsl) return;
+                await torrent.PeersInternal.AddIncomingPeerAsync(stream, handshake).ConfigureAwait(false);
+            }
+            transferred = true;
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "I2P handshake failed"); }
+        finally
+        {
+            if (!transferred)
+            {
+                if (tlsStream != null) await tlsStream.DisposeAsync().ConfigureAwait(false);
+                else if (!tlsOwnsRawStream) await stream.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
     private async Task HandleIncomingUtpAsync(UtpStream stream)
     {
         bool ownershipTransferred = false;
@@ -1106,12 +1173,32 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // One deadline for the whole handshake. Creating it per read would restart the clock on
             // every chunk, letting a peer that drips a byte every few seconds hold the connection open
             // indefinitely.
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10), _timeProvider);
 
             // The deadline closes the stream, which ends a pending read as end of input, rather than being
             // passed in to cancel the read - which could only report it by throwing, for every inbound peer
             // that connects and then says nothing.
             using var deadline = timeoutCts.Token.UnsafeRegister(static state => ((UtpStream)state!).CloseAndStopReading(), stream);
+
+            byte[] marker = new byte[6];
+            // EOF before the TLS probe completes is ordinary peer churn, just like EOF during the
+            // BitTorrent/MSE handshake below. The deadline already ends the read by closing it.
+            int read = await stream.ReadAtLeastAsync(marker, marker.Length, throwOnEndOfStream: false,
+                CancellationToken.None).ConfigureAwait(false);
+            if (read != marker.Length)
+            {
+                _logger.LogDebug("uTP handshake from {Remote} did not complete", stream.RemoteEndPoint);
+                return;
+            }
+            var prefixed = new PrefixedStream(marker, stream);
+            if (TorrentTls.IsClientHello(marker))
+            {
+                var accepted = await TorrentTls.AcceptAsync(prefixed, this, timeoutCts.Token).ConfigureAwait(false);
+                await accepted.Torrent.PeersInternal.AddConnectedUtpPeerAsync(accepted.Stream, stream,
+                    timeoutCts.Token).ConfigureAwait(false);
+                ownershipTransferred = true;
+                return;
+            }
 
             // uTP peers negotiate MSE exactly as TCP peers do. This path used to read 68 bytes and
             // insist the first was 19, so every encrypted inbound uTP peer was rejected - its
@@ -1120,9 +1207,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // encryption from policy alone with no reference to the transport, and our own measurements
             // show encrypted uTP is the common case rather than an oddity.
             var negotiated = await IncomingHandshakeNegotiator.NegotiateAsync(
-                stream,
+                prefixed,
                 this,
                 _logger,
+                Settings.Connection,
                 CancellationToken.None).ConfigureAwait(false);
 
             if (!negotiated.Success)
@@ -1237,7 +1325,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (Settings.PeerId.All(b => b == 0))
         {
             // BEP 20: Generate peer ID using Azureus-style format
-            // Format: -PS0501-xxxxxxxxxxxx (20 bytes)
+            // Format: -PS0502-xxxxxxxxxxxx (20 bytes)
             var peerId = ProtocolConstants.GeneratePeerId();
             Array.Copy(peerId, Settings.PeerId, 20);
             // NOTE: Client application is responsible for persisting Settings if it wants to keep PeerID
@@ -1276,7 +1364,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             var utpManager = new UtpManager(_timeProvider, _loggerFactory, Settings.Connection);
 
             var dhtManager = DhtManager.Create(Settings.PeerId, udpListener, Settings, _timeProvider, this, new SystemDnsResolver(), _loggerFactory);
-            var portListener = new PortListener(this, _loggerFactory, Settings.Connection.BindAddress);
+            var portListener = new PortListener(this, _loggerFactory, Settings.Connection.BindAddress, Settings.Connection);
             var lsdManager = new LsdManager(Settings, this, _timeProvider, socketFactory, _loggerFactory);
             var portMapperFactory = new PortMapperFactory(_loggerFactory);
 
@@ -1664,11 +1752,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             if (fetched != null)
             {
                 torrentBytes = fetched.Value.Bytes;
-                torrent = await AddTorrentInternal(fetched.Value.Metadata, options?.Events, options?.ResumeData, transient).ConfigureAwait(false);
+                torrent = await AddTorrentInternal(fetched.Value.Metadata, options?.Events, options?.ResumeData, transient,
+                    loadResumePiecesForStart: (options?.StartImmediately ?? true) && (transient || !IsPaused)).ConfigureAwait(false);
             }
         }
 
-        torrent ??= await AddMagnetInternal(magnetLink, options?.Events, options?.ResumeData, transient).ConfigureAwait(false);
+        torrent ??= await AddMagnetInternal(magnetLink, options?.Events, options?.ResumeData, transient,
+            loadResumePiecesForStart: (options?.StartImmediately ?? true) && (transient || !IsPaused)).ConfigureAwait(false);
 
         // The torrent is registered above, so from here on any failure - most commonly the
         // caller's token tripping during StartAsync - has to unregister it again. Leaving a
@@ -1704,6 +1794,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 {
                     await torrent.SetDownloadPathAsync(options.DownloadPath, cancellationToken).ConfigureAwait(false);
                 }
+                torrent.SslCertificate = options.SslCertificate;
                 torrent.DownloadStrategy = options.DownloadStrategy;
                 torrent.DownloadLimitBytesPerSecond = options.DownloadLimitBytesPerSecond ?? 0;
                 torrent.UploadLimitBytesPerSecond = options.UploadLimitBytesPerSecond ?? 0;
@@ -1985,7 +2076,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 $"FileSelections has {selections.Count} entries but the torrent has {torrentFile.FileCount} files.", nameof(options));
         }
 
-        var torrent = await AddTorrentInternal(torrentFile.Metadata, options?.Events, options?.ResumeData).ConfigureAwait(false);
+        var torrent = await AddTorrentInternal(torrentFile.Metadata, options?.Events, options?.ResumeData,
+            loadResumePiecesForStart: (options?.StartImmediately ?? true) && !IsPaused).ConfigureAwait(false);
 
         // See AddMagnetCoreAsync: the torrent is already registered, so a failure or a tripped
         // token from here on has to unregister it again.
@@ -2007,6 +2099,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 {
                     await torrent.SetDownloadPathAsync(options.DownloadPath, cancellationToken).ConfigureAwait(false);
                 }
+                torrent.SslCertificate = options.SslCertificate;
                 torrent.DownloadStrategy = options.DownloadStrategy;
                 torrent.DownloadLimitBytesPerSecond = options.DownloadLimitBytesPerSecond ?? 0;
                 torrent.UploadLimitBytesPerSecond = options.UploadLimitBytesPerSecond ?? 0;
@@ -2064,8 +2157,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     }
 
     /// <summary>Adds the trackers and web seeds the caller gave on top of the torrent's own.</summary>
-    private static void AddOptionSources(Torrent torrent, AddTorrentOptions? options)
+    private void AddOptionSources(Torrent torrent, AddTorrentOptions? options)
     {
+        if (options?.AdditionalTrackers?.Any(I2pSamSession.IsI2pUrl) == true)
+        {
+            torrent.IsI2p = true;
+            ConfigureI2p(torrent);
+        }
         foreach (var tracker in options?.AdditionalTrackers ?? [])
         {
             torrent.TrackerManager.AddTracker(tracker);

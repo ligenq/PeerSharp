@@ -54,14 +54,11 @@ internal sealed class PathValidator : IPathValidator
     };
 
     private readonly string _rootPath;
-    private readonly string _rootPathNormalized;
 
     public PathValidator(string rootPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
-        _rootPath = rootPath;
-        _rootPathNormalized = Path.GetFullPath(rootPath)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        _rootPath = Path.GetFullPath(rootPath);
     }
 
     /// <summary>
@@ -246,7 +243,7 @@ internal sealed class PathValidator : IPathValidator
         string fullPath = Path.GetFullPath(Path.Combine(_rootPath, safePath));
 
         // Final validation: ensure path stays within root directory
-        string relativeToRoot = Path.GetRelativePath(_rootPathNormalized, fullPath);
+        string relativeToRoot = Path.GetRelativePath(_rootPath, fullPath);
 
         if (Path.IsPathRooted(relativeToRoot) || EscapesUpwards(relativeToRoot))
         {

@@ -544,6 +544,11 @@ public interface ITorrent
     /// <summary>
     /// Stops the torrent, disconnecting from peers and halting transfers.
     /// </summary>
+    /// <remarks>
+    /// Completion waits for in-flight piece I/O before releasing its buffers or permitting a restart.
+    /// An I/O provider that ignores cancellation can therefore delay stopping indefinitely; internal
+    /// slow-shutdown diagnostics do not impose a fixed completion deadline.
+    /// </remarks>
     /// <param name="cancellationToken">
     /// Bounds the wait for a concurrent state transition (start, stop, recheck, download-path
     /// change) to release the torrent. Once the stop itself begins it runs to completion, so

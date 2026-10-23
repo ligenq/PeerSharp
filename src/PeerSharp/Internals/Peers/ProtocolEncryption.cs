@@ -117,6 +117,11 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
     { Pe1, Pe2, Pe3, Pe4, Established, Error }
 
     public ProtocolEncryption? Encryption { get; private set; }
+    // The handshake and IA always use RC4. These options and the result concern later payload bytes.
+    public bool AllowPlaintextPayload { get; init; }
+    public bool PreferRc4 { get; init; } = true;
+    public bool EncryptPayload { get; private set; }
+    private uint AllowedMethods => AllowPlaintextPayload ? 3u : 2u;
     public byte[]? InitialPayload { get; set; } // BT Handshake
     public bool IsComplete => _step == Step.Established;
     public bool IsError => _step == Step.Error;
@@ -356,8 +361,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         // VC = 8 zero bytes (already zeroed)
         offset += 8;
 
-        // crypto_provide = 0x02 (RC4) in big-endian
-        msg[offset + 3] = 2;
+        BinaryPrimitives.WriteUInt32BigEndian(msg.AsSpan(offset, 4), AllowedMethods);
         offset += 4;
 
         // len(PadC) in big-endian
@@ -518,6 +522,15 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
             }
         }
 
+        uint cryptoProvide = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(8, 4));
+        uint compatibleMethods = cryptoProvide & AllowedMethods;
+        if (compatibleMethods == 0)
+        {
+            _step = Step.Error;
+            throw new InvalidDataException("Peer did not offer a supported MSE payload method");
+        }
+        uint selectedMethod = (compatibleMethods & 2) != 0 && (PreferRc4 || (compatibleMethods & 1) == 0) ? 2u : 1u;
+
         int padLen = (header[12] << 8) | header[13];
         if (padLen > MaxPaddingLength)
         {
@@ -562,6 +575,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         Array.Copy(_buffer!, encStart + 14 + padLen + 2, ReceivedPayload, 0, iaLen);
         Encryption.RC4In.Decrypt(ReceivedPayload);
 
+        EncryptPayload = selectedMethod == 2;
         _step = Step.Established;
 
         // Consume used data from buffer
@@ -572,8 +586,7 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
         int respSize = 8 + 4 + 2 + padDLen;
         byte[] respBytes = new byte[respSize];
 
-        // crypto_select = 0x02 (RC4)
-        respBytes[11] = 2;
+        BinaryPrimitives.WriteUInt32BigEndian(respBytes.AsSpan(8, 4), selectedMethod);
         BinaryPrimitives.WriteUInt16BigEndian(respBytes.AsSpan(12), (ushort)padDLen);
         if (padDLen > 0)
         {
@@ -626,11 +639,25 @@ internal sealed class ProtocolEncryptionHandshake : IDisposable
                 Array.Copy(_buffer!, i + 8, header, 0, 6);
                 Encryption.RC4In.Decrypt(header);
 
+                uint cryptoSelect = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(0, 4));
+                if (cryptoSelect is not (1 or 2) || (cryptoSelect & AllowedMethods) == 0)
+                {
+                    _step = Step.Error;
+                    throw new InvalidDataException("Peer selected a cipher that was not offered");
+                }
+
                 padLen = (header[4] << 8) | header[5];
-                if (padLen <= MaxPaddingLength && _bufferCount >= i + 14 + padLen)
+                if (padLen > MaxPaddingLength)
+                {
+                    _step = Step.Error;
+                    throw new InvalidDataException($"Padding length {padLen} exceeds MSE spec limit of {MaxPaddingLength}");
+                }
+
+                if (_bufferCount >= i + 14 + padLen)
                 {
                     foundAt = i;
                     Encryption.RC4In.Skip(padLen);
+                    EncryptPayload = cryptoSelect == 2;
                     break;
                 }
             }

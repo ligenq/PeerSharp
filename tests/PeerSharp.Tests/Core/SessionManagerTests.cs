@@ -80,6 +80,42 @@ public class SessionManagerTests
     }
 
     [Fact]
+    public async Task CustomPersistenceStillReceivesCompleteResumeBytesForDeferredPieces()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "PeerSharpCustomResume-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var metadata = new TorrentFileMetadata();
+            metadata.Info.Hash = InfoHash.CreateRandom();
+            metadata.Info.PieceSize = 32768;
+            metadata.Info.FullSize = 32768;
+            metadata.Info.Pieces.Add(new byte[20]);
+            metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "data.bin", Size = 32768 });
+            byte[] data = new byte[32768];
+            data[0] = 42;
+            var state = new PeerSharp.PieceWriter.TorrentStateData
+            {
+                UnfinishedPieces = [new() { Index = 0, Blocks = [true, false], Data = data }]
+            };
+            var resume = new TorrentResumeData
+            {
+                Data = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(state, PeerSharpJsonContext.Default.TorrentStateData)
+            };
+            await using var torrent = TorrentTestUtility.CreateMinimal(metadata, root, resumeData: resume);
+            await torrent.FilesInternal.InitializeAsync([], TestContext.Current.CancellationToken);
+
+            await _sessionManager.SaveTorrentEntryAsync(torrent, cancellationToken: TestContext.Current.CancellationToken);
+
+            var saved = Assert.Single(_persistence.SavedEntries);
+            Assert.NotNull(saved.ResumeData);
+            var restored = System.Text.Json.JsonSerializer.Deserialize(saved.ResumeData.Data, PeerSharpJsonContext.Default.TorrentStateData)!;
+            Assert.Equal(data, Assert.Single(restored.UnfinishedPieces).Data);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task SaveTorrentEntryAsync_PersistsOnlyLearnedPeerPreferences()
     {
         var torrent = TorrentTestUtility.CreateMinimal();

@@ -59,7 +59,7 @@ internal class LsdManager : ILsdManager
 
     public async Task AnnounceAsync(InfoHash infoHash, CancellationToken token = default)
     {
-        if (_settings.Proxy.ForceProxy || !_running || _resolver.GetTorrent(infoHash) is Torrent { InfoFile.Info.IsPrivate: true })
+        if (_settings.Proxy.ForceProxy || !_running || (_resolver.GetTorrent(infoHash) is Torrent restricted && (restricted.InfoFile.Info.IsPrivate || restricted.IsI2p)))
         {
             return;
         }
@@ -235,7 +235,7 @@ internal class LsdManager : ILsdManager
         if (port is > 0 and <= ushort.MaxValue && !string.IsNullOrEmpty(hashStr) && InfoHash.TryFromHex(hashStr, out var hash))
         {
             var torrent = _resolver.GetTorrent(hash);
-            if (torrent is Torrent t && !t.InfoFile.Info.IsPrivate)
+            if (torrent is Torrent t && !t.InfoFile.Info.IsPrivate && !t.IsI2p)
             {
                 var peerEp = new IPEndPoint(sender.Address, port);
                 _logger.LogInformation("LSD found peer {Peer} for {Torrent}", peerEp, t.Name);
@@ -265,7 +265,7 @@ internal class LsdManager : ILsdManager
         var announceTasks = new List<Task>();
         foreach (var torrent in torrents)
         {
-            if (torrent.State == TorrentState.Active && torrent is not Torrent { InfoFile.Info.IsPrivate: true })
+            if (torrent.State == TorrentState.Active && torrent is not Torrent { InfoFile.Info.IsPrivate: true } && torrent is not Torrent { IsI2p: true })
             {
                 announceTasks.Add(AnnounceAsync(torrent.Hash, token));
             }

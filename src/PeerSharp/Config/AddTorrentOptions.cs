@@ -37,6 +37,14 @@ public sealed class AddTorrentOptions
     public IReadOnlyList<string>? AdditionalTrackers { get; set; }
 
     /// <summary>
+    /// Client/server certificate with its private key for an SSL torrent. It must be signed by
+    /// the torrent's embedded CA and name this torrent (or '*'). The client copies the
+    /// certificate when adding the torrent; the caller retains ownership of the original.
+    /// Never persisted to session files.
+    /// </summary>
+    public System.Security.Cryptography.X509Certificates.X509Certificate2? SslCertificate { get; set; }
+
+    /// <summary>
     /// Gets or sets peer endpoints to seed into discovery when the torrent is added. This is useful
     /// when a magnet was previewed as a <see cref="TorrentFile"/> and its BEP 9 <c>x.pe</c> hints need
     /// to be carried into the subsequent torrent-file add.

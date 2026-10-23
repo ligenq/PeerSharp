@@ -42,10 +42,18 @@ internal static class IncomingHandshakeNegotiator
     /// <param name="resolver">Used to match the info hash, which for MSE is only known mid-handshake.</param>
     /// <param name="logger">Diagnostics.</param>
     /// <param name="cancellationToken">Bounds the whole exchange.</param>
+    internal static Task<Result> NegotiateAsync(
+        Stream stream,
+        ITorrentResolver resolver,
+        ILogger logger,
+        CancellationToken cancellationToken)
+        => NegotiateAsync(stream, resolver, logger, new ConnectionSettings(), cancellationToken);
+
     internal static async Task<Result> NegotiateAsync(
         Stream stream,
         ITorrentResolver resolver,
         ILogger logger,
+        ConnectionSettings settings,
         CancellationToken cancellationToken)
     {
         // The opening byte narrows it down and does not settle it. A plaintext handshake starts with
@@ -63,7 +71,7 @@ internal static class IncomingHandshakeNegotiator
 
         if (first[0] != PlaintextMarker)
         {
-            return await NegotiateEncryptedAsync(stream, first, resolver, logger, cancellationToken).ConfigureAwait(false);
+            return await NegotiateEncryptedAsync(stream, first, resolver, logger, settings, cancellationToken).ConfigureAwait(false);
         }
 
         byte[] opening = await ReadHandshakeLengthAsync(stream, cancellationToken).ConfigureAwait(false);
@@ -76,7 +84,7 @@ internal static class IncomingHandshakeNegotiator
         // is no risk of waiting on a plaintext peer that had nothing more to send.
         if (!opening.AsSpan(1, ProtocolName.Length).SequenceEqual(ProtocolName))
         {
-            return await NegotiateEncryptedAsync(stream, opening, resolver, logger, cancellationToken).ConfigureAwait(false);
+            return await NegotiateEncryptedAsync(stream, opening, resolver, logger, settings, cancellationToken).ConfigureAwait(false);
         }
 
         return new Result(true, opening, null, new InfoHash(opening.AsSpan(28, InfoHash.V1Length)));
@@ -110,9 +118,18 @@ internal static class IncomingHandshakeNegotiator
         byte[] initialBytes,
         ITorrentResolver resolver,
         ILogger logger,
+        ConnectionSettings settings,
         CancellationToken cancellationToken)
     {
-        var pe = new ProtocolEncryptionHandshake(resolver);
+        if (settings.EffectiveIncomingEncryption == Encryption.Refuse)
+        {
+            return Failed;
+        }
+        using var pe = new ProtocolEncryptionHandshake(resolver)
+        {
+            AllowPlaintextPayload = settings.EffectiveIncomingEncryption == Encryption.Allow,
+            PreferRc4 = settings.PreferRc4
+        };
 
         try
         {
@@ -141,9 +158,12 @@ internal static class IncomingHandshakeNegotiator
             if (pe.IsComplete && pe.MatchedInfoHash != null && pe.Encryption != null)
             {
                 // IA need not contain a complete handshake. Bytes following it may already have
-                // arrived in the negotiation read and must advance the cipher exactly once.
+                // arrived in the negotiation read. Decrypt only if the selected payload mode is RC4.
                 byte[] trailing = pe.TrailingData;
-                pe.Encryption.Decrypt(trailing);
+                if (pe.EncryptPayload)
+                {
+                    pe.Encryption.Decrypt(trailing);
+                }
                 byte[] payload = pe.ReceivedPayload ?? [];
                 byte[] handshake = new byte[Math.Max(HandshakeLength, payload.Length + trailing.Length)];
                 payload.CopyTo(handshake, 0);
@@ -157,11 +177,14 @@ internal static class IncomingHandshakeNegotiator
                         return Failed;
                     }
 
-                    pe.Encryption.Decrypt(handshake.AsSpan(received, read));
+                    if (pe.EncryptPayload)
+                    {
+                        pe.Encryption.Decrypt(handshake.AsSpan(received, read));
+                    }
                     received += read;
                 }
 
-                return new Result(true, handshake, pe.Encryption, new InfoHash(pe.MatchedInfoHash));
+                return new Result(true, handshake, pe.EncryptPayload ? pe.Encryption : null, new InfoHash(pe.MatchedInfoHash));
             }
 
             return Failed;
@@ -170,10 +193,6 @@ internal static class IncomingHandshakeNegotiator
         {
             logger.LogDebug(ex, "Encryption handshake error on an incoming connection");
             return Failed;
-        }
-        finally
-        {
-            pe.Dispose();
         }
     }
 }

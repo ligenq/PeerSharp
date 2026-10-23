@@ -50,6 +50,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     private bool _selectionFinishedEventFired;
 
     private int _started;
+    private bool _loadResumePiecesForStart;
 
     private int _rollbackIncomplete;
 
@@ -162,7 +163,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public InfoHash Hash => InfoFile.Info.Hash;
     InfoHash IPeerTransportHost.Hash => InfoFile.Info.GetTrackerInfoHash();
-    bool IPeerTransportHost.AllowsDirectConnections => !Settings.Proxy.ForceProxy &&
+    bool IPeerTransportHost.AllowsDirectConnections => (!IsI2p || Settings.Connection.I2pAllowMixedNetworks) && !Settings.Proxy.ForceProxy &&
         !(Settings.Proxy.ProxyPeers && Settings.Proxy.Type != ProxyType.None && !string.IsNullOrEmpty(Settings.Proxy.Host));
 
     public InfoHash HashV2 => InfoFile.Info.HashV2;
@@ -416,15 +417,70 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         dht.ReportExternalIp(parsed);
     }
     public WebSeedManager? WebSeedManager { get; private set; }
+
+    private System.Security.Cryptography.X509Certificates.X509Certificate2? _sslCertificate;
+    internal System.Security.Cryptography.X509Certificates.X509Certificate2? SslCertificate
+    {
+        get => _sslCertificate;
+        set
+        {
+            var prepared = value == null ? null : TorrentTls.PrepareCertificate(value);
+            _sslCertificate?.Dispose();
+            _sslCertificate = prepared;
+        }
+    }
+    private bool _i2pTorrent;
+
+    /// <summary>One answer to "do these trackers make this an I2P torrent", with what produced it.</summary>
+    /// <remarks>
+    /// Written as a single object so a reader either sees a whole scan or sees none: the fingerprint
+    /// and the answer it belongs to can never be observed from different scans, which four separate
+    /// fields updated without a lock would allow.
+    /// </remarks>
+    private sealed class I2pTrackerScan(List<string> trackers, string announce, bool answer)
+    {
+        private readonly string[] _trackerSnapshot = trackers.ToArray();
+
+        /// <summary>Whether this answer was taken from the announce list the torrent has now.</summary>
+        public bool Matches(List<string> currentTrackers, string currentAnnounce) =>
+            ReferenceEquals(trackers, currentTrackers) && ReferenceEquals(announce, currentAnnounce)
+            && currentTrackers.SequenceEqual(_trackerSnapshot, StringComparer.Ordinal);
+
+        public bool Answer { get; } = answer;
+    }
+
+    private I2pTrackerScan? _i2pScan;
+
+    internal bool IsI2p
+    {
+        // Read per handshake, per connection, and on the LSD and web seed paths, so the tracker scan
+        // - a Uri.TryCreate for every announce URL - is kept rather than repeated. Metadata arrival
+        // replaces the announce list; additions, replacements and remove/add edits also invalidate
+        // the retained snapshot. This avoids depending on an explicit invalidation call
+        // that a future mutation site could forget to make.
+        get
+        {
+            if (_i2pTorrent) return true;
+            var trackers = InfoFile.AnnounceList;
+            string announce = InfoFile.Announce;
+            var scan = Volatile.Read(ref _i2pScan);
+            if (scan != null && scan.Matches(trackers, announce)) return scan.Answer;
+            bool answer = trackers.Append(announce).Any(I2pSamSession.IsI2pUrl);
+            Volatile.Write(ref _i2pScan, new I2pTrackerScan(trackers, announce, answer));
+            return answer;
+        }
+        set => _i2pTorrent = value;
+    }
+    internal I2pPeerTransport? I2pTransport { get; set; }
     private readonly Lock _webSeedLock = new();
 
     internal void RefreshWebSeeds()
     {
         lock (_webSeedLock)
         {
-            if (!Started || !HasMetadata || _disposal.IsDisposed || Volatile.Read(ref _stopping) == 1 || !Settings.Connection.EnableWebSeeds) return;
+            if (!Started || !HasMetadata || _disposal.IsDisposed || Volatile.Read(ref _stopping) == 1 || !Settings.Connection.EnableWebSeeds || (IsI2p && !Settings.Connection.I2pAllowMixedNetworks)) return;
             var urls = _webSeeds.GetAll();
-            if (WebSeedManager == null && urls.Count == 0) return;
+            if (WebSeedManager == null && urls.Count == 0 && InfoFile.HttpSeedUrls.Count == 0) return;
             WebSeedManager ??= new WebSeedManager(this, urls, Services.TimeProvider, Services.LoggerFactory.CreateLogger<WebSeedManager>());
             foreach (string existing in WebSeedManager.GetSourceUrls())
             {
@@ -480,13 +536,15 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         TimeProvider? timeProvider = null,
         ITorrentEvents? events = null,
         TorrentResumeData? resumeData = null,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        bool loadResumePiecesForStart = false)
     {
         var factories = new TorrentFactories(peerFactory, trackerFactory, httpClientFactory, loggerFactory ?? NullLoggerFactory.Instance);
         var services = new TorrentServices(bandwidth, alerts, fileHandleCache, connectionGovernor, geoIpService, factories, timeProvider ?? TimeProvider.System);
         var torrent = new Torrent(infoFile, settings, services, fileSelectionManager)
         {
-            Events = events
+            Events = events,
+            _loadResumePiecesForStart = loadResumePiecesForStart
         };
         if (resumeData != null)
         {
@@ -514,6 +572,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 _logger.LogError(ex, "StopInternalAsync failed during DisposeAsync");
             }
 
+            _sslCertificate?.Dispose();
             await _timer.DisposeAsync().ConfigureAwait(false);
             _metadataApplied.TrySetCanceled(CancellationToken.None);
             GC.SuppressFinalize(this);
@@ -615,12 +674,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     public TorrentResumeData GetResumeData() => SerializeResumeState(GetResumeState());
 
-    internal TorrentStateData GetResumeState()
+    internal TorrentStateData GetResumeState(bool streamed = false)
     {
         var state = new TorrentStateData
         {
             Pieces = Pieces.ToBitfield(),
-            UnfinishedPieces = FileTransferInternal?.GetUnfinishedPiecesState() ?? [],
             Downloaded = (ulong)(FileTransferInternal?.Downloader?.Downloaded ?? 0),
             Uploaded = (ulong)(FileTransferInternal?.Uploader?.Uploaded ?? 0),
             SeedTimeSeconds = (long)GetSeedingTime(Services.TimeProvider.GetUtcNow()).TotalSeconds,
@@ -639,6 +697,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             }
         };
 
+        if (FileTransferInternal != null)
+        {
+            var capture = FileTransferInternal.CaptureUnfinishedPieces(streamed);
+            state.UnfinishedPieces = capture.Pieces;
+            state.DeferredDataLease = capture.Lease;
+        }
         return state;
     }
 
@@ -1169,6 +1233,22 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     internal Task StartCoreAsync(CancellationToken cancellationToken = default) => StartCoreAsync(false, cancellationToken);
 
+    internal async Task DeferRestoredPiecesAsync(CancellationToken cancellationToken)
+    {
+        if (!_loadResumePiecesForStart) return;
+        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!Started && HasMetadata && _loadResumePiecesForStart)
+            {
+                FileTransferInternal.DeferUnfinishedPiecesState(LocalState.UnfinishedPieces);
+                LocalState.UnfinishedPieces.Clear();
+                _loadResumePiecesForStart = false;
+            }
+        }
+        finally { _stateLock.Release(); }
+    }
+
     private async Task StartCoreAsync(bool stateLockHeld, CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
@@ -1191,6 +1271,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                     $"Torrent '{Name}' did not finish rolling back its previous start. Stop it before starting again.");
             }
 
+            if (InfoFile.Info.IsSsl && (SslCertificate?.HasPrivateKey != true
+                || !TorrentTls.ValidateCertificate(this, SslCertificate, null)))
+                throw new System.Security.Authentication.AuthenticationException("SSL torrent requires an authorized certificate in AddTorrentOptions.SslCertificate.");
+
             LastException = null;
 
             if (FilesInternal == null)
@@ -1207,6 +1291,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             EnsureFileTransferInitialized();
 
             await FilesInternal.StartAsync(GetFileSelectionSnapshot(), cancellationToken).ConfigureAwait(false);
+
+            FileTransferInternal.RestoreDeferredPieces();
+            if (HasMetadata) LocalState.UnfinishedPieces.Clear();
+            _loadResumePiecesForStart = false;
 
             Interlocked.Exchange(ref _started, 1);
             Interlocked.Exchange(ref _activityTimeTicks, Services.TimeProvider.GetUtcNow().Ticks);
@@ -1235,7 +1323,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
                 FireAndForgetLsdAnnounce();
 
-                if (Network.Dht != null && !InfoFile.Info.IsPrivate)
+                if (Network.Dht != null && !InfoFile.Info.IsPrivate && !IsI2p)
                 {
                     var dhtHash = InfoFile.Info.GetTrackerInfoHash();
                     Network.Dht.FindPeers(dhtHash);
@@ -1247,12 +1335,12 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 }
 
                 var webSeedUrls = _webSeeds.GetAll();
-                if (Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
+                if (Settings.Connection.EnableWebSeeds && (webSeedUrls.Count > 0 || InfoFile.HttpSeedUrls.Count > 0))
                 {
                     RefreshWebSeeds();
                     _logger.LogInformation("Started WebSeedManager with {UrlCount} URLs", webSeedUrls.Count);
                 }
-                else if (!Settings.Connection.EnableWebSeeds && webSeedUrls.Count > 0)
+                else if (!Settings.Connection.EnableWebSeeds && (webSeedUrls.Count > 0 || InfoFile.HttpSeedUrls.Count > 0))
                 {
                     _logger.LogInformation("Web seeds disabled; ignoring {UrlCount} URLs", webSeedUrls.Count);
                 }
@@ -1476,6 +1564,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             return;
         }
 
+        // Legacy or hand-written JSON may explicitly null this optional collection. Treat that
+        // as no partial pieces while retaining the rest of the validated resume state.
+        state.UnfinishedPieces ??= [];
+
         if (!IsResumeDataUsable(state, out string? rejection))
         {
             // Starting from nothing costs a re-download. Adopting a bitfield that does not describe
@@ -1569,10 +1661,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
         if (state.Pieces.Length > 0)
         {
-            int expectedPieces = info.PieceSize > 0
-                ? (int)((info.FullSize + info.PieceSize - 1) / info.PieceSize)
-                : 0;
-            int expectedBytes = (expectedPieces + 7) / 8;
+            int expectedPieces = info.MerklePieceCount;
+            int expectedBytes = (int)(((long)expectedPieces + 7) / 8);
             if (state.Pieces.Length != expectedBytes)
             {
                 reason = $"its bitfield is {state.Pieces.Length} bytes, but {expectedPieces} pieces need {expectedBytes}";
@@ -1783,11 +1873,21 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             Pieces.FromBitfield(LocalState.Pieces);
         }
 
-        if (LocalState.UnfinishedPieces != null)
+        if (HasMetadata && LocalState.UnfinishedPieces != null)
         {
-            FileTransferInternal?.LoadUnfinishedPiecesState(LocalState.UnfinishedPieces);
-            // Free the large byte[] data now that it's been copied into PieceState blocks
-            LocalState.UnfinishedPieces.Clear();
+            if (_loadResumePiecesForStart || Started)
+            {
+                FileTransferInternal.LoadUnfinishedPiecesState(LocalState.UnfinishedPieces);
+                // Keep the source until the pending start decision completes, so a concurrent
+                // session pause can defer it without exporting/copying active blocks again.
+                if (Started) LocalState.UnfinishedPieces.Clear();
+            }
+            else
+            {
+                FileTransferInternal.DeferUnfinishedPiecesState(LocalState.UnfinishedPieces);
+                // The partial bytes now live in the temporary store, or in blocks on I/O fallback.
+                LocalState.UnfinishedPieces.Clear();
+            }
         }
 
         _fileSelectionManager.Initialize(LocalState.Selection, Pieces);
@@ -1817,7 +1917,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     private void FireAndForgetLsdAnnounce()
     {
         var lsd = Network.Lsd;
-        if (lsd == null || InfoFile.Info.IsPrivate)
+        if (lsd == null || InfoFile.Info.IsPrivate || IsI2p)
         {
             return;
         }
@@ -1961,7 +2061,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         int piecesCount = 0;
         if (InfoFile.Info.PieceSize > 0)
         {
-            piecesCount = (int)((InfoFile.Info.FullSize + InfoFile.Info.PieceSize - 1) / InfoFile.Info.PieceSize);
+            piecesCount = InfoFile.Info.MerklePieceCount;
         }
 
         long contentSize = InfoFile.Info.ContentSize;

@@ -30,6 +30,9 @@ public class BlockCacheBenchmarks
     [Params(1 * 1024 * 1024, 32 * 1024 * 1024)]
     public int CapacityBytes { get; set; }
 
+    [Params(0, 4, 64)]
+    public int ReadAheadBlocks { get; set; }
+
     [GlobalSetup]
     public void Setup()
     {
@@ -37,18 +40,20 @@ public class BlockCacheBenchmarks
         Random.Shared.NextBytes(_block);
         _readBuffer = new byte[BlockSize];
 
-        _cache = new BlockCache(CapacityBytes, readAheadBlocks: 0, readAheadEnabled: false, TotalSize);
+        _cache = new BlockCache(CapacityBytes, ReadAheadBlocks, readAheadEnabled: true, TotalSize);
         _cache.Initialize(new InMemoryStorage(TotalSize));
 
-        // Warm offset 0 so the hit benchmark actually hits.
+        // Warm the hit target even when a maximum read-ahead window evicts offset 0
+        // from the smaller cache while filling offsets 1..64.
         _cache.ReadAsync(0, _readBuffer).GetAwaiter().GetResult();
+        _cache.ReadAsync(BlockSize, _readBuffer).GetAwaiter().GetResult();
     }
 
     [GlobalCleanup]
     public void Cleanup() => _cache.Dispose();
 
     [Benchmark(Description = "Read, cache hit")]
-    public Task<bool> ReadHit() => _cache.ReadAsync(0, _readBuffer);
+    public Task<bool> ReadHit() => _cache.ReadAsync(BlockSize, _readBuffer);
 
     /// <summary>
     /// Walks forward through the whole address space so every call is a fresh block. Once the
