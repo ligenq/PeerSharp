@@ -105,11 +105,7 @@ internal sealed class RequestScheduler
             }
         }
 
-        int maxRequests = Math.Min(peer.GetAdaptivePipelineDepth(), Math.Max(1, _torrent.Settings.Transfer.MaxRequestsPerPeer));
-        if (peer.RemoteExtensions?.RequestQueueDepth is > 0 and var remoteCapacity)
-        {
-            maxRequests = Math.Min(maxRequests, remoteCapacity);
-        }
+        int maxRequests = RequestQueuePolicy.RequestQueueLimit(peer, _torrent.Settings.Transfer);
         int pending = 0;
         if (_requestTracker.TryGetPeerRequests(peer, out var existingReqs))
         {

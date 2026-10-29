@@ -40,6 +40,18 @@ public class RequestQueuePolicyTests
         Assert.Equal(3, RequestQueuePolicy.CalculateNewPieceStartLimit(3, 9, 0));
     }
 
+    [Theory]
+    [InlineData(500, 64, 2, 9)]    // eight 1 MiB pieces, and the one finishing
+    [InlineData(64, 64, 2, 2)]     // exactly one piece, plus one: the minimum already covers it
+    [InlineData(32, 16, 2, 3)]     // two 256 KiB pieces, plus one
+    [InlineData(2, 64, 2, 2)]      // a peer that queues little is given the minimum
+    [InlineData(0, 64, 1, 1)]      // no queue at all
+    [InlineData(10, 0, 1, 11)]     // a nonsensical block count is one block per piece
+    public void APeersQueueKeepsAsManyPiecesOpenAsItSpans(int queueDepth, int blocksPerPiece, int minimum, int expected)
+    {
+        Assert.Equal(expected, RequestQueuePolicy.PiecesToKeepOpen(queueDepth, blocksPerPiece, minimum));
+    }
+
     [Fact]
     public void AtLeastOnePieceIsOpenedWhenThereIsAnySlotAndAnyDemand()
     {
