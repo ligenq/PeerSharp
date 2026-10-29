@@ -29,7 +29,10 @@ public sealed class HttpStreamServerOptions
     /// A server bound to anything but loopback serves whoever can reach it, so it always requires a
     /// token: when this is null one is generated, and <see cref="HttpStreamServer.Url"/> includes it.
     /// A loopback server requires one only when it is given one here, so its URL stays
-    /// <c>http://127.0.0.1:port/stream</c>.
+    /// <c>http://127.0.0.1:port/stream</c>. Without a token, the server sends no CORS headers and
+    /// answers only requests whose Host names loopback, so a web page open in a browser on the same
+    /// device cannot read the file - not by trying ports, and not by DNS rebinding. Give a loopback
+    /// server a token if a page on another origin has to fetch from it.
     /// </para>
     /// <para>
     /// A token given here must be URL-safe: letters, digits, <c>-</c> and <c>_</c> only.

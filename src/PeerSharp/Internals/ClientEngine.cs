@@ -2048,7 +2048,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         return new DefaultHttpClient(_httpClientFactory.CreateClient(
             settings,
             isTracker: true,
-            Settings.Connection.BindAddress));
+            Settings.Connection.BindAddress,
+            ssrf: new SsrfPolicy(Settings.Connection.SsrfMitigation, HttpRequestKind.TorrentDownload)));
     }
 
     public Task<ITorrent> AddTorrentAsync(

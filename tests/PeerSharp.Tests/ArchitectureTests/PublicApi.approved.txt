@@ -90,6 +90,7 @@ sealed class PeerSharp.Config.ConnectionSettings
     Nullable<PeerSharp.Config.Encryption> IncomingEncryption { get; set; }
     Nullable<PeerSharp.Config.Encryption> OutgoingEncryption { get; set; }
     PeerSharp.Config.Encryption Encryption { get; set; }
+    PeerSharp.Config.SsrfMitigation SsrfMitigation { get; set; }
     String I2pSamHost { get; set; }
     TimeSpan PexInterval { get; set; }
     UInt16 TcpPort { get; set; }
@@ -176,6 +177,10 @@ sealed class PeerSharp.Config.Settings
     PeerSharp.Config.StreamingSettings Streaming { get; }
     PeerSharp.Config.TransferSettings Transfer { get; }
     UInt32 MaxPeersPerTrackerRequest { get; set; }
+enum PeerSharp.Config.SsrfMitigation
+    LocalNetworks = 2
+    None = 0
+    ThisDevice = 1
 sealed class PeerSharp.Config.StreamingSettings
     .ctor()
     Int32 DataWaitTimeoutSeconds { get; set; }

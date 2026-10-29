@@ -41,10 +41,62 @@ public enum ProxyType
 }
 
 /// <summary>
+/// How far the HTTP requests a torrent causes - to its trackers, its web seeds and a magnet link's
+/// <c>xs</c> source - are kept from reaching services on this device or its network.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Those URLs come from whoever made the torrent, so without a guard a torrent can make the engine
+/// send GET requests to a web interface on <c>127.0.0.1</c>, or to a router at
+/// <c>192.168.1.1</c>: server-side request forgery. The engine never shows the answer to the torrent's
+/// author, but a request with side effects does not need to be read to do harm.
+/// </para>
+/// <para>
+/// A guarded address is reachable only through a URL that names it outright - an address literal, or
+/// <c>localhost</c> - and then only in the shape the protocol needs: the last segment of a tracker's
+/// path begins <c>announce</c> or <c>scrape</c>, and a web seed or a <c>xs</c> source carries no query
+/// string.
+/// A redirect into a guarded address is refused unless the request began at one, and a host name
+/// that resolves to a guarded address is refused outright, which defeats DNS rebinding. The check is
+/// made against the address actually connected to, so it holds through redirects and pooled
+/// connections alike.
+/// </para>
+/// <para>
+/// Through a proxy, the proxy resolves names and makes the connection, so only the URLs themselves
+/// can be checked.
+/// </para>
+/// </remarks>
+public enum SsrfMitigation
+{
+    /// <summary>No guard. Every URL a torrent names is requested as it stands.</summary>
+    None,
+
+    /// <summary>
+    /// Guard this device: loopback and the unspecified addresses. The default, and the same ground
+    /// libtorrent's <c>ssrf_mitigation</c> covers.
+    /// </summary>
+    ThisDevice,
+
+    /// <summary>
+    /// Guard this device and the networks it is on: private IPv4 ranges, link-local addresses and
+    /// IPv6 unique-local addresses as well. Stronger, but a tracker on an internal network that is
+    /// reached by a host name - <c>tracker.corp</c> resolving to <c>10.0.0.5</c> - is refused, and
+    /// has to be named by address instead.
+    /// </summary>
+    LocalNetworks,
+}
+
+/// <summary>
 /// Settings for peer-to-peer network connections.
 /// </summary>
 public sealed class ConnectionSettings
 {
+    /// <summary>
+    /// How far the HTTP requests a torrent causes are kept from this device and its network. Defaults
+    /// to <see cref="SsrfMitigation.ThisDevice"/>.
+    /// </summary>
+    public SsrfMitigation SsrfMitigation { get; set; } = SsrfMitigation.ThisDevice;
+
     /// <summary>
     /// Local address to bind network traffic to. <see langword="null"/> uses the operating system's
     /// default routing and listens on all available interfaces.

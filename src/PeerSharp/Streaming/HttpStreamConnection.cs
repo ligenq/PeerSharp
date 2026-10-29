@@ -284,6 +284,7 @@ internal sealed class HttpStreamConnection
             204 => "No Content",
             206 => "Partial Content",
             400 => "Bad Request",
+            403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
             416 => "Range Not Satisfiable",

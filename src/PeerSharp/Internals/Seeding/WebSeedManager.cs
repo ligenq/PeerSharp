@@ -67,6 +67,11 @@ internal sealed class WebSeedManager : IAsyncDisposable
             if (Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
                 (uri.Scheme == "http" || uri.Scheme == "https"))
             {
+                if (IsRefusedBySsrfGuard(uri))
+                {
+                    continue;
+                }
+
                 if (!_sources.Any(source => Matches(source, url))) _sources.Add(new WebSeedSource(url, isMultiFile));
                 _logger.LogInformation("Added web seed: {Url}", url);
             }
@@ -77,7 +82,8 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
         foreach (string url in torrent.InfoFile.HttpSeedUrls)
         {
-            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && (uri.Scheme == "http" || uri.Scheme == "https"))
+            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && (uri.Scheme == "http" || uri.Scheme == "https")
+                && !IsRefusedBySsrfGuard(uri))
             {
                 _sources.Add(new WebSeedSource(url, isMultiFile) { IsHttpSeed = true });
             }
@@ -90,7 +96,8 @@ internal sealed class WebSeedManager : IAsyncDisposable
     public bool AddSource(string url)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-            (uri.Scheme != "http" && uri.Scheme != "https"))
+            (uri.Scheme != "http" && uri.Scheme != "https") ||
+            IsRefusedBySsrfGuard(uri))
         {
             return false;
         }
@@ -129,6 +136,24 @@ internal sealed class WebSeedManager : IAsyncDisposable
         }
 
         _logger.LogInformation("Removed web seed: {Url}", url);
+        return true;
+    }
+
+    private SsrfPolicy SsrfPolicyFor(HttpRequestKind kind) => new(_torrent.Settings.Connection.SsrfMitigation, kind);
+
+    /// <summary>
+    /// Whether the guard would refuse every request to this source, judged once when it is added rather
+    /// than by failing each request. A host name that resolves to a guarded address can only be caught
+    /// when connecting, so that is refused there.
+    /// </summary>
+    private bool IsRefusedBySsrfGuard(Uri uri)
+    {
+        if (SsrfGuard.CheckRequest(SsrfPolicyFor(HttpRequestKind.WebSeed), uri, uri.Authority, redirectedFrom: null) is not { } reason)
+        {
+            return false;
+        }
+
+        _logger.LogWarning("Skipping web seed {Url}: refused by SSRF mitigation, as {Reason}", uri, reason);
         return true;
     }
 
@@ -332,7 +357,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
         using var request = new HttpRequestMessage(HttpMethod.Get, uri.Uri);
         request.Headers.AcceptEncoding.ParseAdd("identity");
-        using var response = await GetClient().SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
+        using var response = await GetClient(HttpRequestKind.HttpSeed).SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
         if (response.StatusCode == HttpStatusCode.OK)
         {
             return await ReadExactContentAsync(response.Content, length, linked.Token).ConfigureAwait(false);
@@ -798,7 +823,7 @@ internal sealed class WebSeedManager : IAsyncDisposable
     private bool CanServePieceLocked(WebSeedSource source, int piece) => !source.IsRetired
         && _torrent.InfoFile.Info.GetFilesForPiece(piece).All(index => !source.MissingFiles.Contains(_torrent.InfoFile.Info.Files[index].Path));
 
-    private IHttpClient GetClient()
+    private IHttpClient GetClient(HttpRequestKind kind = HttpRequestKind.WebSeed)
     {
         if (_testClient != null)
         {
@@ -814,14 +839,16 @@ internal sealed class WebSeedManager : IAsyncDisposable
                 directSettings,
                 false,
                 _torrent.Settings.Connection.BindAddress,
-                maxConnectionsPerServer: PerServerConnectionLimit()));
+                maxConnectionsPerServer: PerServerConnectionLimit(),
+                ssrf: SsrfPolicyFor(kind)));
         }
 
         return new DefaultHttpClient(_torrent.Services.HttpClientFactory.CreateClient(
             settings,
             false,
             _torrent.Settings.Connection.BindAddress,
-            maxConnectionsPerServer: PerServerConnectionLimit()));
+            maxConnectionsPerServer: PerServerConnectionLimit(),
+            ssrf: SsrfPolicyFor(kind)));
     }
 
     /// <summary>

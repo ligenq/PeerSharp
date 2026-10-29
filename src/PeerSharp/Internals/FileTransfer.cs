@@ -503,6 +503,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     // Track overflow tasks for clean shutdown
     private readonly ConcurrentDictionary<Task, byte> _overflowTasks = new();
+
+    // Pieces already retracted from the whole swarm, so a lost file is announced once rather than
+    // once for every request that finds it missing.
+    private readonly ConcurrentDictionary<int, byte> _retractedPieces = new();
     private readonly int _maxPieceQueueCapacity;
 
     private readonly Channel<PeerCommunication> _peerEvaluationQueue;
@@ -888,10 +892,57 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         catch (OperationCanceledException) { block?.Dispose(); }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Failed to fulfil request from {RemoteEndPoint}", peer.RemoteEndPoint);
             block?.Dispose();
 
-            await RetractUnreadablePieceAsync(peer, item).ConfigureAwait(false);
+            if (IsDataLoss(ex))
+            {
+                Logger.LogError(ex, "Failed to fulfil request from {RemoteEndPoint}: the data is gone", peer.RemoteEndPoint);
+                await RetractUnreadablePieceAsync(peer, item).ConfigureAwait(false);
+            }
+            else
+            {
+                // Shutting down, or an error that can clear by itself - another process holding the file
+                // open, say. Telling the swarm the piece is gone would be untrue, so only this request
+                // is refused, and the next one for the piece is tried afresh.
+                Logger.Log(
+                    ex is ObjectDisposedException ? LogLevel.Debug : LogLevel.Warning,
+                    ex,
+                    "Failed to fulfil request {PieceIndex}:{Offset} from {RemoteEndPoint}; refusing it",
+                    item.PieceIndex, item.Offset, peer.RemoteEndPoint);
+                await RejectUploadAsync(peer, item).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether a failed read means the data is gone - the file deleted, moved or cut short, or given
+    /// up on after repeated errors - rather than that it could not be read just now.
+    /// </summary>
+    internal static bool IsDataLoss(Exception ex) => ex switch
+    {
+        StorageException { IsRecoverable: false } => true,
+        StorageException { InnerException: { } inner } => IsMissingData(inner),
+        _ => IsMissingData(ex),
+    };
+
+    private static bool IsMissingData(Exception ex) =>
+        ex is FileNotFoundException or DirectoryNotFoundException or EndOfStreamException;
+
+    private async Task RejectUploadAsync(PeerCommunication peer, UploadQueueItem item)
+    {
+        try
+        {
+            await peer.SendRejectAsync(new BlockRequest
+            {
+                PieceIndex = item.PieceIndex,
+                Offset = item.Offset,
+                Length = item.Length
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Best effort: the read already failed, and failing to say so must not cascade.
+            Logger.LogDebug(ex, "Failed to refuse request {PieceIndex}:{Offset}", item.PieceIndex, item.Offset);
         }
     }
 
@@ -906,15 +957,27 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// </para>
     ///
     /// <para>
-    /// A transient I/O error costs peers a re-source they did not strictly need. That is the better
-    /// error: continuing to advertise data we cannot read is indistinguishable, from the outside, from
-    /// being an unreliable peer.
+    /// The whole swarm is told once per piece. A peer that asks again afterwards - one that connected
+    /// since, and was sent the bitfield that still includes the piece - is told on its own.
     /// </para>
     /// </summary>
     private async Task RetractUnreadablePieceAsync(PeerCommunication peer, UploadQueueItem item)
     {
         try
         {
+            await peer.SendRejectAsync(new BlockRequest
+            {
+                PieceIndex = item.PieceIndex,
+                Offset = item.Offset,
+                Length = item.Length
+            }).ConfigureAwait(false);
+
+            if (!_retractedPieces.TryAdd(item.PieceIndex, 0))
+            {
+                await peer.LtDontHave.SendAsync(item.PieceIndex).ConfigureAwait(false);
+                return;
+            }
+
             // Not withdrawn from _torrent.Pieces: the completion counters behind it only ever count
             // upward, so clearing a piece there would leave progress and "finished" state inconsistent.
             // A recheck is the correct way to rebuild the local bitfield, hence the warning.
@@ -922,13 +985,6 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 "Piece {PieceIndex} could not be read while serving it; retracting it from peers (BEP 54). " +
                 "Run a recheck to rebuild local piece state.",
                 item.PieceIndex);
-
-            await peer.SendRejectAsync(new BlockRequest
-            {
-                PieceIndex = item.PieceIndex,
-                Offset = item.Offset,
-                Length = item.Length
-            }).ConfigureAwait(false);
 
             foreach (var other in _torrent.PeersInternal.GetConnectedPeersInternal())
             {
