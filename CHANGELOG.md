@@ -41,6 +41,9 @@ Security hardening for the HTTP requests a torrent can cause and for the streami
   quota in, where it used to cut them back to 16 KiB. On the same benchmark, seeding uses 27% less
   CPU (2.80 s to 2.03 s) and runs 17% faster (1,549 MB/s to 1,810 MB/s). Downloading uses less CPU
   too, because a scheduling pass's requests now leave in a few writes.
+- The end-to-end benchmark's `--skip-build` still publishes the PeerSharp CLI from the working
+  tree. It used to reuse whichever CLI was last published, while recording the current revision as
+  the one measured.
 
 ## 5.2.0 — 2026-10-23
 
