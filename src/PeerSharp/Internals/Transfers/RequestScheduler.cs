@@ -84,11 +84,35 @@ internal sealed class RequestScheduler
         _streamingPriorityPieces = options.GetStreamingPriorityPieces ?? (() => _torrent.StreamingPriorityPieces);
     }
 
-    public async Task EvaluateNextRequestsAsync(PeerCommunication peer, bool endGameMode, Func<bool> isQueueFull)
+    /// <summary>
+    /// Sends <paramref name="peer"/> as many requests as its queue has room for.
+    /// </summary>
+    /// <returns>
+    /// What, if anything, stopped a peer with nothing outstanding from being given work. Such a peer
+    /// receives no blocks, and so is not evaluated again by their arrival; the caller has to.
+    /// </returns>
+    public async Task<RequestShortfall> EvaluateNextRequestsAsync(PeerCommunication peer, bool endGameMode, Func<bool> isQueueFull)
     {
-        if (peer.Connected == 0 || isQueueFull())
+        if (peer.Connected == 0)
         {
-            return;
+            return RequestShortfall.None;
+        }
+
+        int pending = 0;
+        if (_requestTracker.TryGetPeerRequests(peer, out var existingReqs))
+        {
+            pending = existingReqs.Count;
+        }
+
+        // Backpressure while completed pieces wait to be verified, for peers that still owe us blocks:
+        // each of those evaluates them again as it lands. A peer owed nothing gets no such second
+        // chance, and holding it back only handed its share to whichever peer next found the queue
+        // with room - the one evaluated most often, which is the one already doing most of the work.
+        // What it may be given is bounded regardless: blocks land only in open pieces, and pieces
+        // waiting to be verified still count against MaxActivePieces.
+        if (pending > 0 && isQueueFull())
+        {
+            return RequestShortfall.None;
         }
 
         bool isChoked = peer.PeerChoking;
@@ -101,23 +125,17 @@ internal sealed class RequestScheduler
 
             if (peer.AllowedFastCount == 0)
             {
-                return;
+                return RequestShortfall.None;
             }
         }
 
         int maxRequests = RequestQueuePolicy.RequestQueueLimit(peer, _torrent.Settings.Transfer);
-        int pending = 0;
-        if (_requestTracker.TryGetPeerRequests(peer, out var existingReqs))
-        {
-            pending = existingReqs.Count;
-        }
-
         var streaming = _streamingPriorityPieces();
         var urgent = UrgentPieces(streaming);
 
         if (pending >= maxRequests)
         {
-            return;
+            return RequestShortfall.None;
         }
 
         int needed = maxRequests - pending;
@@ -207,6 +225,20 @@ internal sealed class RequestScheduler
         {
             _logger.LogTrace("Sent {SentCount} requests to {RemoteEndPoint}", sent, peer.RemoteEndPoint);
         }
+
+        if (sent > 0 || pending > 0)
+        {
+            return RequestShortfall.None;
+        }
+
+        if (_pieceStateManager.Count >= _pieceStateManager.MaxActivePieces)
+        {
+            return RequestShortfall.NoPieceSlot;
+        }
+
+        // A peer that has nothing left we want is not waiting for anything, and treating it as though
+        // it were would evaluate it again for nothing.
+        return !isChoked && HasWantedPieces(peer) ? RequestShortfall.NothingRequestable : RequestShortfall.None;
     }
 
     /// <summary>
@@ -445,6 +477,22 @@ internal sealed class RequestScheduler
     }
 
     private readonly record struct BlockSpan(int StartBlock, int EndBlock);
+}
+
+/// <summary>Why an evaluation left a peer with no requests outstanding, when that was not its choice.</summary>
+internal enum RequestShortfall
+{
+    /// <summary>Nothing held it back: it has work, has nothing we want, or is choking us.</summary>
+    None,
+
+    /// <summary>Every open piece was already asked for, and no more may be opened.</summary>
+    NoPieceSlot,
+
+    /// <summary>
+    /// It has pieces we want, but none could be asked of it just now - every block of those under way
+    /// is already asked of someone, and the pieces it could have started were taken first.
+    /// </summary>
+    NothingRequestable,
 }
 
 internal sealed class RequestSchedulerOptions
