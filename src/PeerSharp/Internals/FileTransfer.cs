@@ -507,6 +507,10 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     // Pieces already retracted from the whole swarm, so a lost file is announced once rather than
     // once for every request that finds it missing.
     private readonly ConcurrentDictionary<int, byte> _retractedPieces = new();
+
+    // Peers that could take requests but were left with none, finding every open piece already asked
+    // for. See EvaluateNextRequestsInternalAsync.
+    private readonly ConcurrentDictionary<PeerCommunication, byte> _idlePeers = new();
     private readonly int _maxPieceQueueCapacity;
 
     private readonly Channel<PeerCommunication> _peerEvaluationQueue;
@@ -1335,6 +1339,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _piecePicker.UnregisterPeerAvailability(peer);
         _requestTracker.RemovePeer(peer);
         _uploadQueueManager.RemovePeer(peer);
+        _idlePeers.TryRemove(peer, out _);
 
         // A piece being retried is reserved for one peer at a time so that the next failure names its
         // author. Nothing released that reservation when the peer went away, so a piece could sit
@@ -1720,9 +1725,50 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             && _pieceProcessingQueue.Reader.Count >= _maxPieceQueueCapacity;
     }
 
-    private Task EvaluateNextRequestsInternalAsync(PeerCommunication peer)
+    /// <summary>
+    /// Evaluates a peer, and remembers it for later when it could take requests but was left with
+    /// none, because every open piece was already asked for.
+    ///
+    /// <para>
+    /// A peer is evaluated when one of its blocks arrives, and a peer with nothing outstanding
+    /// receives none. One left idle therefore had no way back but the once-a-second update, while a
+    /// peer still owed blocks was evaluated again the moment its next one landed - and took the
+    /// pieces the others would have had. On a fast link that happened often enough that one of four
+    /// equal peers served 93% of a download that finished before the update ran at all. A remembered
+    /// peer is evaluated again as soon as a piece finishes processing, which frees its slot or, if it
+    /// failed, its blocks.
+    /// </para>
+    /// </summary>
+    private async Task EvaluateNextRequestsInternalAsync(PeerCommunication peer)
     {
-        return _requestScheduler.EvaluateNextRequestsAsync(peer, EndGameMode, IsPieceQueueFull);
+        var shortfall = await _requestScheduler.EvaluateNextRequestsAsync(peer, EndGameMode, IsPieceQueueFull).ConfigureAwait(false);
+        if (shortfall == RequestShortfall.None)
+        {
+            return;
+        }
+
+        _idlePeers.TryAdd(peer, 0);
+
+        // A slot may have freed between the evaluation and the add, after the release that would have
+        // seen this peer; without this it could wait for a release that never comes. Nothing
+        // requestable has no such test, so a peer is not sent straight back to an evaluation that
+        // will leave it idle again: it waits for the next piece to finish.
+        if (shortfall == RequestShortfall.NoPieceSlot && _pieceStateManager.Count < _pieceStateManager.MaxActivePieces)
+        {
+            ReleaseIdlePeers();
+        }
+    }
+
+    /// <summary>Queues every peer that was left idle for another evaluation.</summary>
+    internal void ReleaseIdlePeers()
+    {
+        foreach (var peer in _idlePeers.Keys)
+        {
+            if (_idlePeers.TryRemove(peer, out _) && peer.Connected != 0)
+            {
+                _peerEvaluationScheduler.Enqueue(peer);
+            }
+        }
     }
 
     private async Task ProcessIncomingBlocksAsync(CancellationToken ct)
@@ -1987,6 +2033,15 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             // Log unhandled exceptions in fire-and-forget task to prevent silent failures
             Logger.LogError(ex, "Error processing piece {PieceIndex}", pieceToProcess.Index);
             pieceToProcess.ReleaseWriting();
+        }
+        finally
+        {
+            // Verified, failed or put back: either way its slot or its blocks are free again, which is
+            // what a peer left with nothing to request was waiting for.
+            if (!_idlePeers.IsEmpty)
+            {
+                ReleaseIdlePeers();
+            }
         }
     }
 

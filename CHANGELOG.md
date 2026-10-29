@@ -27,10 +27,15 @@ Security hardening for the HTTP requests a torrent can cause and for the streami
 - The number of pieces kept open at once now follows what the unchoked peers will actually queue,
   within `ActivePieceByteBudget`. It used to allow two pieces per peer, which with 1 MiB pieces left
   room for 512 blocks across all peers, while one peer may queue 500. The download stalled
-  waiting for slots to free. `ActivePiecesPerPeer` is now the minimum per peer. Against
-  libtorrent's `connection_tester` on loopback (v1, 256 MiB, four peers), the median download went
-  from 214 MB/s to 636 MB/s. Peak private memory rises to match, because the budget is now
-  actually used.
+  waiting for slots to free. `ActivePiecesPerPeer` is now the minimum per peer. Peak private
+  memory rises to match, because the budget is now actually used.
+- A peer with no requests outstanding is no longer held back while completed pieces wait to be
+  verified, and a peer that finds every open piece already requested is evaluated again as soon as
+  a piece finishes. Before, it waited up to a second for the next update, while the peer still
+  receiving blocks took every freed slot. On a fast link one of four equal peers served 93% of a
+  download.
+- Together, against libtorrent's `connection_tester` on loopback (v1, 256 MiB, four peers), the
+  median download went from 214 MB/s to 887 MB/s, with runs ranging from 869 to 907 MB/s.
 
 ## 5.2.0 — 2026-10-23
 
