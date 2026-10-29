@@ -21,8 +21,15 @@ namespace PeerSharp.Internals.Peers;
 /// </summary>
 internal sealed class RateLimitedStream : Stream
 {
-    /// <summary>Largest read or write issued to the inner stream, so one call cannot hog a reservation.</summary>
+    /// <summary>Largest read issued to the inner stream, so one call cannot hog a reservation.</summary>
     private const int ChunkSize = ProtocolConstants.BlockSize;
+
+    /// <summary>
+    /// Largest write issued to the inner stream: the size quota is reserved in anyway, so a write this
+    /// size costs a throttled connection nothing it was not already granted. Smaller, the send loop's
+    /// joined writes were cut back into a send per block.
+    /// </summary>
+    private const int WriteChunkSize = ProtocolConstants.UploadBatchSize;
 
     private readonly IBandwidthManager _bandwidthManager;
     private readonly string[] _downloadChannels;
@@ -251,7 +258,7 @@ internal sealed class RateLimitedStream : Stream
                     "The connection was closed part way through a write. See the note on partial writes below.");
             }
 
-            int remaining = Math.Min(buffer.Length - sent, ChunkSize);
+            int remaining = Math.Min(buffer.Length - sent, WriteChunkSize);
 
             if (_reservedUploadBandwidth < remaining)
             {

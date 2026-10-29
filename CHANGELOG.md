@@ -36,6 +36,11 @@ Security hardening for the HTTP requests a torrent can cause and for the streami
   download.
 - Together, against libtorrent's `connection_tester` on loopback (v1, 256 MiB, four peers), the
   median download went from 214 MB/s to 887 MB/s, with runs ranging from 869 to 907 MB/s.
+- Messages already waiting in a peer's send queue go out in one write of up to 128 KiB, not one
+  write each. The rate limiter passes writes through in 64 KiB pieces, the size it already reserves
+  quota in, where it used to cut them back to 16 KiB. On the same benchmark, seeding uses 27% less
+  CPU (2.80 s to 2.03 s) and runs 17% faster (1,549 MB/s to 1,810 MB/s). Downloading uses less CPU
+  too, because a scheduling pass's requests now leave in a few writes.
 
 ## 5.2.0 — 2026-10-23
 
