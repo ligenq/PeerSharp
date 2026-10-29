@@ -24,6 +24,13 @@ Security hardening for the HTTP requests a torrent can cause and for the streami
   deleted, moved or cut short, or storage gave up on it. Shutdown and errors that can clear, such
   as another process holding the file open, refuse only the request. The whole swarm is told at
   most once per piece.
+- The number of pieces kept open at once now follows what the unchoked peers will actually queue,
+  within `ActivePieceByteBudget`. It used to allow two pieces per peer, which with 1 MiB pieces left
+  room for 512 blocks across all peers, while one peer may queue 500. The download stalled
+  waiting for slots to free. `ActivePiecesPerPeer` is now the minimum per peer. Against
+  libtorrent's `connection_tester` on loopback (v1, 256 MiB, four peers), the median download went
+  from 214 MB/s to 636 MB/s. Peak private memory rises to match, because the budget is now
+  actually used.
 
 ## 5.2.0 — 2026-10-23
 

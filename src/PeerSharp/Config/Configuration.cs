@@ -1052,8 +1052,9 @@ public sealed class TransferSettings
     public int MinActivePieces { get; set; } = 8;
 
     /// <summary>
-    /// Pieces of headroom kept open per unchoked peer, so capacity tracks the demand actually
-    /// present rather than the budget alone. Default is 2, clamped to 1 - 64.
+    /// The fewest pieces kept open per unchoked peer, so capacity tracks the demand actually present
+    /// rather than the budget alone. A peer whose request queue spans more pieces than this is given
+    /// as many as it spans, within <see cref="ActivePieceByteBudget"/>. Default is 2, clamped to 1 - 64.
     /// </summary>
     public int ActivePiecesPerPeer { get; set; } = 2;
 

@@ -1561,6 +1561,15 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// requests across more partial pieces, so demand - the peers currently willing to send to us -
     /// caps it too, and the floor keeps enough open for endgame to have somewhere to go.
     /// </para>
+    ///
+    /// <para>
+    /// Demand is what those peers will queue, not how many of them there are. It used to be a fixed
+    /// two pieces each, while one peer's queue can be five hundred blocks - eight pieces of 1 MiB. The
+    /// first peer to fill its queue then held every open piece, a slot freed only as one of its
+    /// pieces completed, and its own next pass reclaimed it: against libtorrent's
+    /// <c>connection_tester</c> one of four equal peers served 96% of a download, and the engine ran
+    /// at that one connection's rate.
+    /// </para>
     /// </summary>
     private int CalculateMaxActivePieces()
     {
@@ -1575,19 +1584,25 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         }
 
         long byBudget = Math.Max(1, transfer.ActivePieceByteBudget / pieceSize);
+        int blocksPerPiece = (int)Math.Min(int.MaxValue, (pieceSize + ProtocolConstants.BlockSize - 1) / ProtocolConstants.BlockSize);
+        int perPeer = Math.Clamp(transfer.ActivePiecesPerPeer, 1, 64);
 
         // Peers that are not choking us are the ones a newly opened piece could actually make
         // progress on. Choked and idle peers are counted by neither.
-        int willingPeers = 0;
+        long byDemand = 0;
         foreach (var peer in _torrent.PeersInternal.GetConnectedPeersInternal())
         {
             if (!peer.PeerChoking)
             {
-                willingPeers++;
+                int queue = RequestQueuePolicy.RequestQueueLimit(peer, transfer);
+                byDemand += RequestQueuePolicy.PiecesToKeepOpen(queue, blocksPerPiece, perPeer);
+            }
+
+            if (byDemand >= byBudget)
+            {
+                break;
             }
         }
-
-        long byDemand = (long)willingPeers * Math.Clamp(transfer.ActivePiecesPerPeer, 1, 64);
 
         return (int)Math.Clamp(Math.Min(byBudget, byDemand), floor, ceiling);
     }
