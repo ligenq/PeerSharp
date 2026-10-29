@@ -32,6 +32,8 @@ internal sealed class HttpRequestHead : IHttpStreamRequest
 
     public string? RangeHeader => Headers.GetValueOrDefault("Range");
 
+    public string? Host => Headers.GetValueOrDefault("Host");
+
     /// <summary>
     /// Whether the request carries a body. The server accepts none, and without reading one it
     /// cannot find where the next request on the connection begins, so such a connection is closed

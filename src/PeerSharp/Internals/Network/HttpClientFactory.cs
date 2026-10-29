@@ -25,12 +25,16 @@ internal interface IHttpClientFactory
     /// carries that header to wherever a redirect points, so such a caller follows redirects itself.
     /// </param>
     /// <param name="maxConnectionsPerServer">Connections held open per origin.</param>
+    /// <param name="ssrf">
+    /// The guard for a client that requests URLs a torrent named. The default guards nothing.
+    /// </param>
     HttpClient CreateClient(
         ProxySettings proxy,
         bool isTracker,
         IPAddress? bindAddress = null,
         bool followRedirects = true,
-        int maxConnectionsPerServer = DefaultMaxConnectionsPerServer);
+        int maxConnectionsPerServer = DefaultMaxConnectionsPerServer,
+        SsrfPolicy ssrf = default);
 }
 
 /// <summary>
@@ -87,7 +91,8 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
         bool isTracker,
         IPAddress? bindAddress = null,
         bool followRedirects = true,
-        int maxConnectionsPerServer = IHttpClientFactory.DefaultMaxConnectionsPerServer)
+        int maxConnectionsPerServer = IHttpClientFactory.DefaultMaxConnectionsPerServer,
+        SsrfPolicy ssrf = default)
     {
         if (proxy.ForceProxy && (proxy.Type == ProxyType.None || string.IsNullOrWhiteSpace(proxy.Host) || proxy.Port == 0))
             throw new InvalidOperationException("ForceProxy requires a usable proxy configuration.");
@@ -106,7 +111,8 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             isTracker,
             bindAddress,
             followRedirects,
-            perServer);
+            perServer,
+            ssrf);
 
         lock (_lock)
         {
@@ -119,7 +125,7 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             }
 
             EvictUntilThereIsRoom();
-            var client = CreateNewClient(proxy, isTracker, bindAddress, followRedirects, perServer);
+            var client = CreateNewClient(proxy, isTracker, bindAddress, followRedirects, perServer, ssrf);
             _clients[key] = new PooledClient(client) { LastUsed = ++_useCounter };
             return client;
         }
@@ -171,8 +177,11 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
         bool isTracker,
         IPAddress? bindAddress,
         bool followRedirects,
-        int maxConnectionsPerServer)
+        int maxConnectionsPerServer,
+        SsrfPolicy ssrf)
     {
+        bool guarded = ssrf.Mode != SsrfMitigation.None;
+        bool useProxy = proxy.Type != ProxyType.None && !string.IsNullOrEmpty(proxy.Host);
         var handler = new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
@@ -180,19 +189,30 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             MaxConnectionsPerServer = maxConnectionsPerServer,
             ConnectTimeout = TimeSpan.FromSeconds(10),
             AutomaticDecompression = isTracker ? DecompressionMethods.GZip | DecompressionMethods.Deflate : DecompressionMethods.None,
-            AllowAutoRedirect = followRedirects,
-            UseProxy = proxy.Type != ProxyType.None && !string.IsNullOrEmpty(proxy.Host)
+
+            // A guarded client follows redirects in SsrfGuardHandler, which checks every one.
+            AllowAutoRedirect = followRedirects && !guarded,
+            UseProxy = useProxy
         };
 
-        // Only for a bind address, which the default connect path has no way to apply. A callback can
-        // report a failed connect only by throwing, from our code into HttpClient's, so it is kept to
-        // the one configuration that needs it: choosing an address family is done by addressing the
-        // server by IP instead - see HttpTracker.
-        if (bindAddress != null)
+        // For a bind address, which the default connect path has no way to apply, and for the SSRF
+        // guard, which has to see the address a connection actually goes to. A callback can report a
+        // failed connect only by throwing, from our code into HttpClient's, so it is kept to the
+        // configurations that need it: choosing an address family is done by addressing the server by
+        // IP instead - see HttpTracker. Through a proxy the callback reaches the proxy, not the server,
+        // and the proxy - often on loopback itself - is the user's own choice, so it is not screened.
+        bool screen = guarded && !useProxy;
+        if (bindAddress != null || screen)
         {
             var hostAddresses = _hostAddresses;
-            handler.ConnectCallback = (context, cancellationToken) =>
-                ConnectForTestingAsync(context.DnsEndPoint, bindAddress, bindAddress.AddressFamily, hostAddresses.ResolveAsync, cancellationToken);
+            var mode = screen ? ssrf.Mode : SsrfMitigation.None;
+            handler.ConnectCallback = (context, cancellationToken) => ConnectAsync(
+                context.DnsEndPoint,
+                bindAddress,
+                bindAddress?.AddressFamily,
+                hostAddresses.ResolveAsync,
+                addresses => SsrfGuard.ScreenAddresses(mode, SsrfGuard.RequestHost(context.InitialRequestMessage), addresses),
+                cancellationToken);
         }
 
         if (proxy.Type != ProxyType.None && !string.IsNullOrEmpty(proxy.Host))
@@ -216,7 +236,8 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             }
         }
 
-        var client = new HttpClient(handler)
+        HttpMessageHandler pipeline = guarded ? new SsrfGuardHandler(handler, ssrf, followRedirects) : handler;
+        var client = new HttpClient(pipeline)
         {
             Timeout = TimeSpan.FromSeconds(isTracker ? 15 : 30)
         };
@@ -239,7 +260,8 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
         bool IsTracker,
         IPAddress? BindAddress,
         bool FollowRedirects,
-        int MaxConnectionsPerServer);
+        int MaxConnectionsPerServer,
+        SsrfPolicy Ssrf);
 
     /// <summary>A cached client and when it was last handed out, which sets eviction order.</summary>
     private sealed class PooledClient
@@ -268,11 +290,25 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
     /// walk itself can be tested without depending on what a real name happens to resolve to.
     /// </para>
     /// </summary>
-    internal static async ValueTask<Stream> ConnectForTestingAsync(
+    internal static ValueTask<Stream> ConnectForTestingAsync(
         DnsEndPoint remoteEndPoint,
         IPAddress? bindAddress,
         AddressFamily addressFamily,
         Func<string, CancellationToken, Task<IPAddress[]>> resolveAddressesAsync,
+        CancellationToken cancellationToken)
+        => ConnectAsync(remoteEndPoint, bindAddress, addressFamily, resolveAddressesAsync, screen: null, cancellationToken);
+
+    /// <summary>
+    /// The connect walk <see cref="ConnectForTestingAsync"/> describes, over addresses of any family
+    /// when <paramref name="addressFamily"/> is null, and only those <paramref name="screen"/> lets
+    /// through - which may refuse by throwing.
+    /// </summary>
+    internal static async ValueTask<Stream> ConnectAsync(
+        DnsEndPoint remoteEndPoint,
+        IPAddress? bindAddress,
+        AddressFamily? addressFamily,
+        Func<string, CancellationToken, Task<IPAddress[]>> resolveAddressesAsync,
+        Func<IPAddress[], IPAddress[]>? screen,
         CancellationToken cancellationToken)
     {
         IPAddress[] addresses;
@@ -285,12 +321,17 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
             addresses = await resolveAddressesAsync(remoteEndPoint.Host, cancellationToken).ConfigureAwait(false);
         }
 
+        if (screen != null)
+        {
+            addresses = screen(addresses);
+        }
+
         // Every attempt spends from one ConnectTimeout, so a long list of dead records could burn the
         // whole budget before reaching a live address and leave the fallback buying nothing. Round
         // robin exists to spread load over a handful of hosts, not dozens, so a short walk keeps the
         // benefit while bounding the worst case.
         var candidates = addresses
-            .Where(address => address.AddressFamily == addressFamily)
+            .Where(address => addressFamily == null || address.AddressFamily == addressFamily)
             .Take(MaxConnectAttempts)
             .ToArray();
         if (candidates.Length == 0)
@@ -303,7 +344,9 @@ internal sealed class HttpClientFactory : IHttpClientFactory, IDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var socket = new Socket(addressFamily, SocketType.Stream, ProtocolType.Tcp);
+            // NoDelay, as the connect path this replaces sets it: a request is one small write, and
+            // Nagle would hold it back waiting for an acknowledgement that has nothing to ride on.
+            var socket = new Socket(remoteAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
             try
             {
                 if (bindAddress != null)

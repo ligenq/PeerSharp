@@ -3,6 +3,28 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
+## Unreleased
+
+Security hardening for the HTTP requests a torrent can cause and for the streaming server.
+
+- Tracker, web seed and magnet `xs` requests are guarded against server-side request forgery by the
+  new `Connection.SsrfMitigation`, which defaults to `ThisDevice`. A URL that names loopback outright
+  must have the shape its protocol needs: a tracker path whose last segment begins `announce` or
+  `scrape`, or a web seed or `xs` source without a query string. A redirect into loopback is
+  refused unless the request began there, and a host name that resolves to loopback is refused when
+  connecting, which also defeats DNS rebinding. `LocalNetworks` extends the same rules to private,
+  link-local and unique-local addresses. `None` turns the guard off. Through a proxy, only the URLs
+  are checked.
+- A loopback `HttpStreamServer` without an access token no longer sends
+  `Access-Control-Allow-Origin: *`, and it answers only requests whose `Host` names loopback. A web
+  page open on the same device can no longer read the stream by trying ports or by DNS rebinding.
+  Servers with a token, which includes every server bound to a network address, still allow any
+  origin, so cast receivers keep working.
+- A piece is retracted from the swarm (BEP 54) only when its data is actually gone: the file is
+  deleted, moved or cut short, or storage gave up on it. Shutdown and errors that can clear, such
+  as another process holding the file open, refuse only the request. The whole swarm is told at
+  most once per piece.
+
 ## 5.2.0 — 2026-10-23
 
 Lower memory use for resume persistence and streaming, broader protocol compatibility, and fixes

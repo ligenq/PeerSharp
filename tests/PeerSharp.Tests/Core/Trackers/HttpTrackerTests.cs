@@ -119,7 +119,8 @@ public class HttpTrackerTests
             bool isTracker,
             IPAddress? bindAddress = null,
             bool followRedirects = true,
-            int maxConnectionsPerServer = IHttpClientFactory.DefaultMaxConnectionsPerServer)
+            int maxConnectionsPerServer = IHttpClientFactory.DefaultMaxConnectionsPerServer,
+            SsrfPolicy ssrf = default)
         {
             FollowRedirects.Enqueue(followRedirects);
             return new HttpClient(new FamilyHandler(request =>

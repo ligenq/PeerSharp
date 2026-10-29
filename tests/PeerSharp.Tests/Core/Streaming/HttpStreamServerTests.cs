@@ -101,10 +101,10 @@ public class HttpStreamRequestHandlerTests
     {
         // A cast receiver is a web page on another origin, and it is not allowed to read a response
         // that does not say it may - nor the range headers it needs to seek, unless they are exposed.
-        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1, 2, 3, 4]), 0);
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1, 2, 3, 4]), 0, "/secret-token/stream", NullLoggerFactory.Instance);
         var response = new FakeResponse();
 
-        await handler.ProcessAsync(new FakeRequest("GET", "/stream", "bytes=0-1"), response);
+        await handler.ProcessAsync(new FakeRequest("GET", "/secret-token/stream", "bytes=0-1"), response);
 
         Assert.Equal("*", response.Headers["Access-Control-Allow-Origin"]);
         Assert.Contains("Content-Range", response.Headers["Access-Control-Expose-Headers"], StringComparison.Ordinal);
@@ -114,10 +114,10 @@ public class HttpStreamRequestHandlerTests
     public async Task Options_AnswersACorsPreflightWithoutOpeningTheFile()
     {
         var torrent = new FakeTorrent("movie.mp4", [1], () => throw new InvalidOperationException("a preflight must not open the file"));
-        var handler = new HttpStreamRequestHandler(torrent, 0);
+        var handler = new HttpStreamRequestHandler(torrent, 0, "/secret-token/stream", NullLoggerFactory.Instance);
         var response = new FakeResponse();
 
-        await handler.ProcessAsync(new FakeRequest("OPTIONS", "/stream"), response);
+        await handler.ProcessAsync(new FakeRequest("OPTIONS", "/secret-token/stream"), response);
 
         Assert.Equal((int)HttpStatusCode.NoContent, response.StatusCode);
         Assert.Contains("GET", response.Headers["Access-Control-Allow-Methods"], StringComparison.Ordinal);
@@ -302,7 +302,7 @@ public class HttpStreamRequestHandlerTests
             handler.ProcessAsync(new FakeRequest("GET", "/stream"), response));
     }
 
-    internal sealed record FakeRequest(string Method, string Path, string? RangeHeader = null) : IHttpStreamRequest;
+    internal sealed record FakeRequest(string Method, string Path, string? RangeHeader = null, string? Host = null) : IHttpStreamRequest;
 
     [Theory]
     [InlineData("bytes=1-2")]
@@ -507,13 +507,86 @@ public class HttpStreamRequestHandlerTests
     [Fact(Timeout = 30000)]
     public async Task ASideFile_CanBeReadByACastReceiver()
     {
-        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0);
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0, "/secret-token/stream", NullLoggerFactory.Instance);
         handler.AddFile("subs.vtt", "text/vtt", () => "WEBVTT\n"u8.ToArray());
         var response = new FakeResponse();
 
-        await handler.ProcessAsync(new FakeRequest("GET", "/subs.vtt"), response);
+        await handler.ProcessAsync(new FakeRequest("GET", "/secret-token/subs.vtt"), response);
 
         Assert.Equal("*", response.Headers["Access-Control-Allow-Origin"]);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ALoopbackServerWithoutAToken_DoesNotLetOtherOriginsRead()
+    {
+        // Its URL is guessable from the port alone, so allowing any origin would let any web page the
+        // user has open read the file by trying ports.
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1, 2, 3, 4]), 0);
+        handler.AddFile("subs.vtt", "text/vtt", () => "WEBVTT\n"u8.ToArray());
+
+        var stream = new FakeResponse();
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream", "bytes=0-1"), stream);
+        var sideFile = new FakeResponse();
+        await handler.ProcessAsync(new FakeRequest("GET", "/subs.vtt"), sideFile);
+        var preflight = new FakeResponse();
+        await handler.ProcessAsync(new FakeRequest("OPTIONS", "/stream"), preflight);
+
+        Assert.Equal((int)HttpStatusCode.PartialContent, stream.StatusCode);
+        Assert.DoesNotContain(stream.Headers.Keys, name => name.StartsWith("Access-Control-", StringComparison.Ordinal));
+        Assert.DoesNotContain(sideFile.Headers.Keys, name => name.StartsWith("Access-Control-", StringComparison.Ordinal));
+        Assert.DoesNotContain(preflight.Headers.Keys, name => name.StartsWith("Access-Control-", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("evil.example")]
+    [InlineData("evil.example:8080")]
+    [InlineData("127.0.0.1.evil.example:8080")]
+    [InlineData("localhost.evil.example")]
+    [InlineData("192.168.1.20:8080")]
+    [InlineData("[fe80::1]:8080")]
+    [InlineData("[::1")]
+    public async Task ALoopbackServerWithoutAToken_RefusesAForeignHost(string host)
+    {
+        // DNS rebinding: a page points its own name at 127.0.0.1 and reads the stream as same-origin.
+        // The Host header still names the page's host, which is what gives it away.
+        var torrent = new FakeTorrent("movie.mp4", [1], () => throw new InvalidOperationException("must not open the file"));
+        var handler = new HttpStreamRequestHandler(torrent, 0);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream", Host: host), response);
+
+        Assert.Equal((int)HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("127.0.0.1:8080")]
+    [InlineData("127.0.0.1")]
+    [InlineData("LOCALHOST:8080")]
+    [InlineData("player.localhost:8080")]
+    [InlineData("[::1]:8080")]
+    public async Task ALoopbackServerWithoutAToken_ServesALoopbackHost(string? host)
+    {
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1, 2]), 0);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/stream", Host: host), response);
+
+        Assert.Equal((int)HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(new byte[] { 1, 2 }, response.BodyBytes);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AServerWithAToken_AcceptsAnyHost()
+    {
+        // A cast receiver reaches the server by its network address; the token is what keeps everyone
+        // else out.
+        var handler = new HttpStreamRequestHandler(new FakeTorrent("movie.mp4", [1]), 0, "/secret-token/stream", NullLoggerFactory.Instance);
+        var response = new FakeResponse();
+
+        await handler.ProcessAsync(new FakeRequest("GET", "/secret-token/stream", Host: "192.168.1.20:8080"), response);
+
+        Assert.Equal((int)HttpStatusCode.OK, response.StatusCode);
     }
 
     [Fact(Timeout = 30000)]
