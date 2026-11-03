@@ -137,6 +137,36 @@ public interface ITorrent
     bool HasMetadata { get; }
 
     /// <summary>
+    /// Gets whether this torrent requires mutually authenticated TLS peer connections, and so a
+    /// certificate before it can start. False for a magnet link until its metadata arrives.
+    /// </summary>
+    /// <remarks>
+    /// The same answer as <see cref="TorrentFile.IsSsl"/> on <see cref="ExportTorrentFile"/>, without
+    /// serializing and parsing the whole metadata to get it.
+    /// </remarks>
+    bool IsSsl => false;
+
+    /// <summary>
+    /// Gives a stopped SSL torrent the certificate it authenticates with, replacing any it had. It
+    /// takes effect at the next start.
+    /// </summary>
+    /// <remarks>
+    /// For a torrent added without one, restored from a session (which never stores private keys), or
+    /// whose certificate has been renewed. Removing the torrent and adding it back did the same thing
+    /// at the risk of losing it. The torrent keeps its own copy, so the caller may dispose
+    /// <paramref name="certificate"/> afterwards.
+    /// </remarks>
+    /// <param name="certificate">A certificate with its private key, issued for this torrent by the
+    /// certificate authority in its metadata.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="InvalidOperationException">The torrent is running, has no metadata yet, or is
+    /// not an SSL torrent.</exception>
+    /// <exception cref="ArgumentException">The certificate has no private key, or was not issued for
+    /// this torrent.</exception>
+    Task SetSslCertificateAsync(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("This ITorrent implementation cannot change its SSL certificate.");
+
+    /// <summary>
     /// Determines whether this torrent and another share a non-empty V1 or V2 info hash. Empty hashes
     /// represent an unavailable hash version and are never treated as identity evidence.
     /// </summary>

@@ -154,6 +154,66 @@ public sealed class TorrentTlsTests
         }
     }
 
+    private static TorrentFileMetadata SslMetadata(X509Certificate2? ca)
+    {
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.Name = "test.bin";
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384;
+        metadata.Info.Pieces.Add(new byte[20]);
+        metadata.Info.Files.Add(new PeerSharp.Internals.TorrentFileEntry { Path = "test.bin", Size = 16384 });
+        metadata.Info.SslCertificateAuthority = ca?.ExportCertificatePem();
+        return metadata;
+    }
+
+    /// <summary>
+    /// Attaching a certificate to a torrent that already exists used to mean removing it and adding it
+    /// back, which loses it outright if the second add fails.
+    /// </summary>
+    [Fact]
+    public async Task SetSslCertificate_GivesAStoppedTorrentItsOwnCopy()
+    {
+        var (ca, peer) = CreateCertificates("test.bin");
+        using (ca)
+        {
+            await using var torrent = TorrentTestUtility.CreateMinimal(SslMetadata(ca));
+            ITorrent api = torrent;
+            Assert.True(api.IsSsl);
+
+            await api.SetSslCertificateAsync(peer, TestContext.Current.CancellationToken);
+            peer.Dispose();
+
+            Assert.NotNull(torrent.SslCertificate);
+            Assert.True(torrent.SslCertificate!.HasPrivateKey);
+            Assert.True(TorrentTls.ValidateCertificate(torrent, torrent.SslCertificate, null));
+        }
+    }
+
+    [Fact]
+    public async Task SetSslCertificate_RefusesWhatAStartWouldRefuse()
+    {
+        var (ca, peer) = CreateCertificates("test.bin");
+        var (otherCa, otherPeer) = CreateCertificates("test.bin");
+        using (ca) using (peer) using (otherCa) using (otherPeer)
+        using (var withoutKey = X509CertificateLoader.LoadCertificate(peer.RawData))
+        {
+            var ct = TestContext.Current.CancellationToken;
+            await using var torrent = TorrentTestUtility.CreateMinimal(SslMetadata(ca));
+            await using var plain = TorrentTestUtility.CreateMinimal(SslMetadata(null));
+            Assert.False(((ITorrent)plain).IsSsl);
+
+            await Assert.ThrowsAsync<ArgumentException>(() => torrent.SetSslCertificateAsync(otherPeer, ct));
+            await Assert.ThrowsAsync<ArgumentException>(() => torrent.SetSslCertificateAsync(withoutKey, ct));
+            await Assert.ThrowsAsync<InvalidOperationException>(() => plain.SetSslCertificateAsync(peer, ct));
+            Assert.Null(torrent.SslCertificate);
+
+            // TLS handshakes read the certificate while the torrent runs.
+            typeof(Torrent).GetField("_started", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(torrent, 1);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => torrent.SetSslCertificateAsync(peer, ct));
+            typeof(Torrent).GetField("_started", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(torrent, 0);
+        }
+    }
+
     [Fact]
     public async Task ACodeSigningCertificateCannotAuthenticateAsATorrentPeer()
     {
