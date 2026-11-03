@@ -303,7 +303,9 @@ public interface IClientEngine : IAsyncDisposable
 
     /// <summary>
     /// Loads the IP blocklist from a stream and enables blocklist filtering.
-    /// Supports P2P format (Description:StartIP-EndIP), CIDR notation, and single IPs.
+    /// Supports P2P lists (Description:StartIP-EndIP), eMule DAT lists (StartIP - EndIP , level ,
+    /// Description, where a level above 127 is allowed), CIDR notation and single addresses. IPv4 octets
+    /// are decimal even when zero-padded.
     /// </summary>
     /// <param name="stream">Stream containing blocklist data.</param>
     /// <remarks>
@@ -314,7 +316,9 @@ public interface IClientEngine : IAsyncDisposable
 
     /// <summary>
     /// Loads the IP blocklist from a stream asynchronously and enables blocklist filtering.
-    /// Supports P2P format (Description:StartIP-EndIP), CIDR notation, and single IPs.
+    /// Supports P2P lists (Description:StartIP-EndIP), eMule DAT lists (StartIP - EndIP , level ,
+    /// Description, where a level above 127 is allowed), CIDR notation and single addresses. IPv4 octets
+    /// are decimal even when zero-padded.
     /// </summary>
     /// <param name="stream">Stream containing blocklist data.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
