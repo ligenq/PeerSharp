@@ -48,7 +48,8 @@ Security hardening for the HTTP requests a torrent can cause and for the streami
   and no earlier recheck, a start used to report nothing and download the whole torrent again over
   the files. It now hashes them first, as libtorrent does, and `StartAsync`, and an
   `AddTorrentAsync` that starts the torrent, return when the check is done. The torrent passes
-  through `CheckingFiles`. A start with no files on disk skips the check.
+  through `CheckingFiles`. A start with no files on disk skips the check. A magnet is checked
+  when its metadata arrives and it starts transferring.
 - A full check runs up to four pieces at once, in at most 64 MiB of buffers, so the disk is read
   while earlier pieces are hashed. A warm-cache recheck of 2 GiB went from 2.6 s to 0.9 s.
 - v2-only torrents seed the last piece of a file whose size is not a whole number of pieces. Each
