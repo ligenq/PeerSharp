@@ -21,7 +21,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp 5.2.0 reduces resume persistence and streaming memory use, improves libtorrent compatibility, and fixes hybrid uploads, metadata validation, peer availability, uTP handshakes and UDP tracker disposal. Adds directional MSE policies, BEP 17 HTTP seeds, SSL torrents over TCP/uTP and I2P SAM peer/tracker support. SSL and I2P have local protocol coverage but have not been validated against external SSL peers or a live I2P router. Binary compatible with 5.1.0. See https://github.com/ligenq/PeerSharp/blob/v5.2.0/CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp 5.3.0 guards tracker, web seed and magnet xs requests against server-side request forgery (new Connection.SsrfMitigation, on by default for this device), stops a tokenless loopback stream server from allowing cross-origin reads, and greatly speeds up downloading from and seeding to fast peers. v2-only torrents now seed the last piece of every file, a start over files already on disk checks them instead of downloading them again, and rechecks hash several pieces at once. SSL torrents take a certificate after they are added (ITorrent.SetSslCertificateAsync) and report ITorrent.IsSsl. Blocklists load six times faster, read zero-padded addresses as decimal rather than octal, and accept eMule DAT lists. Binary compatible with 5.2.0. See https://github.com/ligenq/PeerSharp/blob/v5.3.0/CHANGELOG.md.</PackageReleaseNotes>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<IsTrimmable>true</IsTrimmable>
 		<!-- iOS allows no code generation at run time, so an app there is compiled ahead of time in
@@ -29,7 +29,7 @@
 		     dynamic code that would fail under AOT fails the build instead. -->
 		<IsAotCompatible>true</IsAotCompatible>
 		<EnablePackageValidation>true</EnablePackageValidation>
-		<PackageValidationBaselineVersion>5.1.0</PackageValidationBaselineVersion>
+		<PackageValidationBaselineVersion>5.2.0</PackageValidationBaselineVersion>
 	</PropertyGroup>
 
 	<ItemGroup>
