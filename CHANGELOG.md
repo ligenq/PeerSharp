@@ -44,6 +44,8 @@ Security hardening for the HTTP requests a torrent can cause and for the streami
 - The end-to-end benchmark's `--skip-build` still publishes the PeerSharp CLI from the working
   tree. It used to reuse whichever CLI was last published, while recording the current revision as
   the one measured.
+- A full check runs up to four pieces at once, in at most 64 MiB of buffers, so the disk is read
+  while earlier pieces are hashed. A warm-cache recheck of 2 GiB went from 2.6 s to 0.9 s.
 - v2-only torrents seed the last piece of a file whose size is not a whole number of pieces. Each
   file starts on a piece boundary, and the end of its last piece is padding that exists only in the
   piece space. Reads of it went past the end of the file. Read-ahead crossed it at every file

@@ -85,8 +85,11 @@ public class PieceCheckerTests
             return Task.FromResult(bytes);
         }
 
+        public int ReadsStarted;
+
         public async Task ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
         {
+            Interlocked.Increment(ref ReadsStarted);
             if (YieldOnRead)
             {
                 await Task.Yield();
@@ -152,9 +155,13 @@ public class PieceCheckerTests
             VerifiedPieces.Add(pieceIndex);
         }
 
+        // A full check verifies several pieces at once.
         public bool VerifyPiece(int pieceIndex, ReadOnlySpan<byte> pieceData)
         {
-            VerifyPieceCalls.Add((pieceIndex, pieceData.ToArray()));
+            lock (VerifyPieceCalls)
+            {
+                VerifyPieceCalls.Add((pieceIndex, pieceData.ToArray()));
+            }
             return MerkleValidPieces.Contains(pieceIndex);
         }
     }
@@ -395,13 +402,60 @@ public class PieceCheckerTests
             ctx.ExpectedHashes.Add(SHA1.HashData(piece));
         }
 
+        // The gate holds every read, so the check is certainly still running when it is cancelled.
+        // Without it this test passed only because the check used to finish synchronously before
+        // Cancel was reached.
+        using var gate = new SemaphoreSlim(0, pieceCount);
+        files.ReadGate = gate;
+        bool published = false;
+        ctx.BitfieldCallback = _ => published = true;
+
         var checker = new PieceChecker(files, ctx);
         var task = checker.CheckAllPiecesAsync();
         checker.Cancel();
-        await task;
 
-        // Cancelled early — fewer than all pieces verified.
-        Assert.True(ctx.VerifiedPieces.Count < pieceCount);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+        Assert.False(published);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task CheckAllPiecesAsync_ReadsTheNextPieceWhileOneIsStillOutstanding()
+    {
+        Assert.SkipWhen(PieceChecker.GetCheckConcurrency(10, Environment.ProcessorCount) < 2, "Needs at least two processors.");
+        const int pieceCount = 8;
+        using var gate = new SemaphoreSlim(0, pieceCount);
+        var files = new MockFiles { ReadGate = gate };
+        var ctx = new MockContext { PieceCount = pieceCount, PieceSize = 10, FullSize = pieceCount * 10 };
+        for (int i = 0; i < pieceCount; i++)
+        {
+            byte[] piece = new byte[10]; piece[0] = (byte)(i + 1);
+            files.Data[i * 10] = piece;
+            ctx.ExpectedHashes.Add(SHA1.HashData(piece));
+        }
+
+        var checker = new PieceChecker(files, ctx);
+        var task = checker.CheckAllPiecesAsync(TestContext.Current.CancellationToken);
+
+        // With no read allowed to finish, a second read can only start if pieces are checked
+        // concurrently rather than one after the other.
+        while (Volatile.Read(ref files.ReadsStarted) < 2)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        gate.Release(pieceCount);
+        Assert.Equal(pieceCount, await task);
+    }
+
+    [Theory]
+    [InlineData(256 * 1024, 16, 4)]
+    [InlineData(256 * 1024, 2, 2)]
+    [InlineData(256 * 1024, 1, 1)]
+    [InlineData(32L * 1024 * 1024, 16, 2)]
+    [InlineData(128L * 1024 * 1024, 16, 1)]
+    public void GetCheckConcurrency_IsBoundedByCoresAndMemory(long pieceSize, int processors, int expected)
+    {
+        Assert.Equal(expected, PieceChecker.GetCheckConcurrency(pieceSize, processors));
     }
 
     [Fact(Timeout = 30000)]
@@ -440,12 +494,19 @@ public class PieceCheckerTests
             ctx.ExpectedHashes.Add(SHA1.HashData(new byte[10]));
         }
 
+        // Held open so the check is still running when it is disposed; it used to pass only because
+        // the check finished synchronously first.
+        using var gate = new SemaphoreSlim(0, pieceCount);
+        files.ReadGate = gate;
+        bool published = false;
+        ctx.BitfieldCallback = _ => published = true;
+
         var checker = new PieceChecker(files, ctx);
         var task = checker.CheckAllPiecesAsync();
         await checker.DisposeAsync();
-        await task;
 
-        Assert.True(ctx.VerifiedPieces.Count < pieceCount);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+        Assert.False(published);
     }
 
     [Fact(Timeout = 30000)]
@@ -468,7 +529,8 @@ public class PieceCheckerTests
 
         Assert.Equal(1, valid);
         Assert.Equal(2, ctx.VerifyPieceCalls.Count);
-        Assert.Equal(new[] { 0, 1 }, ctx.VerifyPieceCalls.Select(c => c.PieceIndex).ToArray());
+        // Pieces are checked concurrently, so they may be verified in either order.
+        Assert.Equal(new[] { 0, 1 }, ctx.VerifyPieceCalls.Select(c => c.PieceIndex).Order().ToArray());
     }
 
     [Fact(Timeout = 30000)]
