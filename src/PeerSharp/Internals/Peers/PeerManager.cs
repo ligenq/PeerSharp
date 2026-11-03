@@ -524,6 +524,13 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 ReasonCode = code,
                 Timestamp = _timeProvider.GetUtcNow()
             });
+
+            // An unchoked peer leaving frees an upload slot. Waiting for the rechoke left it empty
+            // for up to ten seconds, which is longer than a fast peer takes to finish a torrent.
+            if (!p.AmChoking)
+            {
+                FillFreeUploadSlots();
+            }
         }
         _peerHealth.Remove(p);
 
@@ -1291,10 +1298,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
                 break;
 
             case MessageId.NotInterested:
-                // If the peer no longer wants data, choke to free a slot.
+                // If the peer no longer wants data, choke to free a slot, and give the slot to a
+                // waiting peer now rather than at the next rechoke, which is up to ten seconds away.
                 if (!p.PeerInterested && !p.AmChoking)
                 {
-                    p.Choke();
+                    p.Choke(ignoreMinPeriod: true);
+                    FillFreeUploadSlots();
                 }
                 break;
 
@@ -3248,6 +3257,18 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     }
 
     internal void UnchokePeers() => _choker.Rechoke(_connectedPeers.Keys, ConnectedCount);
+
+    internal void FillFreeUploadSlots()
+    {
+        // A stop closes every connection; refilling the slots each one frees would only unchoke peers
+        // that are about to be closed too.
+        if (_mainLoopCts?.IsCancellationRequested == true)
+        {
+            return;
+        }
+
+        _choker.FillFreeUploadSlots(_connectedPeers.Keys, ConnectedCount);
+    }
     private async Task UpdateSpeedsAsync()
     {
         long totalDownloadSpeed = 0;

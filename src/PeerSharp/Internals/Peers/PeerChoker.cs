@@ -12,6 +12,8 @@ internal sealed class PeerChoker
     private readonly List<PeerCommunication> _peers = [];
     private readonly List<PeerCommunication> _candidates = [];
     private readonly HashSet<PeerCommunication> _selected = [];
+    // Rechoke runs on the tick and FillFreeUploadSlots on peer callbacks; both reuse the lists above.
+    private readonly Lock _lock = new();
     private PeerCommunication? _optimisticPeer;
     private DateTimeOffset _lastOptimisticChange = DateTimeOffset.MinValue;
 
@@ -35,7 +37,67 @@ internal sealed class PeerChoker
         return connectedPeers.Count(peer => !peer.AmChoking) < GetUploadSlots(connectedCount);
     }
 
+    /// <summary>
+    /// Unchokes the best-ranked waiting peers into whatever upload slots are free, without choking
+    /// anyone. Called when an unchoked peer leaves or loses interest, so the slot is used now instead
+    /// of at the next rechoke; libtorrent does the same through <c>trigger_unchoke</c>.
+    /// </summary>
+    public void FillFreeUploadSlots(IEnumerable<PeerCommunication> connectedPeers, int connectedCount)
+    {
+        lock (_lock)
+        {
+            _peers.Clear();
+            _candidates.Clear();
+            _peers.AddRange(connectedPeers);
+
+            int unchoked = 0;
+            foreach (var peer in _peers)
+            {
+                if (!peer.AmChoking) unchoked++;
+                else if (peer.PeerInterested) _candidates.Add(peer);
+            }
+
+            int free = GetUploadSlots(connectedCount) - unchoked;
+            if (free <= 0 || _candidates.Count == 0) return;
+
+            SortCandidates(_torrent.Finished);
+            int filled = 0;
+            foreach (var peer in _candidates)
+            {
+                if (filled == free) break;
+                peer.Unchoke();
+                // Unchoke declines a peer whose choke state changed moments ago; leave that slot to
+                // the next candidate rather than counting it as filled.
+                if (!peer.AmChoking) filled++;
+            }
+
+            _logger.LogDebug("Filled {Filled} of {Free} free upload slot(s) from {Waiting} waiting peer(s)", filled, free, _candidates.Count);
+        }
+    }
+
     public void Rechoke(IEnumerable<PeerCommunication> connectedPeers, int connectedCount)
+    {
+        lock (_lock)
+        {
+            RechokeLocked(connectedPeers, connectedCount);
+        }
+    }
+
+    private void SortCandidates(bool isSeeding)
+    {
+        if (isSeeding)
+        {
+            long pieceLength = _torrent.PieceSize;
+            var now = _timeProvider.GetUtcNow();
+            _candidates.Sort((a, b) => SeedingChoker.Compare(SeedingChoker.FromPeer(a), SeedingChoker.FromPeer(b), pieceLength, SeedingChoker.DefaultPieceQuota, now));
+        }
+        else
+        {
+            _candidates.Sort((a, b) => b.SmoothedDownloadSpeed.CompareTo(a.SmoothedDownloadSpeed));
+        }
+    }
+
+    private void RechokeLocked(IEnumerable<PeerCommunication> connectedPeers, int connectedCount)
     {
         bool isSeeding = _torrent.Finished;
         _peers.Clear();
@@ -50,16 +112,7 @@ internal sealed class PeerChoker
             if (peer.PeerInterested) _candidates.Add(peer);
         }
 
-        if (isSeeding)
-        {
-            long pieceLength = _torrent.PieceSize;
-            var now = _timeProvider.GetUtcNow();
-            _candidates.Sort((a, b) => SeedingChoker.Compare(SeedingChoker.FromPeer(a), SeedingChoker.FromPeer(b), pieceLength, SeedingChoker.DefaultPieceQuota, now));
-        }
-        else
-        {
-            _candidates.Sort((a, b) => b.SmoothedDownloadSpeed.CompareTo(a.SmoothedDownloadSpeed));
-        }
+        SortCandidates(isSeeding);
 
         int slots = GetUploadSlots(connectedCount);
         int regularSlots = _candidates.Count > slots ? slots - 1 : slots;

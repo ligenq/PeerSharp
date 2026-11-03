@@ -891,10 +891,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public void AssignBandwidth(int amount)
     { }
 
-    public void Choke()
+    /// <param name="ignoreMinPeriod">
+    /// Choke even if the choke state changed within the last <see cref="MinChokePeriodSeconds"/>. The
+    /// period stops a rechoke from flapping a peer; it is not meant to keep a slot held by a peer that
+    /// has said it wants nothing. Without this, a peer that finished within ten seconds of being
+    /// unchoked kept its upload slot until it disconnected, while interested peers waited.
+    /// </param>
+    public void Choke(bool ignoreMinPeriod = false)
     {
         var now = _timeProvider.GetUtcNow();
-        if (_lastChokeChange != DateTimeOffset.MinValue &&
+        if (!ignoreMinPeriod && _lastChokeChange != DateTimeOffset.MinValue &&
             (now - _lastChokeChange) < TimeSpan.FromSeconds(MinChokePeriodSeconds))
         {
             return;
