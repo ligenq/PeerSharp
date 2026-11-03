@@ -327,13 +327,18 @@ internal class TorrentFileInfo
         return spans;
     }
 
-    /// <summary>Hybrid requests include the v1 alignment padding even after a v2 handshake upgrade.</summary>
+    /// <summary>
+    /// The largest piece a peer may request from us. Hybrid requests include the v1 alignment padding
+    /// even after a v2 handshake upgrade. A v2-only torrent's files are padded to piece boundaries
+    /// just the same, only implicitly, and <see cref="FullSize"/> is that padded piece space:
+    /// libtorrent pads the end of every file of a multi-file v2 torrent, the last one included, and
+    /// requests every piece at full length, getting zeros for the padding. Refusing those requests
+    /// left it unable to fetch the last piece of any file whose size is not a whole number of pieces.
+    /// </summary>
     internal long GetUploadPieceSize(int pieceIndex)
     {
         if (pieceIndex < 0 || pieceIndex >= GetPieceCount()) return 0;
-        return IsV1
-            ? Math.Min((long)PieceSize, FullSize - (long)pieceIndex * PieceSize)
-            : GetPieceSize(pieceIndex);
+        return Math.Min((long)PieceSize, FullSize - (long)pieceIndex * PieceSize);
     }
 
     public long GetPieceSize(int pieceIndex)

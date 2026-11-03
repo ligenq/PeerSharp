@@ -47,6 +47,60 @@ public class StorageAdditionalTests : IAsyncLifetime
         return meta;
     }
 
+    // ── v2 tail padding ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Two v2 files of 1000 bytes each. Every v2 file starts on a piece boundary, so the first one's
+    /// span in the piece space runs to 16384 and the rest of it is padding that is not on disk.
+    /// </summary>
+    private static TorrentFileMetadata MakeV2Metadata()
+    {
+        var meta = new TorrentFileMetadata();
+        meta.Info.Name = "v2";
+        meta.Info.Version = TorrentVersion.V2;
+        meta.Info.PieceSize = 16384;
+        meta.Info.Files.Add(new Internals.TorrentFileEntry { Path = "a.bin", Size = 1000, Offset = 0, FirstPieceIndex = 0, PieceCount = 1 });
+        meta.Info.Files.Add(new Internals.TorrentFileEntry { Path = "b.bin", Size = 1000, Offset = 16384, FirstPieceIndex = 1, PieceCount = 1 });
+        meta.Info.FullSize = 16384 + 1000;
+        return meta;
+    }
+
+    [Fact]
+    public async Task V2TailPadding_ReadsAsZeros_AndIsNotWrittenToTheFile()
+    {
+        await using var storage = CreateStorage(MakeV2Metadata());
+        await storage.InitAsync(ct: TestContext.Current.CancellationToken);
+        byte[] first = Enumerable.Repeat((byte)1, 1000).ToArray();
+        byte[] second = Enumerable.Repeat((byte)2, 1000).ToArray();
+
+        // A whole padded piece written, as a peer that pads would send it, then the second file.
+        var padded = new byte[16384];
+        first.CopyTo(padded, 0);
+        await storage.WriteAsync(0, padded, TestContext.Current.CancellationToken);
+        await storage.WriteAsync(16384, second, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1000, new FileInfo(Path.Combine(_tempDir, "a.bin")).Length);
+
+        // One read across the padding into the next file - what block-cache read-ahead does. It used
+        // to read past the end of a.bin and fail.
+        var read = Enumerable.Repeat((byte)0xff, 16384 + 1000).ToArray();
+        await storage.ReadAsync(0, read, TestContext.Current.CancellationToken);
+
+        Assert.Equal(first, read[..1000]);
+        Assert.All(read[1000..16384], value => Assert.Equal(0, value));
+        Assert.Equal(second, read[16384..]);
+    }
+
+    [Fact]
+    public void V2UploadPieceSize_IncludesTailPadding_UpToTheEndOfThePieceSpace()
+    {
+        var info = MakeV2Metadata().Info;
+
+        Assert.Equal(1000, info.GetPieceSize(0));
+        Assert.Equal(16384, info.GetUploadPieceSize(0));
+        Assert.Equal(1000, info.GetUploadPieceSize(1));
+    }
+
     // ── StorageException constructors ─────────────────────────────────────────
 
     [Fact]
