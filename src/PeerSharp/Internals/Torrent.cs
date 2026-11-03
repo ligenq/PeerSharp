@@ -583,6 +583,55 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
+    public bool IsSsl => InfoFile.Info.IsSsl;
+
+    public async Task SetSslCertificateAsync(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(certificate);
+        _disposal.ThrowIfDisposed(this);
+
+        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _disposal.ThrowIfDisposed(this);
+
+            // Stopped because TLS handshakes read the certificate while the torrent runs, and the
+            // replaced one is disposed here.
+            if (Started)
+            {
+                throw new InvalidOperationException("Stop the torrent before changing its SSL certificate.");
+            }
+
+            if (!HasMetadata)
+            {
+                throw new InvalidOperationException("The torrent's metadata has not arrived, so it is not known whether it needs a certificate.");
+            }
+
+            if (!IsSsl)
+            {
+                throw new InvalidOperationException("This torrent does not use SSL.");
+            }
+
+            if (!certificate.HasPrivateKey)
+            {
+                throw new ArgumentException("The certificate must include its private key.", nameof(certificate));
+            }
+
+            // The check a start would make, made now, so a wrong certificate is refused where it is
+            // given rather than surfacing later as a start that fails.
+            if (!TorrentTls.ValidateCertificate(this, certificate, null))
+            {
+                throw new ArgumentException("The certificate was not issued for this torrent by the certificate authority in its metadata.", nameof(certificate));
+            }
+
+            SslCertificate = certificate;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
     public async Task<int> ForceRecheckAsync(IProgress<PieceCheckProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
@@ -1308,7 +1357,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
             if (InfoFile.Info.IsSsl && (SslCertificate?.HasPrivateKey != true
                 || !TorrentTls.ValidateCertificate(this, SslCertificate, null)))
-                throw new System.Security.Authentication.AuthenticationException("SSL torrent requires an authorized certificate in AddTorrentOptions.SslCertificate.");
+                throw new System.Security.Authentication.AuthenticationException("SSL torrent requires an authorized certificate: pass it in AddTorrentOptions.SslCertificate or to SetSslCertificateAsync.");
 
             LastException = null;
 
