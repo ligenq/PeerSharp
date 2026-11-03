@@ -61,6 +61,8 @@ Security hardening for the HTTP requests a torrent can cause and for the streami
 - A peer that sends NotInterested is choked even if it was unchoked under ten seconds ago, and a
   slot freed by that or by an unchoked peer leaving goes straight to the best waiting peer. Before,
   the slot stayed held or empty until the next rechoke, up to ten seconds later.
+- The sample CLI finds the resume data it saved for v2-only torrents. It looked for it under the v1
+  hash, which a v2-only torrent does not have, then saved the empty state over it on exit.
 
 ## 5.2.0 — 2026-10-23
 
