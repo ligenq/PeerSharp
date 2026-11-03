@@ -531,6 +531,76 @@ public class TorrentControlTests : IDisposable
     }
 
     /// <summary>
+    /// Adding a .torrent for files already on disk is how seeding them begins, and what is left when
+    /// resume data is lost. It used to report nothing and start downloading the whole torrent again
+    /// over the files, unless the caller knew to add it stopped and recheck it first.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task Start_OverCompleteFilesWithoutResumeData_ChecksThemFirst()
+    {
+        var (engine, torrent) = await AddOverExistingFileAsync("auto-check", corrupt: false);
+        await using var _ = engine;
+
+        Assert.True(torrent.Started);
+        Assert.True(torrent.Finished);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Start_OverFilesThatDoNotMatch_StartsWithNothing()
+    {
+        var (engine, torrent) = await AddOverExistingFileAsync("auto-check-bad", corrupt: true);
+        await using var _ = engine;
+
+        Assert.True(torrent.Started);
+        Assert.Equal(0f, torrent.Progress);
+    }
+
+    private async Task<(ClientEngine Engine, ITorrent Torrent)> AddOverExistingFileAsync(string name, bool corrupt)
+    {
+        string downloadPath = Path.Combine(_testRoot, name + "-root");
+        Directory.CreateDirectory(downloadPath);
+        byte[] payload = RandomNumberGenerator.GetBytes((PieceLength * 2) + 511);
+        string fileName = name + ".bin";
+        await File.WriteAllBytesAsync(
+            Path.Combine(downloadPath, fileName),
+            corrupt ? RandomNumberGenerator.GetBytes(payload.Length) : payload,
+            TestContext.Current.CancellationToken);
+
+        var torrentFile = new ApiTorrentFileBuilder()
+            .WithName(fileName)
+            .WithPieceLength(PieceLength)
+            .AddFile(fileName, payload)
+            .Build();
+
+        var engine = ClientEngine.Create(new TorrentClientOptions
+        {
+            LoggerFactory = _loggerFactory,
+            Settings = new Settings
+            {
+                Files = { DefaultDownloadPath = downloadPath },
+                Connection =
+                {
+                    TcpPort = 0,
+                    UdpPort = 0,
+                    EnableLsd = false,
+                    UpnpPortMapping = false,
+                    NatPmpPortMapping = false
+                },
+                Dht = { Enabled = false }
+            }
+        });
+        await engine.InitializeAsync(TestContext.Current.CancellationToken);
+
+        // Started by the add, with no resume data and no recheck.
+        var torrent = await engine.AddTorrentAsync(
+            torrentFile,
+            new AddTorrentOptions(downloadPath),
+            TestContext.Current.CancellationToken);
+
+        return (engine, torrent);
+    }
+
+    /// <summary>
     /// A torrent whose single file is already on disk and verified, for the read-back tests.
     /// </summary>
     private async Task<(ClientEngine Engine, ITorrent Torrent, byte[] Payload)> CreateCompleteTorrentAsync(string name)

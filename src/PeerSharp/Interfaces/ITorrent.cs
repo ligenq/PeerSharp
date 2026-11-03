@@ -535,6 +535,11 @@ public interface ITorrent
     /// <summary>
     /// Starts the torrent, initiating peer connections and file transfers.
     /// </summary>
+    /// <remarks>
+    /// The first start of a torrent that has no resume data and has not been rechecked, over files that
+    /// already hold data, hashes those files before it transfers anything, as
+    /// <see cref="ForceRecheckAsync"/> would. The returned task completes after that check.
+    /// </remarks>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A task that completes when the torrent has started.</returns>
     /// <exception cref="InvalidOperationException">Thrown when the torrent is already started.</exception>

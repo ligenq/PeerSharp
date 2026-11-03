@@ -89,6 +89,13 @@ internal sealed class Storage : IStorage
 
     internal bool IsInitialized => Volatile.Read(ref _initialized) == 1;
 
+    /// <summary>
+    /// Whether a selected file already held data when storage was first initialized - before
+    /// allocation created the rest. A torrent added with no resume data over files like that has
+    /// to hash them before it knows what it has.
+    /// </summary>
+    internal bool FoundExistingData { get; private set; }
+
     public void DeleteAll()
     {
         _handleCache.CloseTorrentHandles(_rootPath);
@@ -601,6 +608,10 @@ internal sealed class Storage : IStorage
                 }
 
                 ValidateCompletedPiecesBeforeAllocation();
+
+                // Looked at before allocation, which creates every file and so would make the
+                // question meaningless afterwards.
+                FoundExistingData = toAllocate.Any(alloc => new FileInfo(alloc.Path) is { Exists: true, Length: > 0 });
 
                 if (toAllocate.Count > 0)
                 {
