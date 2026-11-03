@@ -44,6 +44,9 @@ Security hardening for the HTTP requests a torrent can cause and for the streami
 - The end-to-end benchmark's `--skip-build` still publishes the PeerSharp CLI from the working
   tree. It used to reuse whichever CLI was last published, while recording the current revision as
   the one measured.
+- A peer that sends NotInterested is choked even if it was unchoked under ten seconds ago, and a
+  slot freed by that or by an unchoked peer leaving goes straight to the best waiting peer. Before,
+  the slot stayed held or empty until the next rechoke, up to ten seconds later.
 
 ## 5.2.0 — 2026-10-23
 
