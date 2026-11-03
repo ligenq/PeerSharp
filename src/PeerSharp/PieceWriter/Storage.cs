@@ -778,10 +778,16 @@ internal sealed class Storage : IStorage
                     continue;
                 }
 
+                var content = ClampToFileContent(fileIdx, fileOffset, buffer.Slice(bufferOffset, readSize));
+                if (content.IsEmpty)
+                {
+                    continue;
+                }
+
                 try
                 {
                     using var lease = await _handleCache.GetHandleAsync(entry.FullPath, false, ct).ConfigureAwait(false);
-                    await ReadWithThrottleAsync(lease.Handle, buffer.Slice(bufferOffset, readSize), fileOffset, ct).ConfigureAwait(false);
+                    await ReadWithThrottleAsync(lease.Handle, content, fileOffset, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -801,6 +807,28 @@ internal sealed class Storage : IStorage
         {
             ReleaseFileLocks(acquiredLocks);
         }
+    }
+
+    /// <summary>
+    /// Returns the part of <paramref name="range"/> that is real file content, zeroing the rest.
+    /// </summary>
+    /// <remarks>
+    /// A v2 file starts on a piece boundary, so the end of its last piece is padding that exists only
+    /// in the piece space: BEP 52 defines it as zeros and libtorrent requests it as such. Mapped
+    /// straight to the file, it is a read past the end. Read-ahead crosses it whenever it passes a file
+    /// boundary, and the errors that produced marked the file failed, after which none of it could be
+    /// served - a v2 seed stopped uploading every file whose size was not a whole number of pieces.
+    /// </remarks>
+    private Memory<byte> ClampToFileContent(int fileIdx, long fileOffset, Memory<byte> range)
+    {
+        long content = Math.Max(0, _info.Info.Files[fileIdx].Size - fileOffset);
+        if (content >= range.Length)
+        {
+            return range;
+        }
+
+        range.Span[(int)content..].Clear();
+        return range[..(int)content];
     }
 
     /// <summary>
@@ -825,6 +853,12 @@ internal sealed class Storage : IStorage
                 throw new StorageException("Cannot read a file with an invalid path", null, isRecoverable: false);
             }
             destination.Span.Clear();
+            return;
+        }
+
+        destination = ClampToFileContent(fileIdx, fileOffset, destination);
+        if (destination.IsEmpty)
+        {
             return;
         }
 
@@ -1014,8 +1048,11 @@ internal sealed class Storage : IStorage
                                 // a selection change or a shared-piece edge in a deselected file.
                                 await EnsureFileAllocatedAsync(entry.FullPath, entry.Length, ct).ConfigureAwait(false);
                             }
+                            // Bytes in a v2 file's tail padding have nowhere to go; writing them would
+                            // grow the file past its real size. See ClampToFileContent.
+                            int contentSize = (int)Math.Clamp(_info.Info.Files[fileIdx].Size - fileOffset, 0, writeSize);
                             using var lease = await _handleCache.GetHandleAsync(entry.FullPath, true, ct).ConfigureAwait(false);
-                            await WriteWithThrottleAsync(lease.Handle, data.Slice(dataOffset, writeSize), fileOffset, ct).ConfigureAwait(false);
+                            await WriteWithThrottleAsync(lease.Handle, data.Slice(dataOffset, contentSize), fileOffset, ct).ConfigureAwait(false);
                             // Set under the file lock that FlushAsync also takes, so a flush cannot
                             // observe the write and clear the flag before this marks it.
                             _fileDirty[fileIdx] = true;
