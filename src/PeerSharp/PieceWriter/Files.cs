@@ -60,6 +60,9 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
 
     internal bool IsInitialized => _storage is Storage storage && storage.IsInitialized;
 
+    /// <summary>See <see cref="Storage.FoundExistingData"/>.</summary>
+    internal bool FoundExistingData => _storage is Storage storage && storage.FoundExistingData;
+
     /// <summary>
     /// Creates a Files instance with optional custom download path.
     /// Path resolution: customPath → settings default → app base directory.

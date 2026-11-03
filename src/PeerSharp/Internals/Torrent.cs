@@ -51,6 +51,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private int _started;
     private bool _loadResumePiecesForStart;
+    // Whether this torrent's piece state has been established from its files at least once - by
+    // resume data, a recheck, or an earlier start. Until it has, a start over files that already hold
+    // data checks them first.
+    private bool _pieceStateEstablished;
 
     private int _rollbackIncomplete;
 
@@ -579,6 +583,55 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
+    public bool IsSsl => InfoFile.Info.IsSsl;
+
+    public async Task SetSslCertificateAsync(System.Security.Cryptography.X509Certificates.X509Certificate2 certificate, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(certificate);
+        _disposal.ThrowIfDisposed(this);
+
+        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _disposal.ThrowIfDisposed(this);
+
+            // Stopped because TLS handshakes read the certificate while the torrent runs, and the
+            // replaced one is disposed here.
+            if (Started)
+            {
+                throw new InvalidOperationException("Stop the torrent before changing its SSL certificate.");
+            }
+
+            if (!HasMetadata)
+            {
+                throw new InvalidOperationException("The torrent's metadata has not arrived, so it is not known whether it needs a certificate.");
+            }
+
+            if (!IsSsl)
+            {
+                throw new InvalidOperationException("This torrent does not use SSL.");
+            }
+
+            if (!certificate.HasPrivateKey)
+            {
+                throw new ArgumentException("The certificate must include its private key.", nameof(certificate));
+            }
+
+            // The check a start would make, made now, so a wrong certificate is refused where it is
+            // given rather than surfacing later as a start that fails.
+            if (!TorrentTls.ValidateCertificate(this, certificate, null))
+            {
+                throw new ArgumentException("The certificate was not issued for this torrent by the certificate authority in its metadata.", nameof(certificate));
+            }
+
+            SslCertificate = certificate;
+        }
+        finally
+        {
+            _stateLock.Release();
+        }
+    }
+
     public async Task<int> ForceRecheckAsync(IProgress<PieceCheckProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
@@ -608,7 +661,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             {
                 await FilesInternal.InitializeAsync(GetFileSelectionSnapshot(), cancellationToken).ConfigureAwait(false);
                 await using var checker = new PieceChecker(FilesInternal, new TorrentPieceCheckerContext(this), progress, Services.LoggerFactory);
-                return await checker.CheckAllPiecesAsync(cancellationToken).ConfigureAwait(false);
+                int valid = await checker.CheckAllPiecesAsync(cancellationToken).ConfigureAwait(false);
+                _pieceStateEstablished = true;
+                return valid;
             }
             finally
             {
@@ -619,6 +674,35 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         finally
         {
             _stateLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Hashes the files a torrent was added over before it starts transferring, which is what
+    /// libtorrent does for a torrent added without resume data. Without it, adding a .torrent for
+    /// files that were already on disk - the usual way to start seeding them, and what is left after
+    /// resume data is lost - reported nothing and downloaded the whole torrent again on top of them.
+    /// </summary>
+    private async Task CheckExistingDataAsync(CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Checking data already on disk for {TorrentName} before starting", Name);
+        FilesInternal.Checking = true;
+        Alerts.TorrentAlert(AlertId.TorrentCheckStarted, this);
+        FireStateChangedEvent(TorrentState.CheckingFiles);
+        try
+        {
+            await using var checker = new PieceChecker(FilesInternal, new TorrentPieceCheckerContext(this), null, Services.LoggerFactory);
+            await checker.CheckAllPiecesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The start fails with it, and a torrent that never started is stopped, not checking.
+            FireStateChangedEvent(TorrentState.Stopped);
+            throw;
+        }
+        finally
+        {
+            FilesInternal.Checking = false;
         }
     }
 
@@ -1273,7 +1357,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
             if (InfoFile.Info.IsSsl && (SslCertificate?.HasPrivateKey != true
                 || !TorrentTls.ValidateCertificate(this, SslCertificate, null)))
-                throw new System.Security.Authentication.AuthenticationException("SSL torrent requires an authorized certificate in AddTorrentOptions.SslCertificate.");
+                throw new System.Security.Authentication.AuthenticationException("SSL torrent requires an authorized certificate: pass it in AddTorrentOptions.SslCertificate or to SetSslCertificateAsync.");
 
             LastException = null;
 
@@ -1291,6 +1375,16 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             EnsureFileTransferInitialized();
 
             await FilesInternal.StartAsync(GetFileSelectionSnapshot(), cancellationToken).ConfigureAwait(false);
+
+            if (HasMetadata)
+            {
+                if (!_pieceStateEstablished && LocalState.Pieces is not { Length: > 0 } && Pieces.ReceivedCount == 0
+                    && FilesInternal.FoundExistingData)
+                {
+                    await CheckExistingDataAsync(cancellationToken).ConfigureAwait(false);
+                }
+                _pieceStateEstablished = true;
+            }
 
             FileTransferInternal.RestoreDeferredPieces();
             if (HasMetadata) LocalState.UnfinishedPieces.Clear();

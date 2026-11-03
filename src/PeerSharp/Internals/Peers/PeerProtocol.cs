@@ -120,7 +120,7 @@ internal static class PeerProtocol
             case MessageId.Piece:
                 if (length < 10)
                 {
-                    throw new InvalidDataException($"Piece message too short: {length} < 9");
+                    throw new InvalidDataException($"Piece message too short: {length} < 10");
                 }
                 message.PieceIndex = ReadInt(messageBuffer, 1);
                 message.BlockOffset = ReadInt(messageBuffer, 5);

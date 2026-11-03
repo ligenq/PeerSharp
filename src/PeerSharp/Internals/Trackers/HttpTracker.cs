@@ -337,6 +337,7 @@ internal class HttpTracker : TrackerBase, IDisposable
     private async Task<byte[]> GetResponseBytesOverAsync(Uri uri, AddressFamily family, CancellationToken ct)
     {
         var client = GetClient(followRedirects: false);
+        var origin = uri;
         int redirects = 0;
         while (true)
         {
@@ -349,7 +350,7 @@ internal class HttpTracker : TrackerBase, IDisposable
                 throw new HttpRequestException($"Tracker host {uri.Host} has no {family} address.");
             }
 
-            using var response = await SendToFirstAnsweringAsync(client, uri, addresses, ct).ConfigureAwait(false);
+            using var response = await SendToFirstAnsweringAsync(client, uri, addresses, redirects > 0 ? origin : null, ct).ConfigureAwait(false);
             if (redirects < MaxRedirects && FollowableRedirect(uri, response) is { } location)
             {
                 uri = location;
@@ -362,11 +363,15 @@ internal class HttpTracker : TrackerBase, IDisposable
         }
     }
 
-    /// <summary>Tries each address in turn until one takes the connection.</summary>
+    /// <summary>
+    /// Tries each address in turn until one takes the connection. <paramref name="redirectedFrom"/> is
+    /// where the redirect chain began, for the SSRF guard, which cannot see redirects followed here.
+    /// </summary>
     private async Task<HttpResponseMessage> SendToFirstAnsweringAsync(
         IHttpClient client,
         Uri uri,
         IPAddress[] addresses,
+        Uri? redirectedFrom,
         CancellationToken ct)
     {
         for (int i = 0; i < addresses.Length; i++)
@@ -374,6 +379,10 @@ internal class HttpTracker : TrackerBase, IDisposable
             using var request = new HttpRequestMessage(HttpMethod.Get, new UriBuilder(uri) { Host = addresses[i].ToString() }.Uri);
             string host = uri.HostNameType == UriHostNameType.IPv6 ? $"[{uri.IdnHost}]" : uri.IdnHost;
             request.Headers.Host = uri.IsDefaultPort ? host : $"{host}:{uri.Port}";
+            if (redirectedFrom != null)
+            {
+                request.Options.Set(SsrfGuard.RedirectedFrom, redirectedFrom);
+            }
             try
             {
                 return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
@@ -873,15 +882,19 @@ internal class HttpTracker : TrackerBase, IDisposable
                 directSettings,
                 true,
                 Torrent.Settings.Connection.BindAddress,
-                followRedirects));
+                followRedirects,
+                ssrf: SsrfPolicy));
         }
 
         return new DefaultHttpClient(_httpClientFactory.CreateClient(
             settings,
             true,
             Torrent.Settings.Connection.BindAddress,
-            followRedirects));
+            followRedirects,
+            ssrf: SsrfPolicy));
     }
+
+    private SsrfPolicy SsrfPolicy => new(Torrent.Settings.Connection.SsrfMitigation, HttpRequestKind.Tracker);
 
     private sealed record AnnounceAttempt(AnnounceResponse? Response, Exception? Error);
 }

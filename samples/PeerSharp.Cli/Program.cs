@@ -113,21 +113,32 @@ if (options.ResumeDir is { } resumeDirToCreate)
 string ResumeFile(InfoHash hash) =>
     Path.Combine(options.ResumeDir!, Convert.ToHexString(hash.Span) + ".resume");
 
-TorrentResumeData? LoadResume(InfoHash hash)
+// The library saves under the v1 hash when the torrent has one and the v2 hash otherwise, so look
+// for both. Loading by the v1 hash alone found nothing for a v2-only torrent, whose v1 hash is empty:
+// every restart began from zero and then saved that zero over the good file.
+TorrentResumeData? LoadResume(InfoHash hash, InfoHash hashV2)
 {
     if (options.ResumeDir is null)
     {
         return null;
     }
 
-    var file = ResumeFile(hash);
-    if (!File.Exists(file))
+    foreach (var candidate in new[] { hash, hashV2 })
     {
-        return null;
+        if (candidate.IsEmpty)
+        {
+            continue;
+        }
+
+        var file = ResumeFile(candidate);
+        if (File.Exists(file))
+        {
+            Console.WriteLine($"                 resuming from {Path.GetFileName(file)}");
+            return new TorrentResumeData { Data = File.ReadAllBytes(file), Hash = candidate };
+        }
     }
 
-    Console.WriteLine($"                 resuming from {Path.GetFileName(file)}");
-    return new TorrentResumeData { Data = File.ReadAllBytes(file), Hash = hash };
+    return null;
 }
 
 var torrents = new List<ITorrent>(options.Sources.Count);
@@ -143,7 +154,7 @@ foreach (var source in options.Sources)
             {
                 StartImmediately = !options.Recheck,
                 StopAfterMetadata = options.MetadataOnly,
-                ResumeData = LoadResume(magnet.InfoHash)
+                ResumeData = LoadResume(magnet.InfoHash, magnet.InfoHashV2)
             }));
         continue;
     }
@@ -165,7 +176,7 @@ foreach (var source in options.Sources)
             // matters in a mixed file/magnet run: the file must not download payload while the
             // magnet is still fetching its metadata.
             StartImmediately = !options.Recheck && !options.MetadataOnly,
-            ResumeData = LoadResume(torrentFile.InfoHash)
+            ResumeData = LoadResume(torrentFile.InfoHash, torrentFile.InfoHashV2)
         }));
 }
 

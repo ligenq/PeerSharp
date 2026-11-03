@@ -503,6 +503,14 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     // Track overflow tasks for clean shutdown
     private readonly ConcurrentDictionary<Task, byte> _overflowTasks = new();
+
+    // Pieces already retracted from the whole swarm, so a lost file is announced once rather than
+    // once for every request that finds it missing.
+    private readonly ConcurrentDictionary<int, byte> _retractedPieces = new();
+
+    // Peers that could take requests but were left with none, finding every open piece already asked
+    // for. See EvaluateNextRequestsInternalAsync.
+    private readonly ConcurrentDictionary<PeerCommunication, byte> _idlePeers = new();
     private readonly int _maxPieceQueueCapacity;
 
     private readonly Channel<PeerCommunication> _peerEvaluationQueue;
@@ -888,10 +896,57 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         catch (OperationCanceledException) { block?.Dispose(); }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Failed to fulfil request from {RemoteEndPoint}", peer.RemoteEndPoint);
             block?.Dispose();
 
-            await RetractUnreadablePieceAsync(peer, item).ConfigureAwait(false);
+            if (IsDataLoss(ex))
+            {
+                Logger.LogError(ex, "Failed to fulfil request from {RemoteEndPoint}: the data is gone", peer.RemoteEndPoint);
+                await RetractUnreadablePieceAsync(peer, item).ConfigureAwait(false);
+            }
+            else
+            {
+                // Shutting down, or an error that can clear by itself - another process holding the file
+                // open, say. Telling the swarm the piece is gone would be untrue, so only this request
+                // is refused, and the next one for the piece is tried afresh.
+                Logger.Log(
+                    ex is ObjectDisposedException ? LogLevel.Debug : LogLevel.Warning,
+                    ex,
+                    "Failed to fulfil request {PieceIndex}:{Offset} from {RemoteEndPoint}; refusing it",
+                    item.PieceIndex, item.Offset, peer.RemoteEndPoint);
+                await RejectUploadAsync(peer, item).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether a failed read means the data is gone - the file deleted, moved or cut short, or given
+    /// up on after repeated errors - rather than that it could not be read just now.
+    /// </summary>
+    internal static bool IsDataLoss(Exception ex) => ex switch
+    {
+        StorageException { IsRecoverable: false } => true,
+        StorageException { InnerException: { } inner } => IsMissingData(inner),
+        _ => IsMissingData(ex),
+    };
+
+    private static bool IsMissingData(Exception ex) =>
+        ex is FileNotFoundException or DirectoryNotFoundException or EndOfStreamException;
+
+    private async Task RejectUploadAsync(PeerCommunication peer, UploadQueueItem item)
+    {
+        try
+        {
+            await peer.SendRejectAsync(new BlockRequest
+            {
+                PieceIndex = item.PieceIndex,
+                Offset = item.Offset,
+                Length = item.Length
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Best effort: the read already failed, and failing to say so must not cascade.
+            Logger.LogDebug(ex, "Failed to refuse request {PieceIndex}:{Offset}", item.PieceIndex, item.Offset);
         }
     }
 
@@ -906,15 +961,27 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// </para>
     ///
     /// <para>
-    /// A transient I/O error costs peers a re-source they did not strictly need. That is the better
-    /// error: continuing to advertise data we cannot read is indistinguishable, from the outside, from
-    /// being an unreliable peer.
+    /// The whole swarm is told once per piece. A peer that asks again afterwards - one that connected
+    /// since, and was sent the bitfield that still includes the piece - is told on its own.
     /// </para>
     /// </summary>
     private async Task RetractUnreadablePieceAsync(PeerCommunication peer, UploadQueueItem item)
     {
         try
         {
+            await peer.SendRejectAsync(new BlockRequest
+            {
+                PieceIndex = item.PieceIndex,
+                Offset = item.Offset,
+                Length = item.Length
+            }).ConfigureAwait(false);
+
+            if (!_retractedPieces.TryAdd(item.PieceIndex, 0))
+            {
+                await peer.LtDontHave.SendAsync(item.PieceIndex).ConfigureAwait(false);
+                return;
+            }
+
             // Not withdrawn from _torrent.Pieces: the completion counters behind it only ever count
             // upward, so clearing a piece there would leave progress and "finished" state inconsistent.
             // A recheck is the correct way to rebuild the local bitfield, hence the warning.
@@ -922,13 +989,6 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 "Piece {PieceIndex} could not be read while serving it; retracting it from peers (BEP 54). " +
                 "Run a recheck to rebuild local piece state.",
                 item.PieceIndex);
-
-            await peer.SendRejectAsync(new BlockRequest
-            {
-                PieceIndex = item.PieceIndex,
-                Offset = item.Offset,
-                Length = item.Length
-            }).ConfigureAwait(false);
 
             foreach (var other in _torrent.PeersInternal.GetConnectedPeersInternal())
             {
@@ -1279,6 +1339,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _piecePicker.UnregisterPeerAvailability(peer);
         _requestTracker.RemovePeer(peer);
         _uploadQueueManager.RemovePeer(peer);
+        _idlePeers.TryRemove(peer, out _);
 
         // A piece being retried is reserved for one peer at a time so that the next failure names its
         // author. Nothing released that reservation when the peer went away, so a piece could sit
@@ -1505,6 +1566,15 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// requests across more partial pieces, so demand - the peers currently willing to send to us -
     /// caps it too, and the floor keeps enough open for endgame to have somewhere to go.
     /// </para>
+    ///
+    /// <para>
+    /// Demand is what those peers will queue, not how many of them there are. It used to be a fixed
+    /// two pieces each, while one peer's queue can be five hundred blocks - eight pieces of 1 MiB. The
+    /// first peer to fill its queue then held every open piece, a slot freed only as one of its
+    /// pieces completed, and its own next pass reclaimed it: against libtorrent's
+    /// <c>connection_tester</c> one of four equal peers served 96% of a download, and the engine ran
+    /// at that one connection's rate.
+    /// </para>
     /// </summary>
     private int CalculateMaxActivePieces()
     {
@@ -1519,19 +1589,25 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         }
 
         long byBudget = Math.Max(1, transfer.ActivePieceByteBudget / pieceSize);
+        int blocksPerPiece = (int)Math.Min(int.MaxValue, (pieceSize + ProtocolConstants.BlockSize - 1) / ProtocolConstants.BlockSize);
+        int perPeer = Math.Clamp(transfer.ActivePiecesPerPeer, 1, 64);
 
         // Peers that are not choking us are the ones a newly opened piece could actually make
         // progress on. Choked and idle peers are counted by neither.
-        int willingPeers = 0;
+        long byDemand = 0;
         foreach (var peer in _torrent.PeersInternal.GetConnectedPeersInternal())
         {
             if (!peer.PeerChoking)
             {
-                willingPeers++;
+                int queue = RequestQueuePolicy.RequestQueueLimit(peer, transfer);
+                byDemand += RequestQueuePolicy.PiecesToKeepOpen(queue, blocksPerPiece, perPeer);
+            }
+
+            if (byDemand >= byBudget)
+            {
+                break;
             }
         }
-
-        long byDemand = (long)willingPeers * Math.Clamp(transfer.ActivePiecesPerPeer, 1, 64);
 
         return (int)Math.Clamp(Math.Min(byBudget, byDemand), floor, ceiling);
     }
@@ -1649,9 +1725,50 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             && _pieceProcessingQueue.Reader.Count >= _maxPieceQueueCapacity;
     }
 
-    private Task EvaluateNextRequestsInternalAsync(PeerCommunication peer)
+    /// <summary>
+    /// Evaluates a peer, and remembers it for later when it could take requests but was left with
+    /// none, because every open piece was already asked for.
+    ///
+    /// <para>
+    /// A peer is evaluated when one of its blocks arrives, and a peer with nothing outstanding
+    /// receives none. One left idle therefore had no way back but the once-a-second update, while a
+    /// peer still owed blocks was evaluated again the moment its next one landed - and took the
+    /// pieces the others would have had. On a fast link that happened often enough that one of four
+    /// equal peers served 93% of a download that finished before the update ran at all. A remembered
+    /// peer is evaluated again as soon as a piece finishes processing, which frees its slot or, if it
+    /// failed, its blocks.
+    /// </para>
+    /// </summary>
+    private async Task EvaluateNextRequestsInternalAsync(PeerCommunication peer)
     {
-        return _requestScheduler.EvaluateNextRequestsAsync(peer, EndGameMode, IsPieceQueueFull);
+        var shortfall = await _requestScheduler.EvaluateNextRequestsAsync(peer, EndGameMode, IsPieceQueueFull).ConfigureAwait(false);
+        if (shortfall == RequestShortfall.None)
+        {
+            return;
+        }
+
+        _idlePeers.TryAdd(peer, 0);
+
+        // A slot may have freed between the evaluation and the add, after the release that would have
+        // seen this peer; without this it could wait for a release that never comes. Nothing
+        // requestable has no such test, so a peer is not sent straight back to an evaluation that
+        // will leave it idle again: it waits for the next piece to finish.
+        if (shortfall == RequestShortfall.NoPieceSlot && _pieceStateManager.Count < _pieceStateManager.MaxActivePieces)
+        {
+            ReleaseIdlePeers();
+        }
+    }
+
+    /// <summary>Queues every peer that was left idle for another evaluation.</summary>
+    internal void ReleaseIdlePeers()
+    {
+        foreach (var peer in _idlePeers.Keys)
+        {
+            if (_idlePeers.TryRemove(peer, out _) && peer.Connected != 0)
+            {
+                _peerEvaluationScheduler.Enqueue(peer);
+            }
+        }
     }
 
     private async Task ProcessIncomingBlocksAsync(CancellationToken ct)
@@ -1916,6 +2033,15 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             // Log unhandled exceptions in fire-and-forget task to prevent silent failures
             Logger.LogError(ex, "Error processing piece {PieceIndex}", pieceToProcess.Index);
             pieceToProcess.ReleaseWriting();
+        }
+        finally
+        {
+            // Verified, failed or put back: either way its slot or its blocks are free again, which is
+            // what a peer left with nothing to request was waiting for.
+            if (!_idlePeers.IsEmpty)
+            {
+                ReleaseIdlePeers();
+            }
         }
     }
 

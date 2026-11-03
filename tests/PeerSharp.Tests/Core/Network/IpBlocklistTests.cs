@@ -149,6 +149,85 @@ public class IpBlocklistTests
         Assert.False(blocklist.IsBlocked("11.0.0.1"));
     }
 
+    /// <summary>
+    /// IPAddress reads a leading zero as octal, so a zero-padded list blocked 8.0.0.1 where it said
+    /// 10.0.0.1, and lost every line with an 8 or 9 after a leading zero.
+    /// </summary>
+    [Fact]
+    public void LoadFromStream_ReadsZeroPaddedOctetsAsDecimal()
+    {
+        var blocklist = Load(
+            "Padded:010.000.000.000-010.000.000.255",
+            "Nines:009.009.009.000-009.009.009.255",
+            "192.168.001.010",
+            "172.016.000.000/12");
+
+        Assert.True(blocklist.IsBlocked("10.0.0.1"));
+        Assert.False(blocklist.IsBlocked("8.0.0.1"));
+        Assert.True(blocklist.IsBlocked("9.9.9.9"));
+        Assert.True(blocklist.IsBlocked("192.168.1.10"));
+        Assert.False(blocklist.IsBlocked("192.168.1.8"));
+        Assert.True(blocklist.IsBlocked("172.31.255.255"));
+    }
+
+    [Fact]
+    public void LoadFromStream_ReadsEmuleDatLines_AndSkipsAllowedAccessLevels()
+    {
+        var blocklist = Load(
+            "001.002.004.000 - 001.002.004.255 , 000 , Example Org - Bogon",
+            "001.002.005.000 - 001.002.005.255 , 200 , Allowed by its access level",
+            "001.002.006.000 - 001.002.006.255 , 127 , Highest blocking level");
+
+        Assert.True(blocklist.IsBlocked("1.2.4.9"));
+        Assert.False(blocklist.IsBlocked("1.2.5.9"));
+        Assert.True(blocklist.IsBlocked("1.2.6.9"));
+    }
+
+    [Fact]
+    public void LoadFromStream_P2PDescriptionsMayHoldCommasColonsAndDashes()
+    {
+        var blocklist = Load(
+            "Example, Inc:1.2.3.0-1.2.3.255",
+            "Range: east-west:5.6.7.0-5.6.7.255");
+
+        Assert.True(blocklist.IsBlocked("1.2.3.4"));
+        Assert.True(blocklist.IsBlocked("5.6.7.8"));
+    }
+
+    [Theory]
+    [InlineData("1.2.3")]
+    [InlineData("0x7f.0.0.1")]
+    [InlineData("256.0.0.1")]
+    [InlineData("1.2.3.4.5")]
+    [InlineData("1.2.3.0001")]
+    public void LoadFromStream_RejectsWhatIsNotFourDecimalOctets(string line)
+    {
+        Assert.Equal(0, Load(line).RangeCount);
+    }
+
+    [Fact]
+    public void LoadFromStream_JoinsALineSplitAcrossReads()
+    {
+        // StreamReader hands the parser 4096 characters at a time, so a long file splits lines.
+        var lines = Enumerable.Range(0, 2000).Select(i => $"Block {i}:10.{i / 250}.{i % 250}.0-10.{i / 250}.{i % 250}.255").ToArray();
+        var blocklist = Load(lines);
+
+        Assert.True(blocklist.IsBlocked("10.7.249.255"));
+        Assert.False(blocklist.IsBlocked("10.8.0.0"));
+        for (int i = 0; i < 2000; i += 37)
+        {
+            Assert.True(blocklist.IsBlocked($"10.{i / 250}.{i % 250}.7"), lines[i]);
+        }
+    }
+
+    private static IpBlocklist Load(params string[] lines)
+    {
+        var blocklist = new IpBlocklist();
+        using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(string.Join("\r\n", lines)));
+        blocklist.LoadFromStream(stream);
+        return blocklist;
+    }
+
     [Fact]
     public async Task LoadFromStreamAsync_SupportsMultipleFormatsAndLeavesStreamOpen()
     {

@@ -197,7 +197,7 @@ internal sealed record BenchmarkOptions
               --iterations <n>               measured trials per case (default 3)
               --timeout <seconds>            per-transfer timeout (default 180)
               --seed <n>                     deterministic case-order seed (default 1741)
-              --skip-build                   reuse existing binaries
+              --skip-build                   reuse the libtorrent build; PeerSharp is still published
               --keep-run-data                preserve payload directories after a run
               -h, --help                     show this text
 

@@ -45,13 +45,31 @@ public class AdaptivePolicyTests
     [Fact]
     public void ActivePieces_AreAlsoCappedByThePeersWillingToSend()
     {
-        // Opening pieces nobody will serve only scatters requests over more partial pieces.
+        // Opening pieces nobody will serve only scatters requests over more partial pieces. A queue of
+        // 32 blocks spans two 16-block pieces, and one more is open while the oldest finishes.
         var (transfer, torrent) = CreateTransfer(pieceSize: 256 * 1024, willingPeers: 5);
         torrent.Settings.Transfer.ActivePieceByteBudget = 1024L * 1024 * 1024;
         torrent.Settings.Transfer.ActivePiecesPerPeer = 2;
+        torrent.Settings.Transfer.MaxRequestsPerPeer = 32;
         torrent.Settings.Transfer.MinActivePieces = 1;
 
-        Assert.Equal(10, ActivePieceCapacity(transfer));
+        Assert.Equal(15, ActivePieceCapacity(transfer));
+    }
+
+    [Fact]
+    public void ActivePieces_LeaveRoomForEveryWillingPeersWholeQueue()
+    {
+        // The case that made one of four equal loopback peers serve 96% of a download: each peer queues
+        // 500 blocks, eight 1 MiB pieces, and two pieces apiece left room for one peer's queue at most.
+        // Nine each for four peers is 36, held to the 32 MiB budget's 32.
+        var (transfer, torrent) = CreateTransfer(pieceSize: 1024 * 1024, willingPeers: 4);
+        torrent.Settings.Transfer.ActivePieceByteBudget = 32L * 1024 * 1024;
+
+        Assert.Equal(32, ActivePieceCapacity(transfer));
+
+        // With room to spare in the budget, the demand is what decides.
+        torrent.Settings.Transfer.ActivePieceByteBudget = 256L * 1024 * 1024;
+        Assert.Equal(36, ActivePieceCapacity(transfer));
     }
 
     [Fact]

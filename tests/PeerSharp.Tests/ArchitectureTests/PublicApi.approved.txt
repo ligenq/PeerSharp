@@ -90,6 +90,7 @@ sealed class PeerSharp.Config.ConnectionSettings
     Nullable<PeerSharp.Config.Encryption> IncomingEncryption { get; set; }
     Nullable<PeerSharp.Config.Encryption> OutgoingEncryption { get; set; }
     PeerSharp.Config.Encryption Encryption { get; set; }
+    PeerSharp.Config.SsrfMitigation SsrfMitigation { get; set; }
     String I2pSamHost { get; set; }
     TimeSpan PexInterval { get; set; }
     UInt16 TcpPort { get; set; }
@@ -176,6 +177,10 @@ sealed class PeerSharp.Config.Settings
     PeerSharp.Config.StreamingSettings Streaming { get; }
     PeerSharp.Config.TransferSettings Transfer { get; }
     UInt32 MaxPeersPerTrackerRequest { get; set; }
+enum PeerSharp.Config.SsrfMitigation
+    LocalNetworks = 2
+    None = 0
+    ThisDevice = 1
 sealed class PeerSharp.Config.StreamingSettings
     .ctor()
     Int32 DataWaitTimeoutSeconds { get; set; }
@@ -900,6 +905,7 @@ interface PeerSharp.Interfaces.ITorrent
     Boolean HasMetadata { get; }
     Boolean HasSameIdentity(PeerSharp.Interfaces.ITorrent other)
     Boolean HasStreamableFiles { get; }
+    Boolean IsSsl { get; }
     Boolean QueueAutoStart { get; set; }
     Boolean SelectionFinished { get; }
     Boolean Started { get; }
@@ -954,6 +960,7 @@ interface PeerSharp.Interfaces.ITorrent
     Task SetDownloadPathAsync(String path, CancellationToken cancellationToken = default)
     Task SetFilePriorityAsync(Int32 fileIndex, PeerSharp.Core.Priority priority, CancellationToken cancellationToken = default)
     Task SetFileSelectionAsync(Int32 fileIndex, PeerSharp.Core.FileSelection selection, CancellationToken cancellationToken = default)
+    Task SetSslCertificateAsync(Security.Cryptography.X509Certificates.X509Certificate2 certificate, CancellationToken cancellationToken = default)
     Task StartAsync(CancellationToken cancellationToken = default)
     Task StopAsync(CancellationToken cancellationToken = default)
     Task WaitForMetadataAsync(CancellationToken cancellationToken = default)

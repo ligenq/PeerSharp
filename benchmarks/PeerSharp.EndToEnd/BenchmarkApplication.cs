@@ -42,7 +42,7 @@ internal static class BenchmarkApplication
             }
 
             ToolPaths tools = options.SkipBuild
-                ? toolchain.FindBuiltTools()
+                ? await toolchain.FindBuiltToolsWithCurrentPeerSharpAsync(stopping.Token).ConfigureAwait(false)
                 : await toolchain.BuildAsync(stopping.Token).ConfigureAwait(false);
             if (options.Command == "build")
             {

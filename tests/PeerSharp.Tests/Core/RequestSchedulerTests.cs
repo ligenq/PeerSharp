@@ -331,6 +331,64 @@ public class RequestSchedulerTests
         Assert.False(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out _));
     }
 
+    [Fact]
+    public async Task AnIdlePeer_IsGivenWorkWhileCompletedPiecesWaitToBeVerified()
+    {
+        // Held back, it had no blocks coming to bring it back, and the peer evaluated next - the one
+        // doing most of the work - took its share instead.
+        var fixture = CreateSchedulerFixture(8, 1, 8, 6);
+
+        var shortfall = await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => true);
+
+        Assert.Equal(RequestShortfall.None, shortfall);
+        Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
+        Assert.Equal(6, requests.Count);
+    }
+
+    [Fact]
+    public async Task APeerStillOwedBlocks_IsHeldBackWhileCompletedPiecesWaitToBeVerified()
+    {
+        var fixture = CreateSchedulerFixture(8, 1, 8, 6);
+        AddPendingRequest(fixture.RequestTracker, fixture.Peer, 7, 0);
+
+        var shortfall = await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => true);
+
+        // Each block it is owed evaluates it again as it lands, so it is not waiting on anyone.
+        Assert.Equal(RequestShortfall.None, shortfall);
+        Assert.True(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests));
+        Assert.Equal(1, requests.Count);
+    }
+
+    [Fact]
+    public async Task APeerLeftIdleBecauseNoMorePiecesMayOpen_SaysSo()
+    {
+        var fixture = CreateSchedulerFixture(8, 1, 1, 6);
+        var other = new PeerCommunication(fixture.Torrent, new MockPeerListener(), TimeProvider.System);
+        Assert.True(fixture.PieceStateManager.TryAddPiece(new PieceState(0, 1)));
+        AddPendingRequest(fixture.RequestTracker, other, 0, 0);
+
+        var shortfall = await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false);
+
+        Assert.Equal(RequestShortfall.NoPieceSlot, shortfall);
+        Assert.False(fixture.RequestTracker.TryGetPeerRequests(fixture.Peer, out var requests) && requests.Count > 0);
+    }
+
+    [Fact]
+    public async Task APeerWithWorkOrNothingWeWant_IsNotReportedIdle()
+    {
+        var fixture = CreateSchedulerFixture(8, 1, 8, 6);
+        Assert.Equal(
+            RequestShortfall.None,
+            await fixture.Scheduler.EvaluateNextRequestsAsync(fixture.Peer, endGameMode: false, isQueueFull: () => false));
+
+        // Choking us, with nothing allowed fast: it is not waiting on us for anything.
+        var choking = CreateSchedulerFixture(8, 1, 8, 6);
+        SetPrivateField(choking.Peer, "_peerChoking", 1);
+        Assert.Equal(
+            RequestShortfall.None,
+            await choking.Scheduler.EvaluateNextRequestsAsync(choking.Peer, endGameMode: false, isQueueFull: () => false));
+    }
+
     private static void SetPrivateField(object target, string fieldName, int value)
     {
         var field = target.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);

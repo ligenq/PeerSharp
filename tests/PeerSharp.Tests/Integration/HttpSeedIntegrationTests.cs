@@ -43,8 +43,11 @@ public sealed class HttpSeedIntegrationTests
                 {
                     Files = { DefaultDownloadPath = path },
                     Dht = { Enabled = false },
+                    // The seed's URL carries a query to prove it is passed through, and a query to
+                    // loopback is what the SSRF guard refuses - rightly, for a torrent from anyone else.
                     Connection = { TcpPort = 0, UdpPort = 0, EnableTcpIn = false, EnableTcpOut = false,
-                        EnableUtpIn = false, EnableUtpOut = false, EnableLsd = false, UpnpPortMapping = false, NatPmpPortMapping = false }
+                        EnableUtpIn = false, EnableUtpOut = false, EnableLsd = false, UpnpPortMapping = false, NatPmpPortMapping = false,
+                        SsrfMitigation = SsrfMitigation.None }
                 }
             });
             await engine.InitializeAsync();

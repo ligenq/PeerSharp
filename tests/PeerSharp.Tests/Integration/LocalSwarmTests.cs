@@ -128,6 +128,40 @@ public class LocalSwarmTests : IDisposable
         Assert.Equal(dummyData, downloadedData);
     }
 
+    /// <summary>
+    /// A magnet knows nothing about its files until the metadata arrives, so the check of what is
+    /// already on disk has to happen then, when the rebuilt torrent starts, rather than at the add.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task Magnet_OverFilesAlreadyOnDisk_ChecksThemInsteadOfDownloading()
+    {
+        const string fileName = "already-here.bin";
+        byte[] data = new byte[96 * 1024];
+        Random.Shared.NextBytes(data);
+        await WriteFilesAsync(_pathA, (fileName, data));
+        await WriteFilesAsync(_pathB, (fileName, data));
+
+        var torrentFile = new ApiTorrentFileBuilder()
+            .WithName(fileName)
+            .WithPieceLength(16_384)
+            .AddFile(fileName, data)
+            .Build();
+
+        await using var seedEngine = await CreateEngineAsync(_pathA);
+        var seedTorrent = await seedEngine.AddTorrentAsync(torrentFile, new AddTorrentOptions { StartImmediately = false });
+        await seedTorrent.ForceRecheckAsync();
+        await seedTorrent.StartAsync();
+
+        string magnet = $"magnet:?xt=urn:btih:{torrentFile.InfoHash.ToHexString()}&dn={Uri.EscapeDataString(torrentFile.Name)}";
+        await using var leecherEngine = await CreateEngineAsync(_pathB);
+        var leecherTorrent = await leecherEngine.AddMagnetAsync(magnet, new AddTorrentOptions { StartImmediately = true });
+
+        await EnsureConnectedAsync(leecherEngine, leecherTorrent, seedEngine, ConnectionTimeout, cancellationToken: TestContext.Current.CancellationToken);
+        await WaitForConditionAsync(leecherTorrent, t => t.Finished, DownloadTimeout, "completion", cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, leecherTorrent.GetTransferStats().Downloaded);
+    }
+
     [Fact(Timeout = 30000)]
     public async Task PreviewMagnet_StopAfterMetadata_AllowsDeselectionBeforeDownload()
     {

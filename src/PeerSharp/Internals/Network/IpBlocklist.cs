@@ -3,14 +3,13 @@ using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Utilities;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 
 namespace PeerSharp.Internals.Network;
 
 /// <summary>
 /// IP blocklist for filtering peer connections.
-/// Supports loading from P2P format files (Description:StartIP-EndIP) and CIDR notation.
-/// Uses a sorted list of IP ranges for efficient O(log n) lookup.
+/// Loads P2P lists (Description:StartIP-EndIP), eMule DAT lists (StartIP - EndIP , level , Description),
+/// CIDR notation and single addresses. Uses a sorted list of IP ranges for efficient O(log n) lookup.
 /// </summary>
 internal class IpBlocklist
 {
@@ -64,9 +63,9 @@ internal class IpBlocklist
     /// <summary>
     /// Adds a CIDR range to the blocklist.
     /// </summary>
-    public void AddCidr(string cidr, string? description = null)
+    public void AddCidr(string cidr)
     {
-        if (TryParseCidrRange(cidr, description, out var range))
+        if (BlocklistParser.TryParseCidr(cidr, out var range))
         {
             lock (_lock)
             {
@@ -80,7 +79,7 @@ internal class IpBlocklist
     /// <summary>
     /// Adds a single IP range to the blocklist.
     /// </summary>
-    public void AddRange(IPAddress start, IPAddress end, string? description = null)
+    public void AddRange(IPAddress start, IPAddress end)
     {
         start = Normalize(start);
         end = Normalize(end);
@@ -91,7 +90,7 @@ internal class IpBlocklist
 
         lock (_lock)
         {
-            _ranges.Add(new IpRange(start.AddressFamily, NetworkUtils.IpToUInt128(start), NetworkUtils.IpToUInt128(end), description));
+            _ranges.Add(new IpRange(start.AddressFamily, NetworkUtils.IpToUInt128(start), NetworkUtils.IpToUInt128(end)));
             _sorted = false;
             Volatile.Write(ref _snapshot, null);
         }
@@ -350,116 +349,272 @@ internal class IpBlocklist
 
     private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
-    private static bool TryParseCidrRange(string cidr, string? description, out IpRange range)
+    /// <summary>
+    /// Parses blocklist text a line at a time, staging ranges so a caller can commit a whole file at once.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Lines are parsed as spans, without a string per line. The version this replaced built each line
+    /// in a <c>StringBuilder</c> a character at a time, then trimmed, sliced and parsed it through
+    /// <see cref="IPAddress"/>: 168 MB allocated and 115 ms for a 250,000-range list, which an
+    /// application pays at startup.
+    /// </para>
+    /// <para>
+    /// IPv4 octets are read as decimal even with leading zeros, as blocklist publishers and other
+    /// clients mean them. <see cref="IPAddress.TryParse(string?, out IPAddress?)"/> reads a leading zero
+    /// as octal, so <c>010.000.000.001</c> became 8.0.0.1, <c>192.168.001.010</c> became 192.168.1.8,
+    /// and an octet such as <c>008</c> failed the whole line. eMule DAT lists pad every octet that way.
+    /// </para>
+    /// </remarks>
+    internal sealed class BlocklistParser
     {
-        range = default;
-        int slash = cidr.IndexOf('/');
-        if (slash <= 0 || !IPAddress.TryParse(cidr[..slash].Trim(), out var address)) return false;
-        if (address.IsIPv4MappedToIPv6 && int.TryParse(cidr[(slash + 1)..], out int prefix) && prefix is >= 96 and <= 128)
-        {
-            address = address.MapToIPv4();
-            cidr = $"{address}/{prefix - 96}";
-        }
-        if (!NetworkUtils.TryParseCidr(cidr, out var start, out var end)) return false;
-        range = new IpRange(address.AddressFamily, start, end, description);
-        return true;
-    }
+        private const int MaxLineLength = 4096;
 
-    private sealed class BlocklistParser
-    {
-        private readonly StringBuilder _line = new();
+        // eMule's convention, which qBittorrent follows: an entry whose access level is above this
+        // is allowed rather than blocked.
+        private const int MaxBlockingAccessLevel = 127;
+
+        private char[] _carry = new char[256];
+        private int _carryLength;
         private int _characters;
         public List<IpRange> Ranges { get; } = [];
 
-        /// <summary>
-        /// Parses one blocklist line into a range without publishing it, so callers can stage a
-        /// whole file and commit it atomically.
-        /// </summary>
-        private static bool TryParseLine(string line, out IpRange range)
+        public void Append(ReadOnlySpan<char> text)
+        {
+            if (text.Length > 64 * 1024 * 1024 - _characters) throw new InvalidDataException("Blocklist exceeds 64 MiB of text.");
+            _characters += text.Length;
+            while (!text.IsEmpty)
+            {
+                int newline = text.IndexOf('\n');
+                if (newline < 0)
+                {
+                    Carry(text);
+                    return;
+                }
+
+                if (_carryLength > 0)
+                {
+                    Carry(text[..newline]);
+                    Add(_carry.AsSpan(0, _carryLength));
+                    _carryLength = 0;
+                }
+                else
+                {
+                    if (newline > MaxLineLength) throw new InvalidDataException("Blocklist line is too long.");
+                    Add(text[..newline]);
+                }
+
+                text = text[(newline + 1)..];
+            }
+        }
+
+        public void Complete()
+        {
+            Add(_carry.AsSpan(0, _carryLength));
+            _carryLength = 0;
+        }
+
+        private void Carry(ReadOnlySpan<char> text)
+        {
+            if (_carryLength + text.Length > MaxLineLength) throw new InvalidDataException("Blocklist line is too long.");
+            if (_carryLength + text.Length > _carry.Length) Array.Resize(ref _carry, MaxLineLength);
+            text.CopyTo(_carry.AsSpan(_carryLength));
+            _carryLength += text.Length;
+        }
+
+        private void Add(ReadOnlySpan<char> line)
+        {
+            if (TryParseLine(line, out var range))
+            {
+                if (Ranges.Count >= MaxRanges) throw new InvalidDataException("Blocklist has too many ranges.");
+                Ranges.Add(range);
+            }
+        }
+
+        internal static bool TryParseLine(ReadOnlySpan<char> line, out IpRange range)
         {
             range = default;
-
-            if (string.IsNullOrWhiteSpace(line))
-            {
-                return false;
-            }
-
             line = line.Trim();
-
-            // Skip comments
-            if (line.StartsWith('#') || line.StartsWith("//", StringComparison.Ordinal))
+            if (line.IsEmpty || line[0] == '#' || line.StartsWith("//", StringComparison.Ordinal))
             {
                 return false;
             }
 
-            // IPv6 colons belong to the address, so find the range before its optional description.
-            int dashIndex = line.LastIndexOf('-');
-            if (dashIndex > 0 && IPAddress.TryParse(line[(dashIndex + 1)..].Trim(), out var endIp))
+            // eMule DAT: "start - end , level , description". Only when what precedes the first comma
+            // is a range: a P2P description can hold commas too ("Example, Inc:1.2.3.4-1.2.3.5").
+            int comma = line.IndexOf(',');
+            if (comma > 0)
             {
-                string left = line[..dashIndex].Trim();
-                string? description = null;
-                if (!IPAddress.TryParse(left, out var startIp))
+                var addresses = line[..comma];
+                int dash = addresses.IndexOf('-');
+                if (dash > 0 && TryParseRange(addresses[..dash].Trim(), addresses[(dash + 1)..].Trim(), out range))
                 {
-                    for (int colon = left.IndexOf(':'); colon >= 0; colon = left.IndexOf(':', colon + 1))
-                    {
-                        if (!IPAddress.TryParse(left[(colon + 1)..].Trim(), out startIp)) continue;
-                        description = left[..colon];
-                        break;
-                    }
+                    var rest = line[(comma + 1)..];
+                    int nextComma = rest.IndexOf(',');
+                    var level = (nextComma < 0 ? rest : rest[..nextComma]).Trim();
+                    bool allowed = int.TryParse(level, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int access)
+                        && access > MaxBlockingAccessLevel;
+                    if (allowed) range = default;
+                    return !allowed;
                 }
-                if (startIp != null)
+            }
+
+            // P2P: "description:start-end". IPv6 colons belong to the address, so the range is found
+            // from its end, and the start is whatever after a colon parses as an address.
+            int lastDash = line.LastIndexOf('-');
+            if (lastDash > 0)
+            {
+                var end = line[(lastDash + 1)..].Trim();
+                var left = line[..lastDash].Trim();
+                if (TryParseRange(left, end, out range))
                 {
-                    startIp = Normalize(startIp);
-                    endIp = Normalize(endIp);
-                    UInt128 start = NetworkUtils.IpToUInt128(startIp), end = NetworkUtils.IpToUInt128(endIp);
-                    if (startIp.AddressFamily == endIp.AddressFamily && start <= end)
+                    return true;
+                }
+
+                for (int colon = left.IndexOf(':'); colon >= 0; colon = NextColon(left, colon))
+                {
+                    if (TryParseRange(left[(colon + 1)..].Trim(), end, out range))
                     {
-                        range = new IpRange(startIp.AddressFamily, start, end, description);
                         return true;
                     }
                 }
             }
 
-            // Try CIDR format: 192.168.1.0/24
-            if (TryParseCidrRange(line, null, out range)) return true;
-
-            // Try single IP
-            if (IPAddress.TryParse(line, out var singleIp))
+            if (line.Contains('/'))
             {
-                singleIp = Normalize(singleIp);
-                var ipValue = NetworkUtils.IpToUInt128(singleIp);
-                range = new IpRange(singleIp.AddressFamily, ipValue, ipValue, null);
+                return TryParseCidr(line, out range);
+            }
+
+            if (TryParseAddress(line, out var family, out var single))
+            {
+                range = new IpRange(family, single, single);
                 return true;
             }
 
             return false;
         }
 
-        public void Append(ReadOnlySpan<char> text)
+        private static int NextColon(ReadOnlySpan<char> text, int colon)
         {
-            if (text.Length > 64 * 1024 * 1024 - _characters) throw new InvalidDataException("Blocklist exceeds 64 MiB of text.");
-            _characters += text.Length;
-            foreach (char value in text)
-            {
-                if (value == '\n') Complete();
-                else
-                {
-                    if (_line.Length >= 4096) throw new InvalidDataException("Blocklist line is too long.");
-                    _line.Append(value);
-                }
-            }
+            int next = text[(colon + 1)..].IndexOf(':');
+            return next < 0 ? -1 : colon + 1 + next;
         }
 
-        public void Complete()
+        private static bool TryParseRange(ReadOnlySpan<char> startText, ReadOnlySpan<char> endText, out IpRange range)
         {
-            if (TryParseLine(_line.ToString(), out var range))
+            range = default;
+            if (!TryParseAddress(startText, out var startFamily, out var start)
+                || !TryParseAddress(endText, out var endFamily, out var end)
+                || startFamily != endFamily || start > end)
             {
-                if (Ranges.Count >= MaxRanges) throw new InvalidDataException("Blocklist has too many ranges.");
-                Ranges.Add(range);
+                return false;
             }
-            _line.Clear();
+
+            range = new IpRange(startFamily, start, end);
+            return true;
+        }
+
+        internal static bool TryParseCidr(ReadOnlySpan<char> text, out IpRange range)
+        {
+            range = default;
+            int slash = text.IndexOf('/');
+            if (slash <= 0 || !int.TryParse(text[(slash + 1)..].Trim(), System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out int prefix))
+            {
+                return false;
+            }
+
+            var addressText = text[..slash].Trim();
+            AddressFamily family;
+            UInt128 address;
+            if (TryParseIPv4(addressText, out uint ipv4))
+            {
+                family = AddressFamily.InterNetwork;
+                address = ipv4;
+            }
+            else if (addressText.Contains(':') && IPAddress.TryParse(addressText, out var ipv6) && ipv6.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                // An IPv4-mapped prefix that covers only mapped space is the IPv4 range it maps; a
+                // shorter one is an ordinary IPv6 range.
+                if (ipv6.IsIPv4MappedToIPv6 && prefix is >= 96 and <= 128)
+                {
+                    family = AddressFamily.InterNetwork;
+                    address = NetworkUtils.IpToUInt128(ipv6.MapToIPv4());
+                    prefix -= 96;
+                }
+                else
+                {
+                    family = AddressFamily.InterNetworkV6;
+                    address = NetworkUtils.IpToUInt128(ipv6);
+                }
+            }
+            else
+            {
+                return false;
+            }
+
+            int bits = family == AddressFamily.InterNetwork ? 32 : 128;
+            if (prefix > bits)
+            {
+                return false;
+            }
+
+            int hostBits = bits - prefix;
+            UInt128 mask = hostBits == 128 ? UInt128.MaxValue : (UInt128.One << hostBits) - 1;
+            range = new IpRange(family, address & ~mask, address | mask);
+            return true;
+        }
+
+        /// <summary>Parses an address, reading an IPv4-mapped IPv6 address as the IPv4 address it maps.</summary>
+        private static bool TryParseAddress(ReadOnlySpan<char> text, out AddressFamily family, out UInt128 value)
+        {
+            if (TryParseIPv4(text, out uint ipv4))
+            {
+                family = AddressFamily.InterNetwork;
+                value = ipv4;
+                return true;
+            }
+
+            // Only IPv6 goes to IPAddress, which would otherwise also accept IPv4 in octal, in hex or
+            // with octets missing.
+            if (text.Contains(':') && IPAddress.TryParse(text, out var address) && address.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                address = Normalize(address);
+                family = address.AddressFamily;
+                value = NetworkUtils.IpToUInt128(address);
+                return true;
+            }
+
+            family = default;
+            value = default;
+            return false;
+        }
+
+        /// <summary>Four decimal octets of up to three digits, leading zeros allowed.</summary>
+        internal static bool TryParseIPv4(ReadOnlySpan<char> text, out uint value)
+        {
+            value = 0;
+            int octets = 0;
+            int i = 0;
+            while (true)
+            {
+                int digits = 0;
+                uint octet = 0;
+                while (i < text.Length && (uint)(text[i] - '0') <= 9)
+                {
+                    if (++digits > 3) return false;
+                    octet = (octet * 10) + (uint)(text[i] - '0');
+                    i++;
+                }
+
+                if (digits == 0 || octet > 255) return false;
+                value = (value << 8) | octet;
+                if (++octets == 4) return i == text.Length;
+                if (i >= text.Length || text[i] != '.') return false;
+                i++;
+            }
         }
     }
 
-    private readonly record struct IpRange(AddressFamily Family, UInt128 Start, UInt128 End, string? Description);
+    internal readonly record struct IpRange(AddressFamily Family, UInt128 Start, UInt128 End);
 }

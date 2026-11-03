@@ -1325,7 +1325,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (Settings.PeerId.All(b => b == 0))
         {
             // BEP 20: Generate peer ID using Azureus-style format
-            // Format: -PS0502-xxxxxxxxxxxx (20 bytes)
+            // Format: -PS0503-xxxxxxxxxxxx (20 bytes)
             var peerId = ProtocolConstants.GeneratePeerId();
             Array.Copy(peerId, Settings.PeerId, 20);
             // NOTE: Client application is responsible for persisting Settings if it wants to keep PeerID
@@ -2048,7 +2048,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         return new DefaultHttpClient(_httpClientFactory.CreateClient(
             settings,
             isTracker: true,
-            Settings.Connection.BindAddress));
+            Settings.Connection.BindAddress,
+            ssrf: new SsrfPolicy(Settings.Connection.SsrfMitigation, HttpRequestKind.TorrentDownload)));
     }
 
     public Task<ITorrent> AddTorrentAsync(

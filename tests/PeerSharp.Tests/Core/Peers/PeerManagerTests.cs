@@ -1550,6 +1550,55 @@ public class PeerManagerTests
     }
 
     /// <summary>
+    /// A peer that finishes within ten seconds of being unchoked used to keep its upload slot: the choke
+    /// on NotInterested was swallowed by the anti-flapping period, and nobody else was unchoked until the
+    /// next rechoke. Seeding sixteen fast peers from eight slots, half of them sat idle for ten seconds.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task NotInterested_FromAJustUnchokedPeer_HandsItsSlotToAWaitingPeer()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.UploadSlotsMin = 1;
+        ctx.Torrent.Settings.Connection.UploadSlotsMax = 1;
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+        var finished = new PolicyTestPeer(ctx.Torrent); finished.SetInterested(true); finished.Unchoke();
+        var waiting = new PolicyTestPeer(ctx.Torrent); waiting.SetInterested(true);
+        connected.TryAdd(finished, 0);
+        connected.TryAdd(waiting, 0);
+        SetPrivateField(ctx.Manager, "_connectedPeersCount", 2);
+
+        finished.SetInterested(false);
+        await ctx.Manager.MessageReceivedAsync(finished, new PeerMessage(MessageId.NotInterested));
+
+        Assert.True(finished.AmChoking);
+        Assert.False(waiting.AmChoking);
+
+        await CleanupAsync(ctx);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ConnectionClosed_OfAnUnchokedPeer_HandsItsSlotToAWaitingPeer()
+    {
+        var ctx = CreateContext();
+        ctx.Torrent.Settings.Connection.UploadSlotsMin = 1;
+        ctx.Torrent.Settings.Connection.UploadSlotsMax = 1;
+        var connected = GetPrivateField<ConcurrentDictionary<PeerCommunication, byte>>(ctx.Manager, "_connectedPeers");
+        var leaving = new PolicyTestPeer(ctx.Torrent) { RemoteEndPoint = new IPEndPoint(IPAddress.Parse("203.0.113.50"), 6881) };
+        leaving.SetInterested(true);
+        leaving.Unchoke();
+        var waiting = new PolicyTestPeer(ctx.Torrent); waiting.SetInterested(true);
+        connected.TryAdd(leaving, 0);
+        connected.TryAdd(waiting, 0);
+        SetPrivateField(ctx.Manager, "_connectedPeersCount", 2);
+
+        await ctx.Manager.ConnectionClosedAsync(leaving, 0);
+
+        Assert.False(waiting.AmChoking);
+
+        await CleanupAsync(ctx);
+    }
+
+    /// <summary>
     /// Bad data has to be remembered against the source, not the connection it arrived on. Counting it
     /// on the connection made dropping the peer pointless - it reconnects, the count is gone, and it
     /// goes straight back into the rotation. In a live run one piece failed its hash thirteen times

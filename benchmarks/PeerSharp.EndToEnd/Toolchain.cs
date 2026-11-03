@@ -27,6 +27,19 @@ internal sealed class Toolchain(BenchmarkOptions options)
             doctor.Dotnet!, doctor.Cmake!, peerSharpCli, clientTest, connectionTester, boostRoot, buildRoot);
     }
 
+    /// <summary>
+    /// The binaries already built, except PeerSharp's CLI, which is published again from the working
+    /// tree. That publish is incremental and takes seconds, where libtorrent's build takes minutes, and
+    /// without it a run would measure whatever CLI was last published while recording the current
+    /// revision as the one under test - two months stale, the first time this was noticed.
+    /// </summary>
+    public async Task<ToolPaths> FindBuiltToolsWithCurrentPeerSharpAsync(CancellationToken cancellationToken)
+    {
+        ToolPaths built = FindBuiltTools();
+        string cli = await BuildPeerSharpAsync(built.Dotnet, cancellationToken).ConfigureAwait(false);
+        return built with { PeerSharpCli = cli };
+    }
+
     public ToolPaths FindBuiltTools()
     {
         DoctorResult doctor = Inspect();
