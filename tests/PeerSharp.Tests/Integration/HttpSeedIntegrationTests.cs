@@ -95,7 +95,15 @@ public sealed class HttpSeedIntegrationTests
             {
                 var stream = client.GetStream();
                 using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
-                string line = (await reader.ReadLineAsync(stopServer.Token))!;
+                // HttpClient keeps a connection attempt going after another connection has taken its
+                // request, and closes that spare unused when the engine shuts down. It arrives here
+                // as a connection with no request on it, which is not this server's to answer.
+                string? line = await reader.ReadLineAsync(stopServer.Token);
+                if (line is null)
+                {
+                    return;
+                }
+
                 string target = line.Split(' ')[1];
                 requests.Add(target);
                 while (!string.IsNullOrEmpty(await reader.ReadLineAsync(stopServer.Token))) { }
