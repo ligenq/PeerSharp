@@ -86,7 +86,7 @@ internal static class TorrentTls
     {
         var certificate = torrent.SslCertificate;
         if (certificate?.HasPrivateKey != true || !ValidateCertificate(torrent, certificate, null))
-            throw new AuthenticationException("SSL torrent needs a valid torrent certificate and private key in AddTorrentOptions.SslCertificate.");
+            throw new AuthenticationException("SSL torrent needs a valid torrent certificate and private key, from AddTorrentOptions.SslCertificate or SetSslCertificateAsync.");
         var tls = new SslStream(stream, leaveInnerStreamOpen: false,
             (_, remote, chain, _) => ValidateCertificate(torrent, remote, chain, serverCertificate: true));
         try

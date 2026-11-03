@@ -196,6 +196,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     private const int SendQueueCapacityMax = 1000;
     private const int SendQueueCapacityMin = 200;
     private const int SendQueueTimeoutMs = ProtocolConstants.SendQueueTimeoutMs;
+
+    /// <summary>The most the send loop joins into one write: eight blocks and their headers.</summary>
+    private const int MaxSendBatchBytes = 128 * 1024 + 8 * 13;
     private readonly HashSet<int> _allowedFastPieces = [];
     private readonly Lock _availabilityLock = new();
     private readonly Lock _fastPiecesLock = new();
@@ -888,10 +891,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     public void AssignBandwidth(int amount)
     { }
 
-    public void Choke()
+    /// <param name="ignoreMinPeriod">
+    /// Choke even if the choke state changed within the last <see cref="MinChokePeriodSeconds"/>. The
+    /// period stops a rechoke from flapping a peer; it is not meant to keep a slot held by a peer that
+    /// has said it wants nothing. Without this, a peer that finished within ten seconds of being
+    /// unchoked kept its upload slot until it disconnected, while interested peers waited.
+    /// </param>
+    public void Choke(bool ignoreMinPeriod = false)
     {
         var now = _timeProvider.GetUtcNow();
-        if (_lastChokeChange != DateTimeOffset.MinValue &&
+        if (!ignoreMinPeriod && _lastChokeChange != DateTimeOffset.MinValue &&
             (now - _lastChokeChange) < TimeSpan.FromSeconds(MinChokePeriodSeconds))
         {
             return;
@@ -3184,11 +3193,17 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
+        // Messages already queued go out in one write rather than one each. A seeding peer queues a
+        // 16 KiB block per request, and a write apiece cost a send and a completion on the thread pool
+        // per block: profiled against connection_tester, waking threads for those completions took
+        // most of the upload's CPU. Only what is already waiting is joined - nothing is held back to
+        // wait for more - so a lone control message goes out as promptly as before.
+        byte[] batch = ArrayPool<byte>.Shared.Rent(MaxSendBatchBytes);
         try
         {
             while (await _sendQueue.WaitToReadAsync(token).ConfigureAwait(false))
             {
-                int batchCount = 0;
+                int used = 0;
                 while (_sendQueue.TryDequeue(out var msg))
                 {
                     // Completed means the connection is closing and the stream is going or gone. What is
@@ -3201,22 +3216,33 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
                     try
                     {
-                        var writeStart = _timeProvider.GetUtcNow();
-                        await WriteMessageToStreamAsync(msg, token).ConfigureAwait(false);
-                        var writeMs = (_timeProvider.GetUtcNow() - writeStart).TotalMilliseconds;
-
-                        // Log slow writes that might indicate bandwidth throttling or network issues
-                        if (writeMs > 100)
+                        int length = PeerProtocol.GetMessageLength(msg);
+                        if (used > 0 && used + length > MaxSendBatchBytes)
                         {
-                            _logger.LogTrace("Slow send to {PeerName}: {MsgId} took {Elapsed}ms (possible bandwidth throttle or network issue)", Name, msg.Id, Math.Round(writeMs, 1));
+                            await WriteBatchAsync(batch, used, token).ConfigureAwait(false);
+                            used = 0;
+                        }
+
+                        if (length > MaxSendBatchBytes)
+                        {
+                            await WriteMessageToStreamAsync(msg, token).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            LogOutgoing(msg);
+                            used += PeerProtocol.WriteMessage(msg, batch.AsSpan(used, length));
                         }
                     }
                     finally
                     {
                         msg.Dispose();
                     }
-                    batchCount++;
                     _messagesSentSinceLastLog++;
+                }
+
+                if (used > 0)
+                {
+                    await WriteBatchAsync(batch, used, token).ConfigureAwait(false);
                 }
 
                 // Log periodic send queue stats every 10 seconds
@@ -3238,6 +3264,43 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             _logger.LogDebug(ex, "Send error for {PeerName}", Name);
             await CloseAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(batch);
+        }
+    }
+
+    /// <summary>Writes messages joined by the send loop, as one write.</summary>
+    private async Task WriteBatchAsync(byte[] batch, int length, CancellationToken token)
+    {
+        // Read once, as WriteMessageToStreamAsync does: with no stream the connection is closing.
+        if (Stream is not { } stream)
+        {
+            return;
+        }
+
+        var writeStart = _timeProvider.GetUtcNow();
+        await stream.WriteAsync(batch.AsMemory(0, length), token).ConfigureAwait(false);
+        var writeMs = (_timeProvider.GetUtcNow() - writeStart).TotalMilliseconds;
+
+        // Log slow writes that might indicate bandwidth throttling or network issues
+        if (writeMs > 100)
+        {
+            _logger.LogTrace("Slow send to {PeerName}: {Bytes} bytes took {Elapsed}ms (possible bandwidth throttle or network issue)", Name, length, Math.Round(writeMs, 1));
+        }
+    }
+
+    private void LogOutgoing(PeerMessage msg)
+    {
+        if (msg.Id == MessageId.Interested)
+        {
+            _logger.LogTrace("Sending Interested to {PeerName}", Name);
+        }
+
+        if (msg.Id == MessageId.NotInterested)
+        {
+            _logger.LogTrace("Sending NotInterested to {PeerName}", Name);
         }
     }
 
@@ -3314,15 +3377,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return;
         }
 
-        if (msg.Id == MessageId.Interested)
-        {
-            _logger.LogTrace("Sending Interested to {PeerName}", Name);
-        }
-
-        if (msg.Id == MessageId.NotInterested)
-        {
-            _logger.LogTrace("Sending NotInterested to {PeerName}", Name);
-        }
+        LogOutgoing(msg);
 
         int len = PeerProtocol.GetMessageLength(msg);
 

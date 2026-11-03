@@ -3,6 +3,107 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
+## 5.3.0 — 2026-11-03
+
+Guards for the HTTP requests a torrent can make, much faster downloads and seeding from fast peers,
+working v2-only seeding, and SSL torrents that can take a certificate after they are added. Binary
+compatible with 5.2.0: the API gains the `SsrfMitigation` setting and two `ITorrent` members with
+default implementations.
+
+### Upgrade notes
+
+- **Torrent HTTP requests to this device are restricted by default.** `Connection.SsrfMitigation`
+  defaults to `ThisDevice`. A tracker, web seed or magnet `xs` URL that names loopback must have the
+  shape its protocol needs, and a redirect or DNS answer that leads to loopback is refused. A local
+  tracker at `/announce` keeps working; anything unusual on loopback needs `SsrfMitigation.None`.
+- **A loopback `HttpStreamServer` without an access token no longer allows cross-origin reads.**
+  Browser players on another origin need a server with an access token, which is what every server
+  bound to a network address already uses.
+- **`StartAsync` can take as long as hashing the files already on disk.** A torrent started without
+  resume data over files that already hold data is checked before it transfers, and `StartAsync`,
+  or an `AddTorrentAsync` that starts the torrent, returns after the check. With no files on disk,
+  nothing changes.
+- **Peak private memory rises while downloading,** because `ActivePieceByteBudget` is now actually
+  used. Lower it to trade throughput for memory.
+
+### Added
+
+- **`Connection.SsrfMitigation`** guards tracker, web seed and magnet `xs` requests against
+  server-side request forgery. With the default `ThisDevice`, a URL that names loopback outright
+  must have the shape its protocol needs: a tracker path whose last segment begins `announce` or
+  `scrape`, or a web seed or `xs` source without a query string. A redirect into loopback is
+  refused unless the request began there, and a host name that resolves to loopback is refused when
+  connecting, which also defeats DNS rebinding. `LocalNetworks` extends the same rules to private,
+  link-local and unique-local addresses. `None` turns the guard off. Through a proxy, only the URLs
+  are checked.
+- **`ITorrent.SetSslCertificateAsync`** gives a stopped SSL torrent its certificate, for one added
+  without it, restored from a session (which never stores private keys), or renewed. It validates
+  the certificate against the torrent's authority as a start would, and keeps its own copy. Removing
+  the torrent and adding it back did the same thing, at the risk of losing it if the second add
+  failed.
+- **`ITorrent.IsSsl`** says whether a torrent needs a certificate without `ExportTorrentFile`, which
+  serializes and re-parses the whole metadata to answer.
+- Blocklists load eMule DAT lists (`start - end , level , description`). As in eMule and
+  qBittorrent, an entry whose access level is above 127 is allowed rather than blocked.
+
+### Changed
+
+- **Starting a torrent over files that already hold data checks them first.** With no resume data
+  and no earlier recheck, a start used to report nothing and download the whole torrent again over
+  the files. It now hashes them first, as libtorrent does. The torrent passes through
+  `CheckingFiles`. A magnet is checked when its metadata arrives and it starts transferring.
+- A loopback `HttpStreamServer` without an access token no longer sends
+  `Access-Control-Allow-Origin: *`, and it answers only requests whose `Host` names loopback. A web
+  page open on the same device can no longer read the stream by trying ports or by DNS rebinding.
+  Servers with a token still allow any origin, so cast receivers keep working.
+- The number of pieces kept open at once follows what the unchoked peers will actually queue,
+  within `ActivePieceByteBudget`. It used to allow two pieces per peer, which with 1 MiB pieces left
+  room for 512 blocks across all peers, while one peer may queue 500, so the download stalled
+  waiting for slots to free. `ActivePiecesPerPeer` is now the minimum per peer.
+- A peer with no requests outstanding is no longer held back while completed pieces wait to be
+  verified, and a peer that finds every open piece already requested is evaluated again as soon as
+  a piece finishes. Before, it waited up to a second, while the peer still receiving blocks took
+  every freed slot. On a fast link one of four equal peers served 93% of a download.
+- A peer that sends NotInterested is choked even if it was unchoked under ten seconds ago, and a
+  slot freed by that or by an unchoked peer leaving goes straight to the best waiting peer. Before,
+  the slot stayed held or empty until the next rechoke, up to ten seconds later.
+
+### Fixed
+
+- **v2-only torrents seed the last piece of every file.** Each file starts on a piece boundary, and
+  the end of its last piece is padding that exists only in the piece space. Reads of it went past
+  the end of the file; read-ahead crossed it at every file boundary, and the read errors marked the
+  file failed, after which none of it was served. Padding now reads as zeros and is never written.
+  Requests for the full padded piece are accepted too, because libtorrent sends them: 5.2.0 kept
+  pure v2 requests to content bounds, which left libtorrent unable to fetch those pieces from us.
+- A piece is retracted from the swarm (BEP 54) only when its data is actually gone: the file is
+  deleted, moved or cut short, or storage gave up on it. Shutdown and errors that can clear, such
+  as another process holding the file open, refuse only the request. The whole swarm is told at
+  most once per piece.
+- **Zero-padded blocklist addresses are read as decimal.** They were read as octal, so
+  `010.000.000.001` blocked 8.0.0.1, `192.168.001.010` blocked 192.168.1.8, and a line with an octet
+  such as `008` was dropped. IPv4 addresses in a blocklist must now be four decimal octets; the
+  short, octal and hex forms `IPAddress` also accepted are refused.
+- The sample CLI finds the resume data it saved for v2-only torrents. It looked for it under the v1
+  hash, which a v2-only torrent does not have, then saved the empty state over it on exit.
+- The end-to-end benchmark's `--skip-build` still publishes the PeerSharp CLI from the working
+  tree. It used to reuse whichever CLI was last published, while recording the current revision as
+  the one measured.
+
+### Performance
+
+- Against libtorrent's `connection_tester` on loopback (v1, 256 MiB, four peers), the median
+  download went from 214 MB/s to 887 MB/s, from the two scheduling changes above.
+- Messages already waiting in a peer's send queue go out in one write of up to 128 KiB, not one
+  write each, and the rate limiter passes writes through in 64 KiB pieces, the size it already
+  reserves quota in. On the same benchmark, seeding uses 27% less CPU and runs 17% faster
+  (1,549 MB/s to 1,810 MB/s).
+- A full recheck runs up to four pieces at once, in at most 64 MiB of buffers, so the disk is read
+  while earlier pieces are hashed. A warm-cache recheck of 2 GiB went from 2.6 s to 0.9 s.
+- A 250,000-range blocklist loads in 20 ms rather than 115 ms, allocating 47 MB rather than 168 MB.
+  Lines are parsed as spans instead of strings, and the description of each range, which nothing
+  read, is no longer kept.
+
 ## 5.2.0 — 2026-10-23
 
 Lower memory use for resume persistence and streaming, broader protocol compatibility, and fixes

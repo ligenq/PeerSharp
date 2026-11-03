@@ -30,6 +30,12 @@ internal sealed class HttpStreamRequestHandler
     /// <summary>Where side files live: the stream's path up to and including its last slash.</summary>
     private readonly byte[] _directory;
 
+    /// <summary>
+    /// Whether the path carries an access token. Only a loopback server goes without one, and then
+    /// nothing but the URL's port stands between the file and any web page the user has open.
+    /// </summary>
+    private readonly bool _tokenProtected;
+
     private readonly ConcurrentDictionary<string, SideFile> _files = new(StringComparer.Ordinal);
     private readonly ILogger<HttpStreamRequestHandler> _logger;
 
@@ -45,6 +51,7 @@ internal sealed class HttpStreamRequestHandler
         _fileIndex = fileIndex;
         _path = Encoding.UTF8.GetBytes(path);
         _directory = Encoding.UTF8.GetBytes(path[..(path.LastIndexOf('/') + 1)]);
+        _tokenProtected = !string.Equals(path, DefaultPath, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -56,6 +63,15 @@ internal sealed class HttpStreamRequestHandler
 
     public async Task ProcessAsync(IHttpStreamRequest request, IHttpStreamResponse response, CancellationToken cancellationToken = default)
     {
+        // Without a token, a request naming some other host is a page that rebound its own name to
+        // this machine (DNS rebinding) to read the stream as if same-origin. Refused before anything
+        // else is revealed about what is served here.
+        if (!_tokenProtected && request.Host is { } host && !IsLoopbackHost(host))
+        {
+            response.StatusCode = (int)HttpStatusCode.Forbidden;
+            return;
+        }
+
         SideFile? sideFile = null;
         if (!IsTheStreamPath(request.Path) && !TryFindFile(request.Path, out sideFile))
         {
@@ -64,16 +80,24 @@ internal sealed class HttpStreamRequestHandler
         }
 
         // A cast receiver is a web page, and fetching from another origin - which this server always
-        // is to it - needs the answer to say so. The URL carries the access token, so allowing any
-        // origin gives nothing to a page that does not already hold the URL.
-        response.AddHeader("Access-Control-Allow-Origin", "*");
+        // is to it - needs the answer to say so. Allowing any origin is safe only because the URL
+        // carries the access token, so a page that does not already hold the URL gains nothing. A
+        // loopback server without a token says nothing: any page could find its port by trying them.
+        if (_tokenProtected)
+        {
+            response.AddHeader("Access-Control-Allow-Origin", "*");
+        }
 
         if (request.Method == "OPTIONS")
         {
             response.StatusCode = (int)HttpStatusCode.NoContent;
-            response.AddHeader("Access-Control-Allow-Methods", AllowedMethods);
-            response.AddHeader("Access-Control-Allow-Headers", "Range");
-            response.AddHeader("Access-Control-Max-Age", "86400");
+            response.AddHeader("Allow", AllowedMethods);
+            if (_tokenProtected)
+            {
+                response.AddHeader("Access-Control-Allow-Methods", AllowedMethods);
+                response.AddHeader("Access-Control-Allow-Headers", "Range");
+                response.AddHeader("Access-Control-Max-Age", "86400");
+            }
             return;
         }
 
@@ -108,7 +132,10 @@ internal sealed class HttpStreamRequestHandler
 
         long contentLength = range.End - range.Start + 1;
         response.AddHeader("Accept-Ranges", "bytes");
-        response.AddHeader("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range");
+        if (_tokenProtected)
+        {
+            response.AddHeader("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range");
+        }
         response.ContentType = StreamMediaTypes.GetMimeType(fileInfo.Path);
         response.ContentLength = contentLength;
 
@@ -239,6 +266,36 @@ internal sealed class HttpStreamRequestHandler
         var candidate = Encoding.UTF8.GetBytes(path);
         return candidate.Length == _path.Length && CryptographicOperations.FixedTimeEquals(candidate, _path);
     }
+
+    /// <summary>
+    /// Whether a Host header names this machine's loopback interface: a loopback address literal, or
+    /// <c>localhost</c>, which browsers resolve to loopback themselves rather than asking DNS.
+    /// </summary>
+    internal static bool IsLoopbackHost(string host)
+    {
+        string name = host;
+        if (name.StartsWith('['))
+        {
+            int close = name.IndexOf(']');
+            if (close < 0)
+            {
+                return false;
+            }
+            name = name[1..close];
+        }
+        else if (name.LastIndexOf(':') is int colon and >= 0)
+        {
+            name = name[..colon];
+        }
+
+        if (name.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || name.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return IPAddress.TryParse(name, out var address) && IPAddress.IsLoopback(address);
+    }
 }
 
 /// <summary>A small file served beside the stream, produced afresh for every request.</summary>
@@ -249,6 +306,9 @@ internal interface IHttpStreamRequest
     string Method { get; }
     string Path { get; }
     string? RangeHeader { get; }
+
+    /// <summary>The Host header, or null when the request carried none.</summary>
+    string? Host { get; }
 }
 
 internal interface IHttpStreamResponse

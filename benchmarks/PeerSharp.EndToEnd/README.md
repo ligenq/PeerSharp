@@ -89,6 +89,10 @@ pinned `deps/try_signal` submodule, and builds `client_test` plus `connection_te
 dotnet run -c Release --project benchmarks/PeerSharp.EndToEnd -- build
 ```
 
+`--skip-build` then reuses that libtorrent build but still publishes the PeerSharp CLI from the
+working tree, which takes a few seconds. It used to reuse the CLI too, so a run measured whichever
+CLI was last published while recording the current revision as the one under test.
+
 A fast interoperability smoke test—not a publishable performance result:
 
 ```powershell

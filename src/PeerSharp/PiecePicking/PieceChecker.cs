@@ -16,6 +16,11 @@ internal class PieceChecker : IAsyncDisposable
     private readonly IInternalFiles _files;
     private readonly ILogger<PieceChecker> _logger;
     private readonly IProgress<PieceCheckProgress>? _progress;
+    // Bytes of piece buffers a check may hold at once, and a cap on pieces in flight whatever the
+    // piece size. Four is enough to keep a fast disk busy without taking every core from the rest of
+    // the engine.
+    private const long CheckMemoryBudget = 64L * 1024 * 1024;
+    private const int MaxCheckConcurrency = 4;
     private CancellationTokenSource? _cts;
     private AtomicDisposal _disposal = new();
     private int _isRunning;
@@ -89,56 +94,17 @@ internal class PieceChecker : IAsyncDisposable
     public async Task<int> CheckPieceRangeAsync(int startPiece, int endPiece, CancellationToken ct = default)
     {
         int validPieces = 0;
-        bool isMerkle = _context.IsMerkle;
-        bool isV2 = _context.IsV2;
 
         for (int pieceIndex = startPiece; pieceIndex <= endPiece && pieceIndex < _context.PieceCount; pieceIndex++)
         {
             ct.ThrowIfCancellationRequested();
 
-            long pieceSize = _context.GetPieceSize(pieceIndex);
-
-            long pieceOffset = pieceIndex * _context.PieceSize;
-
             try
             {
-                byte[] pieceBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)pieceSize);
-                try
+                if (await IsPieceValidAsync(pieceIndex, ct).ConfigureAwait(false))
                 {
-                    var pieceData = pieceBuffer.AsMemory(0, (int)pieceSize);
-                    await _files.ReadAsync(pieceOffset, pieceData, ct).ConfigureAwait(false);
-
-                    bool isValid;
-                    if (isMerkle || isV2)
-                    {
-                        isValid = _context.VerifyPiece(pieceIndex, pieceData.Span);
-                    }
-                    else
-                    {
-                        var expected = _context.GetExpectedHash(pieceIndex);
-                        if (expected != null)
-                        {
-                            // AsSpan first: byte[].SequenceEqual(byte[]) binds to LINQ's
-                            // Enumerable.SequenceEqual, which allocates two enumerators and
-                            // compares element by element. The span overload is vectorised.
-                            var computed = SHA1.HashData(pieceData.Span);
-                            isValid = computed.AsSpan().SequenceEqual(expected);
-                        }
-                        else
-                        {
-                            isValid = false;
-                        }
-                    }
-
-                    if (isValid)
-                    {
-                        _context.AddPiece(pieceIndex);
-                        validPieces++;
-                    }
-                }
-                finally
-                {
-                    System.Buffers.ArrayPool<byte>.Shared.Return(pieceBuffer);
+                    _context.AddPiece(pieceIndex);
+                    validPieces++;
                 }
             }
             catch (OperationCanceledException)
@@ -175,78 +141,25 @@ internal class PieceChecker : IAsyncDisposable
         int totalPieces = _context.PieceCount;
         int validPieces = 0;
         int checkedPieces = 0;
-
-        bool isMerkle = _context.IsMerkle;
-        bool isV2 = _context.IsV2;
+        var progressLock = new Lock();
 
         // Reset pieces - we'll rebuild the bitfield based on actual data
         var newProgress = new PiecesProgress(totalPieces);
 
-        _logger.LogInformation("Starting piece check for {TorrentName}: {TotalPieces} pieces", _context.TorrentName, totalPieces);
+        int workers = GetCheckConcurrency(_context.PieceSize, Environment.ProcessorCount);
+        _logger.LogInformation("Starting piece check for {TorrentName}: {TotalPieces} pieces, {Workers} at a time", _context.TorrentName, totalPieces, workers);
 
-        for (int pieceIndex = 0; pieceIndex < totalPieces; pieceIndex++)
+        // Several pieces at once, so that one piece is being read while another is hashed. Checking them
+        // one after the other left the disk idle during every hash and the CPU idle during every read,
+        // which is why a recheck ran well under either's speed. Pieces are handed out in index order,
+        // so reads stay close to sequential.
+        var options = new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = ct };
+        await Parallel.ForEachAsync(Enumerable.Range(0, totalPieces), options, async (pieceIndex, token) =>
         {
-            ct.ThrowIfCancellationRequested();
-
-            long pieceSize = _context.GetPieceSize(pieceIndex);
-
-            long pieceOffset = pieceIndex * _context.PieceSize;
-
+            bool isValid = false;
             try
             {
-                // Read piece data from storage
-                byte[] pieceBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)pieceSize);
-                try
-                {
-                    var pieceData = pieceBuffer.AsMemory(0, (int)pieceSize);
-                    await _files.ReadAsync(pieceOffset, pieceData, ct).ConfigureAwait(false);
-
-                    bool isValid;
-                    if (isMerkle || isV2)
-                    {
-                        isValid = _context.VerifyPiece(pieceIndex, pieceData.Span);
-                    }
-                    else
-                    {
-                        var expected = _context.GetExpectedHash(pieceIndex);
-                        if (expected != null)
-                        {
-                            // Standard SHA-1 verification
-                            // AsSpan first: byte[].SequenceEqual(byte[]) binds to LINQ's
-                            // Enumerable.SequenceEqual, which allocates two enumerators and
-                            // compares element by element. The span overload is vectorised.
-                            var computed = SHA1.HashData(pieceData.Span);
-                            isValid = computed.AsSpan().SequenceEqual(expected);
-                        }
-                        else
-                        {
-                            // No hash available - skip
-                            isValid = false;
-                        }
-                    }
-
-                    if (isValid)
-                    {
-                        newProgress.AddPiece(pieceIndex);
-                        validPieces++;
-                    }
-                }
-                finally
-                {
-                    System.Buffers.ArrayPool<byte>.Shared.Return(pieceBuffer);
-                }
-
-                checkedPieces++;
-
-                // Report progress
-                _progress?.Report(new PieceCheckProgress
-                {
-                    CheckedPieces = checkedPieces,
-                    TotalPieces = totalPieces,
-                    ValidPieces = validPieces,
-                    CurrentPiece = pieceIndex,
-                    Progress = (float)checkedPieces / totalPieces
-                });
+                isValid = await IsPieceValidAsync(pieceIndex, token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -255,14 +168,33 @@ internal class PieceChecker : IAsyncDisposable
             catch (IOException)
             {
                 // File doesn't exist or can't be read - piece is invalid
-                checkedPieces++;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error checking piece {PieceIndex}", pieceIndex);
-                checkedPieces++;
             }
-        }
+
+            if (isValid)
+            {
+                newProgress.AddPiece(pieceIndex);
+                Interlocked.Increment(ref validPieces);
+            }
+
+            // Reported under a lock: a caller's IProgress need not be thread-safe, and CheckedPieces
+            // should only ever go up.
+            lock (progressLock)
+            {
+                checkedPieces++;
+                _progress?.Report(new PieceCheckProgress
+                {
+                    CheckedPieces = checkedPieces,
+                    TotalPieces = totalPieces,
+                    ValidPieces = Volatile.Read(ref validPieces),
+                    CurrentPiece = pieceIndex,
+                    Progress = (float)checkedPieces / totalPieces
+                });
+            }
+        }).ConfigureAwait(false);
 
         // Update the torrent's piece progress with verified data
         _context.UpdatePiecesFromBitfield(newProgress.ToBitfield());
@@ -270,5 +202,51 @@ internal class PieceChecker : IAsyncDisposable
         _logger.LogInformation("Piece check complete for {TorrentName}: {ValidPieces}/{TotalPieces} valid", _context.TorrentName, validPieces, totalPieces);
 
         return validPieces;
+    }
+
+    /// <summary>
+    /// How many pieces to check at once: enough to overlap reading with hashing and to use a few cores,
+    /// bounded so the buffers in flight stay within <see cref="CheckMemoryBudget"/>. libtorrent bounds
+    /// its checking the same way, by <c>checking_mem_usage</c>.
+    /// </summary>
+    internal static int GetCheckConcurrency(long pieceSize, int processorCount)
+    {
+        int byMemory = (int)Math.Clamp(CheckMemoryBudget / Math.Max(1, pieceSize), 1, int.MaxValue);
+        return Math.Clamp(Math.Min(processorCount, byMemory), 1, MaxCheckConcurrency);
+    }
+
+    private async Task<bool> IsPieceValidAsync(int pieceIndex, CancellationToken ct)
+    {
+        long pieceSize = _context.GetPieceSize(pieceIndex);
+        long pieceOffset = pieceIndex * _context.PieceSize;
+
+        byte[] pieceBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)pieceSize);
+        try
+        {
+            var pieceData = pieceBuffer.AsMemory(0, (int)pieceSize);
+            await _files.ReadAsync(pieceOffset, pieceData, ct).ConfigureAwait(false);
+
+            if (_context.IsMerkle || _context.IsV2)
+            {
+                return _context.VerifyPiece(pieceIndex, pieceData.Span);
+            }
+
+            var expected = _context.GetExpectedHash(pieceIndex);
+            if (expected == null)
+            {
+                // No hash available - skip
+                return false;
+            }
+
+            // AsSpan first: byte[].SequenceEqual(byte[]) binds to LINQ's Enumerable.SequenceEqual,
+            // which allocates two enumerators and compares element by element. The span overload is
+            // vectorised.
+            var computed = SHA1.HashData(pieceData.Span);
+            return computed.AsSpan().SequenceEqual(expected);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(pieceBuffer);
+        }
     }
 }
