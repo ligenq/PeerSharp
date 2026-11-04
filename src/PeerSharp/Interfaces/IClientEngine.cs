@@ -273,6 +273,10 @@ public interface IClientEngine : IAsyncDisposable
     /// paused is fine: the resume skips what is no longer there.
     /// </para>
     /// <para>
+    /// A torrent still checking its files before it starts counts as running: its check ends, and
+    /// the resume starts it again, which checks them again.
+    /// </para>
+    /// <para>
     /// The engine keeps running - the DHT node, the listeners and the port mappings all stay up, so
     /// this is not a substitute for disposing the engine.
     /// </para>
@@ -283,7 +287,11 @@ public interface IClientEngine : IAsyncDisposable
     /// Starts the torrents that <see cref="PauseAsync(CancellationToken)"/> stopped.
     /// </summary>
     /// <param name="cancellationToken">Cancels partway through; torrents already started stay started.</param>
-    /// <remarks>Does nothing if the session is not paused.</remarks>
+    /// <remarks>
+    /// Does nothing if the session is not paused. The session has resumed before any torrent hashes
+    /// its files, so this can take minutes to return, but nothing else waits for it: other starts,
+    /// additions and pauses go ahead in the meantime.
+    /// </remarks>
     Task ResumeAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
