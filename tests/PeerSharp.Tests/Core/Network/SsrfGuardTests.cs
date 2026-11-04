@@ -106,10 +106,40 @@ public class SsrfGuardTests
     public void CheckRequest_JudgesTheHostTheRequestNames()
     {
         // A tracker resolves its own name and sends to the address, naming the host in the Host header.
-        var sentTo = new Uri("http://127.0.0.1:6969/api/v2/app/shutdown");
+        var sentTo = new Uri("http://203.0.113.7:6969/announce");
 
         Assert.Null(SsrfGuard.CheckRequest(TrackerOnThisDevice, sentTo, "tracker.example:6969", redirectedFrom: null));
-        Assert.NotNull(SsrfGuard.CheckRequest(TrackerOnThisDevice, sentTo, "localhost:6969", redirectedFrom: null));
+        Assert.Null(SsrfGuard.CheckRequest(TrackerOnThisDevice, new Uri("http://127.0.0.1:6969/announce"), "localhost:6969", redirectedFrom: null));
+        Assert.NotNull(SsrfGuard.CheckRequest(TrackerOnThisDevice, new Uri("http://127.0.0.1:6969/api/v2/app/shutdown"), "localhost:6969", redirectedFrom: null));
+    }
+
+    /// <summary>
+    /// Whatever its shape: a name that resolves here is refused at connect time, and a request that
+    /// reuses a connection has to meet the same answer. Every kind of request, since an HTTP seed's
+    /// query is otherwise left alone.
+    /// </summary>
+    [Theory]
+    [InlineData("http://127.0.0.1:6969/announce", nameof(HttpRequestKind.Tracker))]
+    [InlineData("http://127.0.0.1:6969/api/v2/app/shutdown", nameof(HttpRequestKind.Tracker))]
+    [InlineData("http://[::1]:6969/announce", nameof(HttpRequestKind.Tracker))]
+    [InlineData("http://127.0.0.1:6969/file", nameof(HttpRequestKind.WebSeed))]
+    [InlineData("http://127.0.0.1:6969/seed?info_hash=x", nameof(HttpRequestKind.HttpSeed))]
+    public void CheckRequest_RefusesAHostThatResolvedToThisDevice(string sentTo, string kind)
+    {
+        var policy = new SsrfPolicy(SsrfMitigation.ThisDevice, Enum.Parse<HttpRequestKind>(kind));
+
+        Assert.NotNull(SsrfGuard.CheckRequest(policy, new Uri(sentTo), "rebind.example:6969", redirectedFrom: null));
+    }
+
+    [Fact]
+    public void CheckRequest_ReachesAsFarAsTheMode_ForAHostThatResolvedToALocalNetwork()
+    {
+        var sentTo = new Uri("http://192.168.1.1/announce");
+
+        Assert.Null(SsrfGuard.CheckRequest(TrackerOnThisDevice, sentTo, "tracker.corp", redirectedFrom: null));
+        Assert.NotNull(SsrfGuard.CheckRequest(
+            new SsrfPolicy(SsrfMitigation.LocalNetworks, HttpRequestKind.Tracker), sentTo, "tracker.corp", redirectedFrom: null));
+        Assert.Null(SsrfGuard.CheckRequest(default, sentTo, "tracker.corp", redirectedFrom: null));
     }
 
     [Fact]
@@ -198,6 +228,79 @@ public class SsrfGuardTests
 
         Assert.IsType<SsrfRefusedException>(error.InnerException);
         Assert.False(server.WasConnectedTo);
+    }
+
+    /// <summary>
+    /// A tracker sends to the address it resolved and names its host in the Host header, and plain
+    /// HTTP connections are pooled by address alone. So a connection opened for a real tracker on this
+    /// device answers a name that resolves here, without connecting, and only a check made on every
+    /// request can catch it.
+    /// </summary>
+    [Fact]
+    public async Task APooledConnectionToThisDevice_DoesNotServeANameThatResolvesHere()
+    {
+        using var server = new KeepAliveHttpServer();
+        var serving = server.ServeAsync(TestContext.Current.CancellationToken);
+        using var factory = new HttpClientFactory();
+        var client = factory.CreateClient(
+            new ProxySettings { Type = ProxyType.None }, isTracker: true, followRedirects: false, ssrf: TrackerOnThisDevice);
+        using (var announce = await client.GetAsync($"http://127.0.0.1:{server.Port}/announce", TestContext.Current.CancellationToken))
+        {
+            Assert.Equal(HttpStatusCode.OK, announce.StatusCode);
+        }
+
+        using var forged = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{server.Port}/admin?delete=all");
+        forged.Headers.Host = $"rebind.example:{server.Port}";
+        var error = await Record.ExceptionAsync(() => client.SendAsync(forged, TestContext.Current.CancellationToken));
+
+        Assert.Equal(["/announce"], server.Requests);
+        var refused = Assert.IsType<HttpRequestException>(error);
+        Assert.IsType<SsrfRefusedException>(refused.InnerException);
+        await server.DisposeConnectionAsync(serving);
+    }
+
+    /// <summary>A loopback listener that keeps one connection open and records what it is asked for.</summary>
+    private sealed class KeepAliveHttpServer : IDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly System.Collections.Concurrent.ConcurrentQueue<string> _requests = new();
+        private readonly CancellationTokenSource _stop = new();
+
+        public KeepAliveHttpServer() => _listener.Start();
+
+        public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
+
+        public IReadOnlyCollection<string> Requests => [.. _requests];
+
+        public async Task ServeAsync(CancellationToken ct)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _stop.Token);
+            using var connection = await _listener.AcceptTcpClientAsync(linked.Token);
+            await using var stream = connection.GetStream();
+            using var reader = new StreamReader(stream, System.Text.Encoding.ASCII, leaveOpen: true);
+            while (await reader.ReadLineAsync(linked.Token) is { } line)
+            {
+                _requests.Enqueue(line.Split(' ')[1].Split('?')[0]);
+                while (!string.IsNullOrEmpty(await reader.ReadLineAsync(linked.Token)))
+                {
+                    // The rest of the request's headers.
+                }
+
+                await stream.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"u8.ToArray(), linked.Token);
+            }
+        }
+
+        public async Task DisposeConnectionAsync(Task serving)
+        {
+            await _stop.CancelAsync();
+            await Record.ExceptionAsync(() => serving);
+        }
+
+        public void Dispose()
+        {
+            _stop.Dispose();
+            _listener.Stop();
+        }
     }
 
     /// <summary>A loopback listener that answers at most one request, and says whether anyone came.</summary>

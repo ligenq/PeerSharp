@@ -41,16 +41,17 @@ internal sealed class SsrfRefusedException(string message) : IOException(message
 /// </summary>
 /// <remarks>
 /// <para>
-/// Two checks, because neither is enough alone. <see cref="CheckRequest"/> judges a URL by what it
-/// says: one that names a guarded address outright must have the shape the protocol needs, and must
-/// not have been reached by a redirect from elsewhere. <see cref="ScreenAddresses"/> judges a
+/// Two checks, because neither is enough alone. <see cref="CheckRequest"/> judges every request by
+/// what it says: one that names a guarded address outright must have the shape the protocol needs, and
+/// must not have been reached by a redirect from elsewhere. <see cref="ScreenAddresses"/> judges a new
 /// connection by where it actually goes: a name that is not an outright guarded address may not
 /// resolve to one.
 /// </para>
 /// <para>
-/// Together they hold through connection pooling. A pooled connection to a guarded address exists only
-/// for a host that named it outright, and every request to that host passes the URL check before it
-/// can be sent on it.
+/// Together they hold through connection pooling, which is why the first also compares where a request
+/// is addressed with the host it names. A tracker sends to the address it resolved, and plain HTTP
+/// pools connections by address alone, so a name that resolves to this device would otherwise be
+/// served by a connection opened for a real local tracker, and no connect would happen to screen it.
 /// </para>
 /// </remarks>
 internal static class SsrfGuard
@@ -129,7 +130,11 @@ internal static class SsrfGuard
     {
         if (!IsExplicitlyGuarded(requestHost, policy.Mode))
         {
-            return null;
+            // Sent to a guarded address while naming a host that does not name it: the host resolved
+            // there. A pooled connection would carry this without ever reaching ScreenAddresses.
+            return IsExplicitlyGuarded(target.Authority, policy.Mode)
+                ? $"{HostName(requestHost)} resolves to {target.Host}, which is on this device or its network"
+                : null;
         }
 
         if (redirectedFrom != null && !IsExplicitlyGuarded(redirectedFrom.Authority, policy.Mode))

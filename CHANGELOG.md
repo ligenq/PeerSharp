@@ -3,6 +3,16 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
+## Unreleased
+
+### Fixed
+
+- **`SsrfMitigation` no longer lets a tracker name reach this device over a pooled connection.** A
+  tracker sends to the address it resolved, and plain HTTP connections are pooled by address, so a
+  host name resolving to loopback was served by a connection already open to a local tracker. It was
+  never screened, because no connection was made, and could request any path and query. Every
+  request is now checked against where it is actually addressed.
+
 ## 5.3.0 — 2026-11-03
 
 Guards for the HTTP requests a torrent can make, much faster downloads and seeding from fast peers,
