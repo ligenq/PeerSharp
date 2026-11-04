@@ -60,6 +60,19 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     private int _stopping;
 
+    // How many stops have been asked for, whether or not the torrent was running. A start notes this
+    // when it is asked for, so a stop that arrives after it - while it waits for the state lock, or
+    // during its file check - can be told from one that came before.
+    private long _stopRequests;
+
+    // Cancels the file check in progress, the only long work done under the state lock. Without it a
+    // stop, a removal and engine disposal would all wait for the disk.
+    private Func<Task>? _cancelRunningCheck;
+
+    // Starts the engine has let past its pause gate and that have not finished. The gate is not held
+    // through a start, so this is how a session pause finds the ones not yet Started.
+    private int _startsInProgress;
+
     private int _timerTickCount;
 
     private readonly List<IPeerTransport> _peerTransports = [];
@@ -636,6 +649,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     {
         _disposal.ThrowIfDisposed(this);
 
+        long stopRequestsAtStart = Interlocked.Read(ref _stopRequests);
         await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -660,8 +674,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             try
             {
                 await FilesInternal.InitializeAsync(GetFileSelectionSnapshot(), cancellationToken).ConfigureAwait(false);
-                await using var checker = new PieceChecker(FilesInternal, new TorrentPieceCheckerContext(this), progress, Services.LoggerFactory);
-                int valid = await checker.CheckAllPiecesAsync(cancellationToken).ConfigureAwait(false);
+                int valid = await RunPieceCheckAsync(progress, stopRequestsAtStart, cancellationToken).ConfigureAwait(false);
                 _pieceStateEstablished = true;
                 return valid;
             }
@@ -683,7 +696,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// files that were already on disk - the usual way to start seeding them, and what is left after
     /// resume data is lost - reported nothing and downloaded the whole torrent again on top of them.
     /// </summary>
-    private async Task CheckExistingDataAsync(CancellationToken cancellationToken)
+    /// <returns>False if a stop ended the check, in which case the torrent must not start.</returns>
+    private async Task<bool> CheckExistingDataAsync(long stopRequestsAtStart, CancellationToken cancellationToken)
     {
         _logger.LogInformation("Checking data already on disk for {TorrentName} before starting", Name);
         FilesInternal.Checking = true;
@@ -691,12 +705,21 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         FireStateChangedEvent(TorrentState.CheckingFiles);
         try
         {
-            await using var checker = new PieceChecker(FilesInternal, new TorrentPieceCheckerContext(this), null, Services.LoggerFactory);
-            await checker.CheckAllPiecesAsync(cancellationToken).ConfigureAwait(false);
+            await RunPieceCheckAsync(null, stopRequestsAtStart, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Nothing is kept from a check that did not finish, so the next start checks again.
+            _logger.LogInformation(ex, "Stopped checking data on disk for {TorrentName}", Name);
+            FilesInternal.Checking = false;
+            FireStateChangedEvent(TorrentState.Stopped);
+            return false;
         }
         catch
         {
             // The start fails with it, and a torrent that never started is stopped, not checking.
+            FilesInternal.Checking = false;
             FireStateChangedEvent(TorrentState.Stopped);
             throw;
         }
@@ -705,6 +728,77 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             FilesInternal.Checking = false;
         }
     }
+
+    /// <summary>
+    /// Hashes the whole torrent with the state lock held, in a way a stop can end. Everything else
+    /// that wants the lock would otherwise wait for the disk, including disposal, which has nobody to
+    /// cancel it.
+    /// </summary>
+    private async Task<int> RunPieceCheckAsync(IProgress<PieceCheckProgress>? progress, long stopRequestsAtStart, CancellationToken cancellationToken)
+    {
+        using var check = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        // Published before reading the count, and a stop counts itself before reading this, so
+        // whichever way they interleave at least one of them sees the other.
+        Interlocked.Exchange(ref _cancelRunningCheck, check.CancelAsync);
+        try
+        {
+            if (Interlocked.Read(ref _stopRequests) != stopRequestsAtStart)
+            {
+                await check.CancelAsync().ConfigureAwait(false);
+            }
+
+            await using var checker = new PieceChecker(FilesInternal, new TorrentPieceCheckerContext(this), progress, Services.LoggerFactory);
+            return await checker.CheckAllPiecesAsync(check.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _cancelRunningCheck, null);
+        }
+    }
+
+    /// <summary>
+    /// Marks a stop as asked for and ends any file check, so the stop does not wait for the disk.
+    /// </summary>
+    private async Task RequestStopAsync()
+    {
+        Interlocked.Increment(ref _stopRequests);
+        if (Volatile.Read(ref _cancelRunningCheck) is { } cancelCheck)
+        {
+            try
+            {
+                await cancelCheck().ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // The check finished in between.
+            }
+        }
+    }
+
+    private bool PieceStateUnknown =>
+        !_pieceStateEstablished && LocalState.Pieces is not { Length: > 0 } && PiecesReceived == 0;
+
+    /// <summary>
+    /// Whether a start might have to hash files first. Answered without touching the disk, so it says
+    /// "might": whether there is anything to hash is only known once storage has looked.
+    /// </summary>
+    internal bool MayCheckExistingData => HasMetadata && PieceStateUnknown;
+
+    /// <summary>See <see cref="_startsInProgress"/>.</summary>
+    internal bool StartInProgress => Volatile.Read(ref _startsInProgress) > 0;
+
+    /// <summary>
+    /// Registers a start the engine has decided to let run.
+    /// </summary>
+    /// <returns>The stop count to hand to <see cref="StartCoreAsync(long, CancellationToken)"/>.</returns>
+    internal long BeginStart()
+    {
+        Interlocked.Increment(ref _startsInProgress);
+        return Interlocked.Read(ref _stopRequests);
+    }
+
+    internal void EndStart() => Interlocked.Decrement(ref _startsInProgress);
 
     public IReadOnlyList<Core.TorrentFileInfo> GetAllFileInfo()
     {
@@ -881,13 +975,25 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     public async Task ReinitializeAfterMetadataAsync(CancellationToken ct = default)
     {
         _disposal.ThrowIfDisposed(this);
+        long stopRequestsAtStart = Interlocked.Read(ref _stopRequests);
         await _stateLock.WaitAsync(ct).ConfigureAwait(false);
         IReadOnlyList<PeerCommunication> unadoptedPeers = [];
         var oldPeers = PeersInternal;
+        bool restarting = false;
         try
         {
             _disposal.ThrowIfDisposed(this);
             bool wasStarted = Started;
+
+            // Before the stop below, so a session pause cannot look between this torrent reporting
+            // Started and reporting a start in progress and find neither. The restart can then spend
+            // minutes on a file check, and would otherwise end in a paused session.
+            restarting = wasStarted && !StopAfterMetadata;
+            if (restarting)
+            {
+                _ = BeginStart();
+            }
+
             var peerPreferences = PeersInternal.ExportConnectionPreferences();
             IReadOnlyList<PeerCommunication> retainedPeers = [];
 
@@ -928,7 +1034,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             }
             if (wasStarted && !StopAfterMetadata)
             {
-                await StartCoreAsync(stateLockHeld: true, cancellationToken: ct).ConfigureAwait(false);
+                await StartCoreAsync(stateLockHeld: true, stopRequestsAtStart, ct).ConfigureAwait(false);
+
+                // A stop ended the restart. The peers adopted above must not stay connected to a
+                // stopped torrent, and that stop has already gone by, finding nothing to stop.
+                if (!Started)
+                {
+                    await PeersInternal.StopAsync().ConfigureAwait(false);
+                }
             }
 
             // Signal only after selections are applied and the start/stop decision is final,
@@ -948,6 +1061,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             foreach (var peer in unadoptedPeers)
             {
                 await oldPeers.ReleaseTransferredPeerAsync(peer).ConfigureAwait(false);
+            }
+            if (restarting)
+            {
+                EndStart();
             }
             _stateLock.Release();
         }
@@ -1315,7 +1432,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             ?? StartCoreAsync(cancellationToken);
     }
 
-    internal Task StartCoreAsync(CancellationToken cancellationToken = default) => StartCoreAsync(false, cancellationToken);
+    internal Task StartCoreAsync(CancellationToken cancellationToken = default) =>
+        StartCoreAsync(Interlocked.Read(ref _stopRequests), cancellationToken);
+
+    internal Task StartCoreAsync(long stopRequestsAtStart, CancellationToken cancellationToken) =>
+        StartCoreAsync(false, stopRequestsAtStart, cancellationToken);
 
     internal async Task DeferRestoredPiecesAsync(CancellationToken cancellationToken)
     {
@@ -1333,7 +1454,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         finally { _stateLock.Release(); }
     }
 
-    private async Task StartCoreAsync(bool stateLockHeld, CancellationToken cancellationToken)
+    private async Task StartCoreAsync(bool stateLockHeld, long stopRequestsAtStart, CancellationToken cancellationToken)
     {
         _disposal.ThrowIfDisposed(this);
 
@@ -1344,6 +1465,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         try
         {
             _disposal.ThrowIfDisposed(this);
+
+            // A stop that overtook this start while it waited came later, so it has the last word.
+            if (Interlocked.Read(ref _stopRequests) != stopRequestsAtStart)
+            {
+                _logger.LogDebug("Not starting {TorrentName}: it was stopped while the start waited", Name);
+                return;
+            }
+
             Configuration.QueueAutoStart = true;
             if (Interlocked.CompareExchange(ref _started, 0, 0) == 1)
             {
@@ -1378,10 +1507,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
             if (HasMetadata)
             {
-                if (!_pieceStateEstablished && LocalState.Pieces is not { Length: > 0 } && Pieces.ReceivedCount == 0
-                    && FilesInternal.FoundExistingData)
+                if (PieceStateUnknown && FilesInternal.FoundExistingData
+                    && !await CheckExistingDataAsync(stopRequestsAtStart, cancellationToken).ConfigureAwait(false))
                 {
-                    await CheckExistingDataAsync(cancellationToken).ConfigureAwait(false);
+                    return;
                 }
                 _pieceStateEstablished = true;
             }
@@ -2259,6 +2388,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
         if (!stateLockHeld)
         {
+            await RequestStopAsync().ConfigureAwait(false);
             await _stateLock.WaitAsync(ct).ConfigureAwait(false);
         }
         try

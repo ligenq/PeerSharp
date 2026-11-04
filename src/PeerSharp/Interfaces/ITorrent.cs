@@ -568,7 +568,10 @@ public interface ITorrent
     /// <remarks>
     /// The first start of a torrent that has no resume data and has not been rechecked, over files that
     /// already hold data, hashes those files before it transfers anything, as
-    /// <see cref="ForceRecheckAsync"/> would. The returned task completes after that check.
+    /// <see cref="ForceRecheckAsync"/> would. The returned task completes after that check, and other
+    /// torrents can start, and the session can pause, while it runs. <see cref="StopAsync"/>, removing
+    /// the torrent or disposing the engine ends the check: the task then completes normally, with
+    /// the torrent stopped, and the next start checks again.
     /// </remarks>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A task that completes when the torrent has started.</returns>
