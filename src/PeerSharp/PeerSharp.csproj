@@ -21,7 +21,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp 5.3.0 guards tracker, web seed and magnet xs requests against server-side request forgery (new Connection.SsrfMitigation, on by default for this device), stops a tokenless loopback stream server from allowing cross-origin reads, and greatly speeds up downloading from and seeding to fast peers. v2-only torrents now seed the last piece of every file, a start over files already on disk checks them instead of downloading them again, and rechecks hash several pieces at once. SSL torrents take a certificate after they are added (ITorrent.SetSslCertificateAsync) and report ITorrent.IsSsl. Blocklists load six times faster, read zero-padded addresses as decimal rather than octal, and accept eMule DAT lists. Binary compatible with 5.2.0. See https://github.com/ligenq/PeerSharp/blob/v5.3.0/CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp 5.3.1 closes a bypass of Connection.SsrfMitigation, where a tracker host name resolving to this device could reuse a pooled connection to a local tracker and request any path. A file check no longer holds up the rest of the session, and stopping, removing or pausing a torrent, or disposing the engine, now ends one. Binary compatible with 5.3.0. See https://github.com/ligenq/PeerSharp/blob/v5.3.1/CHANGELOG.md.</PackageReleaseNotes>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<IsTrimmable>true</IsTrimmable>
 		<!-- iOS allows no code generation at run time, so an app there is compiled ahead of time in
@@ -29,7 +29,7 @@
 		     dynamic code that would fail under AOT fails the build instead. -->
 		<IsAotCompatible>true</IsAotCompatible>
 		<EnablePackageValidation>true</EnablePackageValidation>
-		<PackageValidationBaselineVersion>5.2.0</PackageValidationBaselineVersion>
+		<PackageValidationBaselineVersion>5.3.0</PackageValidationBaselineVersion>
 	</PropertyGroup>
 
 	<ItemGroup>
