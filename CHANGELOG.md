@@ -3,7 +3,19 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
-## Unreleased
+## 5.3.1 — 2026-11-04
+
+Closes a bypass of the SSRF guard that 5.3.0 introduced, and stops a file check from holding up the
+rest of the session. Binary compatible with 5.3.0, with no API changes. Anyone relying on
+`Connection.SsrfMitigation` should upgrade.
+
+### Upgrade notes
+
+- **A stop during a file check no longer waits for it.** A `StartAsync` or `AddTorrentAsync` under way
+  completes normally with the torrent stopped, so a caller that assumes the torrent is running
+  afterwards should look at `Started`. `ForceRecheckAsync` throws `OperationCanceledException`.
+- **`ResumeAsync` can return with `IsPaused` already false long before it completes.** Torrents with
+  files to hash are still being checked.
 
 ### Changed
 
