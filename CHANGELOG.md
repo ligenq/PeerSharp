@@ -5,13 +5,34 @@ history has the reasoning and the measurements behind each one.
 
 ## Unreleased
 
+### Changed
+
+- **`StopAsync`, `RemoveTorrentAsync` and disposal end a file check instead of waiting for it.** This
+  covers the check before a first start and `ForceRecheckAsync`. A start ended this way completes
+  normally with the torrent stopped, so an `AddTorrentAsync` that started it keeps the torrent, and
+  the next start checks again. A `ForceRecheckAsync` ended this way throws
+  `OperationCanceledException`.
+- **`PauseAsync` ends the check of a torrent that has not started yet,** and `ResumeAsync` starts it
+  again, rather than the torrent starting in a paused session.
+- **`ResumeAsync` resumes the session before any torrent hashes its files.** It still returns after
+  those checks, but `IsPaused` is already false and new torrents start normally.
+
 ### Fixed
 
+- **A file check no longer holds up the rest of the session.** A start kept the engine's pause gate
+  while it hashed, so every other `StartAsync`, `AddTorrentAsync` that started its torrent,
+  `PauseAsync` and `ResumeAsync` waited for it, for minutes on a large torrent. A removal waited too,
+  and held up other removals and engine shutdown while it did.
+- A stop that arrives while a start is waiting its turn now wins, as the later request should. The
+  torrent used to stop nothing and then start.
+- A torrent removed while `AddTorrentAsync` was starting it is no longer written back to the session.
 - **`SsrfMitigation` no longer lets a tracker name reach this device over a pooled connection.** A
   tracker sends to the address it resolved, and plain HTTP connections are pooled by address, so a
   host name resolving to loopback was served by a connection already open to a local tracker. It was
   never screened, because no connection was made, and could request any path and query. Every
   request is now checked against where it is actually addressed.
+- `PauseAsync` no longer misses a magnet restarting after its metadata arrived. The restart was
+  invisible to it, so a magnet checking its files started once the check ended, in a paused session.
 
 ## 5.3.0 — 2026-11-03
 
