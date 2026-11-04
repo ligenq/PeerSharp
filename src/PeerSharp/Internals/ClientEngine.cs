@@ -465,7 +465,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // and a retry must finish the operation instead of treating the flag as proof.
             foreach (var torrent in _registry.GetAll())
             {
-                if (!torrent.Started)
+                // In this order: a start reports Started before it stops counting as in progress, so
+                // one that ends between these two reads is still seen. A torrent checking its files
+                // is not started yet and cannot be left to finish and start in a paused session.
+                bool starting = torrent.StartInProgress;
+                if (!torrent.Started && !starting)
                 {
                     continue;
                 }
@@ -502,6 +506,9 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         _disposal.ThrowIfDisposed(this);
 
+        // Left until the session has resumed. Hashing a torrent's files can take minutes, and nothing
+        // else in the session should wait for that, least of all torrents that have nothing to hash.
+        var mayCheckFiles = new HashSet<InfoHash>();
         await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -515,13 +522,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 InfoHash[] toStart;
                 lock (_pauseLock)
                 {
-                    if (_pausedTorrents.Count == 0)
+                    toStart = [.. _pausedTorrents.Except(mayCheckFiles)];
+                    if (toStart.Length == 0)
                     {
+                        _pausedTorrents.Clear();
                         Volatile.Write(ref _paused, 0);
-                        return;
+                        break;
                     }
-
-                    toStart = [.. _pausedTorrents];
                 }
 
                 foreach (var hash in toStart)
@@ -532,6 +539,12 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                         {
                             _pausedTorrents.Remove(hash);
                         }
+                        continue;
+                    }
+
+                    if (torrent.MayCheckExistingData)
+                    {
+                        mayCheckFiles.Add(hash);
                         continue;
                     }
 
@@ -573,10 +586,38 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         {
             _pauseGate.Release();
         }
+
+        // Together, because most of these have nothing to hash: any torrent with no resume data is
+        // here, and one added stopped with no files must not wait behind one that has 100 GB of them.
+        await Task.WhenAll(mayCheckFiles.Select(hash => ResumeTorrentAsync(hash, cancellationToken))).ConfigureAwait(false);
+    }
+
+    private async Task ResumeTorrentAsync(InfoHash hash, CancellationToken cancellationToken)
+    {
+        if (!_registry.TryGet(hash, out var torrent))
+        {
+            return;
+        }
+
+        try
+        {
+            await StartUnlessSessionPausedAsync(torrent, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            torrent.QueueAutoStart = false;
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Defect.ReportIfDefect(ex, $"resuming torrent {hash}", _logger);
+            _logger.LogWarning(ex, "Torrent {Hash} could not be restarted while resuming the session", hash);
+        }
     }
 
     private async Task StartUnlessSessionPausedAsync(Torrent torrent, CancellationToken cancellationToken)
     {
+        long stopRequestsAtStart;
         await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -596,11 +637,23 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 return;
             }
 
-            await torrent.StartCoreAsync(cancellationToken).ConfigureAwait(false);
+            stopRequestsAtStart = torrent.BeginStart();
         }
         finally
         {
             _pauseGate.Release();
+        }
+
+        // Outside the gate. The start may hash the torrent's files first, and every other start,
+        // pause and resume in the session would wait behind it. A pause finds this start through
+        // BeginStart, and its stop ends the check.
+        try
+        {
+            await torrent.StartCoreAsync(stopRequestsAtStart, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            torrent.EndStart();
         }
     }
 
@@ -1846,7 +1899,9 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // During restore, only re-register in memory and skip the redundant disk write-back.
         // A transient torrent is not the caller's and must not outlive the operation, so it is
         // kept out of the session entirely - including the in-memory registration.
-        if (_sessionManager != null && !transient)
+        // Registered is asked last: a start can run for minutes, and a torrent removed during it must
+        // not be written back once its entry has been deleted.
+        if (_sessionManager != null && !transient && _registry.TryGet(torrent.SessionHash, out _))
         {
             var magnetString = magnetLink.OriginalString;
             _sessionManager.RegisterTorrentData(torrent.SessionHash, torrentBytes, magnetString);
@@ -2131,7 +2186,9 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // Save to session persistence if enabled.
         // During session restore the entry was just read from disk, so we only re-register
         // the raw data in memory (needed for later auto-saves) and skip the redundant write-back.
-        if (_sessionManager != null)
+        // Registered is asked last: a start can run for minutes, and a torrent removed during it must
+        // not be written back once its entry has been deleted.
+        if (_sessionManager != null && _registry.TryGet(torrent.SessionHash, out _))
         {
             var rawData = torrentFile.RawData.IsEmpty ? null : torrentFile.RawData.ToArray();
             _sessionManager.RegisterTorrentData(torrent.SessionHash, rawData, null);
