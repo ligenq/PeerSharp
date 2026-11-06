@@ -133,6 +133,30 @@ public sealed class SocketStreamTests : IDisposable
         await stream.DisposeAsync();
     }
 
+    /// <summary>
+    /// The socket can close between the stream checking and the send being issued, which is the same
+    /// failed write as any other and has to look like one to the callers that handle those.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task WritingAsTheSocketCloses_ThrowsLikeAnyOtherFailedWrite()
+    {
+        await using var stream = new SocketStream(_ours, ownsSocket: false);
+        _ours.Dispose();
+
+        await Assert.ThrowsAsync<IOException>(
+            async () => await stream.WriteAsync(new byte[16], TestContext.Current.CancellationToken));
+    }
+
+    [Fact(Timeout = 30000)]
+    public void TheSynchronousPaths_AsTheSocketCloses_BehaveTheSame()
+    {
+        using var stream = new SocketStream(_ours, ownsSocket: false);
+        _ours.Dispose();
+
+        Assert.Equal(0, stream.Read(new byte[16], 0, 16));
+        Assert.Throws<IOException>(() => stream.Write(new byte[16], 0, 16));
+    }
+
     [Fact(Timeout = 30000)]
     public void TheSynchronousPathsBehaveTheSame()
     {

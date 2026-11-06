@@ -45,6 +45,12 @@ internal sealed class SessionManager : IAsyncDisposable
         _logger = logger;
     }
 
+    /// <summary>
+    /// The engine's pause, which a save records so the session can come back as it was left. Set by
+    /// the engine, which is created after this.
+    /// </summary>
+    internal ISessionPauseState? SessionPause { get; set; }
+
     public Task DeleteAsync(InfoHash hash, CancellationToken cancellationToken) => DeleteCoreAsync(hash, null, cancellationToken);
 
     public Task DeleteAsync(Torrent torrent, CancellationToken cancellationToken) => DeleteCoreAsync(torrent.SessionHash, torrent, cancellationToken);
@@ -220,7 +226,18 @@ internal sealed class SessionManager : IAsyncDisposable
         }).ConfigureAwait(false);
     }
 
-    public async Task SaveTorrentEntryAsync(Torrent torrent, byte[]? torrentFileData = null, string? magnetLink = null, CancellationToken cancellationToken = default)
+    public Task SaveTorrentEntryAsync(Torrent torrent, byte[]? torrentFileData = null, string? magnetLink = null, CancellationToken cancellationToken = default) =>
+        SaveTorrentEntryAsync(torrent, torrentFileData, magnetLink, startEndedByShutdown: false, cancellationToken);
+
+    /// <param name="torrent">The torrent to save.</param>
+    /// <param name="torrentFileData">The .torrent file, if there is one to save.</param>
+    /// <param name="magnetLink">The magnet link, if there is one to save.</param>
+    /// <param name="startEndedByShutdown">
+    /// Whether the engine shutting down ended a start of this torrent, which leaves it looking stopped
+    /// when nobody stopped it.
+    /// </param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public async Task SaveTorrentEntryAsync(Torrent torrent, byte[]? torrentFileData, string? magnetLink, bool startEndedByShutdown, CancellationToken cancellationToken)
     {
         var hash = torrent.SessionHash;
         var gate = GetSaveGate(hash);
@@ -234,7 +251,7 @@ internal sealed class SessionManager : IAsyncDisposable
                     if (_deletedHashes.Contains(hash)) return;
                 }
                 if (_registry.TryGet(hash, out var replacement) && !ReferenceEquals(replacement, torrent)) return;
-                await SaveTorrentEntryCoreAsync(torrent, torrentFileData, magnetLink, cancellationToken).ConfigureAwait(false);
+                await SaveTorrentEntryCoreAsync(torrent, torrentFileData, magnetLink, startEndedByShutdown, cancellationToken).ConfigureAwait(false);
             }
             finally { gate.Release(); }
         }
@@ -275,7 +292,7 @@ internal sealed class SessionManager : IAsyncDisposable
         }
     }
 
-    private async Task SaveTorrentEntryCoreAsync(Torrent torrent, byte[]? torrentFileData, string? magnetLink, CancellationToken cancellationToken)
+    private async Task SaveTorrentEntryCoreAsync(Torrent torrent, byte[]? torrentFileData, string? magnetLink, bool startEndedByShutdown, CancellationToken cancellationToken)
     {
         // Get stored raw data or magnet link
         lock (_lock)
@@ -323,7 +340,7 @@ internal sealed class SessionManager : IAsyncDisposable
             resumeData,
             new SavedTorrentOptions(
                 torrent.FilesInternal?.DownloadPath ?? torrent.Settings.Files.DefaultDownloadPath,
-                torrent.Started,
+                startEndedByShutdown || torrent.StartedOrStarting || SessionPause?.IsHolding(torrent) == true,
                 torrent.DownloadLimitBytesPerSecond,
                 torrent.UploadLimitBytesPerSecond,
                 torrent.QueuePriority,
@@ -332,7 +349,9 @@ internal sealed class SessionManager : IAsyncDisposable
                 torrent.DownloadStrategy)
             {
                 PeerPreferences = torrent.PeersInternal.ExportConnectionPreferences(),
-                SuperSeeding = torrent.SuperSeeding
+                SuperSeeding = torrent.SuperSeeding,
+                QueueAutoStart = torrent.QueueAutoStart,
+                SessionPaused = SessionPause?.IsPaused == true
             });
 
         if (filePersistence != null)

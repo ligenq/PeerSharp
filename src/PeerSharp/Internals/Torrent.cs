@@ -73,6 +73,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     // through a start, so this is how a session pause finds the ones not yet Started.
     private int _startsInProgress;
 
+    // What earlier sessions transferred. Kept apart from the transfer's own counters because trackers
+    // are told those, and they count from the start of this session.
+    private long _restoredDownloaded;
+    private long _restoredUploaded;
+
     private int _timerTickCount;
 
     private readonly List<IPeerTransport> _peerTransports = [];
@@ -537,6 +542,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     internal long TotalDownloaded => FileTransferInternal?.Downloader.Downloaded ?? 0;
     internal long TotalUploaded => FileTransferInternal?.Uploader.Uploaded ?? 0;
+    private long LifetimeDownloaded => _restoredDownloaded + TotalDownloaded;
+    private long LifetimeUploaded => _restoredUploaded + TotalUploaded;
 
     public static Torrent Create(
         TorrentFileMetadata infoFile,
@@ -776,8 +783,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
-    private bool PieceStateUnknown =>
-        !_pieceStateEstablished && LocalState.Pieces is not { Length: > 0 } && PiecesReceived == 0;
+    /// <summary>
+    /// Whether nothing has established what the files hold. A saved bitfield claiming no pieces does not:
+    /// it is what a torrent saved before its check leaves behind, and what earlier versions left for
+    /// a torrent they stopped before a save caught up with it, and a check only costs time, where
+    /// believing it costs downloading everything again.
+    /// </summary>
+    private bool PieceStateUnknown => !_pieceStateEstablished && PiecesReceived == 0;
 
     /// <summary>
     /// Whether a start might have to hash files first. Answered without touching the disk, so it says
@@ -787,6 +799,20 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     /// <summary>See <see cref="_startsInProgress"/>.</summary>
     internal bool StartInProgress => Volatile.Read(ref _startsInProgress) > 0;
+
+    /// <summary>
+    /// Whether the torrent is running or on its way, which a file check can make a matter of minutes.
+    /// </summary>
+    internal bool StartedOrStarting
+    {
+        get
+        {
+            // In this order: a start reports Started before it stops counting as in progress, so one
+            // that ends between these two reads is still seen.
+            bool starting = StartInProgress;
+            return Started || starting;
+        }
+    }
 
     /// <summary>
     /// Registers a start the engine has decided to let run.
@@ -799,6 +825,9 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     }
 
     internal void EndStart() => Interlocked.Decrement(ref _startsInProgress);
+
+    /// <summary>See <see cref="_stopRequests"/>.</summary>
+    internal long StopRequests => Interlocked.Read(ref _stopRequests);
 
     public IReadOnlyList<Core.TorrentFileInfo> GetAllFileInfo()
     {
@@ -857,8 +886,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         var state = new TorrentStateData
         {
             Pieces = Pieces.ToBitfield(),
-            Downloaded = (ulong)(FileTransferInternal?.Downloader?.Downloaded ?? 0),
-            Uploaded = (ulong)(FileTransferInternal?.Uploader?.Uploaded ?? 0),
+            Downloaded = (ulong)LifetimeDownloaded,
+            Uploaded = (ulong)LifetimeUploaded,
             SeedTimeSeconds = (long)GetSeedingTime(Services.TimeProvider.GetUtcNow()).TotalSeconds,
             Started = Started,
             LastStateTime = Services.TimeProvider.GetUtcNow().ToUnixTimeSeconds(),
@@ -1840,7 +1869,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         if (state.Info == null || state.Pieces == null || state.Selection == null || state.RenamedFiles == null ||
             state.Selection.Contains(null!) || state.RenamedFiles.Contains(null!) ||
             state.AddedTime < -62135596800L || state.AddedTime > 253402300799L ||
-            state.SeedTimeSeconds < 0 || state.SeedTimeSeconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerSecond)
+            state.SeedTimeSeconds < 0 || state.SeedTimeSeconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerSecond ||
+            state.Downloaded > long.MaxValue || state.Uploaded > long.MaxValue)
         {
             reason = "it contains invalid or missing state fields";
             return false;
@@ -1974,8 +2004,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     internal double GetRatio()
     {
-        long downloaded = TotalDownloaded;
-        long uploaded = TotalUploaded;
+        long downloaded = LifetimeDownloaded;
+        long uploaded = LifetimeUploaded;
         if (downloaded <= 0)
         {
             return uploaded > 0 ? double.PositiveInfinity : 0.0;
@@ -2117,6 +2147,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
         TimeAdded = DateTimeOffset.FromUnixTimeSeconds(LocalState.AddedTime == 0 ? Services.TimeProvider.GetUtcNow().ToUnixTimeSeconds() : LocalState.AddedTime);
         _seededTime = TimeSpan.FromSeconds(LocalState.SeedTimeSeconds);
+        _restoredDownloaded = (long)LocalState.Downloaded;
+        _restoredUploaded = (long)LocalState.Uploaded;
     }
 
     private void EnsureFileTransferInitialized()
@@ -2445,6 +2477,11 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 if (FilesInternal != null)
                 {
                     await TryTeardownAsync(() => FilesInternal.StopAsync(), "files", failures).ConfigureAwait(false);
+
+                    // The next start compares the files with this, to catch changes made behind the
+                    // torrent's back. Left as restored, it would take the torrent's own downloading
+                    // for one of those and throw away every piece in a file it had written to.
+                    LocalState.FileSnapshots = FilesInternal.GetFileSnapshots() ?? LocalState.FileSnapshots;
                 }
                 if (disposing)
                 {

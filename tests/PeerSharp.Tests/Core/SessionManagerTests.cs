@@ -163,7 +163,7 @@ public class SessionManagerTests
         // is always the safe direction. Writing a fresh bitfield we cannot stand behind is not.
         using var fixture = await StorageBackedTorrent.CreateAsync();
         await fixture.Torrent.FilesInternal.WriteAsync(0, new byte[16384], TestContext.Current.CancellationToken);
-        await fixture.Torrent.FilesInternal.DisposeAsync();
+        await fixture.DisposeStorageAsync();
 
         await _sessionManager.SaveTorrentEntryAsync(fixture.Torrent, cancellationToken: TestContext.Current.CancellationToken);
 
@@ -173,6 +173,57 @@ public class SessionManagerTests
         // The rest of the entry is still written: options and the torrent file itself do not depend
         // on the disk being in any particular state.
         Assert.NotNull(saved.Options);
+    }
+
+    /// <summary>The flush a stop cannot make is one nothing can make up for later.</summary>
+    [Fact(Timeout = 30000)]
+    public async Task SaveTorrentEntryAsync_AfterACloseThatCouldNotFlush_WritesNoResumeData()
+    {
+        using var fixture = await StorageBackedTorrent.CreateAsync();
+        await fixture.Torrent.FilesInternal.WriteAsync(0, new byte[16384], TestContext.Current.CancellationToken);
+        await fixture.DisposeStorageAsync();
+        await fixture.Torrent.FilesInternal.DisposeAsync();
+
+        await _sessionManager.SaveTorrentEntryAsync(fixture.Torrent, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Null(Assert.Single(_persistence.SavedEntries).ResumeData);
+    }
+
+    /// <summary>
+    /// A stopped torrent has no open files to flush, and is where renames and file selections happen,
+    /// so it has to be able to save. What it wrote was flushed as it closed.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task SaveTorrentEntryAsync_AfterACleanClose_WritesResumeData()
+    {
+        using var fixture = await StorageBackedTorrent.CreateAsync();
+        await fixture.Torrent.FilesInternal.WriteAsync(0, new byte[16384], TestContext.Current.CancellationToken);
+        await fixture.Torrent.FilesInternal.DisposeAsync();
+
+        await _sessionManager.SaveTorrentEntryAsync(fixture.Torrent, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.NotNull(Assert.Single(_persistence.SavedEntries).ResumeData);
+    }
+
+    /// <summary>
+    /// A snapshot from before the file closed could differ from the file as it was left, and read as
+    /// someone having changed it.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ClosingFiles_RecordsThemAsTheyWereLeft()
+    {
+        using var fixture = await StorageBackedTorrent.CreateAsync();
+        await fixture.Torrent.FilesInternal.WriteAsync(0, new byte[16384], TestContext.Current.CancellationToken);
+
+        await fixture.Torrent.FilesInternal.DisposeAsync();
+
+        var snapshot = Assert.Single(fixture.Torrent.FilesInternal.GetFileSnapshots()!);
+        var file = new FileInfo(Directory.GetFiles(fixture.Path, "payload.bin", SearchOption.AllDirectories).Single());
+        Assert.Equal(file.LastWriteTimeUtc.Ticks, snapshot.LastWriteTimeUtcTicks);
+
+        // And it stays that way, or a change made while stopped would be taken for the left state.
+        File.SetLastWriteTimeUtc(file.FullName, DateTime.UtcNow.AddMinutes(5));
+        Assert.Equal(snapshot, Assert.Single(fixture.Torrent.FilesInternal.GetFileSnapshots()!));
     }
 
     [Fact(Timeout = 30000)]
@@ -251,6 +302,16 @@ public class SessionManagerTests
                     .GetValue(storage)!;
                 return flags.Any(dirty => dirty);
             }
+        }
+
+        /// <summary>Takes the storage away from under the files, which then cannot flush anything.</summary>
+        public async Task DisposeStorageAsync()
+        {
+            var files = Torrent.FilesInternal;
+            var storage = (IAsyncDisposable)files.GetType()
+                .GetField("_storage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                .GetValue(files)!;
+            await storage.DisposeAsync();
         }
 
         public static async Task<StorageBackedTorrent> CreateAsync()

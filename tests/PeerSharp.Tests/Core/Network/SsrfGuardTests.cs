@@ -1,4 +1,6 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals.Network;
+using PeerSharp.Internals.Trackers;
 using System.Net;
 using System.Net.Sockets;
 
@@ -257,6 +259,41 @@ public class SsrfGuardTests
         var refused = Assert.IsType<HttpRequestException>(error);
         Assert.IsType<SsrfRefusedException>(refused.InnerException);
         await server.DisposeConnectionAsync(serving);
+    }
+
+    /// <summary>
+    /// The same thing as a torrent would do it, through two real trackers. The first is a real local
+    /// tracker named outright, which leaves a pooled connection. The second is a name the torrent gave
+    /// that resolves here, and its announce must not reach that connection.
+    /// </summary>
+    [Fact]
+    public async Task ATrackerThatResolvesToThisDevice_DoesNotAnnounceOverAPooledConnection()
+    {
+        using var server = new KeepAliveHttpServer();
+        var serving = server.ServeAsync(TestContext.Current.CancellationToken);
+        var names = new HostAddressCache(TimeProvider.System, (_, _) => Task.FromResult(new[] { IPAddress.Loopback }));
+        using var factory = new HttpClientFactory(names);
+        var torrent = TorrentTestUtility.CreateMinimal();
+        torrent.Settings.Connection.SsrfMitigation = SsrfMitigation.ThisDevice;
+
+        var local = new HttpTracker(NullLoggerFactory.Instance, factory, names);
+        local.Init($"http://127.0.0.1:{server.Port}/announce", torrent, new IgnoredTrackerResults());
+        await local.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+        Assert.Equal(["/announce"], server.Requests);
+
+        var rebound = new HttpTracker(NullLoggerFactory.Instance, factory, names);
+        rebound.Init($"http://rebind.example:{server.Port}/announce", torrent, new IgnoredTrackerResults());
+        await rebound.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        Assert.Equal(["/announce"], server.Requests);
+        await server.DisposeConnectionAsync(serving);
+    }
+
+    private sealed class IgnoredTrackerResults : ITrackerCallback
+    {
+        public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null) { }
+        public void OnMultiScrapeResult(bool success, MultiScrapeResponse response, ITracker tracker) { }
+        public void OnScrapeResult(bool success, ScrapeResponse response, ITracker tracker) { }
     }
 
     /// <summary>A loopback listener that keeps one connection open and records what it is asked for.</summary>

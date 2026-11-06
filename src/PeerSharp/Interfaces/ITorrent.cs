@@ -224,6 +224,12 @@ public interface ITorrent
     /// <summary>
     /// Gets or sets whether this torrent is eligible for auto-start.
     /// </summary>
+    /// <remarks>
+    /// With queue management on, the queue starts any stopped torrent that has this set, when there is
+    /// room for it. <see cref="StartAsync"/> sets it. <see cref="StopAsync"/> leaves it alone, because
+    /// that is also how the queue holds a torrent back to start it later, so to stop a torrent for good
+    /// clear this first.
+    /// </remarks>
     bool QueueAutoStart { get; set; }
 
     /// <summary>
@@ -586,6 +592,10 @@ public interface ITorrent
     /// Completion waits for in-flight piece I/O before releasing its buffers or permitting a restart.
     /// An I/O provider that ignores cancellation can therefore delay stopping indefinitely; internal
     /// slow-shutdown diagnostics do not impose a fixed completion deadline.
+    /// <para>
+    /// This does not take the torrent out of the queue. With queue management on, a torrent that still
+    /// has <see cref="QueueAutoStart"/> set will be started again when there is room for it.
+    /// </para>
     /// </remarks>
     /// <param name="cancellationToken">
     /// Bounds the wait for a concurrent state transition (start, stop, recheck, download-path
