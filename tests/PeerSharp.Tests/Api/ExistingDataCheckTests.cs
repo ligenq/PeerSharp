@@ -1,4 +1,8 @@
 using PeerSharp.Internals;
+using PeerSharp.Internals.Peers;
+using PeerSharp.Messages;
+using System.Net;
+using System.Reflection;
 using System.Security.Cryptography;
 using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
 
@@ -208,6 +212,56 @@ public sealed class ExistingDataCheckTests : IDisposable
     }
 
     /// <summary>
+    /// The rebuild keeps a public magnet's peers, and adopts them before it restarts. A stop that ends
+    /// that restart has already gone by, finding the torrent not started and nothing to stop, so the
+    /// peers would otherwise stay connected to a stopped torrent.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task AStopDuringAMagnetsCheck_LeavesNoPeersConnected()
+    {
+        const int size = 128 * 1024;
+        await using var engine = await CreateEngineAsync();
+        string downloadPath = DownloadPath("magnet-peers");
+        byte[] payload = RandomNumberGenerator.GetBytes(size);
+        await File.WriteAllBytesAsync(Path.Combine(downloadPath, "magnet.bin"), payload, Token);
+        var metadata = new ApiTorrentFileBuilder()
+            .WithName("magnet.bin").WithPieceLength(size).AddFile("magnet.bin", payload).Build();
+        var torrent = (Torrent)await engine.AddMagnetAsync(
+            $"magnet:?xt=urn:btih:{metadata.InfoHash.ToHexString()}", new AddTorrentOptions(downloadPath), Token);
+        var peer = new PeerCommunication(torrent, torrent.PeersInternal, TimeProvider.System)
+        {
+            Connected = 1,
+            RemoteEndPoint = new IPEndPoint(IPAddress.Parse("203.0.113.62"), 6881),
+            Stream = new MemoryStream()
+        };
+        SetPeerProperty(peer, "PeerPieces", new PiecesProgress(0));
+        SetPeerProperty(peer, "RemoteSupportsFastExtension", true);
+        await (Task)typeof(PeerCommunication)
+            .GetMethod("ProcessMessageAsync", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(peer, [new PeerMessage(MessageId.HaveAll)])!;
+        torrent.PeersInternal.AddConnectedPeerForTesting(peer);
+
+        var info = torrent.InfoFile.Info;
+        info.Name = "magnet.bin";
+        info.PieceSize = size;
+        info.FullSize = size;
+        info.Files.Add(new Internals.TorrentFileEntry { Path = "magnet.bin", Size = size, Offset = 0 });
+#pragma warning disable CA5350 // BEP 3 requires SHA-1 piece hashes.
+        info.Pieces.Add(SHA1.HashData(payload));
+#pragma warning restore CA5350
+        torrent.InfoFile.InfoBytes = RandomNumberGenerator.GetBytes(32);
+        var rebuild = torrent.ReinitializeAfterMetadataAsync(Token);
+        await UntilCheckingAsync(torrent);
+        Assert.Equal(1, torrent.PeersInternal.ConnectedCount);
+
+        await torrent.StopAsync(Token);
+        await rebuild;
+
+        Assert.False(torrent.Started);
+        Assert.Equal(0, torrent.PeersInternal.ConnectedCount);
+    }
+
+    /// <summary>
     /// Resuming is how a restored session starts. One torrent with data on disk and no resume data
     /// must not leave the session paused, and everything else in it stopped, until it is hashed.
     /// </summary>
@@ -273,7 +327,87 @@ public sealed class ExistingDataCheckTests : IDisposable
         }
     }
 
-    private async Task<ClientEngine> CreateEngineAsync(string? sessionPath = null)
+    /// <summary>
+    /// The queue is for keeping downloads to a limit and seeds to theirs, and has to go on doing that
+    /// while one torrent spends minutes on the disk.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ACheckTheQueueStarted_DoesNotHoldUpTheQueue()
+    {
+        await using var engine = await CreateEngineAsync(queueLimit: 0);
+        var checking = await AddOverExistingFileAsync(engine, "queue-check", startImmediately: false);
+        checking.QueueAutoStart = true;
+        await UntilCheckingAsync(checking);
+
+        var next = await engine.AddTorrentAsync(NewMetadata("queue-next.bin"), new AddTorrentOptions(DownloadPath("queue-next")) { StartImmediately = false }, Token);
+        next.QueueAutoStart = true;
+
+        await UntilAsync(() => next.Started);
+        Assert.Equal(TorrentState.CheckingFiles, checking.State);
+    }
+
+    /// <summary>
+    /// It has its slot from the start. Left uncounted, the queue would start one more torrent every
+    /// pass until the check ended, and then have to stop them all again.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task ACheckTheQueueStarted_TakesASlot()
+    {
+        await using var engine = await CreateEngineAsync(queueLimit: 1);
+        var checking = await AddOverExistingFileAsync(engine, "slot-check", startImmediately: false);
+        checking.QueueAutoStart = true;
+        await UntilCheckingAsync(checking);
+
+        var next = await engine.AddTorrentAsync(NewMetadata("slot-next.bin"), new AddTorrentOptions(DownloadPath("slot-next")) { StartImmediately = false, QueuePriority = 1 }, Token);
+        next.QueueAutoStart = true;
+
+        // Longer than a queue pass, so it has had the chance.
+        await Task.Delay(TimeSpan.FromSeconds(2.5), Token);
+
+        Assert.False(next.Started);
+        Assert.Equal(TorrentState.CheckingFiles, checking.State);
+    }
+
+    /// <summary>
+    /// A torrent's add and removal each run a queue pass, whenever they happen. Two that overlap would
+    /// both read the same free slot, so a pass waits for the one before it.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task AQueuePass_WaitsForTheOneBeforeIt()
+    {
+        await using var engine = await CreateEngineAsync(queueLimit: 1);
+        var waiting = (Torrent)await engine.AddTorrentAsync(NewMetadata("overlap.bin"), new AddTorrentOptions(DownloadPath("overlap")) { StartImmediately = false }, Token);
+        var gate = (SemaphoreSlim)typeof(ClientEngine).GetField("_queuePassGate", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(engine)!;
+        var rebalance = typeof(ClientEngine).GetMethod("RebalanceQueueAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        await gate.WaitAsync(Token);
+        waiting.QueueAutoStart = true;
+
+        var pass = (Task)rebalance.Invoke(engine, [Token])!;
+        await Task.Delay(100, Token);
+
+        Assert.False(pass.IsCompleted);
+        Assert.False(waiting.StartedOrStarting);
+
+        gate.Release();
+        await pass;
+        await UntilAsync(() => waiting.Started);
+    }
+
+    /// <summary>The queue does not wait for the start, so shutting down has to.</summary>
+    [Fact(Timeout = 30000)]
+    public async Task DisposingTheEngine_EndsACheckTheQueueStarted()
+    {
+        var engine = await CreateEngineAsync(queueLimit: 0);
+        var checking = await AddOverExistingFileAsync(engine, "queue-dispose", startImmediately: false);
+        checking.QueueAutoStart = true;
+        await UntilCheckingAsync(checking);
+
+        await engine.DisposeAsync();
+
+        Assert.False(checking.Started);
+    }
+
+    private async Task<ClientEngine> CreateEngineAsync(string? sessionPath = null, int? queueLimit = null)
     {
         var engine = ClientEngine.Create(new TorrentClientOptions
         {
@@ -289,6 +423,7 @@ public sealed class ExistingDataCheckTests : IDisposable
                     NatPmpPortMapping = false
                 },
                 Dht = { Enabled = false },
+                Queue = { Enabled = queueLimit != null, MaxActiveDownloads = queueLimit ?? 0, RecheckIntervalSeconds = 1 },
                 Session = { Enabled = sessionPath != null, SessionPath = sessionPath ?? string.Empty }
             }
         });
@@ -324,6 +459,10 @@ public sealed class ExistingDataCheckTests : IDisposable
         return await engine.AddTorrentAsync(
             metadata, new AddTorrentOptions(downloadPath) { StartImmediately = startImmediately }, Token);
     }
+
+    private static void SetPeerProperty(PeerCommunication peer, string name, object value) =>
+        typeof(PeerCommunication).GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(peer, value);
 
     private static Task UntilCheckingAsync(ITorrent torrent) =>
         UntilAsync(() => torrent.State == TorrentState.CheckingFiles);

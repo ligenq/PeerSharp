@@ -125,7 +125,18 @@ internal sealed class SocketStream : Stream
             return 0;
         }
 
-        int received = _socket.Receive(buffer, SocketFlags.None, out var error);
+        int received;
+        SocketError error;
+        try
+        {
+            received = _socket.Receive(buffer, SocketFlags.None, out error);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Closed between the check above and the receive being issued.
+            return 0;
+        }
+
         if (error != SocketError.Success)
         {
             Interlocked.CompareExchange(ref _endedBy, (int)error, (int)SocketError.Success);
@@ -148,7 +159,18 @@ internal sealed class SocketStream : Stream
                 throw new IOException("The connection was closed before everything was written.");
             }
 
-            int sent = await _send.SendAsync(_socket, buffer).ConfigureAwait(false);
+            int sent;
+            try
+            {
+                sent = await _send.SendAsync(_socket, buffer).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException ex)
+            {
+                // Closed between the check above and the send being issued, which is a failed write
+                // like any other, and the callers that handle those only know them as this.
+                throw new IOException("The connection was closed before everything was written.", ex);
+            }
+
             if (sent <= 0)
             {
                 var error = sent < 0 ? _send.SocketError : SocketError.ConnectionAborted;
@@ -169,7 +191,18 @@ internal sealed class SocketStream : Stream
     {
         while (!buffer.IsEmpty)
         {
-            int sent = _socket.Send(buffer, SocketFlags.None, out var error);
+            int sent;
+            SocketError error;
+            try
+            {
+                sent = _socket.Send(buffer, SocketFlags.None, out error);
+            }
+            catch (ObjectDisposedException ex)
+            {
+                // As in WriteAsync.
+                throw new IOException("The connection was closed before everything was written.", ex);
+            }
+
             if (error != SocketError.Success || sent <= 0)
             {
                 Abort();

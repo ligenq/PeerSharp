@@ -386,9 +386,9 @@ public class PeerManagerDuplicateConnectionTests
             {
                 // The incoming connection wins and our outgoing dial is dropped
                 await WaitForAsync(() => outgoing.CloseCalls > 0 ? (object)this : null);
-                await WaitForAsync(() => ctx.Manager.ConnectedCount == 1 ? (object)this : null);
-                var survivor = Assert.Single(ctx.Manager.GetConnectedPeersInternal());
-                Assert.NotSame(outgoing, survivor);
+
+                // On the peers themselves. The count can reach one before the dropped dial has left them.
+                var survivor = await WaitForAsync(() => ctx.Manager.GetConnectedPeersInternal().ToList() is [var only] && !ReferenceEquals(only, outgoing) ? only : null);
                 Assert.Equal(incomingEndpoint, survivor.RemoteEndPoint);
             }
         }

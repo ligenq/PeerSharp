@@ -3,6 +3,67 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
+## 5.4.0 — Unreleased
+
+A restart now leaves a session as it was, and a file check no longer holds up the queue. Adds three
+members, all optional for anyone implementing the interfaces or reading saved sessions. Binary
+compatible with 5.3.1.
+
+### Upgrade notes
+
+- **A paused session comes back paused.** It used to come back running with everything stopped. An
+  application that pauses the engine before `InitializeAsync` and then resumes it should look at
+  `SessionRestoredPaused`, or it will resume a session someone left paused.
+- **`SavedTorrentOptions.WasStarted` means "should start".** It now also covers a torrent checking its
+  files or held by a session pause, not only one that was running. A session saved by an earlier
+  version is restored as it always was until it next saves.
+- **The queue no longer waits for the torrents it starts,** so `AddTorrentAsync` with queue management
+  on does not wait for the queue's starts either.
+- **A stop flushes the files it closes,** so it can take longer on a slow disk if the torrent wrote
+  much since the last save.
+
+### Added
+
+- `IClientEngine.SessionRestoredPaused`.
+- `SavedTorrentOptions.QueueAutoStart` and `SavedTorrentOptions.SessionPaused`.
+
+### Fixed
+
+- **Renames, file selections and progress are saved for stopped and never-started torrents.** A save
+  skipped their resume data altogether, because they had no open files to flush. A rename, which needs
+  a stopped torrent, was lost on a restart, leaving the file under a name the torrent no longer knew,
+  and a download of everything again.
+- **Stopping and starting a torrent after a restart keeps its pieces.** A start compared the files with
+  the snapshot saved before the restart, took the torrent's own writes for outside changes, and
+  discarded every piece in those files. A session pause and resume did the same.
+- **A file moved across volumes keeps its write time,** which the same comparison depends on.
+- **A saved bitfield claiming no pieces no longer stops a start checking the files.** A session saved
+  before a torrent's files were checked, or by an earlier version for a torrent stopped before a save
+  caught up with it, made the torrent download everything again over complete files. A torrent with
+  files on disk and no pieces to its name is checked instead.
+- **A torrent stopped during a session pause stays stopped.** `ResumeAsync` started it anyway, and a
+  restart then saved it as one to start.
+- **Queue passes run one at a time.** An add or removal overlapping another pass could fill one free
+  slot twice.
+- **A peer socket closing as a write begins is an ordinary failed write.** It escaped as an
+  `ObjectDisposedException`, which the code handling failed writes does not expect.
+- **A torrent waiting for a queue slot stays in the queue across a restart.** It came back stopped and
+  was never started again.
+- **A session pause survives a restart,** and `ResumeAsync` then starts what the pause stopped. It came
+  back with those torrents stopped and nothing to resume them.
+- **A torrent closed during a file check starts again after a restart,** rather than coming back
+  stopped.
+- **Ratio limits count what earlier sessions transferred.** The totals were saved and never read back,
+  so a restart set every torrent's ratio to zero. Trackers still hear this session's bytes.
+- **A file check no longer holds up the queue.** Each pass waited for the torrents it started, so
+  nothing else started, and nothing stopped at its limit, until the check ended. A torrent checking its
+  files now counts against the queue's limits, so the queue does not start another in its place.
+
+### Documentation
+
+- `ITorrent.StopAsync` and `ITorrent.QueueAutoStart` say that a stop does not take a torrent out of the
+  queue.
+
 ## 5.3.1 — 2026-11-04
 
 Closes a bypass of the SSRF guard that 5.3.0 introduced, and stops a file check from holding up the

@@ -20,7 +20,8 @@ internal sealed class TorrentQueueManager
             items.Add(new QueueItem
             {
                 Hash = torrent.SessionHash,
-                Started = torrent.Started,
+                // One still checking its files has its slot already, and is not to be started again.
+                Started = torrent.StartedOrStarting,
                 Finished = torrent.Finished,
                 QueueAutoStart = torrent.QueueAutoStart,
                 QueuePriority = torrent.QueuePriority,

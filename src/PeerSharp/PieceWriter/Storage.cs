@@ -325,38 +325,48 @@ internal sealed class Storage : IStorage
         }
         catch (IOException)
         {
-            // Across volumes a rename is not available, so pay for the copy. Copy to a sibling
-            // temporary file first: cancellation or an I/O failure must not leave a truncated file
-            // at the destination that looks like a completed move.
-            string directory = Path.GetDirectoryName(destination) ?? Directory.GetCurrentDirectory();
-            string temporary = Path.Combine(directory, $".peersharp-{Guid.NewGuid():N}.tmp");
+            await MoveByCopyingAsync(source, destination, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Across volumes a rename is not available, so pay for the copy. Copy to a sibling temporary file
+    /// first: cancellation or an I/O failure must not leave a truncated file at the destination that
+    /// looks like a completed move.
+    /// </summary>
+    internal static async Task MoveByCopyingAsync(string source, string destination, CancellationToken ct)
+    {
+        string directory = Path.GetDirectoryName(destination) ?? Directory.GetCurrentDirectory();
+        string temporary = Path.Combine(directory, $".peersharp-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            await using (var from = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 0, useAsync: true))
+            await using (var to = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 0, useAsync: true))
+            {
+                await from.CopyToAsync(to, ct).ConfigureAwait(false);
+                await to.FlushAsync(ct).ConfigureAwait(false);
+            }
+
+            // A rename keeps this by itself. It is half of how a start tells these files are the ones
+            // the torrent left, and a new one here would cost it all its pieces.
+            File.SetLastWriteTimeUtc(temporary, File.GetLastWriteTimeUtc(source));
+            File.Move(temporary, destination, overwrite: true);
+            File.Delete(source);
+        }
+        finally
+        {
             try
             {
-                await using (var from = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 0, useAsync: true))
-                await using (var to = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 0, useAsync: true))
-                {
-                    await from.CopyToAsync(to, ct).ConfigureAwait(false);
-                    await to.FlushAsync(ct).ConfigureAwait(false);
-                }
-
-                File.Move(temporary, destination, overwrite: true);
-                File.Delete(source);
+                File.Delete(temporary);
             }
-            finally
+            catch (IOException)
             {
-                try
-                {
-                    File.Delete(temporary);
-                }
-                catch (IOException)
-                {
-                    // Do not replace the move's cancellation or original I/O failure with a
-                    // best-effort temporary-file cleanup failure.
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    // As above; the source remains authoritative unless the final rename succeeded.
-                }
+                // Do not replace the move's cancellation or original I/O failure with a best-effort
+                // temporary-file cleanup failure.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // As above; the source remains authoritative unless the final rename succeeded.
             }
         }
     }
