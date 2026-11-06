@@ -835,6 +835,7 @@ interface PeerSharp.Interfaces.IClientEngine
     Boolean BlocklistEnabled { get; set; }
     Boolean GeoIpEnabled { get; set; }
     Boolean IsPaused { get; }
+    Boolean SessionRestoredPaused { get; }
     Boolean StopMaintainingSelfUpdatingTorrent(PeerSharp.Core.TorrentPublisherKey publisher, ReadOnlyMemory<Byte> salt = default)
     IAsyncEnumerable<PeerSharp.Core.DiscoveredInfoHash> DiscoverInfoHashesAsync(PeerSharp.Core.DhtIndexerOptions options = default, CancellationToken cancellationToken = default)
     IReadOnlyList<PeerSharp.Core.PortMappingStatus> GetPortMappingStatus()
@@ -1030,6 +1031,8 @@ sealed class PeerSharp.Interfaces.SavedTorrentOptions
     .ctor(String DownloadPath = default, Boolean WasStarted = default, Int64 DownloadLimitBytesPerSecond = default, Int64 UploadLimitBytesPerSecond = default, Int32 QueuePriority = default, Nullable<Single> RatioLimit = default, Nullable<TimeSpan> SeedTimeLimit = default, PeerSharp.Core.DownloadStrategy DownloadStrategy = default)
     Boolean Equals(Object obj)
     Boolean Equals(PeerSharp.Interfaces.SavedTorrentOptions other)
+    Boolean QueueAutoStart { get; init; }
+    Boolean SessionPaused { get; init; }
     Boolean SuperSeeding { get; init; }
     Boolean WasStarted { get; init; }
     IReadOnlyList<PeerSharp.Interfaces.SavedPeerPreference> PeerPreferences { get; init; }

@@ -300,6 +300,43 @@ public class ClientEnginePersistenceTests
         Assert.Single(engine.GetTorrents(), t => t.Hash == torrentFile.InfoHash);
     }
 
+    /// <summary>
+    /// A ratio limit counts everything a torrent ever transferred, or a torrent the queue stopped at
+    /// its limit would start seeding again after a restart. Trackers still hear this session's bytes.
+    /// </summary>
+    [Fact(Timeout = 10000)]
+    public async Task LoadPersistedTorrentsAsync_KeepsWhatEarlierSessionsTransferred()
+    {
+        var torrentFile = CreateAndParseTorrentFile();
+        var options = new AddTorrentOptions { DownloadPath = Path.GetTempPath(), StartImmediately = false };
+        TorrentResumeData resumeData;
+        await using (var first = ClientEngine.Create(new TorrentClientOptions { Settings = CreateSettings() }))
+        {
+            var added = Assert.IsType<Torrent>(await first.AddTorrentAsync(torrentFile, options));
+            var state = added.GetResumeState();
+            state.Downloaded = 100;
+            state.Uploaded = 300;
+            resumeData = added.SerializeResumeState(state);
+        }
+
+        var persistence = new MockSessionPersistence();
+        persistence.SavedEntries.Add(new SavedTorrentEntry(
+            torrentFile.InfoHash,
+            torrentFile.RawData.ToArray(),
+            null,
+            resumeData,
+            new SavedTorrentOptions(DownloadPath: Path.GetTempPath(), WasStarted: false)));
+        await using var engine = ClientEngine.Create(new TorrentClientOptions { Settings = CreateSettings(), SessionPersistence = persistence });
+
+        await InvokePrivateAsync(engine, "LoadPersistedTorrentsAsync", CancellationToken.None);
+
+        var loaded = Assert.IsType<Torrent>(Assert.Single(engine.GetTorrents()));
+        Assert.Equal(3.0, loaded.GetRatio());
+        Assert.Equal(0, loaded.TotalUploaded);
+        Assert.Equal(300UL, loaded.GetResumeState().Uploaded);
+        Assert.Equal(100UL, loaded.GetResumeState().Downloaded);
+    }
+
     // ── RebalanceQueueAsync ───────────────────────────────────────────────────
 
     [Theory(Timeout = 10000)]

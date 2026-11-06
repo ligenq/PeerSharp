@@ -79,6 +79,25 @@ public class StorageFlushTests : IAsyncLifetime
         Assert.False(await _storage.FlushAsync(TestContext.Current.CancellationToken));
     }
 
+    /// <summary>
+    /// The copy is what a move across volumes does, and a start uses the write time to tell these are
+    /// the files the torrent left. A new one would cost the torrent every piece in the file.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task AMoveByCopying_KeepsTheFilesWriteTime()
+    {
+        string source = Path.Combine(_tempDir, "source.bin");
+        string destination = Path.Combine(_tempDir, "destination.bin");
+        await File.WriteAllBytesAsync(source, new byte[500], TestContext.Current.CancellationToken);
+        var written = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(source, written);
+
+        await Storage.MoveByCopyingAsync(source, destination, TestContext.Current.CancellationToken);
+
+        Assert.False(File.Exists(source));
+        Assert.Equal(written, File.GetLastWriteTimeUtc(destination));
+    }
+
     [Fact(Timeout = 30000)]
     public async Task Flush_IsIdempotent()
     {

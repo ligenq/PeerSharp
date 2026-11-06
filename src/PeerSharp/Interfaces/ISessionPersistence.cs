@@ -19,7 +19,10 @@ public sealed record SavedTorrentEntry(
 /// Saved torrent options that should be restored.
 /// </summary>
 /// <param name="DownloadPath">The download path.</param>
-/// <param name="WasStarted">Whether the torrent was running when saved.</param>
+/// <param name="WasStarted">
+/// Whether the torrent should start when the session is restored: it was running, on its way to
+/// running after a file check, or held by a session pause.
+/// </param>
 /// <param name="DownloadLimitBytesPerSecond">Download speed limit in bytes per second.</param>
 /// <param name="UploadLimitBytesPerSecond">Upload speed limit in bytes per second.</param>
 /// <param name="QueuePriority">Queue priority.</param>
@@ -46,6 +49,18 @@ public sealed record SavedTorrentOptions(
     /// Whether the torrent was seeding in BEP 16 super-seed mode.
     /// </summary>
     public bool SuperSeeding { get; init; }
+
+    /// <summary>
+    /// Whether the torrent was eligible for auto-start, which is how one waiting for a queue slot
+    /// differs from one that was stopped.
+    /// </summary>
+    public bool QueueAutoStart { get; init; }
+
+    /// <summary>
+    /// Whether the session was paused when this was saved. Any entry saying so restores the session
+    /// paused.
+    /// </summary>
+    public bool SessionPaused { get; init; }
 }
 
 /// <summary>

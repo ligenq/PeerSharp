@@ -40,6 +40,8 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
         _blockCache.Initialize(_storage);
     }
 
+    private bool _flushedOnClose;
+
     private bool _checking;
     public bool Checking
     {
@@ -114,26 +116,51 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
     {
         if (_disposal.MarkDisposed())
         {
-            _lastFileSnapshots = GetFileSnapshots();
             _blockCache.Dispose();
+
+            // The last chance to flush, and what lets a stopped torrent still be saved: its resume
+            // data is written long after this, and has to be able to claim what was written here.
+            bool opened = IsInitialized;
+            bool flushed = !opened || await _storage.FlushAsync(CancellationToken.None).ConfigureAwait(false);
             await _storage.DisposeAsync().ConfigureAwait(false);
+
+            // After closing, not before: a file's write time can move when its last handle closes,
+            // and a snapshot from before that would read as the file having changed.
+            if (opened && _storage is Storage storage)
+            {
+                _lastFileSnapshots = storage.GetFileSnapshots();
+            }
+
+            Volatile.Write(ref _flushedOnClose, flushed);
         }
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>
+    /// The files as they stand, or as this left them once disposed. A snapshot taken later would take
+    /// in anything that changed them since, which is what the snapshot exists to catch.
+    /// </summary>
     internal List<TorrentStateData.FileSnapshotData>? GetFileSnapshots() =>
-        _storage is Storage storage && storage.IsInitialized ? storage.GetFileSnapshots() : _lastFileSnapshots;
+        !_disposal.IsDisposed && _storage is Storage storage && storage.IsInitialized
+            ? storage.GetFileSnapshots()
+            : _lastFileSnapshots;
 
+    /// <summary>
+    /// Whether everything written through this instance has reached the disk. Unlike
+    /// <see cref="IStorage.FlushAsync"/>, which can only answer for an open file, this is also true of
+    /// files that were never opened, with nothing written, and of ones closed after a flush. Those are
+    /// the stopped torrents, whose renames and file selections have to be saved all the same.
+    /// </summary>
     public Task<bool> FlushAsync(CancellationToken ct = default)
     {
         // Writes are write-through (see BlockCache.WriteAsync), so there is no cache layer to drain
         // first - the storage flush is the whole barrier.
         if (_disposal.IsDisposed)
         {
-            return Task.FromResult(false);
+            return Task.FromResult(Volatile.Read(ref _flushedOnClose));
         }
 
-        return _storage.FlushAsync(ct);
+        return IsInitialized ? _storage.FlushAsync(ct) : Task.FromResult(true);
     }
 
     public Task InitializeAsync(IReadOnlyList<FileSelection> selection, CancellationToken ct = default)
