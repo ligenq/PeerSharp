@@ -258,6 +258,14 @@ public interface IClientEngine : IAsyncDisposable
     bool IsPaused { get; }
 
     /// <summary>
+    /// Whether <see cref="InitializeAsync"/> restored a session that was paused when it was saved. The
+    /// session is then paused until <see cref="ResumeAsync(CancellationToken)"/>, and a caller that
+    /// paused the engine itself before initializing should use this to tell whether resuming is its
+    /// decision to make.
+    /// </summary>
+    bool SessionRestoredPaused => false;
+
+    /// <summary>
     /// Stops every running torrent at once, remembering which were running.
     /// </summary>
     /// <param name="cancellationToken">Cancels partway through; torrents already stopped stay stopped.</param>
