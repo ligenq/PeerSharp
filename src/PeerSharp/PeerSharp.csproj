@@ -21,7 +21,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp 5.3.1 closes a bypass of Connection.SsrfMitigation, where a tracker host name resolving to this device could reuse a pooled connection to a local tracker and request any path. A file check no longer holds up the rest of the session, and stopping, removing or pausing a torrent, or disposing the engine, now ends one. Binary compatible with 5.3.0. See https://github.com/ligenq/PeerSharp/blob/v5.3.1/CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp 5.4.0 leaves a session as it was across a restart. Renames, file selections and progress are now saved for stopped and never-started torrents, a paused session comes back paused, torrents waiting in the queue stay there, and ratio limits count earlier sessions. Stopping and starting a torrent after a restart no longer throws away pieces in files it had written to, and a file check no longer holds up the queue. Adds IClientEngine.SessionRestoredPaused. Binary compatible with 5.3.1. See https://github.com/ligenq/PeerSharp/blob/v5.4.0/CHANGELOG.md.</PackageReleaseNotes>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<IsTrimmable>true</IsTrimmable>
 		<!-- iOS allows no code generation at run time, so an app there is compiled ahead of time in
@@ -29,7 +29,7 @@
 		     dynamic code that would fail under AOT fails the build instead. -->
 		<IsAotCompatible>true</IsAotCompatible>
 		<EnablePackageValidation>true</EnablePackageValidation>
-		<PackageValidationBaselineVersion>5.3.0</PackageValidationBaselineVersion>
+		<PackageValidationBaselineVersion>5.3.1</PackageValidationBaselineVersion>
 	</PropertyGroup>
 
 	<ItemGroup>
