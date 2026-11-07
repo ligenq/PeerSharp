@@ -26,7 +26,7 @@ public class HttpRangePropertyTests
     /// prefix present or absent, missing or doubled dashes, non-numeric and overflowing positions,
     /// negatives, whitespace, and multi-range.
     /// </summary>
-    private static readonly Gen<string> Header = Gen.OneOfConst(
+    private static readonly Gen<string> Header = Gen.OneOf(
         "bytes=", "bytes=-", "bytes=--", "bytes=5", "bytes=-0", "bytes=--5",
         "bytes=0-", "bytes=-1", "bytes=-5", "bytes=-100000",
         "bytes=0-0", "bytes=0-15", "bytes=0-100000", "bytes=8-7", "bytes=15-15",

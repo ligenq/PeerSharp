@@ -41,10 +41,10 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.400
+          dotnet-version: 10.0.403
 
       - name: Install Stryker
-        run: dotnet tool install --global dotnet-stryker --version 4.16.0
+        run: dotnet tool install --global dotnet-stryker --version 5.0.0
 
       # Nullable analysis is escalated to errors in this repository, which makes almost half of
       # Stryker's mutants uncompilable and therefore untested. StrykerRun reaches MSBuild as a global

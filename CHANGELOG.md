@@ -66,6 +66,12 @@ compatible with 5.3.1.
   nothing else started, and nothing stopped at its limit, until the check ended. A torrent checking its
   files now counts against the queue's limits, so the queue does not start another in its place.
 
+### Changed
+
+- **Dependencies updated.** `Microsoft.Extensions.Logging.Abstractions` moves to 10.0.14, which is now
+  the lowest version an application can use with PeerSharp. The build and CI move to SDK 10.0.403,
+  whose runtime fixes CVE-2026-111497. CsCheck 5 renamed `Gen.OneOfConst` to `Gen.OneOf`.
+
 ### Documentation
 
 - `ITorrent.StopAsync` and `ITorrent.QueueAutoStart` say that a stop does not take a torrent out of the
