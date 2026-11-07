@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using System.Security.Cryptography;
 using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
@@ -113,6 +114,146 @@ public sealed class SessionRestartTests : IDisposable
         await second.PauseAsync(Token);
         await second.InitializeAsync(Token);
         Assert.True(second.SessionRestoredPaused);
+    }
+
+    /// <summary>With nothing in it there is no torrent to carry the pause.</summary>
+    [Fact(Timeout = 30000)]
+    public async Task AnEmptySessionPaused_ComesBackPaused()
+    {
+        await using (var engine = await CreateEngineAsync())
+        {
+            await engine.PauseAsync(Token);
+        }
+
+        await using var restored = await CreateEngineAsync();
+
+        Assert.True(restored.IsPaused);
+        Assert.True(restored.SessionRestoredPaused);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task RemovingTheLastTorrentWhilePaused_LeavesTheSessionPaused()
+    {
+        await using (var engine = await CreateEngineAsync())
+        {
+            var torrent = await engine.AddTorrentAsync(NewMetadata("removed.bin"), new AddTorrentOptions(_root), Token);
+            await engine.PauseAsync(Token);
+            await engine.RemoveTorrentAsync(torrent, cancellationToken: Token);
+        }
+
+        await using var restored = await CreateEngineAsync();
+
+        Assert.Empty(restored.GetTorrents());
+        Assert.True(restored.IsPaused);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ASessionLeftPaused_StaysPaused_ThroughARestartThatDoesNotTouchIt()
+    {
+        await using (var engine = await CreateEngineAsync())
+        {
+            await engine.PauseAsync(Token);
+        }
+
+        await using (await CreateEngineAsync())
+        {
+        }
+
+        await using var restored = await CreateEngineAsync();
+
+        Assert.True(restored.IsPaused);
+    }
+
+    /// <summary>A crash saves nothing, so what a restart comes back as cannot wait for the next save.</summary>
+    [Fact(Timeout = 30000)]
+    public async Task APauseAndAResume_AreSavedAsTheyHappen()
+    {
+        await using var engine = await CreateEngineAsync();
+        await engine.AddTorrentAsync(NewMetadata("saved.bin"), new AddTorrentOptions(_root), Token);
+
+        await engine.PauseAsync(Token);
+        Assert.True((await LoadSessionStateAsync())?.Paused);
+
+        await engine.ResumeAsync(Token);
+        Assert.False((await LoadSessionStateAsync())?.Paused);
+    }
+
+    /// <summary>
+    /// An application pausing the engine for the length of its startup has not paused the session, even
+    /// if it goes no further than that.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task APauseBeforeInitializing_IsNotSaved()
+    {
+        await using (var engine = NewEngine())
+        {
+            await engine.PauseAsync(Token);
+            await engine.InitializeAsync(Token);
+        }
+
+        await using var restored = await CreateEngineAsync();
+
+        Assert.False(restored.IsPaused);
+        Assert.False(restored.SessionRestoredPaused);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task ASavedPause_IsNotReplacedByAResumeBeforeInitializing()
+    {
+        await using (var engine = await CreateEngineAsync())
+        {
+            await engine.PauseAsync(Token);
+        }
+
+        await using (var early = NewEngine())
+        {
+            await early.PauseAsync(Token);
+            await early.ResumeAsync(Token);
+        }
+
+        await using var restored = await CreateEngineAsync();
+
+        Assert.True(restored.IsPaused);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnUnreadableSavedPause_CostsNothingAndIsReplaced()
+    {
+        await using (var engine = await CreateEngineAsync())
+        {
+            await engine.AddTorrentAsync(NewMetadata("kept.bin"), new AddTorrentOptions(_root), Token);
+        }
+
+        await File.WriteAllTextAsync(Path.Combine(_root, "session", "session.json"), "{ not json", Token);
+
+        await using (var damaged = await CreateEngineAsync())
+        {
+            Assert.False(damaged.IsPaused);
+            Assert.Single(damaged.GetTorrents());
+            await damaged.PauseAsync(Token);
+        }
+
+        await using var restored = await CreateEngineAsync();
+
+        Assert.True(restored.IsPaused);
+    }
+
+    /// <summary>
+    /// How an application that will not wait for a file check adds a torrent: stopped, then started once
+    /// the add returns. A crash before the next periodic save must not lose the start.
+    /// </summary>
+    [Fact(Timeout = 30000)]
+    public async Task AStartAndAStop_AreSavedAsTheyHappen()
+    {
+        await using var engine = await CreateEngineAsync();
+        var torrent = await engine.AddTorrentAsync(NewMetadata("started.bin"), new AddTorrentOptions(_root) { StartImmediately = false }, Token);
+        Assert.False((await LoadEntryAsync()).Options?.WasStarted);
+
+        await torrent.StartAsync(Token);
+        Assert.True((await LoadEntryAsync()).Options?.WasStarted);
+
+        await torrent.StopAsync(Token);
+        Assert.False((await LoadEntryAsync()).Options?.WasStarted);
     }
 
     [Fact(Timeout = 30000)]
@@ -397,6 +538,12 @@ public sealed class SessionRestartTests : IDisposable
                 Session = { Enabled = true, SessionPath = Path.Combine(_root, "session") }
             }
         });
+
+    private async Task<SavedTorrentEntry> LoadEntryAsync() =>
+        Assert.Single(await new SessionPersistence(Path.Combine(_root, "session"), NullLogger<SessionPersistence>.Instance).LoadAllAsync(Token));
+
+    private Task<SavedSessionState?> LoadSessionStateAsync() =>
+        new SessionPersistence(Path.Combine(_root, "session"), NullLogger<SessionPersistence>.Instance).LoadSessionStateAsync(Token);
 
     private static TorrentFile NewMetadata(string fileName) => new ApiTorrentFileBuilder()
         .WithName(fileName)

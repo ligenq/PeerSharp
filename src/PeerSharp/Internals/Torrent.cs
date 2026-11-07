@@ -540,6 +540,13 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// </summary>
     internal Func<Torrent, CancellationToken, Task>? SessionStartCoordinator { get; set; }
 
+    /// <summary>
+    /// Saves this torrent once someone has started or stopped it. Set by the owning engine; the
+    /// engine's own starts and stops go through <see cref="StartForEngineAsync"/> and
+    /// <see cref="StopForEngineAsync"/> instead, and do not come here.
+    /// </summary>
+    internal Func<Torrent, Task>? SessionSave { get; set; }
+
     internal long TotalDownloaded => FileTransferInternal?.Downloader.Downloaded ?? 0;
     internal long TotalUploaded => FileTransferInternal?.Uploader.Uploaded ?? 0;
     private long LifetimeDownloaded => _restoredDownloaded + TotalDownloaded;
@@ -1454,11 +1461,27 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         return _fileSelectionManager.SetFileSelectionAsync(internalIndex, selection, cancellationToken);
     }
 
-    public Task StartAsync(CancellationToken cancellationToken = default)
+    public Task StartAsync(CancellationToken cancellationToken = default) =>
+        ThenSave(StartForEngineAsync(cancellationToken));
+
+    /// <summary>A start the engine made itself, such as the queue's, which saves nothing.</summary>
+    internal Task StartForEngineAsync(CancellationToken cancellationToken = default)
     {
         _disposal.ThrowIfDisposed(this);
         return SessionStartCoordinator?.Invoke(this, cancellationToken)
             ?? StartCoreAsync(cancellationToken);
+    }
+
+    private Task ThenSave(Task change)
+    {
+        var save = SessionSave;
+        return save == null ? change : ThenSaveAsync(change, save);
+    }
+
+    private async Task ThenSaveAsync(Task change, Func<Torrent, Task> save)
+    {
+        await change.ConfigureAwait(false);
+        await save(this).ConfigureAwait(false);
     }
 
     internal Task StartCoreAsync(CancellationToken cancellationToken = default) =>
@@ -1771,10 +1794,15 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         }
     }
 
-    public Task StopAsync(CancellationToken cancellationToken = default)
-    {
-        return StopInternalAsync(false, cancellationToken);
-    }
+    public Task StopAsync(CancellationToken cancellationToken = default) =>
+        ThenSave(StopForEngineAsync(cancellationToken));
+
+    /// <summary>
+    /// A stop the engine made itself, which saves nothing: a shutdown stops every torrent, and saving
+    /// each of them as stopped would bring the whole session back stopped.
+    /// </summary>
+    internal Task StopForEngineAsync(CancellationToken cancellationToken = default) =>
+        StopInternalAsync(false, cancellationToken);
 
     /// <summary>
     /// The highest <see cref="TorrentStateData.Version"/> this build understands. Resume data

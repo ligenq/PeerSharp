@@ -15,6 +15,29 @@ public class ClientEnginePersistenceTests
         public bool DeleteCalled { get; private set; }
         public InfoHash? LastDeletedHash { get; private set; }
         public DhtState? SavedDhtState { get; private set; }
+        public Exception? SessionStateFailure { get; init; }
+        public List<SavedSessionState> SavedSessionStates { get; } = [];
+        public Func<CancellationToken, Task>? BeforeSessionStateSave { get; set; }
+
+        public async Task SaveSessionStateAsync(SavedSessionState state, CancellationToken cancellationToken = default)
+        {
+            if (SessionStateFailure != null)
+            {
+                throw SessionStateFailure;
+            }
+
+            if (BeforeSessionStateSave != null)
+            {
+                await BeforeSessionStateSave(cancellationToken);
+            }
+
+            SavedSessionStates.Add(state);
+        }
+
+        public Task<SavedSessionState?> LoadSessionStateAsync(CancellationToken cancellationToken = default)
+            => SessionStateFailure == null
+                ? Task.FromResult<SavedSessionState?>(null)
+                : Task.FromException<SavedSessionState?>(SessionStateFailure);
 
         public Task DeleteAsync(InfoHash hash, CancellationToken cancellationToken = default)
         {
@@ -304,6 +327,101 @@ public class ClientEnginePersistenceTests
     /// A ratio limit counts everything a torrent ever transferred, or a torrent the queue stopped at
     /// its limit would start seeding again after a restart. Trackers still hear this session's bytes.
     /// </summary>
+    /// <summary>The persistence going wrong must not be what decides whether anything stops.</summary>
+    [Fact(Timeout = 10000)]
+    public async Task APauseThatCannotBeSaved_StillPauses_AndAResumeStillResumes()
+    {
+        var persistence = new MockSessionPersistence { SessionStateFailure = new IOException("disk full") };
+        var settings = CreateSettings();
+        settings.Session.Enabled = true;
+        await using var engine = ClientEngine.Create(new TorrentClientOptions { Settings = settings, SessionPersistence = persistence });
+        await InvokePrivateAsync(engine, "LoadPersistedTorrentsAsync", CancellationToken.None);
+
+        await engine.PauseAsync(TestContext.Current.CancellationToken);
+        Assert.True(engine.IsPaused);
+
+        await engine.ResumeAsync(TestContext.Current.CancellationToken);
+        Assert.False(engine.IsPaused);
+    }
+
+    /// <summary>
+    /// By the time a resume is saved the session has resumed, so its caller giving up cannot be allowed
+    /// to leave the next start paused.
+    /// </summary>
+    [Fact(Timeout = 10000)]
+    public async Task AResumeCancelledAsItIsSaved_IsSavedAnyway()
+    {
+        var persistence = new MockSessionPersistence();
+        var settings = CreateSettings();
+        settings.Session.Enabled = true;
+        await using var engine = ClientEngine.Create(new TorrentClientOptions { Settings = settings, SessionPersistence = persistence });
+        await InvokePrivateAsync(engine, "LoadPersistedTorrentsAsync", CancellationToken.None);
+        await engine.PauseAsync(TestContext.Current.CancellationToken);
+
+        using var caller = new CancellationTokenSource();
+        persistence.BeforeSessionStateSave = async ct =>
+        {
+            await caller.CancelAsync();
+            ct.ThrowIfCancellationRequested();
+        };
+        await engine.ResumeAsync(caller.Token);
+
+        Assert.False(engine.IsPaused);
+        Assert.False(persistence.SavedSessionStates[^1].Paused);
+    }
+
+    /// <summary>
+    /// A pause and a resume in quick succession must land in that order, or the session comes back
+    /// the opposite of how it was left.
+    /// </summary>
+    [Fact(Timeout = 10000)]
+    public async Task AResume_WaitsForThePauseBeforeItToFinishSaving()
+    {
+        var persistence = new MockSessionPersistence();
+        var settings = CreateSettings();
+        settings.Session.Enabled = true;
+        await using var engine = ClientEngine.Create(new TorrentClientOptions { Settings = settings, SessionPersistence = persistence });
+        await InvokePrivateAsync(engine, "LoadPersistedTorrentsAsync", CancellationToken.None);
+
+        var saving = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishSaving = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        persistence.BeforeSessionStateSave = async _ =>
+        {
+            saving.SetResult();
+            await finishSaving.Task;
+        };
+
+        var pause = engine.PauseAsync(TestContext.Current.CancellationToken);
+        await saving.Task.WaitAsync(TestContext.Current.CancellationToken);
+        persistence.BeforeSessionStateSave = null;
+
+        var resume = engine.ResumeAsync(TestContext.Current.CancellationToken);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.False(resume.IsCompleted);
+
+        finishSaving.SetResult();
+        await Task.WhenAll(pause, resume);
+
+        Assert.Equal([true, false], persistence.SavedSessionStates.Select(state => state.Paused));
+        Assert.False(engine.IsPaused);
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task LoadPersistedTorrentsAsync_WhenThePauseCannotBeRead_StillLoadsTorrents()
+    {
+        var persistence = new MockSessionPersistence { SessionStateFailure = new IOException("unreadable") };
+        var file = CreateAndParseTorrentFile();
+        persistence.SavedEntries.Add(new SavedTorrentEntry(file.InfoHash, file.RawData.ToArray(), Options: new SavedTorrentOptions(Path.GetTempPath())));
+        var settings = CreateSettings();
+        settings.Session.Enabled = true;
+        await using var engine = ClientEngine.Create(new TorrentClientOptions { Settings = settings, SessionPersistence = persistence });
+
+        await InvokePrivateAsync(engine, "LoadPersistedTorrentsAsync", CancellationToken.None);
+
+        Assert.False(engine.IsPaused);
+        Assert.Single(engine.GetTorrents());
+    }
+
     [Fact(Timeout = 10000)]
     public async Task LoadPersistedTorrentsAsync_KeepsWhatEarlierSessionsTransferred()
     {

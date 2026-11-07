@@ -5,15 +5,16 @@ history has the reasoning and the measurements behind each one.
 
 ## 5.4.0 — Unreleased
 
-A restart now leaves a session as it was, and a file check no longer holds up the queue. Adds three
-members, all optional for anyone implementing the interfaces or reading saved sessions. Binary
+A restart now leaves a session as it was, and a file check no longer holds up the queue. Everything
+it adds is optional for anyone implementing the interfaces or reading saved sessions. Binary
 compatible with 5.3.1.
 
 ### Upgrade notes
 
 - **A paused session comes back paused.** It used to come back running with everything stopped. An
   application that pauses the engine before `InitializeAsync` and then resumes it should look at
-  `SessionRestoredPaused`, or it will resume a session someone left paused.
+  `SessionRestoredPaused`, or it will resume a session someone left paused. A custom
+  `ISessionPersistence` has to implement `SaveSessionStateAsync` and `LoadSessionStateAsync` for this.
 - **`SavedTorrentOptions.WasStarted` means "should start".** It now also covers a torrent checking its
   files or held by a session pause, not only one that was running. A session saved by an earlier
   version is restored as it always was until it next saves.
@@ -25,7 +26,8 @@ compatible with 5.3.1.
 ### Added
 
 - `IClientEngine.SessionRestoredPaused`.
-- `SavedTorrentOptions.QueueAutoStart` and `SavedTorrentOptions.SessionPaused`.
+- `SavedTorrentOptions.QueueAutoStart`.
+- `SavedSessionState`, with `ISessionPersistence.SaveSessionStateAsync` and `LoadSessionStateAsync`.
 
 ### Fixed
 
@@ -41,6 +43,11 @@ compatible with 5.3.1.
   before a torrent's files were checked, or by an earlier version for a torrent stopped before a save
   caught up with it, made the torrent download everything again over complete files. A torrent with
   files on disk and no pieces to its name is checked instead.
+- **Starting or stopping a torrent is saved as it happens,** not at the next periodic save. A torrent
+  added stopped and started once the add returned came back stopped after a crash in between, and one
+  stopped came back running.
+- **A paused session comes back paused with no torrents in it.** The pause is saved for the session
+  as a whole, as it happens, so removing the last torrent or a crash no longer loses it.
 - **A torrent stopped during a session pause stays stopped.** `ResumeAsync` started it anyway, and a
   restart then saved it as one to start.
 - **Queue passes run one at a time.** An add or removal overlapping another pass could fill one free

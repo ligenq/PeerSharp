@@ -55,13 +55,14 @@ public sealed record SavedTorrentOptions(
     /// differs from one that was stopped.
     /// </summary>
     public bool QueueAutoStart { get; init; }
-
-    /// <summary>
-    /// Whether the session was paused when this was saved. Any entry saying so restores the session
-    /// paused.
-    /// </summary>
-    public bool SessionPaused { get; init; }
 }
+
+/// <summary>
+/// What belongs to the session as a whole rather than to any torrent in it, and so has to outlast the
+/// last of them.
+/// </summary>
+/// <param name="Paused">Whether the session was paused.</param>
+public sealed record SavedSessionState(bool Paused = false);
 
 /// <summary>
 /// Connection preferences learned for a peer endpoint and retained with the torrent session.
@@ -123,4 +124,19 @@ public interface ISessionPersistence
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The loaded DHT state, or null if not found.</returns>
     Task<DhtState?> LoadDhtStateAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Saves the state of the session as a whole. An implementation that leaves this out has a session
+    /// that never comes back paused.
+    /// </summary>
+    /// <param name="state">The state to save, replacing any saved before.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    Task SaveSessionStateAsync(SavedSessionState state, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    /// <summary>
+    /// Loads what <see cref="SaveSessionStateAsync"/> saved.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The saved state, or null if there is none.</returns>
+    Task<SavedSessionState?> LoadSessionStateAsync(CancellationToken cancellationToken = default) => Task.FromResult<SavedSessionState?>(null);
 }

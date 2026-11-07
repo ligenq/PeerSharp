@@ -435,6 +435,20 @@ public sealed class SessionPersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task SessionState_RoundTrips_AndLaterSavesReplaceIt()
+    {
+        var persistence = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        Assert.Null(await persistence.LoadSessionStateAsync());
+
+        await persistence.SaveSessionStateAsync(new SavedSessionState(Paused: true));
+        var reloaded = new SessionPersistence(_tempDir, NullLogger<SessionPersistence>.Instance);
+        Assert.True((await reloaded.LoadSessionStateAsync())?.Paused);
+
+        await reloaded.SaveSessionStateAsync(new SavedSessionState(Paused: false));
+        Assert.False((await reloaded.LoadSessionStateAsync())?.Paused);
+    }
+
+    [Fact]
     public async Task DhtLoadSkipsMalformedNodesWithoutDiscardingHealthyOnes()
     {
         await File.WriteAllTextAsync(Path.Combine(_tempDir, "dht.json"),
