@@ -46,6 +46,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     private readonly SemaphoreSlim _pauseGate = new(1, 1);
     private readonly Lock _pauseLock = new();
     private readonly Dictionary<InfoHash, long> _pausedTorrents = [];
+
+    /// <summary>
+    /// Whether the saved pause has been read, and so can be replaced. Guarded by the pause gate.
+    /// </summary>
+    private bool _sessionPauseLoaded;
     private int _paused;
     private int _initialized;
     private INetworkManager? _networkManager;
@@ -479,6 +484,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 Volatile.Write(ref _paused, 1);
             }
 
+            await SaveSessionPauseAsync(cancellationToken).ConfigureAwait(false);
+
             // Always rescan. A cancelled earlier pause may have stopped only part of the session,
             // and a retry must finish the operation instead of treating the flag as proof.
             foreach (var torrent in _registry.GetAll())
@@ -502,7 +509,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
                 try
                 {
-                    await torrent.StopAsync(cancellationToken).ConfigureAwait(false);
+                    await torrent.StopForEngineAsync(cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -598,6 +605,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                     }
                 }
             }
+
+            // Not the caller's to cancel by now: the session has resumed, and would otherwise come
+            // back paused.
+            await SaveSessionPauseAsync(CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
@@ -607,6 +618,30 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         // Together, because most of these have nothing to hash: any torrent with no resume data is
         // here, and one added stopped with no files must not wait behind one that has 100 GB of them.
         await Task.WhenAll(mayCheckFiles.Select(hash => ResumeTorrentAsync(hash, cancellationToken))).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Records a pause or resume as it happens, with the pause gate held so that two cannot land out of
+    /// order. Only these record it, not every save: an application pausing the engine for the length of
+    /// its own startup is not the session being paused, and a crash in that time must not leave it so.
+    /// For the same reason a pause before the saved one has been read replaces nothing.
+    /// </summary>
+    private async Task SaveSessionPauseAsync(CancellationToken cancellationToken)
+    {
+        if (_sessionManager == null || !_sessionPauseLoaded)
+        {
+            return;
+        }
+
+        try
+        {
+            await _sessionManager.SaveSessionStateAsync(new SavedSessionState(IsPaused), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The pause itself has happened. Only what a restart comes back as is at stake.
+            _logger.LogWarning(ex, "The session pause could not be saved");
+        }
     }
 
     private async Task ResumeTorrentAsync(InfoHash hash, CancellationToken cancellationToken)
@@ -629,6 +664,36 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         {
             Defect.ReportIfDefect(ex, $"resuming torrent {hash}", _logger);
             _logger.LogWarning(ex, "Torrent {Hash} could not be restarted while resuming the session", hash);
+        }
+    }
+
+    /// <summary>
+    /// Saves a torrent as soon as someone has started or stopped it, rather than at the next periodic
+    /// save. An application that adds a torrent stopped and starts it once the add returns would
+    /// otherwise lose the start to a crash in between, and the torrent would come back stopped.
+    /// </summary>
+    private async Task SaveStartOrStopAsync(Torrent torrent)
+    {
+        // A shutdown saves everything itself, and knows which of the starts it ended were meant to run.
+        if (_sessionManager == null || _disposal.IsDisposed)
+        {
+            return;
+        }
+
+        // A removal or a replacement has the last word on the entry.
+        if (!_registry.TryGet(torrent.SessionHash, out var registered) || !ReferenceEquals(registered, torrent))
+        {
+            return;
+        }
+
+        try
+        {
+            await _sessionManager.SaveTorrentEntryAsync(torrent, null, null, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The start or stop has happened. Only what a crash before the next save comes back as is at stake.
+            _logger.LogWarning(ex, "Torrent {Name} could not be saved after it was started or stopped", torrent.Name);
         }
     }
 
@@ -869,7 +934,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
         foreach (var torrent in _registry.GetAllIncludingTransient())
         {
-            stopTasks.Add(torrent.StopAsync(ct));
+            stopTasks.Add(torrent.StopForEngineAsync(ct));
         }
 
         stopTasks.AddRange(backgroundLoops);
@@ -1013,6 +1078,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (!transient)
         {
             torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
+            torrent.SessionSave = SaveStartOrStopAsync;
         }
 
         torrent.DhtManager = Dht;
@@ -1059,6 +1125,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         if (!transient)
         {
             torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
+            torrent.SessionSave = SaveStartOrStopAsync;
         }
 
         torrent.DhtManager = Dht;
@@ -1688,21 +1755,14 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         try
         {
+            // Before any torrent loads, so those the pause stopped go back to being held by it and the
+            // next resume starts them, instead of every one starting now.
+            await RestoreSessionPauseAsync(cancellationToken).ConfigureAwait(false);
+
             var entries = await _sessionManager.LoadAllAsync(cancellationToken).ConfigureAwait(false);
             if (entries.Count == 0)
             {
                 return;
-            }
-
-            // Before any torrent loads, so those the pause stopped go back to being held by it and the
-            // next resume starts them, instead of every one starting now.
-            if (entries.Any(entry => entry.Options?.SessionPaused == true))
-            {
-                SessionRestoredPaused = true;
-                lock (_pauseLock)
-                {
-                    Volatile.Write(ref _paused, 1);
-                }
             }
 
             // Load torrents concurrently. Each entry allocates files and spins up its
@@ -1744,6 +1804,33 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to load persisted session");
+        }
+    }
+
+    private async Task RestoreSessionPauseAsync(CancellationToken cancellationToken)
+    {
+        await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var saved = await _sessionManager!.LoadSessionStateAsync(cancellationToken).ConfigureAwait(false);
+            if (saved?.Paused == true)
+            {
+                SessionRestoredPaused = true;
+                lock (_pauseLock)
+                {
+                    Volatile.Write(ref _paused, 1);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Nothing else in the session depends on this, so it must not cost the torrents.
+            _logger.LogWarning(ex, "The saved session pause could not be read");
+        }
+        finally
+        {
+            _sessionPauseLoaded = true;
+            _pauseGate.Release();
         }
     }
 
@@ -1824,7 +1911,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             {
                 try
                 {
-                    await torrent.StopAsync(ct).ConfigureAwait(false);
+                    await torrent.StopForEngineAsync(ct).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -1863,7 +1950,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         try
         {
-            await torrent.StartAsync(ct).ConfigureAwait(false);
+            await torrent.StartForEngineAsync(ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -2102,7 +2189,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         try
         {
             _registry.RemoveTransient(torrent);
-            await torrent.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            await torrent.StopForEngineAsync(CancellationToken.None).ConfigureAwait(false);
             _bandwidth.RemoveTorrentChannels(torrent);
             await torrent.DisposeAsync().ConfigureAwait(false);
         }
@@ -2505,7 +2592,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         try
         {
-            try { await t.StopAsync(CancellationToken.None).ConfigureAwait(false); }
+            try { await t.StopForEngineAsync(CancellationToken.None).ConfigureAwait(false); }
             catch (Exception ex) { _logger.LogWarning(ex, "Failed to stop removed torrent {Hash}", t.Hash); }
 
             if (options.HasFlag(RemoveOptions.DeleteFiles))

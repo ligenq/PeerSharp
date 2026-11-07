@@ -5,8 +5,6 @@ namespace PeerSharp.Internals;
 /// </summary>
 internal interface ISessionPauseState
 {
-    bool IsPaused { get; }
-
     /// <summary>Whether the pause stopped this torrent, so that resuming will start it again.</summary>
     bool IsHolding(Torrent torrent);
 }

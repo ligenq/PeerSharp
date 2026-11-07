@@ -899,8 +899,10 @@ interface PeerSharp.Interfaces.ISessionPersistence
     Task SaveAllAsync(IEnumerable<PeerSharp.Interfaces.SavedTorrentEntry> entries, CancellationToken cancellationToken = default)
     Task SaveAsync(PeerSharp.Interfaces.SavedTorrentEntry entry, CancellationToken cancellationToken = default)
     Task SaveDhtStateAsync(PeerSharp.Core.DhtState state, CancellationToken cancellationToken = default)
+    Task SaveSessionStateAsync(PeerSharp.Interfaces.SavedSessionState state, CancellationToken cancellationToken = default)
     Task<IReadOnlyList<PeerSharp.Interfaces.SavedTorrentEntry>> LoadAllAsync(CancellationToken cancellationToken = default)
     Task<PeerSharp.Core.DhtState> LoadDhtStateAsync(CancellationToken cancellationToken = default)
+    Task<PeerSharp.Interfaces.SavedSessionState> LoadSessionStateAsync(CancellationToken cancellationToken = default)
 interface PeerSharp.Interfaces.ITorrent
     Boolean Finished { get; }
     Boolean HasMetadata { get; }
@@ -1014,6 +1016,15 @@ sealed class PeerSharp.Interfaces.SavedPeerPreference
     String Address { get; init; }
     String ToString()
     Void Deconstruct(out String Address, out Int32 Port, out Boolean UtpSupported, out Boolean OfferEncryptionNext)
+sealed class PeerSharp.Interfaces.SavedSessionState
+    .ctor(Boolean Paused = default)
+    Boolean Equals(Object obj)
+    Boolean Equals(PeerSharp.Interfaces.SavedSessionState other)
+    Boolean Paused { get; init; }
+    Int32 GetHashCode()
+    PeerSharp.Interfaces.SavedSessionState <Clone>$()
+    String ToString()
+    Void Deconstruct(out Boolean Paused)
 sealed class PeerSharp.Interfaces.SavedTorrentEntry
     .ctor(PeerSharp.Core.InfoHash Hash, Byte[] TorrentFileData = default, String MagnetLink = default, PeerSharp.Core.TorrentResumeData ResumeData = default, PeerSharp.Interfaces.SavedTorrentOptions Options = default)
     Boolean Equals(Object obj)
@@ -1032,7 +1043,6 @@ sealed class PeerSharp.Interfaces.SavedTorrentOptions
     Boolean Equals(Object obj)
     Boolean Equals(PeerSharp.Interfaces.SavedTorrentOptions other)
     Boolean QueueAutoStart { get; init; }
-    Boolean SessionPaused { get; init; }
     Boolean SuperSeeding { get; init; }
     Boolean WasStarted { get; init; }
     IReadOnlyList<PeerSharp.Interfaces.SavedPeerPreference> PeerPreferences { get; init; }

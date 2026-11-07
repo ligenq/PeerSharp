@@ -102,7 +102,7 @@ public class BlockCachePropertyTests
             Gen.Int[0, 3].Select(block => block * BlockSize),
             Gen.Int[0, TotalSize - 1]);
 
-        return Gen.Select(Gen.Bool, offset, Gen.OneOfConst(1, 100, BlockSize - 1, BlockSize, BlockSize + 1), Gen.Byte)
+        return Gen.Select(Gen.Bool, offset, Gen.OneOf(1, 100, BlockSize - 1, BlockSize, BlockSize + 1), Gen.Byte)
             .Select(t => new Operation(t.Item1, t.Item2, Math.Min(t.Item3, TotalSize - t.Item2), t.Item4))
             .Array[1, 24];
     }

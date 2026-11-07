@@ -502,7 +502,7 @@ Notes for production use:
 ## Testing
 
 Unit, integration, architecture and property-based tests run in CI. To run the core suite locally,
-use the SDK selected by `global.json` (10.0.400 or a compatible patch):
+use the SDK selected by `global.json` (10.0.403 or a compatible patch):
 
 ```shell
 dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj --configuration Release

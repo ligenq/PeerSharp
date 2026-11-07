@@ -21,7 +21,7 @@ public class PathValidatorPropertyTests
     /// reserves or rewrites, characters no platform will store, and ordinary names that merely look
     /// suspicious and must still be accepted.
     /// </summary>
-    private static readonly Gen<string> Component = Gen.OneOfConst(
+    private static readonly Gen<string> Component = Gen.OneOf(
         "..", ".", "...", "..foo", "foo..", ".hidden",
         "", " ", "  ", "\t",
         "/", "\\", "//", "\\\\", "/..", "..\\",
@@ -33,7 +33,7 @@ public class PathValidatorPropertyTests
         "normal.txt", "sub", "a", new string('x', 300));
 
     private static readonly Gen<string> Path_ = Component.Array[0, 6]
-        .SelectMany(parts => Gen.OneOfConst("/", "\\").Select(separator => string.Join(separator, parts)));
+        .SelectMany(parts => Gen.OneOf("/", "\\").Select(separator => string.Join(separator, parts)));
 
     private readonly string _root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "PeerSharpPathProps", Guid.NewGuid().ToString("N"));
 
