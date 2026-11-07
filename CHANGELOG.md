@@ -3,7 +3,7 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
-## 5.4.0 — Unreleased
+## 5.4.0 — 2026-11-07
 
 A restart now leaves a session as it was, and a file check no longer holds up the queue. Everything
 it adds is optional for anyone implementing the interfaces or reading saved sessions. Binary
