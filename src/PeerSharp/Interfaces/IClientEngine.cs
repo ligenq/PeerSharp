@@ -258,8 +258,8 @@ public interface IClientEngine : IAsyncDisposable
     bool IsPaused { get; }
 
     /// <summary>
-    /// Whether <see cref="InitializeAsync"/> restored a session that was paused when it was saved. The
-    /// session is then paused until <see cref="ResumeAsync(CancellationToken)"/>, and a caller that
+    /// Whether <see cref="InitializeAsync"/> restored a session that was left paused. The session is
+    /// then paused until <see cref="ResumeAsync(CancellationToken)"/>, and a caller that
     /// paused the engine itself before initializing should use this to tell whether resuming is its
     /// decision to make.
     /// </summary>
@@ -287,6 +287,11 @@ public interface IClientEngine : IAsyncDisposable
     /// <para>
     /// The engine keeps running - the DHT node, the listeners and the port mappings all stay up, so
     /// this is not a substitute for disposing the engine.
+    /// </para>
+    /// <para>
+    /// A pause and a resume are saved as they happen, and a paused session comes back paused, with or
+    /// without torrents in it. A pause or resume before <see cref="InitializeAsync"/> is not saved, and
+    /// leaves a saved pause as it was.
     /// </para>
     /// </remarks>
     Task PauseAsync(CancellationToken cancellationToken = default);

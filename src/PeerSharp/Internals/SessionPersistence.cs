@@ -15,6 +15,7 @@ namespace PeerSharp.Internals;
 ///   - resume.dat (resume data bytes)
 ///   - options.json (saved options)
 /// Entries saved by older versions without current.txt are read directly from the hash directory.
+/// {SessionPath}/session.json holds what belongs to the session rather than to a torrent.
 /// </summary>
 internal sealed class SessionPersistence : ISessionPersistence
 {
@@ -24,6 +25,7 @@ internal sealed class SessionPersistence : ISessionPersistence
     private const string TorrentFileName = "torrent.torrent";
     private const string TorrentsFolder = "torrents";
     private const string DhtStateFileName = "dht.json";
+    private const string SessionStateFileName = "session.json";
     private const string CurrentSnapshotFileName = "current.txt";
     private const string SnapshotPrefix = "snapshot-";
 
@@ -363,6 +365,27 @@ internal sealed class SessionPersistence : ISessionPersistence
 
         await WriteAllTextAtomicAsync(path, json, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug("Saved DHT state with {Count} nodes", state.Nodes.Count);
+    }
+
+    public Task SaveSessionStateAsync(SavedSessionState state, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+
+        var json = JsonSerializer.Serialize(state, PeerSharpJsonContext.Default.SavedSessionState);
+        return WriteAllTextAtomicAsync(Path.Combine(_sessionPath, SessionStateFileName), json, cancellationToken);
+    }
+
+    public async Task<SavedSessionState?> LoadSessionStateAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = Path.Combine(_sessionPath, SessionStateFileName);
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize(json, PeerSharpJsonContext.Default.SavedSessionState);
     }
 
     internal sealed class DhtStateDto

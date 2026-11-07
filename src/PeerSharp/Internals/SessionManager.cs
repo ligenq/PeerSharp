@@ -188,6 +188,12 @@ internal sealed class SessionManager : IAsyncDisposable
         return _persistence.SaveDhtStateAsync(state, cancellationToken);
     }
 
+    public Task<SavedSessionState?> LoadSessionStateAsync(CancellationToken cancellationToken) =>
+        _persistence.LoadSessionStateAsync(cancellationToken);
+
+    public Task SaveSessionStateAsync(SavedSessionState state, CancellationToken cancellationToken) =>
+        _persistence.SaveSessionStateAsync(state, cancellationToken);
+
     public void RegisterTorrentData(InfoHash hash, byte[]? rawData, string? magnetLink)
     {
         lock (_lock)
@@ -350,8 +356,7 @@ internal sealed class SessionManager : IAsyncDisposable
             {
                 PeerPreferences = torrent.PeersInternal.ExportConnectionPreferences(),
                 SuperSeeding = torrent.SuperSeeding,
-                QueueAutoStart = torrent.QueueAutoStart,
-                SessionPaused = SessionPause?.IsPaused == true
+                QueueAutoStart = torrent.QueueAutoStart
             });
 
         if (filePersistence != null)

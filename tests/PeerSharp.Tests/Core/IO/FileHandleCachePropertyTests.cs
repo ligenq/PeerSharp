@@ -141,7 +141,7 @@ public class FileHandleCachePropertyTests : IDisposable
         // eviction from a careless one only arises when the least recently used handle is still
         // leased - which needs more handles held at once than the cache will keep.
         return Gen.Select(
-            Gen.OneOfConst(
+            Gen.OneOf(
                 OperationKind.Acquire, OperationKind.Acquire, OperationKind.Acquire,
                 OperationKind.Acquire, OperationKind.Acquire, OperationKind.Acquire,
                 OperationKind.Acquire,

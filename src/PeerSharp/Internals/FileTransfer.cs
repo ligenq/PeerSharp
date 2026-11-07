@@ -748,7 +748,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         {
             try
             {
-                await _torrent.StopAsync(CancellationToken.None).ConfigureAwait(false);
+                await _torrent.StopForEngineAsync(CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception stopEx)
             {
