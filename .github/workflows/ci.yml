@@ -22,7 +22,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.400
+          dotnet-version: 10.0.403
 
       - name: Restore and audit dependencies
         run: dotnet restore PeerSharp.slnx
@@ -66,7 +66,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.400
+          dotnet-version: 10.0.403
 
       - name: Restore
         run: dotnet restore tests/PeerSharp.Tests/PeerSharp.Tests.csproj
@@ -108,7 +108,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.400
+          dotnet-version: 10.0.403
 
       - name: Publish trimmed (trim warnings are errors)
         run: dotnet publish tests/PeerSharp.TrimSmoke/PeerSharp.TrimSmoke.csproj --configuration Release --output trimout
@@ -130,7 +130,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.400
+          dotnet-version: 10.0.403
 
       - name: Restore
         run: dotnet restore benchmarks/PeerSharp.Benchmarks/PeerSharp.Benchmarks.csproj
@@ -156,7 +156,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.400
+          dotnet-version: 10.0.403
 
       - name: Restore
         run: dotnet restore tests/PeerSharp.Fuzz/PeerSharp.Fuzz.csproj
@@ -182,7 +182,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.400
+          dotnet-version: 10.0.403
 
       - name: Restore
         run: dotnet restore tests/PeerSharp.WebTorrent.Tests/PeerSharp.WebTorrent.Tests.csproj
@@ -219,7 +219,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
-          dotnet-version: 10.0.400
+          dotnet-version: 10.0.403
 
       - name: Restore
         run: dotnet restore PeerSharp.slnx
