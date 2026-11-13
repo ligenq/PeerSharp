@@ -4,17 +4,24 @@ namespace PeerSharp.Internals.Dht;
 
 internal sealed class DhtExternalIpVoteTracker
 {
+    /// <summary>Bounds the competing addresses tracked at once, so a flood of distinct lies costs nothing.</summary>
+    private const int MaxCandidates = 8;
+
     private readonly Lock _lock = new();
     private readonly int _requiredVotes;
-    private IPAddress? _externalIp;
-    private int _votes;
-    private readonly HashSet<IPAddress> _sources = [];
+    private IPAddress? _confirmed;
+    private readonly Dictionary<IPAddress, Candidate> _candidates = [];
 
-    public DhtExternalIpVoteTracker(IPAddress? externalIp = null, int initialVotes = 0, int requiredVotes = 3)
+    public DhtExternalIpVoteTracker(int requiredVotes = 3)
     {
-        _externalIp = externalIp;
-        _votes = initialVotes;
         _requiredVotes = requiredVotes;
+    }
+
+    /// <summary>Creates a tracker that already trusts <paramref name="externalIp"/>.</summary>
+    public static DhtExternalIpVoteTracker CreateConfirmed(IPAddress externalIp, int requiredVotes = 3)
+    {
+        ArgumentNullException.ThrowIfNull(externalIp);
+        return new DhtExternalIpVoteTracker(requiredVotes) { _confirmed = externalIp };
     }
 
     /// <summary>
@@ -23,7 +30,9 @@ internal sealed class DhtExternalIpVoteTracker
     /// <remarks>
     /// Held back until the votes are in, deliberately. The first report is one stranger's opinion of
     /// where we are, and callers use this to derive values that decide which peers to keep - so a
-    /// single spoofed report should not move them.
+    /// single spoofed report should not move them. For the same reason a confirmed address is kept
+    /// until a challenger has gathered the same number of independent votes: one dissenting report
+    /// does not unconfirm it.
     /// </remarks>
     public IPAddress? ConfirmedAddress
     {
@@ -31,7 +40,7 @@ internal sealed class DhtExternalIpVoteTracker
         {
             lock (_lock)
             {
-                return _votes >= _requiredVotes ? _externalIp : null;
+                return _confirmed;
             }
         }
     }
@@ -58,38 +67,62 @@ internal sealed class DhtExternalIpVoteTracker
 
         lock (_lock)
         {
-            bool newCandidate = _externalIp == null || !_externalIp.Equals(reportedIp);
-            if (newCandidate)
+            if (reportedIp.Equals(_confirmed))
             {
-                _sources.Clear();
+                // Agreement with the confirmed address counts against every challenger, so replacing
+                // it takes a sustained majority rather than a few reports spread over hours.
+                DecayCandidates();
+                return DhtExternalIpVoteResult.AlreadyConfirmed(reportedIp, _requiredVotes, _requiredVotes);
             }
-            if (source != null && (newCandidate || _votes < _requiredVotes) && !_sources.Add(source))
+
+            bool firstEver = _confirmed == null && _candidates.Count == 0;
+            if (!_candidates.TryGetValue(reportedIp, out var candidate))
+            {
+                if (_candidates.Count >= MaxCandidates)
+                {
+                    _candidates.Remove(_candidates.MinBy(static c => c.Value.Votes).Key);
+                }
+                candidate = new Candidate();
+                _candidates[reportedIp] = candidate;
+            }
+
+            if (source != null && !candidate.Sources.Add(source))
             {
                 return DhtExternalIpVoteResult.Ignored;
             }
-            if (_externalIp == null)
+
+            candidate.Votes++;
+            if (candidate.Votes >= _requiredVotes)
             {
-                _externalIp = reportedIp;
-                _votes = 1;
-                return DhtExternalIpVoteResult.FirstReport(reportedIp, _votes, _requiredVotes);
+                _confirmed = reportedIp;
+                _candidates.Clear();
+                return DhtExternalIpVoteResult.Confirmed(reportedIp, candidate.Votes, _requiredVotes);
             }
 
-            if (!_externalIp.Equals(reportedIp))
+            if (candidate.Votes == 1)
             {
-                _externalIp = reportedIp;
-                _votes = 1;
-                return DhtExternalIpVoteResult.Changed(reportedIp, _votes, _requiredVotes);
+                return firstEver
+                    ? DhtExternalIpVoteResult.FirstReport(reportedIp, candidate.Votes, _requiredVotes)
+                    : DhtExternalIpVoteResult.Changed(reportedIp, candidate.Votes, _requiredVotes);
             }
 
-            if (_votes >= _requiredVotes)
-            {
-                return DhtExternalIpVoteResult.AlreadyConfirmed(reportedIp, _votes, _requiredVotes);
-            }
+            return DhtExternalIpVoteResult.Progress(reportedIp, candidate.Votes, _requiredVotes);
+        }
+    }
 
-            _votes++;
-            return _votes >= _requiredVotes
-                ? DhtExternalIpVoteResult.Confirmed(reportedIp, _votes, _requiredVotes)
-                : DhtExternalIpVoteResult.Progress(reportedIp, _votes, _requiredVotes);
+    private void DecayCandidates()
+    {
+        if (_candidates.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var (address, candidate) in _candidates.ToList())
+        {
+            if (--candidate.Votes <= 0)
+            {
+                _candidates.Remove(address);
+            }
         }
     }
 
@@ -97,12 +130,31 @@ internal sealed class DhtExternalIpVoteTracker
     {
         try
         {
-            return ipBytes.Length is 4 or 16 ? new IPAddress(ipBytes) : null;
+            // BEP 42 sends compact IP+port; the port is of no interest here.
+            ipBytes = ipBytes.Length switch
+            {
+                4 or 16 => ipBytes,
+                6 => ipBytes[..4],
+                18 => ipBytes[..16],
+                _ => [],
+            };
+            if (ipBytes.IsEmpty)
+            {
+                return null;
+            }
+            var address = new IPAddress(ipBytes);
+            return address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
         }
         catch
         {
             return null;
         }
+    }
+
+    private sealed class Candidate
+    {
+        public int Votes { get; set; }
+        public HashSet<IPAddress> Sources { get; } = [];
     }
 }
 

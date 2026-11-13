@@ -200,6 +200,34 @@ public class FileSelectionManagerSurfaceTests
         Assert.True(manager.GetAllFileSelections().Count > 42);
     }
 
+    [Fact]
+    public async Task FinishedBytesCountOnlySelectedFileDataNotPaddingOrUnselectedNeighbours()
+    {
+        // Piece 0 is 10000 bytes of A plus BEP 47 padding; piece 2 holds the last 3616 bytes of B and
+        // then the unselected C. Counting whole pieces reported more done than the files hold.
+        var metadata = new TorrentFileMetadata();
+        metadata.Info.PieceSize = 16384;
+        metadata.Info.FullSize = 16384L * 3;
+        metadata.Info.Files.Add(new PeerSharp.Internals.TorrentFileEntry { Path = "a.bin", Size = 10000, Offset = 0 });
+        metadata.Info.Files.Add(new PeerSharp.Internals.TorrentFileEntry { Path = ".pad/6384", Size = 6384, Offset = 10000, IsPadding = true });
+        metadata.Info.Files.Add(new PeerSharp.Internals.TorrentFileEntry { Path = "b.bin", Size = 20000, Offset = 16384 });
+        metadata.Info.Files.Add(new PeerSharp.Internals.TorrentFileEntry { Path = "c.bin", Size = 12768, Offset = 36384 });
+        for (int i = 0; i < 3; i++) metadata.Info.Pieces.Add(new byte[20]);
+        var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        var manager = new FileSelectionManager(metadata);
+        manager.Initialize(savedSelection: null, torrent.Pieces);
+
+        torrent.Pieces.AddPiece(0);
+        Assert.Equal(10000UL, manager.CalculateFinishedSelectedBytes());
+
+        await manager.SetFileSelectionAsync(
+            3,
+            new FileSelection { Selected = false, Priority = Priority.DoNotDownload },
+            TestContext.Current.CancellationToken);
+        torrent.Pieces.AddPiece(2);
+        Assert.Equal(13616UL, manager.CalculateFinishedSelectedBytes());
+    }
+
     private static FileSelectionManager CreateManager(int pieceCount, out Torrent torrent)
     {
         var metadata = new TorrentFileMetadata();

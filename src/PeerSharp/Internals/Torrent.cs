@@ -549,8 +549,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
 
     internal long TotalDownloaded => FileTransferInternal?.Downloader.Downloaded ?? 0;
     internal long TotalUploaded => FileTransferInternal?.Uploader.Uploaded ?? 0;
-    private long LifetimeDownloaded => _restoredDownloaded + TotalDownloaded;
-    private long LifetimeUploaded => _restoredUploaded + TotalUploaded;
+    internal long LifetimeDownloaded => _restoredDownloaded + TotalDownloaded;
+    internal long LifetimeUploaded => _restoredUploaded + TotalUploaded;
 
     public static Torrent Create(
         TorrentFileMetadata infoFile,
@@ -1626,9 +1626,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 throw;
             }
 
-            Alerts.TorrentAlert(AlertId.TorrentCheckStarted, this);
             Alerts.TorrentAlert(AlertId.TorrentStarted, this);
-            FireStateChangedEvent(TorrentState.Active);
+            FireStateChangedEvent(MetadataDownloadInternal?.Finished == false
+                ? TorrentState.DownloadingMetadata
+                : TorrentState.Active);
 
             _logger.LogInformation("Torrent {TorrentName} started", Name);
         }
@@ -2141,11 +2142,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 rejection);
 
             // Keep only what makes no claim about piece contents. The download path is where the
-            // files already are, and when the torrent was added is not a statement about them.
+            // files already are, when the torrent was added is not a statement about them, and
+            // neither are the bytes it has moved - dropping those would make lifetime counters dip.
             LocalState = new TorrentStateData
             {
                 DownloadPath = LocalState.DownloadPath,
-                AddedTime = LocalState.AddedTime
+                AddedTime = LocalState.AddedTime,
+                Downloaded = LocalState.Downloaded,
+                Uploaded = LocalState.Uploaded
             };
         }
 
@@ -2179,6 +2183,23 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
         _restoredUploaded = (long)LocalState.Uploaded;
     }
 
+    /// <summary>
+    /// Swaps a stopped torrent's disposed transfer for a fresh one that carries on its byte totals and
+    /// holds its partial pieces deferred, as a torrent restored from resume data would.
+    /// </summary>
+    private void ReplaceStoppedFileTransfer(FileTransfer stopped, List<TorrentStateData.UnfinishedPieceData>? unfinished)
+    {
+        var next = new FileTransfer(this, Services.TimeProvider, Services.LoggerFactory);
+        next.Downloader.AddDownloaded(stopped.Downloader.Downloaded);
+        next.Uploader.AddUploaded(stopped.Uploader.Uploaded);
+        if (unfinished is { Count: > 0 })
+        {
+            next.DeferUnfinishedPiecesState(unfinished);
+        }
+        FileTransferInternal = next;
+        _fileSelectionManager.SetBytesProvider(next);
+    }
+
     private void EnsureFileTransferInitialized()
     {
         if (FileTransferInternal?.IsDisposed != false)
@@ -2205,8 +2226,14 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             return;
         }
 
+        var infoHash = InfoFile.Info.GetTrackerInfoHash();
+        if (infoHash.IsEmpty)
+        {
+            return;
+        }
+
         var announceCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        _ = lsd.AnnounceAsync(Hash, announceCts.Token).ContinueWith(t =>
+        _ = lsd.AnnounceAsync(infoHash, announceCts.Token).ContinueWith(t =>
         {
             announceCts.Dispose();
             if (t.IsFaulted && t.Exception != null)
@@ -2498,9 +2525,18 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                     // set. Clear it so StartAsync rebuilds from the durable effective URL list.
                     await TryTeardownAsync(() => webSeeds.DisposeAsync().AsTask(), "web seeds", failures).ConfigureAwait(false);
                 }
-                if (FileTransferInternal != null)
+                if (FileTransferInternal is { } transfer)
                 {
-                    await TryTeardownAsync(() => FileTransferInternal.DisposeAsync().AsTask(), "file transfer", failures).ConfigureAwait(false);
+                    // Disposing the transfer drops its partial pieces, and the next start would build
+                    // a fresh one counting from zero. Take both out first so a stop/start keeps them.
+                    var unfinished = !disposing && HasMetadata && !transfer.IsDisposed
+                        ? transfer.CaptureUnfinishedPieces(streamed: false).Pieces
+                        : null;
+                    await TryTeardownAsync(() => transfer.DisposeAsync().AsTask(), "file transfer", failures).ConfigureAwait(false);
+                    if (!disposing)
+                    {
+                        ReplaceStoppedFileTransfer(transfer, unfinished);
+                    }
                 }
                 if (FilesInternal != null)
                 {

@@ -59,7 +59,7 @@ internal class LsdManager : ILsdManager
 
     public async Task AnnounceAsync(InfoHash infoHash, CancellationToken token = default)
     {
-        if (_settings.Proxy.ForceProxy || !_running || (_resolver.GetTorrent(infoHash) is Torrent restricted && (restricted.InfoFile.Info.IsPrivate || restricted.IsI2p)))
+        if (infoHash.IsEmpty || _settings.Proxy.ForceProxy || !_running || (_resolver.GetTorrent(infoHash) is Torrent restricted && (restricted.InfoFile.Info.IsPrivate || restricted.IsI2p)))
         {
             return;
         }
@@ -267,7 +267,10 @@ internal class LsdManager : ILsdManager
         {
             if (torrent.State == TorrentState.Active && torrent is not Torrent { InfoFile.Info.IsPrivate: true } && torrent is not Torrent { IsI2p: true })
             {
-                announceTasks.Add(AnnounceAsync(torrent.Hash, token));
+                // BEP 14 carries a 20-byte hash: a v2-only torrent's Hash is empty, so announce the
+                // truncated v2 hash it is known by on the wire.
+                var infoHash = torrent is Torrent t ? t.InfoFile.Info.GetTrackerInfoHash() : torrent.Hash;
+                announceTasks.Add(AnnounceAsync(infoHash, token));
             }
         }
 

@@ -93,7 +93,7 @@ internal partial class DhtManager
             endpoint,
             cancellationToken).ConfigureAwait(false);
 
-        return reply?.Get("r") is BDict r ? [.. ReadNodeEndpoints(r)] : [];
+        return reply?.Get("r") is BDict r ? [.. ReadNodes(r).Select(static node => node.EndPoint)] : [];
     }
 
     internal static DhtInfoHashSampleReply? ParseSampleReply(BDict r)
@@ -124,7 +124,7 @@ internal partial class DhtManager
         // node's storage is still unseen - so a nonsense value is floored rather than rejected.
         int total = (int)Math.Clamp(r.GetLong("num") ?? samples.Count, 0, int.MaxValue);
 
-        return new DhtInfoHashSampleReply(samples, total, interval, [.. ReadNodeEndpoints(r)]);
+        return new DhtInfoHashSampleReply(samples, total, interval, [.. ReadNodes(r).Select(static node => node.EndPoint)]);
     }
 
     /// <summary>

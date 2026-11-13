@@ -167,7 +167,26 @@ internal class TorrentFileInfo
             pieceEnd = FullSize - 1;
         }
 
-        for (int i = 0; i < Files.Count; i++)
+        // Files are stored in piece-space order: start at the last file whose offset is not after
+        // this piece rather than scanning from the first file for every piece.
+        int low = 0;
+        int high = Files.Count - 1;
+        int firstCandidate = 0;
+        while (low <= high)
+        {
+            int middle = low + ((high - low) / 2);
+            if (Files[middle].Offset <= pieceStart)
+            {
+                firstCandidate = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        for (int i = firstCandidate; i < Files.Count; i++)
         {
             var file = Files[i];
             if (file.IsPadding)
@@ -175,8 +194,6 @@ internal class TorrentFileInfo
                 continue;
             }
             long fileEnd = file.Offset + file.Size - 1;
-
-            // Check if piece overlaps with file
             if (pieceStart <= fileEnd && pieceEnd >= file.Offset)
             {
                 result.Add(i);

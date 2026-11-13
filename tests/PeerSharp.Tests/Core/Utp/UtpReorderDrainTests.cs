@@ -60,6 +60,27 @@ public class UtpReorderDrainTests
 
     private static ushort Seq(int index) => (ushort)(2 + index);
 
+    [Fact(Timeout = 30000)]
+    public async Task DisposingWithUnreadData_ReleasesWhatWasQueuedForTheReader()
+    {
+        var (stream, _) = Connected();
+        for (int i = 0; i < 200; i++)
+        {
+            Data(stream, Seq(i));
+        }
+
+        var channel = typeof(UtpStream).GetField("_pipeWriteChannel", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(stream)!;
+        var reader = channel.GetType().GetProperty("Reader")!.GetValue(channel)!;
+        var count = reader.GetType().GetProperty("Count")!;
+
+        // The pipe is full and nobody reads it, so its writer is stuck with the rest still queued.
+        await TorrentTestUtility.WaitUntilAsync(() => (int)count.GetValue(reader)! > 0);
+
+        await stream.DisposeAsync();
+
+        await TorrentTestUtility.WaitUntilAsync(() => (int)count.GetValue(reader)! == 0);
+    }
+
     [Theory(Timeout = 30000)]
     [InlineData(false)]
     [InlineData(true)]

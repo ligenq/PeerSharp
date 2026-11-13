@@ -34,6 +34,29 @@ public class LifecycleReviewTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task StartingMagnet_ReportsDownloadingMetadataWithoutACheckAlert()
+    {
+        var alerts = new PeerSharp.Internals.AlertsManager(TimeProvider.System);
+        alerts.RegisterAlerts(uint.MaxValue);
+        var transitions = new List<StateTransition>();
+        await using var torrent = TorrentTestUtility.CreateMinimal(
+            downloadPath: Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()),
+            alerts: alerts);
+        torrent.Events = new TorrentEventsBuilder().OnStateChanged((_, s) => transitions.Add(s)).Build();
+        torrent.MetadataDownload = new PeerSharp.Internals.Extensions.MetadataDownload(
+            torrent, Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance);
+        Assert.False(torrent.HasMetadata);
+
+        await torrent.StartAsync();
+
+        Assert.Equal(TorrentState.DownloadingMetadata, torrent.State);
+        Assert.Equal(TorrentState.DownloadingMetadata, Assert.Single(transitions).NewState);
+        var ids = alerts.PopAlerts().Select(a => a.Id).ToList();
+        Assert.Contains(AlertId.TorrentStarted, ids);
+        Assert.DoesNotContain(AlertId.TorrentCheckStarted, ids);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task PrivateTorrent_DoesNotAnnounceThroughLocalDiscovery()
     {
         await using var torrent = TorrentTestUtility.CreateMinimal(downloadPath: Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()));

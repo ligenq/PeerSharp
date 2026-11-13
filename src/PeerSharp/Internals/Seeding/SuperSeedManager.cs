@@ -132,8 +132,7 @@ internal class SuperSeedManager
             for (int i = 0; i < Math.Min(peerPieces.Count, _pieceSightings.Length); i++)
                 if (peerPieces.HasPiece(i) && peerHas.Add(i))
                 {
-                    var original = RecordDistributionLocked(peer, i);
-                    if (original != null) released.Add(original);
+                    released.UnionWith(RecordDistributionLocked(peer, i));
                 }
         }
         _ = ReassignAfterBitfieldAsync(released).ContinueWith(static task => _ = task.Exception, TaskScheduler.Default);
@@ -194,27 +193,43 @@ internal class SuperSeedManager
             return;
         }
 
-        IPeerCommunication? original;
+        List<IPeerCommunication> released;
         lock (_lock)
         {
             if (!_peerPieces.TryGetValue(peer, out var peerHas) || !peerHas.Add(pieceIndex)) return;
-            original = RecordDistributionLocked(peer, pieceIndex);
+            released = RecordDistributionLocked(peer, pieceIndex);
         }
-        if (original != null) await AssignPieceToPeerAsync(original).ConfigureAwait(false);
+        foreach (var original in released) await AssignPieceToPeerAsync(original).ConfigureAwait(false);
     }
 
-    private IPeerCommunication? RecordDistributionLocked(IPeerCommunication peer, int pieceIndex)
+    /// <summary>
+    /// Records <paramref name="peer"/> holding <paramref name="pieceIndex"/> and returns every other
+    /// peer that piece was advertised to, now free for another. A piece can be advertised to more
+    /// than one peer when no unassigned piece is left, and each of them is waiting on this sighting:
+    /// releasing only the first one left the rest without a piece for good.
+    /// </summary>
+    private List<IPeerCommunication> RecordDistributionLocked(IPeerCommunication peer, int pieceIndex)
     {
-        if (!_pieceOrigin.TryGetValue(pieceIndex, out var original) || ReferenceEquals(original, peer)) return null;
+        var released = new List<IPeerCommunication>();
+        foreach (var (assignee, assigned) in _assignedPieces)
+        {
+            if (assigned == pieceIndex && !ReferenceEquals(assignee, peer))
+            {
+                released.Add(assignee);
+            }
+        }
+
+        bool fromOtherPeer = _pieceOrigin.TryGetValue(pieceIndex, out var original) && !ReferenceEquals(original, peer);
+        if (!fromOtherPeer && released.Count == 0) return released;
+
         _pieceSightings[pieceIndex]++;
         _distributedPieces.Add(pieceIndex);
-        if (_assignedPieces.TryGetValue(original, out int assigned) && assigned == pieceIndex)
+        foreach (var assignee in released)
         {
-            if (_peerPieces.TryGetValue(original, out var pieces)) pieces.Add(pieceIndex);
-            _assignedPieces[original] = -1;
-            return original;
+            if (_peerPieces.TryGetValue(assignee, out var pieces)) pieces.Add(pieceIndex);
+            _assignedPieces[assignee] = -1;
         }
-        return null;
+        return released;
     }
 
     private async Task ReassignAfterBitfieldAsync(IEnumerable<IPeerCommunication> peers)

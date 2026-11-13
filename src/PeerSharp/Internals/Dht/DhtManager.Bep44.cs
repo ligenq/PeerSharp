@@ -74,8 +74,14 @@ internal partial class DhtManager
     /// <summary>Nodes an item is written to, matching the replication BEP 5 uses for peers.</summary>
     private const int ReplicationCount = 8;
 
-    /// <summary>Upper bound on lookup rounds, so a hostile or broken swarm cannot spin forever.</summary>
-    private const int MaxLookupRounds = 8;
+    /// <summary>
+    /// Upper bound on lookup rounds, so a hostile or broken swarm cannot spin forever. A healthy
+    /// lookup converges well before this; see <see cref="RunItemLookupAsync"/>.
+    /// </summary>
+    private const int MaxLookupRounds = 16;
+
+    /// <summary>Unqueried candidates kept between rounds; the farthest are dropped first.</summary>
+    private const int MaxLookupCandidates = 64;
 
     private static readonly TimeSpan QueryTimeout = TimeSpan.FromSeconds(5);
 
@@ -225,39 +231,55 @@ internal partial class DhtManager
     /// <summary>
     /// Walks the DHT toward <paramref name="target"/>, collecting the newest item any node holds
     /// and the write tokens needed to publish there afterwards.
+    ///
+    /// This is a Kademlia walk: each round queries the closest unqueried nodes by XOR distance,
+    /// and the walk ends once the <see cref="ReplicationCount"/> closest responders are closer than
+    /// anything left to ask. Write targets are returned closest first, so a put lands on the nodes
+    /// a later get will actually reach rather than on whichever nodes happened to answer first.
     /// </summary>
     private async Task<ItemLookupResult> RunItemLookupAsync(DhtTarget target, byte[]? salt, CancellationToken cancellationToken)
     {
         if (salt is { Length: > DhtItem.MaxSaltLength }) throw new ArgumentException("DHT salt exceeds 64 bytes.", nameof(salt));
+        var targetId = target.Span.ToArray();
+        var byDistance = Comparer<byte[]>.Create((x, y) => CompareXorDistance(targetId, x, y));
+        var ownId = NodeId.ToArray();
+
         var queried = new HashSet<IPEndPoint>();
-        var writeTargets = new List<(IPEndPoint Endpoint, byte[] Token)>();
+        var candidates = new Dictionary<IPEndPoint, byte[]>();
+        var responders = new List<(byte[] Id, IPEndPoint Endpoint, byte[]? Token)>();
         DhtItem? best = null;
 
         int replied = 0, errored = 0, timedOut = 0, itemsReturned = 0;
         var errorCodes = new Dictionary<int, int>();
 
-        var candidates = FindClosestNodes(target.Span, ReplicationCount)
-            .Select(node => node.EndPoint)
-            .ToList();
+        foreach (var node in FindClosestNodes(target.Span, ReplicationCount))
+        {
+            candidates.TryAdd(node.EndPoint, node.Id);
+        }
         int initialCandidates = candidates.Count;
 
         for (int round = 0; round < MaxLookupRounds && candidates.Count > 0; round++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var batch = candidates.Where(queried.Add).Take(LookupConcurrency).ToArray();
-            if (batch.Length == 0)
+            var batch = candidates.OrderBy(static pair => pair.Value, byDistance).Take(LookupConcurrency).ToArray();
+            if (responders.Count >= ReplicationCount &&
+                byDistance.Compare(batch[0].Value, KthClosestResponder(responders, byDistance)) >= 0)
             {
                 break;
             }
 
-            var replies = await Task.WhenAll(batch.Select(endpoint => SendCorrelatedQueryAsync(
+            foreach (var (endpoint, _) in batch)
+            {
+                candidates.Remove(endpoint);
+                queried.Add(endpoint);
+            }
+
+            var replies = await Task.WhenAll(batch.Select(pair => SendCorrelatedQueryAsync(
                 BuildGetQuery(target, out var transactionId),
                 transactionId,
-                endpoint,
+                pair.Key,
                 cancellationToken))).ConfigureAwait(false);
-
-            var discovered = new List<IPEndPoint>();
 
             for (int i = 0; i < replies.Length; i++)
             {
@@ -276,11 +298,10 @@ internal partial class DhtManager
 
                 replied++;
 
+                // The responder's own id outranks whatever id the referral claimed for it.
+                var responderId = reply.GetBytes("id") is { Length: 20 } id ? id.ToArray() : batch[i].Value;
                 var token = reply.GetBytes("token");
-                if (token is not null)
-                {
-                    writeTargets.Add((batch[i], token.Value.ToArray()));
-                }
+                responders.Add((responderId, batch[i].Key, token?.ToArray()));
 
                 var candidate = TryReadItemFromReply(reply, target, salt);
                 if (candidate is not null)
@@ -292,11 +313,29 @@ internal partial class DhtManager
                     }
                 }
 
-                discovered.AddRange(ReadNodeEndpoints(reply));
+                foreach (var node in ReadNodes(reply))
+                {
+                    if (!queried.Contains(node.EndPoint) && !node.Id.AsSpan().SequenceEqual(ownId))
+                    {
+                        candidates.TryAdd(node.EndPoint, node.Id);
+                    }
+                }
             }
 
-            candidates = candidates.Concat(discovered).Where(endpoint => !queried.Contains(endpoint)).Distinct().Take(MaxLookupRounds * LookupConcurrency).ToList();
+            if (candidates.Count > MaxLookupCandidates)
+            {
+                foreach (var far in candidates.OrderBy(static pair => pair.Value, byDistance).Skip(MaxLookupCandidates).ToArray())
+                {
+                    candidates.Remove(far.Key);
+                }
+            }
         }
+
+        var writeTargets = responders
+            .Where(static responder => responder.Token is not null)
+            .OrderBy(static responder => responder.Id, byDistance)
+            .Select(static responder => (responder.Endpoint, responder.Token!))
+            .ToList();
 
         var stats = new DhtItemLookupStats(
             initialCandidates,
@@ -311,6 +350,26 @@ internal partial class DhtManager
         _logger.LogDebug("BEP 44 lookup of {Target}: {Stats}", target, stats);
 
         return new ItemLookupResult(best, writeTargets, stats);
+    }
+
+    private static byte[] KthClosestResponder(List<(byte[] Id, IPEndPoint Endpoint, byte[]? Token)> responders, IComparer<byte[]> byDistance)
+        => responders.Select(static responder => responder.Id).Order(byDistance).ElementAt(ReplicationCount - 1);
+
+    /// <summary>Orders two node ids by their XOR distance to <paramref name="target"/>.</summary>
+    private static int CompareXorDistance(byte[] target, byte[] x, byte[] y)
+    {
+        int length = Math.Min(target.Length, Math.Min(x.Length, y.Length));
+        for (int i = 0; i < length; i++)
+        {
+            int dx = x[i] ^ target[i];
+            int dy = y[i] ^ target[i];
+            if (dx != dy)
+            {
+                return dx.CompareTo(dy);
+            }
+        }
+
+        return 0;
     }
 
     /// <summary>
@@ -384,18 +443,18 @@ internal partial class DhtManager
                newer.SequenceNumber > current.SequenceNumber;
     }
 
-    private static IEnumerable<IPEndPoint> ReadNodeEndpoints(BDict reply)
+    private static List<NodeInfo> ReadNodes(BDict reply)
     {
-        var results = new List<IPEndPoint>();
+        var results = new List<NodeInfo>();
 
         if (reply.GetBytes("nodes") is { } nodes)
         {
-            results.AddRange(DhtCompactNodeCodec.Parse(nodes.Span, ipv6: false).Select(node => node.EndPoint));
+            results.AddRange(DhtCompactNodeCodec.Parse(nodes.Span, ipv6: false));
         }
 
         if (reply.GetBytes("nodes6") is { } nodes6)
         {
-            results.AddRange(DhtCompactNodeCodec.Parse(nodes6.Span, ipv6: true).Select(node => node.EndPoint));
+            results.AddRange(DhtCompactNodeCodec.Parse(nodes6.Span, ipv6: true));
         }
 
         return results;

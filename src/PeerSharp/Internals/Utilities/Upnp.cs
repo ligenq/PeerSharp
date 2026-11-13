@@ -212,6 +212,18 @@ internal static class UpnpDiscovery
         return null;
     }
 
+    private static bool IsServedBy(string location, IPAddress responder)
+    {
+        if (!Uri.TryCreate(location, UriKind.Absolute, out var uri) || !IPAddress.TryParse(uri.DnsSafeHost, out var host))
+        {
+            return false;
+        }
+
+        if (host.IsIPv4MappedToIPv6) host = host.MapToIPv4();
+        if (responder.IsIPv4MappedToIPv6) responder = responder.MapToIPv4();
+        return host.GetAddressBytes().AsSpan().SequenceEqual(responder.GetAddressBytes());
+    }
+
     private static IEnumerable<IPAddress> GetLocalIPs()
     {
         return NetworkInterface.GetAllNetworkInterfaces()
@@ -240,6 +252,14 @@ internal static class UpnpDiscovery
                 string? location = GetHeaderValue(response, "LOCATION");
                 if (!string.IsNullOrEmpty(location))
                 {
+                    // Any host on the network can answer a search, so only a description served by the
+                    // responder itself is fetched. Otherwise one reply could aim our requests anywhere.
+                    if (!IsServedBy(location, res.RemoteEndPoint.Address))
+                    {
+                        logger.LogDebug("Ignoring UPnP response from {Responder}: description {Location} is on another host", res.RemoteEndPoint.Address, location);
+                        continue;
+                    }
+
                     // Bound unsolicited discovery results and don't fetch the same description twice.
                     lock (gateways)
                     {

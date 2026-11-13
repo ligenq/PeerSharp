@@ -149,6 +149,36 @@ public class FileHandleCacheTests : IDisposable
         // The sibling torrent's handle must survive despite the shared string prefix
         Assert.False(siblingLease.Handle.IsClosed);
     }
+
+    [Fact(Timeout = 30000)]
+    public async Task Dispose_LeavesLeasedHandlesOpenUntilReleased()
+    {
+        string leased = Path.Combine(_tempDir, "leased.txt");
+        string idle = Path.Combine(_tempDir, "idle.txt");
+        File.WriteAllText(leased, "data");
+        File.WriteAllText(idle, "data");
+        var cache = new FileHandleCache(maxOpenFiles: 32);
+        var leasedLease = await cache.GetHandleAsync(leased, false);
+        var idleLease = await cache.GetHandleAsync(idle, false);
+        idleLease.Dispose();
+
+        cache.Dispose();
+
+        Assert.True(idleLease.Handle.IsClosed);
+        Assert.False(leasedLease.Handle.IsClosed);
+        leasedLease.Dispose();
+        Assert.True(leasedLease.Handle.IsClosed);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task GetHandleAsync_ReadDoesNotCreateAMissingFile()
+    {
+        string path = Path.Combine(_tempDir, "missing.txt");
+
+        await Assert.ThrowsAsync<FileNotFoundException>(async () => await _cache.GetHandleAsync(path, false));
+
+        Assert.False(File.Exists(path));
+    }
 }
 
 
