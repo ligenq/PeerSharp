@@ -73,6 +73,9 @@ internal sealed class RateLimitedStream : Stream
         Dispose(false);
     }
 
+    /// <summary>The stream being metered.</summary>
+    internal Stream Inner => _inner;
+
     public override bool CanRead => _inner.CanRead;
 
     public override bool CanSeek => false;

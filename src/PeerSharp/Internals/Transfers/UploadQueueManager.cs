@@ -154,7 +154,14 @@ internal sealed class UploadQueueManager : IAsyncDisposable
 
             peerCts.Cancel();
             channel.Writer.TryComplete();
-            peerCts.Dispose();
+
+            // The pump may still be inside an upload holding this token; dispose only once it has let go.
+            _ = pump.ContinueWith(
+                static (_, cts) => ((CancellationTokenSource)cts!).Dispose(),
+                peerCts,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
     }
 }

@@ -7,7 +7,13 @@ namespace PeerSharp.PieceWriter;
 
 internal sealed class FileHandleCache : IFileHandleCache
 {
-    private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
+    // Shared by every torrent, so two keys differing only in case must stay apart wherever the
+    // filesystem may tell them apart: sharing one handle between two files writes one over the other.
+    // Two handles to one file, the cost of erring the other way, is harmless.
+    private static readonly StringComparison PathComparison =
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.FromComparison(PathComparison));
     private readonly Lock _lock = new();
     private readonly ILogger<FileHandleCache> _logger;
     private readonly LinkedList<string> _lruList = new();
@@ -43,7 +49,7 @@ internal sealed class FileHandleCache : IFileHandleCache
 
         lock (_lock)
         {
-            var toRemove = _cache.Keys.Where(path => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList();
+            var toRemove = _cache.Keys.Where(path => path.StartsWith(prefix, PathComparison)).ToList();
             foreach (var path in toRemove)
             {
                 if (_cache.Remove(path, out var entry))
@@ -132,10 +138,11 @@ internal sealed class FileHandleCache : IFileHandleCache
                 }
             }
 
-            // Open new handle
+            // Open new handle. A read never creates the file: a missing file is an error either way,
+            // and creating it would leave an empty file behind, hiding that it was deleted.
             var handle = File.OpenHandle(
                 path: path,
-                mode: FileMode.OpenOrCreate,
+                mode: writable ? FileMode.OpenOrCreate : FileMode.Open,
                 access: writable ? FileAccess.ReadWrite : FileAccess.Read,
                 share: FileShare.ReadWrite,
                 options: FileOptions.Asynchronous | FileOptions.RandomAccess);
@@ -174,9 +181,14 @@ internal sealed class FileHandleCache : IFileHandleCache
         {
             lock (_lock)
             {
+                // A handle still leased is in use by I/O. Clearing the list orphans it, so the
+                // last lease to be released closes it.
                 foreach (var entry in _cache.Values)
                 {
-                    CloseEntry(entry);
+                    if (entry.RefCount == 0)
+                    {
+                        CloseEntry(entry);
+                    }
                 }
                 _cache.Clear();
                 _lruList.Clear();

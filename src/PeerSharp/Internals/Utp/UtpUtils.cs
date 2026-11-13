@@ -53,6 +53,8 @@ internal static class Utils
 
     public static uint TimestampMicro()
     {
-        return (uint)(TimestampClock.ElapsedTicks * 1_000_000 / Stopwatch.Frequency);
+        // Through TimeSpan ticks: ElapsedTicks * 1_000_000 overflows a long after about 2.5 hours
+        // where Stopwatch.Frequency is 1 GHz. Wrapping to 32 bits is what the protocol expects.
+        return unchecked((uint)(TimestampClock.Elapsed.Ticks / TimeSpan.TicksPerMicrosecond));
     }
 }

@@ -97,6 +97,54 @@ public class DhtExternalIpVoteTrackerTests
     }
 
     [Fact]
+    public void ProcessReport_SingleDissent_DoesNotUnconfirm()
+    {
+        var tracker = new DhtExternalIpVoteTracker(requiredVotes: 2);
+        var confirmed = IPAddress.Parse("203.0.113.10");
+        var challenger = IPAddress.Parse("198.51.100.20");
+        tracker.ProcessReport(confirmed.GetAddressBytes());
+        tracker.ProcessReport(confirmed.GetAddressBytes());
+
+        var dissent = tracker.ProcessReport(challenger.GetAddressBytes());
+
+        Assert.Equal(DhtExternalIpVoteStatus.Changed, dissent.Status);
+        Assert.Equal(confirmed, tracker.ConfirmedAddress);
+
+        var replaced = tracker.ProcessReport(challenger.GetAddressBytes());
+
+        Assert.Equal(DhtExternalIpVoteStatus.Confirmed, replaced.Status);
+        Assert.Equal(challenger, tracker.ConfirmedAddress);
+    }
+
+    [Fact]
+    public void ProcessReport_AgreementWithConfirmed_DecaysChallengers()
+    {
+        var tracker = new DhtExternalIpVoteTracker(requiredVotes: 2);
+        var confirmed = IPAddress.Parse("203.0.113.10");
+        var challenger = IPAddress.Parse("198.51.100.20");
+        tracker.ProcessReport(confirmed.GetAddressBytes());
+        tracker.ProcessReport(confirmed.GetAddressBytes());
+
+        tracker.ProcessReport(challenger.GetAddressBytes());
+        tracker.ProcessReport(confirmed.GetAddressBytes());
+        var afterDecay = tracker.ProcessReport(challenger.GetAddressBytes());
+
+        Assert.Equal(1, afterDecay.Votes);
+        Assert.Equal(confirmed, tracker.ConfirmedAddress);
+    }
+
+    [Fact]
+    public void ProcessReport_CompactAddressWithPort_IsAccepted()
+    {
+        var tracker = new DhtExternalIpVoteTracker(requiredVotes: 3);
+
+        var result = tracker.ProcessReport([203, 0, 113, 10, 0x1A, 0xE1]);
+
+        Assert.Equal(DhtExternalIpVoteStatus.FirstReport, result.Status);
+        Assert.Equal(IPAddress.Parse("203.0.113.10"), result.Address);
+    }
+
+    [Fact]
     public void ProcessReport_Ipv6Address_CanBeConfirmed()
     {
         var tracker = new DhtExternalIpVoteTracker(requiredVotes: 2);

@@ -16,6 +16,9 @@ internal class FileSelectionManager : IFileSelectionManager
     /// unchanged, even though the selected-piece answer changed.
     /// </summary>
     private long _piecesGenerationAtLastSync = -1;
+
+    /// <summary>File data in the received selected pieces; kept alongside the piece counters.</summary>
+    private long _receivedSelectedBytes;
     private PiecesProgress? _pieces; // Set during Initialize
 
     public FileSelectionManager(TorrentFileMetadata metadata)
@@ -59,20 +62,7 @@ internal class FileSelectionManager : IFileSelectionManager
         lock (_selectionLock)
         {
             EnsureStatsFresh();
-            ulong bytes = (ulong)ReceivedSelectedPieces * _metadata.Info.PieceSize;
-
-            // Adjust for last piece if it's smaller and selected/received
-            if (_pieces.Count > 0 &&
-                _metadata.Info.IsPieceNeeded(_pieces.Count - 1, _fileSelection) &&
-                _pieces.HasPiece(_pieces.Count - 1))
-            {
-                long lastPieceSize = _metadata.Info.FullSize % _metadata.Info.PieceSize;
-                if (lastPieceSize > 0)
-                {
-                    bytes -= _metadata.Info.PieceSize;
-                    bytes += (ulong)lastPieceSize;
-                }
-            }
+            ulong bytes = (ulong)Math.Max(0, _receivedSelectedBytes);
 
             if (_bytesProvider != null)
             {
@@ -173,6 +163,7 @@ internal class FileSelectionManager : IFileSelectionManager
                 if (_metadata.Info.IsPieceNeeded(pieceIndex, _fileSelection))
                 {
                     ReceivedSelectedPieces++;
+                    _receivedSelectedBytes += PieceDataBytes(pieceIndex);
                 }
 
                 _piecesGenerationAtLastSync = generation;
@@ -333,6 +324,7 @@ internal class FileSelectionManager : IFileSelectionManager
         long generationBefore = _pieces.Generation;
         int total = 0;
         int received = 0;
+        long receivedBytes = 0;
         for (int i = 0; i < _pieces.Count; i++)
         {
             if (_metadata.Info.IsPieceNeeded(i, _fileSelection))
@@ -341,6 +333,7 @@ internal class FileSelectionManager : IFileSelectionManager
                 if (_pieces.HasPiece(i))
                 {
                     received++;
+                    receivedBytes += PieceDataBytes(i);
                 }
             }
         }
@@ -348,6 +341,7 @@ internal class FileSelectionManager : IFileSelectionManager
         long generationAfter = _pieces.Generation;
         TotalSelectedPieces = total;
         ReceivedSelectedPieces = received;
+        _receivedSelectedBytes = receivedBytes;
 
         // A concurrent update can make this scan a transient mixture. Do not spin until a large,
         // active torrent happens to pause; leave it marked stale so the queued piece notification or
@@ -369,5 +363,39 @@ internal class FileSelectionManager : IFileSelectionManager
         {
             RecalculateSelectionStats();
         }
+    }
+
+    /// <summary>
+    /// Bytes of selected files in one piece. Padding (BEP 47 entries, or the gap BEP 52 leaves after
+    /// each file) is not data, and a piece shared with an unselected file is only partly ours, so a
+    /// flat piece size overstates.
+    /// </summary>
+    private long PieceDataBytes(int pieceIndex)
+    {
+        var info = _metadata.Info;
+        if (info.Files.Count == 0)
+        {
+            return info.GetPieceSize(pieceIndex);
+        }
+        if (_fileSelection.Count == 0)
+        {
+            return info.GetPieceContentSize(pieceIndex);
+        }
+
+        long pieceStart = (long)pieceIndex * info.PieceSize;
+        long pieceEnd = pieceStart + info.GetPieceSize(pieceIndex);
+        long bytes = 0;
+        foreach (int fileIndex in info.GetFilesForPiece(pieceIndex))
+        {
+            if (fileIndex < _fileSelection.Count &&
+                (!_fileSelection[fileIndex].Selected || _fileSelection[fileIndex].Priority == Priority.DoNotDownload))
+            {
+                continue;
+            }
+
+            var file = info.Files[fileIndex];
+            bytes += Math.Max(0, Math.Min(pieceEnd, file.Offset + file.Size) - Math.Max(pieceStart, file.Offset));
+        }
+        return bytes;
     }
 }

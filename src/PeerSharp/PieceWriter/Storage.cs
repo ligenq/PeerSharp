@@ -883,7 +883,7 @@ internal sealed class Storage : IStorage
             return;
         }
 
-        var fileLock = _fileLocks[fileIdx];
+        var fileLock = FileLockFor(fileIdx);
         await fileLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -902,7 +902,8 @@ internal sealed class Storage : IStorage
         }
         finally
         {
-            fileLock.Release();
+            try { fileLock.Release(); }
+            catch (ObjectDisposedException) { /* Ignored - storage shutting down */ }
         }
     }
 
@@ -1245,10 +1246,21 @@ internal sealed class Storage : IStorage
                 failIfShuttingDown && Volatile.Read(ref _shutdownRequested) == 1,
                 this);
 
-            var lockObj = _fileLocks[fileIdx];
+            var lockObj = FileLockFor(fileIdx);
             await lockObj.WaitAsync(ct).ConfigureAwait(false);
             acquiredLocks.Add(lockObj);
         }
+    }
+
+    /// <summary>
+    /// The lock for one file. Disposal swaps the array for an empty one, so an operation racing it is
+    /// told the storage is gone rather than failing with an index out of range.
+    /// </summary>
+    private SemaphoreSlim FileLockFor(int fileIdx)
+    {
+        var locks = Volatile.Read(ref _fileLocks);
+        ObjectDisposedException.ThrowIf((uint)fileIdx >= (uint)locks.Length, this);
+        return locks[fileIdx];
     }
 
     /// <summary>

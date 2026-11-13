@@ -27,6 +27,8 @@ internal class RoutingTable
 
     private const int MaxBucketNodesCount = 8;
 
+    private const int MaxFailuresBeforeInactive = 2;
+
     private static readonly TimeSpan MaxBucketFreshNodeInactiveTime = TimeSpan.Zero;
 
     private static readonly TimeSpan MaxBucketNodeInactiveTime = TimeSpan.FromMinutes(15);
@@ -80,19 +82,65 @@ internal class RoutingTable
             return;
         }
 
-        // BEP 42: Validate node ID against IP address
-        bool isSecure = false;
-        if (DhtSecurity.ShouldValidate(ep.Address))
+        NodeResponded(new NodeInfo(id, ep), IdMatchesAddress(id, ep));
+    }
+
+    /// <summary>
+    /// Adds a node another node told us about. Unlike <see cref="AddNode"/> nothing has been heard
+    /// from it, so it may only fill a gap: a referral naming a node we already know is ignored
+    /// rather than allowed to repoint it somewhere else.
+    /// </summary>
+    public void AddReferral(ReadOnlySpan<byte> id, IPEndPoint ep)
+    {
+        if (id.Length != 20)
         {
-            isSecure = DhtSecurity.ValidateNodeId(id, ep.Address);
-        }
-        else
-        {
-            // Don't validate local/private addresses - consider them secure
-            isSecure = true;
+            return;
         }
 
-        NodeResponded(new NodeInfo(id, ep), isSecure);
+        int bucketId = GetBucketId(id);
+        lock (_lock)
+        {
+            var bucket = _buckets[bucketId];
+            if (bucket.Find(id) != null || bucket.FindCache(id) != null)
+            {
+                return;
+            }
+        }
+
+        NodeResponded(new NodeInfo(id, ep), IdMatchesAddress(id, ep));
+    }
+
+    /// <summary>
+    /// Records a query to <paramref name="ep"/> that went unanswered. A node that fails
+    /// <see cref="MaxFailuresBeforeInactive"/> times running is no longer handed out, and the next
+    /// node to respond in its bucket may take its place.
+    /// </summary>
+    public void EndpointNotResponded(IPEndPoint ep)
+    {
+        lock (_lock)
+        {
+            foreach (var bucket in _buckets)
+            {
+                foreach (var n in bucket.Nodes)
+                {
+                    if (n.Info.EndPoint.Equals(ep))
+                    {
+                        if (++n.Failures >= MaxFailuresBeforeInactive)
+                        {
+                            n.Active = false;
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    private static bool IdMatchesAddress(ReadOnlySpan<byte> id, IPEndPoint ep)
+    {
+        // BEP 42: Validate node ID against IP address. Local/private addresses are not validated
+        // and count as secure.
+        return !DhtSecurity.ShouldValidate(ep.Address) || DhtSecurity.ValidateNodeId(id, ep.Address);
     }
 
     public List<NodeInfo> FindClosest(ReadOnlySpan<byte> target, int count)
@@ -221,10 +269,21 @@ internal class RoutingTable
                     }
                     else
                     {
-                        // BEP 42: If new node is secure and bucket is full,
-                        // try to replace an insecure node
+                        // A node that has stopped answering is the first to go, then (BEP 42) an
+                        // insecure one.
                         bool replaced = false;
-                        if (isSecure)
+                        for (int i = 0; i < bucket.Nodes.Count; i++)
+                        {
+                            if (!bucket.Nodes[i].Active)
+                            {
+                                bucket.Nodes[i] = bnode;
+                                bucket.LastUpdate = now;
+                                replaced = true;
+                                break;
+                            }
+                        }
+
+                        if (!replaced && isSecure)
                         {
                             for (int i = 0; i < bucket.Nodes.Count; i++)
                             {
@@ -264,16 +323,28 @@ internal class RoutingTable
                 }
                 else
                 {
+                    if (!n.Info.EndPoint.Equals(node.EndPoint))
+                    {
+                        // Someone else claiming a known ID; keep the endpoint we already have.
+                        return;
+                    }
                     n.LastUpdate = now;
-                    n.Info = node; // Update IP/Port
+                    n.Info = node;
                     n.IsSecure = isSecure; // Update security status
                     bucket.LastCacheUpdate = now;
                 }
             }
             else
             {
+                if (n.Active && !n.Info.EndPoint.Equals(node.EndPoint))
+                {
+                    // A live node keeps its endpoint: otherwise anyone could claim its ID and take
+                    // its place. Once it stops answering, the new endpoint may have it.
+                    return;
+                }
                 n.LastUpdate = now;
                 n.Active = true;
+                n.Failures = 0;
                 n.Info = node; // Update IP/Port
                 n.IsSecure = isSecure; // Update security status
                 bucket.LastUpdate = now;
@@ -359,6 +430,10 @@ internal class RoutingTable
         }
 
         public bool Active { get; set; }
+
+        /// <summary>Consecutive queries this node has left unanswered.</summary>
+        public int Failures { get; set; }
+
         public NodeInfo Info { get; set; }
 
         /// <summary>

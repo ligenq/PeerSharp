@@ -77,6 +77,23 @@ public class MerkleHashRequestCoordinatorTests
     }
 
     [Fact]
+    public void SelectV2Peer_Retry_PrefersAnotherPeer()
+    {
+        var coordinator = new MerkleHashRequestCoordinator(TimeSpan.FromSeconds(3));
+        var request = Request(index: 10);
+        var peers = new[] { new Candidate("a", true), new Candidate("b", true) };
+        var now = DateTimeOffset.UnixEpoch;
+
+        var first = coordinator.SelectV2Peer(request, peers, peer => peer.CanRequest, now);
+        var retry = coordinator.SelectV2Peer(request, peers, peer => peer.CanRequest, now.AddSeconds(4));
+        var third = coordinator.SelectV2Peer(request, peers, peer => peer.CanRequest, now.AddSeconds(8));
+
+        Assert.Equal("a", first.Peer!.Name);
+        Assert.Equal("b", retry.Peer!.Name);
+        Assert.Equal("a", third.Peer!.Name);
+    }
+
+    [Fact]
     public void CompleteFailedV2Request_RemovesThrottle()
     {
         var coordinator = new MerkleHashRequestCoordinator(TimeSpan.FromSeconds(3));

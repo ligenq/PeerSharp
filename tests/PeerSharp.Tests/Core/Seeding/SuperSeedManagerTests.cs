@@ -90,6 +90,39 @@ public class SuperSeedManagerTests
     }
 
     [Fact]
+    public async Task HandlePeerHaveAsync_ReleasesEveryPeerThePieceWasAdvertisedTo()
+    {
+        // With every piece already out, the next peer is offered one somebody else has too. A sighting
+        // of that piece has to free both: freeing only the first left the second waiting for good.
+        var ctx = CreateTorrentContext(2);
+        var manager = new SuperSeedManager(ctx.Torrent) { Enabled = true };
+        var peerA = new TestPeer(new IPEndPoint(IPAddress.Loopback, 1));
+        var peerB = new TestPeer(new IPEndPoint(IPAddress.Loopback, 2));
+        var peerC = new TestPeer(new IPEndPoint(IPAddress.Loopback, 3));
+        var peerD = new TestPeer(new IPEndPoint(IPAddress.Loopback, 4));
+
+        try
+        {
+            foreach (var peer in new[] { peerA, peerB, peerC, peerD }) manager.HandlePeerConnected(peer);
+            await manager.AssignPieceToPeerAsync(peerA);
+            await manager.AssignPieceToPeerAsync(peerB);
+            await manager.AssignPieceToPeerAsync(peerC);
+            int shared = peerC.SentMessages[0].HavePieceIndex;
+            var sharer = peerA.SentMessages[0].HavePieceIndex == shared ? peerA : peerB;
+
+            await manager.HandlePeerHaveAsync(peerD, shared);
+
+            Assert.Equal(2, sharer.SentMessages.Count);
+            Assert.Equal(2, peerC.SentMessages.Count);
+            Assert.NotEqual(shared, peerC.SentMessages[1].HavePieceIndex);
+        }
+        finally
+        {
+            Cleanup(ctx);
+        }
+    }
+
+    [Fact]
     public async Task AssignPieceToPeerAsync_MultiplePeersGetDifferentPieces()
     {
         var ctx = CreateTorrentContext(3);

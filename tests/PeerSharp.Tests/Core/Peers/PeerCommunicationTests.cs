@@ -9,6 +9,23 @@ namespace PeerSharp.Tests.Core.Peers;
 public class PeerCommunicationTests
 {
     [Fact]
+    public void Stream_ReassigningSameTlsStream_StaysMetered()
+    {
+        // Incoming TLS: the factory assigns the SslStream, then Start assigns it again.
+        var torrent = TorrentTestUtility.CreateMinimal();
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+        using var tls = new System.Net.Security.SslStream(new MemoryStream());
+
+        peer.Stream = tls;
+        var first = peer.Stream;
+        peer.Stream = tls;
+
+        var metered = Assert.IsType<RateLimitedStream>(peer.Stream);
+        Assert.Same(first, metered);
+        Assert.Same(tls, metered.Inner);
+    }
+
+    [Fact]
     public async Task SetHandshakeReceivedAsync_V2TruncatedHash_SetsFlagsAndPeerId()
     {
         var metadata = CreateMetadataV2();
@@ -214,6 +231,25 @@ public class PeerCommunicationTests
 
         InvokePrivate<object?>(peer, "AddSuggestedPiece", 6);
         Assert.NotSame(snapshot, peer.GetSuggestedPieces());
+        Assert.Equal([4, 5], snapshot);
+
+        await torrent.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SuggestedPieces_AreDedupedAndCapped()
+    {
+        var torrent = TorrentTestUtility.CreateMinimal(CreateMetadataV1(), CreateTempPath());
+        var peer = new PeerCommunication(torrent, new TestPeerListener(), TimeProvider.System);
+
+        for (int i = 0; i < 100; i++)
+        {
+            InvokePrivate<object?>(peer, "AddSuggestedPiece", i % 40);
+        }
+
+        var suggested = peer.GetSuggestedPieces();
+        Assert.Equal(16, suggested.Count);
+        Assert.Equal(suggested.Count, suggested.Distinct().Count());
 
         await torrent.DisposeAsync();
     }
@@ -498,9 +534,10 @@ public class PeerCommunicationTests
         Assert.False(dropPiece);
         Assert.False(dropChoke);
         Assert.False(dropRequest);
+        // A HAVE is sent once; dropping it hides the piece from the peer for the whole connection.
+        Assert.False(InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Have)));
 
         // Non-critical drops
-        Assert.True(InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Have)));
         Assert.True(InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.AllowedFast)));
         Assert.True(InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Suggest)));
         Assert.True(InvokePrivate<bool>(peer, "ShouldDropNonCriticalMessage", new PeerMessage(MessageId.Port)));
@@ -662,7 +699,7 @@ public class PeerCommunicationTests
         }
 
         int before = (int)GetPublicProperty(queue, "Count")!;
-        await peer.SendMessageAsync(new PeerMessage(MessageId.Have));
+        await peer.SendMessageAsync(new PeerMessage(MessageId.Suggest));
         int after = (int)GetPublicProperty(queue, "Count")!;
 
         Assert.Equal(before, after);
