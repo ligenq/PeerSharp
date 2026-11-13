@@ -14,6 +14,7 @@ internal class PortListener : IPortListener
     private readonly ITorrentResolver _resolver;
     private readonly ITcpListenerFactory _tcpFactory;
     private readonly ConnectionSettings _connectionSettings;
+    private readonly PendingHandshakeLimiter _pendingHandshakes = new();
     private CancellationTokenSource? _acceptCts;
     private AtomicDisposal _disposal = new();
     private bool _running;
@@ -158,7 +159,15 @@ internal class PortListener : IPortListener
                 try
                 {
                     var client = await _tcpListener.AcceptTcpClientAsync(token).ConfigureAwait(false);
-                    _ = HandleClientAsync(client);
+                    var remote = TryGetRemoteAddress(client);
+                    if (!_pendingHandshakes.TryEnter(remote))
+                    {
+                        _logger.LogDebug("Refusing incoming connection from {Remote}: too many handshakes in progress", remote);
+                        client.Dispose();
+                        continue;
+                    }
+
+                    _ = HandleClientAsync(client, remote);
                 }
                 catch (OperationCanceledException) { break; }
                 catch (ObjectDisposedException) { break; }
@@ -174,7 +183,21 @@ internal class PortListener : IPortListener
         }
     }
 
-    private async Task HandleClientAsync(TcpClient client)
+    internal int PendingHandshakes => _pendingHandshakes.Pending;
+
+    private static IPAddress? TryGetRemoteAddress(TcpClient client)
+    {
+        try
+        {
+            return (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+            return null;
+        }
+    }
+
+    private async Task HandleClientAsync(TcpClient client, IPAddress? remote)
     {
         bool ownershipTransferred = false;
         try
@@ -243,6 +266,7 @@ internal class PortListener : IPortListener
         }
         finally
         {
+            _pendingHandshakes.Exit(remote);
             if (!ownershipTransferred)
             {
                 client.Dispose();

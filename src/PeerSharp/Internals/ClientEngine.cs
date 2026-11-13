@@ -56,6 +56,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     private INetworkManager? _networkManager;
     private I2pSamSession? _i2pSession;
     private readonly Lock _i2pGate = new();
+    private readonly PendingHandshakeLimiter _pendingUtpHandshakes = new();
     private CancellationTokenSource? _dhtSaveCts;
 
     /// <summary>Drives the BEP 46 record keep-alive loop.</summary>
@@ -91,7 +92,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _logger = loggerFactory.CreateLogger<ClientEngine>();
         _registry = registry;
         _lifetimeTotals = new LifetimeByteTotals(
-            () => _registry.GetAll().Select(torrent => (torrent.TotalDownloaded, torrent.TotalUploaded)));
+            () => _registry.GetAll().Select(torrent => (torrent.LifetimeDownloaded, torrent.LifetimeUploaded)));
         _sessionManager = sessionManager;
         _sessionManager?.SessionPause = this;
 
@@ -142,8 +143,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         return _lifetimeTotals.RemoveAndRetire(
             () => transient ? _registry.RemoveTransient(torrent) : _registry.Remove(torrent),
-            torrent.TotalDownloaded,
-            torrent.TotalUploaded);
+            torrent.LifetimeDownloaded,
+            torrent.LifetimeUploaded);
     }
 
     public IAlerts Alerts => _alerts;
@@ -467,7 +468,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         lock (_pauseLock)
         {
-            return _pausedTorrents.TryGetValue(torrent.Hash, out long stopRequests)
+            return _pausedTorrents.TryGetValue(torrent.SessionHash, out long stopRequests)
                 && torrent.StopRequests <= stopRequests;
         }
     }
@@ -500,7 +501,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 lock (_pauseLock)
                 {
                     // Plus the stop below, which is this pause's own.
-                    _pausedTorrents[torrent.Hash] = torrent.StopRequests + 1;
+                    _pausedTorrents[torrent.SessionHash] = torrent.StopRequests + 1;
                 }
 
                 // Cleared before stopping, so the queue cannot pick this torrent up again between the
@@ -710,7 +711,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
                 if (paused)
                 {
                     torrent.QueueAutoStart = false;
-                    _pausedTorrents[torrent.Hash] = torrent.StopRequests;
+                    _pausedTorrents[torrent.SessionHash] = torrent.StopRequests;
                 }
             }
             if (paused)
@@ -1414,10 +1415,22 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
     private void HandleUtpConnection(UtpStream stream)
     {
-        // Need to read handshake similar to TCP
+        // Same bound the TCP listener applies: a handshake that has not named a torrent yet is not
+        // covered by any peer limit.
+        var remote = stream.RemoteEndPoint.Address;
+        if (!_pendingUtpHandshakes.TryEnter(remote))
+        {
+            _logger.LogDebug("Refusing incoming uTP connection from {Remote}: too many handshakes in progress", remote);
+            try { stream.Close(); }
+            catch (IOException) { /* Already closed by the peer */ }
+            catch (ObjectDisposedException) { /* Already disposed */ }
+            return;
+        }
+
         // Observe exceptions from fire-and-forget task
         _ = HandleIncomingUtpAsync(stream).ContinueWith(t =>
         {
+            _pendingUtpHandshakes.Exit(remote);
             if (t.IsFaulted && t.Exception != null)
             {
                 _logger.LogError(t.Exception.GetBaseException(), "Unhandled exception in uTP connection handler");
@@ -2463,7 +2476,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             throw new InvalidOperationException("Client engine is already initialized.");
         }
 
-        var torrentsBeforeInitialization = _registry.GetAll().Select(static t => t.Hash).ToHashSet();
+        var torrentsBeforeInitialization = _registry.GetAll().Select(static t => t.SessionHash).ToHashSet();
 
         try
         {
@@ -2513,7 +2526,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         foreach (var torrent in _registry.GetAll())
         {
-            if (torrentsBeforeInitialization.Contains(torrent.Hash))
+            if (torrentsBeforeInitialization.Contains(torrent.SessionHash))
             {
                 continue;
             }

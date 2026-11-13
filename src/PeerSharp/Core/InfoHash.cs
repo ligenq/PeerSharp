@@ -283,13 +283,16 @@ public readonly struct InfoHash : IEquatable<InfoHash>
     /// <inheritdoc/>
     public override int GetHashCode()
     {
-        if (_bytes == null || _bytes.Length < 4)
+        if (_bytes == null)
         {
             return 0;
         }
 
-        // Use first 4 bytes as hash code - sufficient for dictionary distribution
-        return BitConverter.ToInt32(_bytes, 0);
+        // Seeded per process: info hashes arrive from untrusted peers (DHT announces, handshakes),
+        // and a fixed hash such as the leading bytes would let them flood one dictionary bucket.
+        var hash = new HashCode();
+        hash.AddBytes(_bytes);
+        return hash.ToHashCode();
     }
 
     /// <summary>

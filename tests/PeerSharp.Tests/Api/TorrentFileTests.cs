@@ -23,6 +23,19 @@ public class TorrentFileTests
     }
 
     [Fact]
+    public void Parse_KeepsItsOwnCopyOfTheCallersBuffer()
+    {
+        var built = new TorrentFileBuilder().WithName("test").WithPieceLength(16384).AddFile("file.bin", new byte[1024]).Build();
+        byte[] buffer = built.RawData.ToArray();
+        byte[] expected = buffer.ToArray();
+
+        var parsed = TorrentFile.Parse(buffer);
+        Array.Clear(buffer);
+
+        Assert.Equal(expected, parsed.RawData.ToArray());
+    }
+
+    [Fact]
     public void GetFile_OutOfRange_Throws()
     {
         var builder = new TorrentFileBuilder()

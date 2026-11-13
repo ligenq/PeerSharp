@@ -37,12 +37,14 @@ internal sealed class BlockProcessor
             block.Dispose();
             return;
         }
-        // Ensure piece state exists for this piece
-        long pieceSize = _torrent.InfoFile.Info.GetPieceSize(block.PieceIndex);
-        int blocksPerPiece = (int)Math.Ceiling((double)pieceSize / _blockSize);
-
-        var newState = new PieceState(block.PieceIndex, blocksPerPiece);
-        _pieceStateManager.TryAddPiece(newState);
+        // Ensure piece state exists for this piece. Every block of a web seed piece arrives here, so only
+        // the first one allocates.
+        if (!_pieceStateManager.ContainsPiece(block.PieceIndex))
+        {
+            long pieceSize = _torrent.InfoFile.Info.GetPieceSize(block.PieceIndex);
+            int blocksPerPiece = (int)Math.Ceiling((double)pieceSize / _blockSize);
+            _pieceStateManager.TryAddPiece(new PieceState(block.PieceIndex, blocksPerPiece));
+        }
 
         try
         {

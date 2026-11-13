@@ -70,7 +70,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private bool _stateDirty;
 
-    private DhtExternalIpVoteTracker _externalIpVoteTracker = new(requiredVotes: ExternalIpVotesRequired);
+    // BEP 42 reports are kept per family: a dual-stack node has one address in each, and pooling them
+    // made every report from the other family look like a change of address.
+    private DhtExternalIpVoteTracker _externalIpV4VoteTracker = new(requiredVotes: ExternalIpVotesRequired);
+    private DhtExternalIpVoteTracker _externalIpV6VoteTracker = new(requiredVotes: ExternalIpVotesRequired);
 
     private DateTimeOffset _lastSecretRotation;
 
@@ -142,13 +145,19 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
         var actualTimeProvider = timeProvider ?? TimeProvider.System;
         var actualDnsResolver = dnsResolver ?? new SystemDnsResolver();
-        var manager = new DhtManager(id, listener, settings, actualTimeProvider, null, actualDnsResolver)
+        var manager = new DhtManager(id, listener, settings, actualTimeProvider, null, actualDnsResolver);
+        if (externalIp != null)
         {
-            _externalIpVoteTracker = new DhtExternalIpVoteTracker(
-                externalIp,
-                externalIp != null ? ExternalIpVotesRequired : 0,
-                ExternalIpVotesRequired)
-        };
+            var tracker = DhtExternalIpVoteTracker.CreateConfirmed(externalIp, ExternalIpVotesRequired);
+            if (externalIp.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                manager._externalIpV6VoteTracker = tracker;
+            }
+            else
+            {
+                manager._externalIpV4VoteTracker = tracker;
+            }
+        }
         return manager;
     }
 
@@ -461,6 +470,12 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     {
         var normalized = NetworkUtils.NormalizeEndPoint(endpoint);
         RoutingTableFor(normalized).AddNode(id, normalized);
+    }
+
+    private void AddRoutingReferral(ReadOnlySpan<byte> id, IPEndPoint endpoint)
+    {
+        var normalized = NetworkUtils.NormalizeEndPoint(endpoint);
+        RoutingTableFor(normalized).AddReferral(id, normalized);
     }
 
     /// <summary>Closest active nodes from each independent DHT, interleaved to avoid family bias.</summary>
@@ -1218,8 +1233,9 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 MarkStateDirty();
             }
 
-            // BEP 42: Check for "ip" field containing our external IP
-            var ipField = r.GetBytes("ip");
+            // BEP 42: our external address as the responder saw it. The spec puts it at the top level
+            // of the message as compact IP+port; older PeerSharp builds sent a bare address in "r".
+            var ipField = node.GetBytes("ip") ?? r.GetBytes("ip");
             if (ipField != null)
             {
                 ProcessExternalIp(ipField.Value.Span, remote.Address);
@@ -1232,7 +1248,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 var nodes = DhtCompactNodeCodec.Parse(nodesData.Value.Span, ipv6: false);
                 foreach (var n in nodes)
                 {
-                    AddRoutingNode(n.Id, n.EndPoint);
+                    AddRoutingReferral(n.Id, n.EndPoint);
                     MarkStateDirty();
                     ContinueWalk(trans, n.EndPoint);
                 }
@@ -1244,7 +1260,7 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 var nodes = DhtCompactNodeCodec.Parse(nodes6Data.Value.Span, ipv6: true);
                 foreach (var n in nodes)
                 {
-                    AddRoutingNode(n.Id, n.EndPoint);
+                    AddRoutingReferral(n.Id, n.EndPoint);
                     MarkStateDirty();
                     ContinueWalk(trans, n.EndPoint);
                 }
@@ -1302,7 +1318,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// </summary>
     private void ProcessExternalIp(ReadOnlySpan<byte> ipBytes, IPAddress source)
     {
-        ApplyExternalIpVote(_externalIpVoteTracker.ProcessReport(ipBytes, source), "BEP 42 DHT node");
+        var tracker = ipBytes.Length is 16 or 18 && !new IPAddress(ipBytes[..16]).IsIPv4MappedToIPv6
+            ? _externalIpV6VoteTracker
+            : _externalIpV4VoteTracker;
+        ApplyExternalIpVote(tracker.ProcessReport(ipBytes, source), "BEP 42 DHT node");
     }
 
     /// <summary>
@@ -1311,12 +1330,17 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// to be met, and the caller is responsible for not submitting the same tracker's opinion twice.
     /// </summary>
     /// <inheritdoc />
-    public IPAddress? ExternalIp => _externalIpVoteTracker.ConfirmedAddress;
+    public IPAddress? ExternalIp => _externalIpV4VoteTracker.ConfirmedAddress ?? _externalIpV6VoteTracker.ConfirmedAddress;
 
     public void ReportExternalIp(IPAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);
-        ApplyExternalIpVote(_externalIpVoteTracker.ProcessReport(address), "BEP 24 tracker");
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+        var tracker = address.AddressFamily == AddressFamily.InterNetworkV6 ? _externalIpV6VoteTracker : _externalIpV4VoteTracker;
+        ApplyExternalIpVote(tracker.ProcessReport(address), "BEP 24 tracker");
     }
 
     private void ApplyExternalIpVote(DhtExternalIpVoteResult result, string source)
@@ -1331,7 +1355,13 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 break;
             case DhtExternalIpVoteStatus.Confirmed:
                 _logger.LogDebug("{Source}: External IP confirmed ({Votes}/{Required}): {ExternalIP}", source, result.Votes, result.RequiredVotes, result.Address);
-                RegenerateNodeId(result.Address!);
+                // One node ID serves both families. Derive it from the IPv4 address when there is
+                // one, so confirming the IPv6 address alongside does not churn it.
+                if (result.Address!.AddressFamily == AddressFamily.InterNetwork
+                    || _externalIpV4VoteTracker.ConfirmedAddress == null)
+                {
+                    RegenerateNodeId(result.Address);
+                }
                 break;
             case DhtExternalIpVoteStatus.Changed:
                 _logger.LogDebug("{Source}: External IP changed to: {ExternalIP}", source, result.Address);
@@ -1381,6 +1411,12 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
     /// </summary>
     private void RegenerateNodeId(IPAddress externalIp)
     {
+        // Already secure for this address: a new ID would only throw both routing tables away.
+        if (DhtSecurity.ValidateNodeId(NodeId.Span, externalIp))
+        {
+            return;
+        }
+
         byte[] newId = DhtSecurity.GenerateSecureNodeId(externalIp);
         _logger.LogInformation("BEP 42: Regenerating node ID for IP {ExternalIP}: {NodeIdPrefix}...", externalIp, Convert.ToHexString(newId)[..8]);
 
@@ -1543,9 +1579,10 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
         // Cleanup transactions - direct enumeration is safe for ConcurrentDictionary
         foreach (var kvp in _transactions)
         {
-            if ((now - kvp.Value.Timestamp).TotalMinutes > ProtocolConstants.DhtTransactionTimeoutMinutes)
+            if ((now - kvp.Value.Timestamp).TotalMinutes > ProtocolConstants.DhtTransactionTimeoutMinutes
+                && _transactions.TryRemove(kvp) && kvp.Value.Endpoint is { } unanswered)
             {
-                _transactions.TryRemove(kvp.Key, out _);
+                RoutingTableFor(unanswered).EndpointNotResponded(unanswered);
             }
         }
 
@@ -1804,15 +1841,18 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
 
     private void SendResponse(BString t, BDict r, IPEndPoint ep)
     {
-        // BEP 42: Include the querying node's IP in our response
-        // This helps them discover their external IP
-        Span<byte> ipBytes = stackalloc byte[16];
-        if (ep.Address.TryWriteBytes(ipBytes, out int bytesWritten))
+        var dict = new BDict();
+
+        // BEP 42: tell the querying node its address as we see it, as compact IP+port at the top
+        // level - where other implementations look for it.
+        var address = ep.Address.IsIPv4MappedToIPv6 ? ep.Address.MapToIPv4() : ep.Address;
+        Span<byte> ipBytes = stackalloc byte[18];
+        if (address.TryWriteBytes(ipBytes, out int bytesWritten))
         {
-            r.Dict["ip"] = new BString(ipBytes[..bytesWritten].ToArray());
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(ipBytes[bytesWritten..], (ushort)ep.Port);
+            dict.Dict["ip"] = new BString(ipBytes[..(bytesWritten + 2)].ToArray());
         }
 
-        var dict = new BDict();
         dict.Dict["t"] = t;
         dict.Dict["y"] = new BString("r"u8.ToArray());
         dict.Dict["r"] = r;

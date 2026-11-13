@@ -157,6 +157,50 @@ public class WebSeedManagerTests
     }
 
     [Fact]
+    public async Task DownloadSingleFilePieceAsync_OkResponseFarIntoFile_RefusesToDiscardThePrefix()
+    {
+        // Slicing a 200 response means reading everything before the range. Far into a large file
+        // that is a whole download per piece, so the source fails rather than doing it.
+        var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);
+        manager.SetTestClient(_mockHttp);
+        var body = new ReadCountingStream(new byte[64]);
+        _mockHttp.Handler = _ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(body) };
+            response.Content.Headers.ContentLength = WebSeedManager.MaxRangelessSkipBytes * 4;
+            return response;
+        };
+
+        var source = new WebSeedManager.WebSeedSource("http://seed.com", false);
+
+        var data = await manager.DownloadSingleFilePieceAsync(source, WebSeedManager.MaxRangelessSkipBytes + 1, 16, CancellationToken.None);
+
+        Assert.Null(data);
+        Assert.Equal(0, body.BytesRead);
+    }
+
+    private sealed class ReadCountingStream(byte[] buffer) : MemoryStream(buffer)
+    {
+        public long BytesRead { get; private set; }
+
+        public override int Read(byte[] buffer, int offset, int count) => Counted(base.Read(buffer, offset, count));
+
+        public override int Read(Span<byte> buffer) => Counted(base.Read(buffer));
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            => Counted(await base.ReadAsync(buffer, cancellationToken));
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => Counted(await base.ReadAsync(buffer, offset, count, cancellationToken));
+
+        private int Counted(int read)
+        {
+            BytesRead += read;
+            return read;
+        }
+    }
+
+    [Fact]
     public async Task DownloadSingleFilePieceAsync_OkResponseTooShort_ReturnsNull()
     {
         var manager = new WebSeedManager(_torrent, ["http://seed.com"], _timeProvider);

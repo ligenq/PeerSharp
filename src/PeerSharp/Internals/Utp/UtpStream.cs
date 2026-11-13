@@ -139,6 +139,9 @@ internal class UtpStream : Stream
     /// </summary>
     private bool _drainPending;
 
+    /// <summary>The owner has stopped reading, so what still arrives is dropped rather than buffered for no one.</summary>
+    private bool _readingStopped;
+
     /// <summary>When <see cref="_ackNr"/> last moved on: how long a gap in what the peer sent has stood.</summary>
     private DateTimeOffset _lastAckAdvance;
 
@@ -163,6 +166,17 @@ internal class UtpStream : Stream
     private DateTimeOffset _nextQuietAllowed = DateTimeOffset.MinValue;
 
     private readonly HashSet<ushort> _reorderBufferSeqs = [];
+
+    /// <summary>Most packets held for reordering; also how far ahead of the next expected one they may be.</summary>
+    private const int MaxReorderBufferPackets = 1024;
+
+    /// <summary>
+    /// Most payload held for reordering. The packet count alone allowed a peer sending oversized
+    /// datagrams to park tens of megabytes per connection here.
+    /// </summary>
+    private const int MaxReorderBufferBytes = 4 * 1024 * 1024;
+
+    private int _reorderBufferBytes;
 
     // SACK SUPPORT: Dictionary for O(1) lookup/removal on selective ACKs
     // Key = SeqNr, allows fast removal when SACK indicates receipt
@@ -565,14 +579,18 @@ internal class UtpStream : Stream
     /// <summary>
     /// Sends a FIN: a half-close, after which what the peer still sends can be read.
     /// </summary>
-    public override void Close()
+    /// <remarks>
+    /// <see cref="Stream.Close"/> is not overridden for this: <see cref="Stream.Dispose()"/> calls it, so
+    /// a half-close there meant disposing the stream never released anything it held.
+    /// </remarks>
+    internal void HalfClose()
     {
         CloseInternal(true);
     }
 
     /// <summary>
     /// Sends a FIN and ends a pending read as end of input, for an owner that is done with the stream in
-    /// both directions. <see cref="Close"/> keeps reading, which is right for a half-close but left a
+    /// both directions. <see cref="HalfClose"/> keeps reading, which is right for a half-close but left a
     /// connection being torn down with a read that only its cancellation could end - an exception thrown
     /// up through every layer above, on every uTP disconnect.
     /// </summary>
@@ -700,7 +718,15 @@ internal class UtpStream : Stream
     /// it - an exception thrown through every layer above - even though the owner disposing the stream
     /// is exactly the signal that it has stopped reading.
     /// </summary>
-    private void EndPendingRead() => _pipe.Reader.CancelPendingRead();
+    private void EndPendingRead()
+    {
+        Volatile.Write(ref _readingStopped, true);
+        _pipe.Reader.CancelPendingRead();
+
+        // Nothing reads any more, so a writer waiting for the pipe to drain would wait for good,
+        // holding everything still queued for it. The reader is left alone: a read may be in flight.
+        _pipe.Writer.CancelPendingFlush();
+    }
 
     public override int Read(byte[] buffer, int offset, int count)
     {
@@ -1057,6 +1083,7 @@ internal class UtpStream : Stream
             {
                 _reorderBuffer.Dequeue();
                 _reorderBufferSeqs.Remove(next.SeqNr);
+                _reorderBufferBytes -= next.Data.Length;
                 if (next.Data.Pooled)
                 {
                     _pool.Return(next.Data.Buffer);
@@ -1090,6 +1117,7 @@ internal class UtpStream : Stream
             _lastAckAdvance = _timeProvider.GetUtcNow();
             _reorderBuffer.Dequeue();
             _reorderBufferSeqs.Remove(next.SeqNr);
+            _reorderBufferBytes -= next.Data.Length;
 
             // Empty packets are not handed to the pipe writer, which normally returns the buffer.
             if (next.Data.Length == 0 && next.Data.Pooled)
@@ -1667,12 +1695,15 @@ internal class UtpStream : Stream
     /// <summary>Keeps a packet that cannot be passed on yet, unless it is kept already or the buffer is full.</summary>
     private void BufferOutOfOrder(MessageHeader header, byte[] data, int headerSize, ushort seq)
     {
-        if (_reorderBuffer.Count >= 1024 || _reorderBufferSeqs.Contains(seq))
+        int payloadLen = data.Length - headerSize;
+        if (_reorderBuffer.Count >= MaxReorderBufferPackets
+            || _reorderBufferBytes + payloadLen > MaxReorderBufferBytes
+            || (ushort)(seq - _ackNr) > MaxReorderBufferPackets
+            || _reorderBufferSeqs.Contains(seq))
         {
             return;
         }
 
-        int payloadLen = data.Length - headerSize;
         var payload = _pool.Rent(payloadLen);
         Array.Copy(data, headerSize, payload, 0, payloadLen);
 
@@ -1685,6 +1716,7 @@ internal class UtpStream : Stream
             },
             seq);
         _reorderBufferSeqs.Add(seq);
+        _reorderBufferBytes += payloadLen;
     }
 
     /// <summary>
@@ -1822,7 +1854,10 @@ internal class UtpStream : Stream
                     bool writeFailed = false;
                     try
                     {
-                        await _pipe.Writer.WriteAsync(data.Value.Buffer.AsMemory(0, data.Value.Length)).ConfigureAwait(false);
+                        if (!Volatile.Read(ref _readingStopped))
+                        {
+                            await _pipe.Writer.WriteAsync(data.Value.Buffer.AsMemory(0, data.Value.Length)).ConfigureAwait(false);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -1899,6 +1934,7 @@ internal class UtpStream : Stream
             }
         }
         _reorderBufferSeqs.Clear();
+        _reorderBufferBytes = 0;
     }
 
     private void ReleaseSentPacket(SentPacket pkt)

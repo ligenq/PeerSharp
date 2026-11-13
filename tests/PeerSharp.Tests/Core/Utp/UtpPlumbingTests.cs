@@ -373,13 +373,25 @@ public class UtpStreamTests
     [Fact(Timeout = 30000)]
     public void AHalfCloseKeepsReading()
     {
-        // Close is a FIN, after which what the peer still sends must be readable.
+        // A half-close is a FIN, after which what the peer still sends must be readable.
         var stream = CreateStream();
 
         var reading = stream.ReadAsync(new byte[16], TestContext.Current.CancellationToken);
-        stream.Close();
+        stream.HalfClose();
 
         Assert.False(reading.IsCompleted);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task DisposingSynchronouslyEndsAPendingReadToo()
+    {
+        // Stream.Dispose goes through Close, which used to be the half-close and so left this read waiting.
+        var stream = CreateStream();
+
+        var reading = stream.ReadAsync(new byte[16], TestContext.Current.CancellationToken);
+        stream.Dispose();
+
+        Assert.Equal(0, await reading);
     }
 
     [Fact(Timeout = 30000)]

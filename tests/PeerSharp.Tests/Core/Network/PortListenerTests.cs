@@ -123,6 +123,46 @@ public class PortListenerTests
 
         Assert.Same(mock.AcceptCancelled, completed);
     }
+
+    [Fact]
+    public async Task AcceptLoop_BoundsHandshakesInProgressFromOneAddress()
+    {
+        var factory = new MockTcpListenerFactory();
+        var listener = new PortListener(new MockResolver(), factory);
+        listener.Start(0);
+        var mock = factory.LastListener ?? throw new InvalidOperationException("Listener not created.");
+
+        using var server = new TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        var remotes = new List<TcpClient>();
+        try
+        {
+            int attempts = PendingHandshakeLimiter.DefaultMaxPerAddress + 1;
+            for (int i = 0; i < attempts; i++)
+            {
+                var remote = new TcpClient();
+                await remote.ConnectAsync(IPAddress.Loopback, ((IPEndPoint)server.LocalEndpoint).Port, TestContext.Current.CancellationToken);
+                remotes.Add(remote);
+                mock.EnqueueClient(await server.AcceptTcpClientAsync(TestContext.Current.CancellationToken));
+            }
+
+            // The connection past the cap is closed straight away instead of waiting out a handshake.
+            var buffer = new byte[1];
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            Assert.Equal(0, await remotes[^1].GetStream().ReadAsync(buffer, timeout.Token));
+            Assert.Equal(PendingHandshakeLimiter.DefaultMaxPerAddress, listener.PendingHandshakes);
+
+            // Slots are handed back when a handshake ends.
+            foreach (var remote in remotes) remote.Dispose();
+            while (listener.PendingHandshakes > 0) await Task.Delay(20, timeout.Token);
+        }
+        finally
+        {
+            foreach (var remote in remotes) remote.Dispose();
+            listener.Stop();
+        }
+    }
 }
 
 

@@ -21,6 +21,9 @@ internal sealed class WebSeedManager : IAsyncDisposable
     private const int MaxRetries = 3;
     private const int RetryDelayMs = 5000;
     private const int StreamBufferSize = 8192;
+
+    /// <summary>The most a server that ignores Range may make us read and discard to reach one range.</summary>
+    internal const long MaxRangelessSkipBytes = 8L * 1024 * 1024;
     internal static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
 
     // Configuration
@@ -580,12 +583,21 @@ internal sealed class WebSeedManager : IAsyncDisposable
     /// <summary>
     /// A server that ignores the Range header replies 200 with the whole file.
     /// Like libtorrent, accept that and stream-slice the requested range without
-    /// buffering the full response.
+    /// buffering the full response - but only near the start of the file. Reaching piece N that way
+    /// downloads everything before it, so fetching a large file piece by piece would cost bandwidth
+    /// quadratic in its size; past <see cref="MaxRangelessSkipBytes"/> the request fails instead and
+    /// the source backs off.
     /// </summary>
     private async Task<byte[]?> ReadRangeFromFullContentAsync(HttpContent content, long offset, int length, CancellationToken ct)
     {
         if (offset < 0 || length < 0 || content.Headers.ContentEncoding.Any(encoding => !encoding.Equals("identity", StringComparison.OrdinalIgnoreCase)))
         {
+            return null;
+        }
+
+        if (offset > MaxRangelessSkipBytes)
+        {
+            _logger.LogDebug("Web seed ignored the Range header; not discarding {Offset} bytes to reach the range", offset);
             return null;
         }
 

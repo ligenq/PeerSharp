@@ -197,7 +197,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
 
         foreach (var stream in _streamsByRecvId.Values)
         {
-            stream.Close();
+            stream.HalfClose();
         }
         _streamsByRecvId.Clear();
         _streamsBySendId.Clear();

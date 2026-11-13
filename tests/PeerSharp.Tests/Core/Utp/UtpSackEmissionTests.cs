@@ -29,7 +29,7 @@ public class UtpSackEmissionTests
         }
         if (fin)
         {
-            responder.Stream.Close();
+            responder.Stream.HalfClose();
         }
         else
         {
@@ -110,7 +110,7 @@ public class UtpSackEmissionTests
         byte[] payload = [0, 1, 4, 0, 0xFF, 0x13, 0x42];
         await peer.Stream.WriteAsync(payload, TestContext.Current.CancellationToken);
         byte[] data = peer.Last(MessageType.ST_DATA);
-        peer.Stream.Close();
+        peer.Stream.HalfClose();
         byte[] fin = peer.Last(MessageType.ST_FIN);
 
         byte[] expectedMask = offset < 256 ? new byte[(offset / 32 + 1) * 4] : [];
@@ -221,7 +221,7 @@ public class UtpSackEmissionTests
         byte[] payload = fin ? [] : [0, 1, 2, 3, 4, 5, 6, 7];
         if (fin)
         {
-            peer.Stream.Close();
+            peer.Stream.HalfClose();
         }
         else
         {

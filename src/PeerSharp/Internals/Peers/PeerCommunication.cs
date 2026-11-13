@@ -199,6 +199,9 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
     /// <summary>The most the send loop joins into one write: eight blocks and their headers.</summary>
     private const int MaxSendBatchBytes = 128 * 1024 + 8 * 13;
+
+    /// <summary>Most Suggest offers remembered per peer; older ones are dropped first.</summary>
+    private const int MaxSuggestedPieces = 16;
     private readonly HashSet<int> _allowedFastPieces = [];
     private readonly Lock _availabilityLock = new();
     private readonly Lock _fastPiecesLock = new();
@@ -791,8 +794,26 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         {
             _usesTls = value is System.Net.Security.SslStream { IsMutuallyAuthenticated: true }
                 || (value is RateLimitedStream && _usesTls);
+
+            // The factory assigns the stream and Start assigns it again. Wrapping or exempting the
+            // second assignment would either orphan the first limiter or strip metering entirely.
+            if (value != null && _stream is RateLimitedStream current && ReferenceEquals(current.Inner, value))
+            {
+                return;
+            }
+
             _stream = WrapRateLimited(value);
         }
+    }
+
+    /// <summary>
+    /// Assigns a stream that was layered over the current, already metered <see cref="Stream"/>
+    /// (such as an outgoing TLS session), so it must not be wrapped a second time.
+    /// </summary>
+    private void SetStreamLayeredOverLimiter(Stream layered)
+    {
+        _usesTls = layered is System.Net.Security.SslStream { IsMutuallyAuthenticated: true };
+        _stream = layered;
     }
 
     /// <summary>
@@ -802,8 +823,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     /// </summary>
     private Stream? WrapRateLimited(Stream? stream)
     {
-        if (stream is null or RateLimitedStream or EncryptedStream
-            || (stream is System.Net.Security.SslStream && _stream is RateLimitedStream))
+        if (stream is null or RateLimitedStream or EncryptedStream)
         {
             return stream;
         }
@@ -1133,7 +1153,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
 
             if (_torrent.InfoFile.Info.IsSsl)
             {
-                Stream = await TorrentTls.ConnectAsync(Stream!, _torrent, linkedCts.Token).ConfigureAwait(false);
+                SetStreamLayeredOverLimiter(await TorrentTls.ConnectAsync(Stream!, _torrent, linkedCts.Token).ConfigureAwait(false));
             }
 
             linkedCts.Token.ThrowIfCancellationRequested();
@@ -1441,7 +1461,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         lock (_fastPiecesLock)
         {
-            return _suggestedSnapshot ??= _suggestedPieces.AsReadOnly();
+            return _suggestedSnapshot ??= _suggestedPieces.ToArray();
         }
     }
 
@@ -1874,6 +1894,18 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
     {
         lock (_fastPiecesLock)
         {
+            // A peer can send Suggest without limit; keep only the most recent few, once each,
+            // as libtorrent does (max_suggest_pieces).
+            if (_suggestedPieces.Contains(pieceIndex))
+            {
+                return;
+            }
+
+            if (_suggestedPieces.Count >= MaxSuggestedPieces)
+            {
+                _suggestedPieces.RemoveAt(0);
+            }
+
             _suggestedPieces.Add(pieceIndex);
             _suggestedSnapshot = null; // Invalidate cache
         }
@@ -2889,10 +2921,13 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 while (PeerProtocol.TryDecodeMessage(ref buffer, out var message, out int consumed))
                 {
                     long now = Environment.TickCount64;
-                    bool isDataTransfer = message?.Id == MessageId.Piece || message?.Id == MessageId.Request;
+                    // HAVE, CANCEL and REJECT track transfer volume the way PIECE and REQUEST do: a
+                    // peer downloading 16 KiB pieces at 1.4 MB/s sends 5000 HAVEs a minute.
+                    bool isDataTransfer = message?.Id is MessageId.Piece or MessageId.Request
+                        or MessageId.Have or MessageId.Cancel or MessageId.Reject;
 
                     // SECURITY: Rate limit ALL messages to prevent small message floods
-                    // EXCEPTION: Piece/Request messages are expected to be frequent during transfer
+                    // EXCEPTION: transfer messages are expected to be frequent during transfer
                     if (!isDataTransfer)
                     {
                         long windowStart = Interlocked.Read(ref _totalMessageWindowStart);
@@ -3401,9 +3436,10 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             return false;
         }
 
+        // HAVE is not here: it is sent once per piece, so a dropped one leaves the peer believing for
+        // the rest of the connection that we lack that piece.
         switch (msg.Id)
         {
-            case MessageId.Have:
             case MessageId.Suggest:
             case MessageId.AllowedFast:
             case MessageId.Port:

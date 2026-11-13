@@ -98,6 +98,29 @@ public sealed class UpnpTests
     }
 
     [Fact]
+    public async Task DiscoverAsync_IgnoresResponsePointingAtAnotherHost()
+    {
+        using var udpServer = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        var ssdpEndpoint = (IPEndPoint)udpServer.Client.LocalEndPoint!;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var fetched = new ConcurrentQueue<string>();
+
+        var responderTask = RespondToSsdpAsync(udpServer, "http://192.0.2.1:8080/desc.xml", cts.Token);
+
+        var gateways = await UpnpDiscovery.DiscoverAsync(
+            () => [IPAddress.Loopback],
+            ssdpEndpoint,
+            (location, _, _) => { fetched.Enqueue(location); return Task.FromResult<UpnpGateway?>(null); },
+            TimeProvider.System,
+            cts.Token);
+
+        await responderTask;
+
+        Assert.Empty(gateways);
+        Assert.Empty(fetched);
+    }
+
+    [Fact]
     public async Task PortMapping_SendsSoapForMapAndUnmap()
     {
         var requests = new ConcurrentQueue<TestHttpRequest>();

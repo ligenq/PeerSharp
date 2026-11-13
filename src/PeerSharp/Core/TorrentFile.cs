@@ -182,13 +182,8 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
     {
         ArgumentNullException.ThrowIfNull(data);
 
-        if (data.Length == 0)
-        {
-            throw new TorrentMetadataException("Torrent file data cannot be empty.");
-        }
-
-        var metadata = TorrentFileParser.Parse(data);
-        return new TorrentFile(metadata, data);
+        // A private copy, so the caller reusing its buffer cannot change RawData after the hashes were taken.
+        return Parse((ReadOnlySpan<byte>)data);
     }
 
     /// <summary>
@@ -205,7 +200,8 @@ public sealed class TorrentFile : IEquatable<TorrentFile>
             throw new TorrentMetadataException("Torrent file data cannot be empty.");
         }
 
-        return Parse(data.ToArray());
+        byte[] copy = data.ToArray();
+        return new TorrentFile(TorrentFileParser.Parse(copy), copy);
     }
 
     /// <summary>

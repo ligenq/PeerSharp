@@ -125,6 +125,38 @@ public class RoutingTableTests
     }
 
     [Fact]
+    public void AddReferral_KnownId_DoesNotRepointNode()
+    {
+        var table = new RoutingTable(_localId, _timeProvider);
+        byte[] nodeId = new byte[20]; nodeId[0] = 0x80;
+        var original = new IPEndPoint(IPAddress.Loopback, 1000);
+        table.AddNode(nodeId, original);
+
+        table.AddReferral(nodeId, new IPEndPoint(IPAddress.Loopback, 2000));
+        table.AddNode(nodeId, new IPEndPoint(IPAddress.Loopback, 3000));
+
+        Assert.Equal(original, Assert.Single(table.FindClosest(nodeId, 1)).EndPoint);
+    }
+
+    [Fact]
+    public void EndpointNotResponded_RepeatedTimeouts_LetResponderReplaceNode()
+    {
+        var table = new RoutingTable(_localId, _timeProvider);
+        byte[] nodeId = new byte[20]; nodeId[0] = 0x80;
+        var original = new IPEndPoint(IPAddress.Loopback, 1000);
+        table.AddNode(nodeId, original);
+
+        table.EndpointNotResponded(original);
+        Assert.Single(table.FindClosest(nodeId, 1));
+        table.EndpointNotResponded(original);
+        Assert.Empty(table.FindClosest(nodeId, 1));
+
+        var moved = new IPEndPoint(IPAddress.Loopback, 3000);
+        table.AddNode(nodeId, moved);
+        Assert.Equal(moved, Assert.Single(table.FindClosest(nodeId, 1)).EndPoint);
+    }
+
+    [Fact]
     public void GetAllNodes_StopsAtMaxNodes()
     {
         var table = new RoutingTable(_localId, _timeProvider);

@@ -1430,6 +1430,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return Task.CompletedTask;
         }
 
+        // BEP 11 caps "added" at 50 per message; anything far past that is a peer trying to flood us.
+        const int MaxPexPeersPerMessage = 100;
+        if (added.Count > MaxPexPeersPerMessage)
+        {
+            added = added.GetRange(0, MaxPexPeersPerMessage);
+            if (addedFlags.Count > MaxPexPeersPerMessage)
+            {
+                addedFlags = addedFlags.GetRange(0, MaxPexPeersPerMessage);
+            }
+        }
+
         AddPeersInternal(added, PeerSourceKind.Pex, p, addedFlags);
         return Task.CompletedTask;
     }
@@ -1738,17 +1749,18 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        if (Interlocked.CompareExchange(ref _knownPeersCacheCount, 0, 0) >= _settings.MaxKnownPeersCache)
-        {
-            PruneKnownPeersCache();
-        }
-
         bool isSeeding = _torrent.Finished;
         var now = _timeProvider.GetUtcNow();
         var candidates = new List<(PeerHistory History, long Score)>();
         int index = 0;
         foreach (var rawEndpoint in peers)
         {
+            // Checked per peer: a single PEX message or tracker response can carry thousands.
+            if (Interlocked.CompareExchange(ref _knownPeersCacheCount, 0, 0) >= _settings.MaxKnownPeersCache)
+            {
+                PruneKnownPeersCache();
+            }
+
             var endpoint = NetworkUtils.NormalizeEndPoint(rawEndpoint);
 
             // Dropped here as well as in ConnectTo so the known-peer cache never holds one. 519 of
