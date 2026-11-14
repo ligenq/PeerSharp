@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using PeerSharp.Internals;
 using PeerSharp.PieceWriter;
 using System.Security.Cryptography;
 

@@ -102,7 +102,7 @@ internal partial class DhtManager
     /// <returns>The most recent item found, or null when no node returned a verifiable one.</returns>
     public async Task<DhtItem?> GetItemAsync(DhtTarget target, byte[]? salt = null, CancellationToken cancellationToken = default)
     {
-        var result = await RunItemLookupAsync(target, salt, cancellationToken).ConfigureAwait(false);
+        var result = await RunItemLookupAsync(target, salt, forPublish: false, cancellationToken).ConfigureAwait(false);
         return result.Item;
     }
 
@@ -114,7 +114,7 @@ internal partial class DhtManager
         byte[]? salt = null,
         CancellationToken cancellationToken = default)
     {
-        var result = await RunItemLookupAsync(target, salt, cancellationToken).ConfigureAwait(false);
+        var result = await RunItemLookupAsync(target, salt, forPublish: false, cancellationToken).ConfigureAwait(false);
         return (result.Item, result.Stats);
     }
 
@@ -201,6 +201,7 @@ internal partial class DhtManager
         var lookup = await RunItemLookupAsync(
             item.Target,
             (item as DhtMutableItem)?.Salt,
+            forPublish: true,
             cancellationToken).ConfigureAwait(false);
         if (lookup.WriteTargets.Count == 0)
         {
@@ -234,10 +235,11 @@ internal partial class DhtManager
     ///
     /// This is a Kademlia walk: each round queries the closest unqueried nodes by XOR distance,
     /// and the walk ends once the <see cref="ReplicationCount"/> closest responders are closer than
-    /// anything left to ask. Write targets are returned closest first, so a put lands on the nodes
+    /// anything left to ask. Publishing counts only responders that supplied a write token.
+    /// Write targets are returned closest first, so a put lands on the nodes
     /// a later get will actually reach rather than on whichever nodes happened to answer first.
     /// </summary>
-    private async Task<ItemLookupResult> RunItemLookupAsync(DhtTarget target, byte[]? salt, CancellationToken cancellationToken)
+    private async Task<ItemLookupResult> RunItemLookupAsync(DhtTarget target, byte[]? salt, bool forPublish, CancellationToken cancellationToken)
     {
         if (salt is { Length: > DhtItem.MaxSaltLength }) throw new ArgumentException("DHT salt exceeds 64 bytes.", nameof(salt));
         var targetId = target.Span.ToArray();
@@ -301,7 +303,10 @@ internal partial class DhtManager
                 // The responder's own id outranks whatever id the referral claimed for it.
                 var responderId = reply.GetBytes("id") is { Length: 20 } id ? id.ToArray() : batch[i].Value;
                 var token = reply.GetBytes("token");
-                responders.Add((responderId, batch[i].Key, token?.ToArray()));
+                if (!forPublish || token is { Length: > 0 })
+                {
+                    responders.Add((responderId, batch[i].Key, token?.ToArray()));
+                }
 
                 var candidate = TryReadItemFromReply(reply, target, salt);
                 if (candidate is not null)

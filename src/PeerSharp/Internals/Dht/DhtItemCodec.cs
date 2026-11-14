@@ -1,7 +1,5 @@
 using PeerSharp.BEncoding;
-using PeerSharp.Core;
 using PeerSharp.Internals.Utilities;
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 

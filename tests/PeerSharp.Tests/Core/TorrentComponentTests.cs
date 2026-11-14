@@ -1,9 +1,5 @@
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Time.Testing;
 using PeerSharp.Internals;
-using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Trackers;
-using PeerSharp.Streaming;
 using System.Net;
 
 namespace PeerSharp.Tests.Core;

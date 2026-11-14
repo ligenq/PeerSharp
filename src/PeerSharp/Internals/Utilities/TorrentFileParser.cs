@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.BEncoding;
-using PeerSharp.Exceptions;
 using System.Security.Cryptography;
 
 namespace PeerSharp.Internals.Utilities;

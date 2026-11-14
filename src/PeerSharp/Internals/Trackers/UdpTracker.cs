@@ -9,8 +9,6 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-using PeerSharp.Exceptions;
-
 namespace PeerSharp.Internals.Trackers;
 
 internal class UdpTracker : TrackerBase, IDisposable

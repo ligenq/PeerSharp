@@ -10,7 +10,6 @@ using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Trackers;
 using PeerSharp.Internals.Utp;
 using PeerSharp.Internals.Utilities;
-using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 
@@ -1399,11 +1398,11 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
         finally
         {
-            if (!ownershipTransferred)
+            if (!ownershipTransferred || stream.IsDisposed)
             {
                 try
                 {
-                    stream.Close();
+                    stream.Abort();
                 }
                 catch (Exception ex)
                 {
@@ -1415,31 +1414,15 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
     private void HandleUtpConnection(UtpStream stream)
     {
-        // Same bound the TCP listener applies: a handshake that has not named a torrent yet is not
-        // covered by any peer limit.
-        var remote = stream.RemoteEndPoint.Address;
-        if (!_pendingUtpHandshakes.TryEnter(remote))
-        {
-            _logger.LogDebug("Refusing incoming uTP connection from {Remote}: too many handshakes in progress", remote);
-            try { stream.Close(); }
-            catch (IOException) { /* Already closed by the peer */ }
-            catch (ObjectDisposedException) { /* Already disposed */ }
-            return;
-        }
-
         // Observe exceptions from fire-and-forget task
         _ = HandleIncomingUtpAsync(stream).ContinueWith(t =>
         {
-            _pendingUtpHandshakes.Exit(remote);
+            _pendingUtpHandshakes.Exit(stream.RemoteEndPoint.Address);
             if (t.IsFaulted && t.Exception != null)
             {
                 _logger.LogError(t.Exception.GetBaseException(), "Unhandled exception in uTP connection handler");
-                // Best-effort cleanup - stream may already be closed/disposed
-                try { stream.Close(); }
-                catch (IOException) { /* Stream already closed by peer - expected */ }
-                catch (ObjectDisposedException) { /* Stream already disposed - expected during shutdown */ }
             }
-        }, TaskScheduler.Default);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private async Task InitAsync(CancellationToken cancellationToken)
@@ -1511,7 +1494,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // Note: socketFactory is now required for UdpListener
             var socketFactory = new UdpSocketFactory();
             var udpListener = new UdpListener(Settings.Connection.UdpPort, socketFactory, Settings, _loggerFactory, _timeProvider);
-            var utpManager = new UtpManager(_timeProvider, _loggerFactory, Settings.Connection);
+            var utpManager = new UtpManager(_timeProvider, _loggerFactory, Settings.Connection, _pendingUtpHandshakes);
 
             var dhtManager = DhtManager.Create(Settings.PeerId, udpListener, Settings, _timeProvider, this, new SystemDnsResolver(), _loggerFactory);
             var portListener = new PortListener(this, _loggerFactory, Settings.Connection.BindAddress, Settings.Connection);

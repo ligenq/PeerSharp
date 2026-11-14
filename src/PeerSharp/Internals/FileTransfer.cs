@@ -10,8 +10,6 @@ using System.Threading.Channels;
 using PeerSharp.Messages;
 using PeerSharp.Internals.Transfers;
 
-using PeerSharp.Exceptions;
-
 namespace PeerSharp.Internals;
 
 /*
@@ -244,35 +242,25 @@ internal sealed class PieceState : IDisposable
                 return 0;
             }
 
-            long rangeEnd = rangeStart + rangeSize;
+            long rangeEnd = Math.Min(rangeStart + rangeSize, Math.Min(pieceStartOffset + pieceSize, torrentFullSize));
+            long start = Math.Max(rangeStart, pieceStartOffset);
+            if (rangeEnd <= start)
+            {
+                return 0;
+            }
+
+            int firstBlock = (int)((start - pieceStartOffset) / ProtocolConstants.BlockSize);
+            int lastBlock = Math.Min(Blocks.Length - 1, (int)((rangeEnd - 1 - pieceStartOffset) / ProtocolConstants.BlockSize));
             long bytes = 0;
 
-            for (int i = 0; i < Blocks.Length; i++)
+            for (int i = firstBlock; i <= lastBlock; i++)
             {
                 if (Blocks[i])
                 {
                     long blockStart = pieceStartOffset + (i * (long)ProtocolConstants.BlockSize);
                     long blockEnd = blockStart + ProtocolConstants.BlockSize;
 
-                    // Cap blockEnd to piece end or torrent end
-                    long pieceEnd = pieceStartOffset + pieceSize;
-                    if (pieceEnd > torrentFullSize)
-                    {
-                        pieceEnd = torrentFullSize;
-                    }
-
-                    if (blockEnd > pieceEnd)
-                    {
-                        blockEnd = pieceEnd;
-                    }
-
-                    long overlapStart = Math.Max(blockStart, rangeStart);
-                    long overlapEnd = Math.Min(blockEnd, rangeEnd);
-
-                    if (overlapEnd > overlapStart)
-                    {
-                        bytes += overlapEnd - overlapStart;
-                    }
+                    bytes += Math.Min(blockEnd, rangeEnd) - Math.Max(blockStart, start);
                 }
             }
             return bytes;
@@ -1175,7 +1163,8 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     public long GetUnfinishedSelectedBytes(IReadOnlyList<FileSelection>? selection)
     {
-        if (selection == null || selection.Count == 0)
+        var info = _torrent.InfoFile.Info;
+        if (info.Files.Count == 0)
         {
             return GetUnfinishedBytes();
         }
@@ -1185,14 +1174,18 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             long bytes = 0;
             foreach (var p in _pieceStateManager.ActivePieces.Values)
             {
-                if (_includeUnfinishedPiece(p.Index) && _torrent.InfoFile.Info.IsPieceNeeded(p.Index, selection))
+                if (!_includeUnfinishedPiece(p.Index)) continue;
+
+                long pieceStart = (long)p.Index * info.PieceSize;
+                foreach (int index in info.GetFilesForPiece(p.Index))
                 {
-                    bytes += p.GetReceivedBytes((long)p.Index * _torrent.InfoFile.Info.PieceSize,
-                        _torrent.InfoFile.Info.PieceSize, _torrent.InfoFile.Info.FullSize, 0, _torrent.InfoFile.Info.FullSize);
+                    if (!TorrentFileInfo.IsFileSelected(index, selection)) continue;
+
+                    var file = info.Files[index];
+                    bytes += p.GetReceivedBytes(pieceStart, info.PieceSize, info.FullSize, file.Offset, file.Size);
                 }
             }
-            return bytes + (_deferredPieces?.GetReceivedBytes(0, _torrent.InfoFile.Info.FullSize, _torrent.InfoFile.Info.PieceSize,
-                index => _includeUnfinishedPiece(index) && _torrent.InfoFile.Info.IsPieceNeeded(index, selection)) ?? 0);
+            return bytes + (_deferredPieces?.GetSelectedReceivedBytes(info, selection, _includeUnfinishedPiece) ?? 0);
         }
     }
 

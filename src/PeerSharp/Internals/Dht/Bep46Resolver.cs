@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.BEncoding;
-using PeerSharp.Core;
 using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.Internals.Dht;

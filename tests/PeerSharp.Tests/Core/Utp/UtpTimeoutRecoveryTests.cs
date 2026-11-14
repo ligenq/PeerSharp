@@ -1,6 +1,5 @@
 ﻿using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
-using PeerSharp.Config;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utp;
 using System.Net;

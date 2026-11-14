@@ -1,4 +1,3 @@
-using PeerSharp.Interfaces;
 using PeerSharp.Internals.Network;
 
 namespace PeerSharp.Tests.Core;

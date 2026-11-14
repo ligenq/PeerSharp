@@ -6,7 +6,6 @@ using PeerSharp.Internals.Transfers;
 using PeerSharp.Messages;
 using System.Collections.Concurrent;
 using System.Net;
-using System.Reflection;
 
 namespace PeerSharp.Tests.Core.Transfers;
 

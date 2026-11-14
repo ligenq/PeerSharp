@@ -5,8 +5,6 @@ using PeerSharp.Internals.Utilities;
 using System.Collections;
 using System.Security.Cryptography;
 
-using PeerSharp.Exceptions;
-
 namespace PeerSharp.Internals.Extensions;
 
 internal class MetadataDownload : IMetadataDownload, IDisposable

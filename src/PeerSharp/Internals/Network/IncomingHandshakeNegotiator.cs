@@ -1,7 +1,6 @@
 ﻿using Microsoft.Extensions.Logging;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Peers;
-using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.Internals.Network;
 

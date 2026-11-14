@@ -140,6 +140,35 @@ public sealed class DeferredResumeTests
     }
 
     [Fact]
+    public async Task SelectedProgressClipsActiveAndDeferredBlocksToSelectedFileData()
+    {
+        var metadata = Metadata();
+        metadata.Info.Files.Clear();
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "selected.bin", Size = 1024, Offset = 0 });
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = ".pad/1024", Size = 1024, Offset = 1024, IsPadding = true });
+        metadata.Info.Files.Add(new Internals.TorrentFileEntry { Path = "unselected.bin", Size = 30720, Offset = 2048 });
+        await using var torrent = TorrentTestUtility.CreateMinimal(metadata);
+        List<TorrentStateData.UnfinishedPieceData> partial =
+            [new() { Index = 0, Blocks = [true, false], Data = new byte[32768] }];
+        FileSelection[] selection = [new() { Selected = true }, new() { Selected = true }, new() { Selected = false }];
+        var transfer = torrent.FileTransferInternal;
+        var manager = new Internals.Framework.FileSelectionManager(metadata);
+        manager.Initialize([.. selection], torrent.Pieces);
+        manager.SetBytesProvider(transfer);
+
+        transfer.LoadUnfinishedPiecesState(partial);
+        Assert.Equal(1024UL, manager.CalculateFinishedSelectedBytes());
+        Assert.Equal(15360, transfer.GetUnfinishedSelectedBytes(null));
+
+        transfer.DeferUnfinishedPiecesState(partial);
+        Assert.Equal(1024UL, manager.CalculateFinishedSelectedBytes());
+        Assert.Equal(15360, transfer.GetUnfinishedSelectedBytes(null));
+
+        torrent.Pieces.AddPiece(0);
+        Assert.Equal(1024UL, manager.CalculateFinishedSelectedBytes());
+    }
+
+    [Fact]
     public async Task InvalidResumePiecesIncludeTheirGeometryInWarnings()
     {
         var messages = new List<string>();

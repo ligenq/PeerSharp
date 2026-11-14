@@ -1,5 +1,3 @@
-using PeerSharp.Config;
-
 namespace PeerSharp.Internals.Network;
 
 /// <summary>

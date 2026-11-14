@@ -1,9 +1,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
-using PeerSharp.Core;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Dht;
-using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
 using System.Net;
 

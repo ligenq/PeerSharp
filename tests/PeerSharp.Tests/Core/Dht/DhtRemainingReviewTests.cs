@@ -1,6 +1,5 @@
 using System.Net;
 using PeerSharp.BEncoding;
-using PeerSharp.Internals;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utilities;
@@ -55,8 +54,10 @@ public sealed class DhtRemainingReviewTests
         await Assert.ThrowsAsync<OverflowException>(() => resolver.PublishNextAsync(seed, InfoHash.CreateRandom()));
     }
 
-    [Fact]
-    public async Task PutLandsOnTheClosestTokenHoldersNotTheFirstToAnswer()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PutLandsOnTheClosestTokenHoldersNotTheFirstToAnswer(bool closestAreTokenless)
     {
         var item = new DhtImmutableItem { Value = new BString("closest"u8.ToArray()) };
         var target = item.Target.Span.ToArray();
@@ -77,7 +78,9 @@ public sealed class DhtRemainingReviewTests
         for (int i = 0; i < near.Length; i++) ids[near[i]] = IdAtDistance(0, i + 1);
         var referral = new BString(DhtCompactNodeCodec.Encode(near.Select(ep => new NodeInfo(ids[ep], ep)).ToList()));
 
-        var transport = new ScriptedTransport(ids, referral);
+        var tokenless = closestAreTokenless ? near.Take(8).ToHashSet() : [];
+        var expectedTargets = near.Concat(far).Where(ep => !tokenless.Contains(ep)).Take(8);
+        var transport = new ScriptedTransport(ids, referral, tokenless);
         var settings = new Settings();
         settings.Dht.BootstrapNodes = [];
         settings.Dht.InitialState = new DhtState(InfoHash.CreateRandom().ToArray(),
@@ -87,8 +90,11 @@ public sealed class DhtRemainingReviewTests
 
         Assert.Equal(8, await dht.PutItemAsync(item, cancellationToken: TestContext.Current.CancellationToken));
 
-        Assert.Equal(near.Take(8).OrderBy(ep => ep.Port), transport.PutTargets.OrderBy(ep => ep.Port));
-        Assert.DoesNotContain(near[^1], transport.GetTargets);
+        Assert.Equal(expectedTargets, transport.PutTargets);
+        if (!closestAreTokenless)
+        {
+            Assert.DoesNotContain(near[^1], transport.GetTargets);
+        }
     }
 
     private static async Task<DhtManager> CreateAsync(ReplyTransport transport)
@@ -104,7 +110,8 @@ public sealed class DhtRemainingReviewTests
 
     private static byte[] NodeId(int i) { var id = new byte[20]; id[^1] = (byte)i; return id; }
 
-    private sealed class ScriptedTransport(Dictionary<IPEndPoint, byte[]> ids, BString referral) : IUdpListener
+    private sealed class ScriptedTransport(Dictionary<IPEndPoint, byte[]> ids, BString referral,
+        HashSet<IPEndPoint> tokenless) : IUdpListener
     {
         private IUdpReceiver? _receiver;
         public List<IPEndPoint> GetTargets { get; } = [];
@@ -124,7 +131,7 @@ public sealed class DhtRemainingReviewTests
             {
                 case "get":
                     lock (GetTargets) GetTargets.Add(endpoint);
-                    reply.Dict["token"] = new BString("token"u8.ToArray());
+                    if (!tokenless.Contains(endpoint)) reply.Dict["token"] = new BString("token"u8.ToArray());
                     reply.Dict["nodes"] = referral;
                     break;
                 case "put":

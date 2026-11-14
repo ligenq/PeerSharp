@@ -1,4 +1,3 @@
-using PeerSharp.Exceptions;
 using PeerSharp.Internals.Utilities;
 
 namespace PeerSharp.Tests.Api;

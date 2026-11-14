@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Logging.Abstractions;
-using PeerSharp.Config;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;

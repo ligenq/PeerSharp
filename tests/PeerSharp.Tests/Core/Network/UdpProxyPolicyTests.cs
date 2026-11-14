@@ -1,4 +1,3 @@
-using PeerSharp.Config;
 using PeerSharp.Internals.Network;
 using Decision = PeerSharp.Internals.Network.UdpProxyPolicy.Decision;
 

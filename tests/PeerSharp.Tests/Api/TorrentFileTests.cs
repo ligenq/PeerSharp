@@ -1,5 +1,3 @@
-using PeerSharp.Exceptions;
-
 namespace PeerSharp.Tests.Api;
 
 public class TorrentFileTests

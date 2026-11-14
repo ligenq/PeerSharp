@@ -1,7 +1,5 @@
 using Microsoft.Extensions.Logging;
-using PeerSharp.Exceptions;
 using PeerSharp.Internals;
-using PeerSharp.PieceWriter;
 using System.Security.Cryptography;
 using System.Text.Json;
 using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;

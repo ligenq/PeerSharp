@@ -2,8 +2,6 @@ using PeerSharp.Internals;
 using PeerSharp.Internals.Utilities;
 using System.Diagnostics.CodeAnalysis;
 
-using PeerSharp.Exceptions;
-
 namespace PeerSharp.Core;
 
 /// <summary>

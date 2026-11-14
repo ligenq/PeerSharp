@@ -1,4 +1,3 @@
-using System.Net;
 using PeerSharp.BEncoding;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Utilities;

@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Time.Testing;
-using PeerSharp.Config;
 using PeerSharp.Internals.Utilities;
 using System.Net;
 

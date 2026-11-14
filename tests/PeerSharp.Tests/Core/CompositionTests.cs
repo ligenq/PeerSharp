@@ -5,7 +5,6 @@ using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Peers;
 using PeerSharp.PiecePicking;
 using PeerSharp.PieceWriter;
-using System.Net;
 
 namespace PeerSharp.Tests.Core;
 

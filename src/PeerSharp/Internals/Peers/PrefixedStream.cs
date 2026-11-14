@@ -1,5 +1,3 @@
-using PeerSharp.Internals.Framework;
-
 namespace PeerSharp.Internals.Peers;
 
 /// <summary>

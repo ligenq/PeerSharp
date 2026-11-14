@@ -1,4 +1,3 @@
-using PeerSharp.Internals;
 using PeerSharp.Internals.Extensions;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Messages;

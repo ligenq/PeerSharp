@@ -131,18 +131,46 @@ internal sealed class DeferredPieceStore : IDisposable
                 continue;
             }
 
-            long pieceStart = (long)entry.Index * pieceSize;
-            for (int i = 0; i < entry.Blocks.Length; i++)
-            {
-                if (!entry.Blocks[i])
-                {
-                    continue;
-                }
+            bytes += GetReceivedBytes(entry, pieceSize, start, end);
+        }
+        return bytes;
+    }
 
-                long blockStart = pieceStart + (long)i * ProtocolConstants.BlockSize;
-                long blockEnd = Math.Min(blockStart + ProtocolConstants.BlockSize, pieceStart + entry.Length);
-                bytes += Math.Max(0, Math.Min(end, blockEnd) - Math.Max(start, blockStart));
+    internal long GetSelectedReceivedBytes(TorrentFileInfo info, IReadOnlyList<FileSelection>? selection, Func<int, bool> includePiece)
+    {
+        long bytes = 0;
+        foreach (var entry in _entries)
+        {
+            if (!includePiece(entry.Index)) continue;
+
+            foreach (int index in info.GetFilesForPiece(entry.Index))
+            {
+                if (!TorrentFileInfo.IsFileSelected(index, selection)) continue;
+
+                var file = info.Files[index];
+                bytes += GetReceivedBytes(entry, info.PieceSize, file.Offset, file.Offset + file.Size);
             }
+        }
+        return bytes;
+    }
+
+    private static long GetReceivedBytes(Entry entry, uint pieceSize, long start, long end)
+    {
+        long pieceStart = (long)entry.Index * pieceSize;
+        start = Math.Max(start, pieceStart);
+        end = Math.Min(end, pieceStart + entry.Length);
+        if (end <= start) return 0;
+
+        int firstBlock = (int)((start - pieceStart) / ProtocolConstants.BlockSize);
+        int lastBlock = (int)((end - 1 - pieceStart) / ProtocolConstants.BlockSize);
+        long bytes = 0;
+        for (int i = firstBlock; i <= lastBlock; i++)
+        {
+            if (!entry.Blocks[i]) continue;
+
+            long blockStart = pieceStart + (long)i * ProtocolConstants.BlockSize;
+            long blockEnd = blockStart + ProtocolConstants.BlockSize;
+            bytes += Math.Min(end, blockEnd) - Math.Max(start, blockStart);
         }
         return bytes;
     }

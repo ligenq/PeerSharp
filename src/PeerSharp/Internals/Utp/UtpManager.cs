@@ -14,6 +14,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
 
     private readonly ILogger<UtpManager> _logger;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly PendingHandshakeLimiter? _pendingHandshakes;
     private readonly ConcurrentDictionary<UtpSocketKey, UtpStream> _streamsByRecvId = new();
     private readonly ConcurrentDictionary<UtpSocketKey, UtpStream> _streamsBySendId = new();
     private readonly ConnectionSettings _settings;
@@ -36,11 +37,13 @@ internal class UtpManager : IUdpReceiver, IUtpManager
     /// Creates a manager whose streams read their congestion knobs from these settings. The instance
     /// is handed to each stream rather than snapshotted, so a change reaches open connections.
     /// </summary>
-    public UtpManager(TimeProvider timeProvider, ILoggerFactory loggerFactory, ConnectionSettings settings)
+    public UtpManager(TimeProvider timeProvider, ILoggerFactory loggerFactory, ConnectionSettings settings,
+        PendingHandshakeLimiter? pendingHandshakes = null)
     {
         _loggerFactory = loggerFactory;
         _timeProvider = timeProvider;
         _settings = settings;
+        _pendingHandshakes = pendingHandshakes;
         _logger = _loggerFactory.CreateLogger<UtpManager>();
     }
 
@@ -78,8 +81,8 @@ internal class UtpManager : IUdpReceiver, IUtpManager
     {
         var recvKey = new UtpSocketKey(stream.RemoteEndPoint, stream.ConnectionIdRecv);
         var sendKey = new UtpSocketKey(stream.RemoteEndPoint, stream.ConnectionIdSend);
-        _streamsByRecvId.TryRemove(recvKey, out _);
-        _streamsBySendId.TryRemove(sendKey, out _);
+        _streamsByRecvId.TryRemove(new KeyValuePair<UtpSocketKey, UtpStream>(recvKey, stream));
+        _streamsBySendId.TryRemove(new KeyValuePair<UtpSocketKey, UtpStream>(sendKey, stream));
     }
 
     public UtpStream CreateStream(IPEndPoint remote)
@@ -105,7 +108,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
             {
                 return stream;
             }
-            // TryAdd failed due to race condition, retry with new ID
+            stream.Abort();
         }
 
         throw new InvalidOperationException("Failed to allocate unique connection ID after maximum retries");
@@ -123,7 +126,7 @@ internal class UtpManager : IUdpReceiver, IUtpManager
 
     public void Receive(byte[] data, IPEndPoint remote)
     {
-        if (!_running || data.Length < 20)
+        if (!Volatile.Read(ref _running) || data.Length < 20)
         {
             return;
         }
@@ -154,16 +157,41 @@ internal class UtpManager : IUdpReceiver, IUtpManager
         }
         else if (header.Type == MessageType.ST_SYN && _settings.EnableUtpIn)
         {
-            ushort sendId = header.ConnectionId;
-            ushort recvId = (ushort)(header.ConnectionId + 1);
+            AcceptIncoming(header, data, headerSize, sackRanges, extensionBits, remote);
+        }
+    }
 
-            var newStream = new UtpStream(this, remote, recvId, sendId, _timeProvider, _loggerFactory, _settings);
-            if (AddStream(remote, recvId, sendId, newStream))
+    private void AcceptIncoming(MessageHeader header, byte[] data, int headerSize,
+        List<(ushort Start, ushort End)>? sackRanges, byte[]? extensionBits, IPEndPoint remote)
+    {
+        var onConnection = OnNewConnection;
+        if (onConnection == null || _pendingHandshakes?.TryEnter(remote.Address) == false)
+        {
+            return;
+        }
+
+        UtpStream? stream = null;
+        bool handedOff = false;
+        try
+        {
+            ushort sendId = header.ConnectionId;
+            ushort recvId = (ushort)(sendId + 1);
+            stream = new UtpStream(this, remote, recvId, sendId, _timeProvider, _loggerFactory, _settings);
+            if (AddStream(remote, recvId, sendId, stream) && Volatile.Read(ref _running))
             {
-                newStream.ProcessPacketWithSack(header, data, headerSize, sackRanges, extensionBits, remote);
-                OnNewConnection?.Invoke(newStream);
+                stream.ProcessPacketWithSack(header, data, headerSize, sackRanges, extensionBits, remote);
+                onConnection(stream);
+                handedOff = true;
             }
-            // else: stream already exists (race condition or duplicate SYN), ignore
+        }
+        finally
+        {
+            // Once handed off, the handshake handler releases the slot when it finishes.
+            if (!handedOff)
+            {
+                _pendingHandshakes?.Exit(remote.Address);
+                stream?.Abort();
+            }
         }
     }
 
@@ -177,12 +205,12 @@ internal class UtpManager : IUdpReceiver, IUtpManager
 
     public void Start(IUdpListener listener)
     {
-        if (_running)
+        if (Volatile.Read(ref _running))
         {
             return;
         }
 
-        _running = true;
+        Volatile.Write(ref _running, true);
         Listener = listener;
         Listener.RegisterReceiver(this);
 
@@ -191,13 +219,15 @@ internal class UtpManager : IUdpReceiver, IUtpManager
 
     public void Stop()
     {
-        _running = false;
+        Volatile.Write(ref _running, false);
         _timer?.Dispose();
         _timer = null;
 
         foreach (var stream in _streamsByRecvId.Values)
         {
+            // Send the FIN once, then release state since the manager can no longer process replies.
             stream.HalfClose();
+            stream.Abort();
         }
         _streamsByRecvId.Clear();
         _streamsBySendId.Clear();

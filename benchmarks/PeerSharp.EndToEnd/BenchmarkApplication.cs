@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-
 namespace PeerSharp.EndToEnd;
 
 internal static class BenchmarkApplication

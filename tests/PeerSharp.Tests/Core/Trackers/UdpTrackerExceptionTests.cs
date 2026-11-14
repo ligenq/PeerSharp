@@ -1,5 +1,3 @@
-using PeerSharp.Internals.Trackers;
-
 namespace PeerSharp.Tests.Core.Trackers;
 
 public class UdpTrackerExceptionTests

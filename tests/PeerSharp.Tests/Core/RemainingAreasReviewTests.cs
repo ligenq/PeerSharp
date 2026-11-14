@@ -9,7 +9,6 @@ using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
-using PeerSharp.Interfaces;
 using PeerSharp.Tests.Core.Peers;
 
 namespace PeerSharp.Tests.Core;

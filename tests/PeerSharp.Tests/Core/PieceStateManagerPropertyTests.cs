@@ -1,6 +1,5 @@
 using CsCheck;
 using Microsoft.Extensions.Logging.Abstractions;
-using PeerSharp.Core;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Transfers;
 using PeerSharp.PiecePicking;

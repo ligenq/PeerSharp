@@ -1,7 +1,6 @@
 using PeerSharp.BEncoding;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Utilities;
-using System.Net;
 using System.Text;
 
 namespace PeerSharp.Tests.Core.Dht;

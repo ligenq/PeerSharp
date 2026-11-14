@@ -1,5 +1,3 @@
-using PeerSharp.Interfaces;
-
 namespace PeerSharp.Core;
 
 /// <summary>

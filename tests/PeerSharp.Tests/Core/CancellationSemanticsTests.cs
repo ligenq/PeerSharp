@@ -1,5 +1,4 @@
 using PeerSharp.Internals;
-using PeerSharp.Internals.Dht;
 using System.Reflection;
 
 namespace PeerSharp.Tests.Core;

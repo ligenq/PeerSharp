@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
-using PeerSharp.Interfaces;
 
 namespace PeerSharp.Tests.Core;
 

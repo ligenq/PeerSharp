@@ -4,7 +4,6 @@ using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.Messages;
 using System.Text;
-using System.Threading.Channels;
 
 namespace PeerSharp.Tests.Core.Peers;
 

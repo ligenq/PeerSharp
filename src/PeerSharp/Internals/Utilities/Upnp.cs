@@ -23,7 +23,11 @@ internal static class UpnpDiscovery
         "MX: 3\r\n\r\n";
 
     private const int SsdpPort = 1900;
-    private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(2) };
+    private static readonly HttpClient HttpClient = new(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        UseProxy = false
+    }) { Timeout = TimeSpan.FromSeconds(2) };
 
     public static Task<List<UpnpGateway>> DiscoverAsync(CancellationToken ct = default)
     {
@@ -120,10 +124,17 @@ internal static class UpnpDiscovery
     {
         try
         {
-            if (!Uri.TryCreate(location, UriKind.Absolute, out var descriptionUri) || descriptionUri.Scheme is not ("http" or "https")) return null;
+            if (!Uri.TryCreate(location, UriKind.Absolute, out var descriptionUri)
+                || !IPAddress.TryParse(descriptionUri.DnsSafeHost, out var responder)
+                || !IsServedBy(descriptionUri, responder))
+            {
+                return null;
+            }
+
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(2));
-            using var response = await HttpClient.GetAsync(descriptionUri, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+            using var response = await GetDescriptionResponseAsync(descriptionUri, responder, timeout.Token).ConfigureAwait(false);
+            if (response == null) return null;
             response.EnsureSuccessStatusCode();
             var doc = await ReadXmlAsync(response, timeout.Token).ConfigureAwait(false);
             var ns = doc.Root?.GetDefaultNamespace() ?? XNamespace.None;
@@ -135,9 +146,13 @@ internal static class UpnpDiscovery
             }
 
             var friendlyName = device.Element(ns + "friendlyName")?.Value ?? "Unknown";
-            var baseUri = descriptionUri;
+            var baseUri = response.RequestMessage?.RequestUri ?? descriptionUri;
             string? urlBase = doc.Root?.Element(ns + "URLBase")?.Value;
-            if (!string.IsNullOrWhiteSpace(urlBase) && Uri.TryCreate(urlBase, UriKind.Absolute, out var advertisedBase)) baseUri = advertisedBase;
+            if (!string.IsNullOrWhiteSpace(urlBase) && Uri.TryCreate(urlBase, UriKind.Absolute, out var advertisedBase))
+            {
+                if (!IsServedBy(advertisedBase, responder)) return null;
+                baseUri = advertisedBase;
+            }
 
             foreach (var service in doc.Descendants(ns + "service"))
             {
@@ -147,7 +162,7 @@ internal static class UpnpDiscovery
                 if (serviceType != null && controlUrl != null &&
                     (serviceType.Contains(":WANIPConnection:") || serviceType.Contains(":WANPPPConnection:")))
                 {
-                    if (!Uri.TryCreate(baseUri, controlUrl.Trim(), out var controlUri) || controlUri.Scheme is not ("http" or "https")) continue;
+                    if (!Uri.TryCreate(baseUri, controlUrl.Trim(), out var controlUri) || !IsServedBy(controlUri, responder)) continue;
 
                     return new UpnpGateway
                     {
@@ -176,6 +191,29 @@ internal static class UpnpDiscovery
         catch (Exception ex)
         {
             logger.LogError(ex, "UPnP error parsing {Location}", location);
+        }
+        return null;
+    }
+
+    private static async Task<HttpResponseMessage?> GetDescriptionResponseAsync(Uri uri, IPAddress responder, CancellationToken ct)
+    {
+        const int maxRedirects = 5;
+        for (int redirects = 0; redirects <= maxRedirects; redirects++)
+        {
+            var response = await HttpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (response.StatusCode is not (HttpStatusCode.Moved or HttpStatusCode.Redirect or HttpStatusCode.RedirectMethod
+                or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect))
+            {
+                return response;
+            }
+
+            var location = response.Headers.Location;
+            response.Dispose();
+            if (location == null || !Uri.TryCreate(uri, location, out var destination) || !IsServedBy(destination, responder))
+            {
+                return null;
+            }
+            uri = destination;
         }
         return null;
     }
@@ -212,9 +250,9 @@ internal static class UpnpDiscovery
         return null;
     }
 
-    private static bool IsServedBy(string location, IPAddress responder)
+    private static bool IsServedBy(Uri uri, IPAddress responder)
     {
-        if (!Uri.TryCreate(location, UriKind.Absolute, out var uri) || !IPAddress.TryParse(uri.DnsSafeHost, out var host))
+        if (uri.Scheme is not ("http" or "https") || !IPAddress.TryParse(uri.DnsSafeHost, out var host))
         {
             return false;
         }
@@ -254,7 +292,7 @@ internal static class UpnpDiscovery
                 {
                     // Any host on the network can answer a search, so only a description served by the
                     // responder itself is fetched. Otherwise one reply could aim our requests anywhere.
-                    if (!IsServedBy(location, res.RemoteEndPoint.Address))
+                    if (!Uri.TryCreate(location, UriKind.Absolute, out var uri) || !IsServedBy(uri, res.RemoteEndPoint.Address))
                     {
                         logger.LogDebug("Ignoring UPnP response from {Responder}: description {Location} is on another host", res.RemoteEndPoint.Address, location);
                         continue;
@@ -311,7 +349,11 @@ internal class UpnpGateway
 
 internal class UpnpPortMapping : IPortMapper
 {
-    private static readonly HttpClient SoapClient = new() { Timeout = TimeSpan.FromSeconds(10) };
+    private static readonly HttpClient SoapClient = new(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        UseProxy = false
+    }) { Timeout = TimeSpan.FromSeconds(10) };
     private readonly Func<CancellationToken, Task<List<UpnpGateway>>> _discoverGatewaysAsync;
     private readonly ILogger<UpnpPortMapping> _logger;
     private readonly List<(int Port, string Protocol, string Description)> _mappings = [];

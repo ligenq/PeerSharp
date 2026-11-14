@@ -1,5 +1,4 @@
-﻿using PeerSharp.Internals;
-using PeerSharp.Internals.Peers;
+﻿using PeerSharp.Internals.Peers;
 using PeerSharp.Messages;
 using PeerSharp.Tests.Core.Peers;
 using System.Net;

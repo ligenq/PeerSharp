@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
-using PeerSharp.Core;
 using PeerSharp.Internals;
 using ApiTorrentFileBuilder = PeerSharp.Core.TorrentFileBuilder;
 

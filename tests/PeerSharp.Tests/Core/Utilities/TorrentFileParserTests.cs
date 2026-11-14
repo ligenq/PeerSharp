@@ -2,8 +2,6 @@ using PeerSharp.Internals.Utilities;
 using PeerSharp.BEncoding;
 using PeerSharp.Internals;
 
-using PeerSharp.Exceptions;
-
 namespace PeerSharp.Tests.Core.Utilities;
 
 public class TorrentFileParserTests

@@ -1,11 +1,9 @@
 using PeerSharp.BEncoding;
-using PeerSharp.Core;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Utp;
 using PeerSharp.Internals.Utilities;
-using System.Net;
 
 namespace PeerSharp.Tests.Core.Dht;
 

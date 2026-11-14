@@ -139,6 +139,24 @@ public class RoutingTableTests
     }
 
     [Fact]
+    public void AddReferral_WaitsForDirectContactAndUsesRespondingEndpoint()
+    {
+        var table = new RoutingTable(_localId, _timeProvider);
+        byte[] nodeId = new byte[20];
+        nodeId[0] = 0x80;
+        var responding = new IPEndPoint(IPAddress.Loopback, 2000);
+
+        table.AddReferral(nodeId, new IPEndPoint(IPAddress.Loopback, 1000));
+
+        Assert.Empty(table.FindClosest(nodeId, 1));
+        Assert.Empty(table.GetAllNodes());
+
+        table.AddNode(nodeId, responding);
+
+        Assert.Equal(responding, Assert.Single(table.FindClosest(nodeId, 1)).EndPoint);
+    }
+
+    [Fact]
     public void EndpointNotResponded_RepeatedTimeouts_LetResponderReplaceNode()
     {
         var table = new RoutingTable(_localId, _timeProvider);

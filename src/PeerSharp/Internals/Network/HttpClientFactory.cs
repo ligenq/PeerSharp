@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Sockets;
-using PeerSharp.Core;
 
 namespace PeerSharp.Internals.Network;
 

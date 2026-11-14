@@ -1,10 +1,7 @@
 ﻿using Microsoft.Extensions.Logging.Abstractions;
-using PeerSharp.BEncoding;
-using PeerSharp.Internals;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Framework;
 using PeerSharp.Internals.Network;
-using System.Text;
 
 namespace PeerSharp.Tests.Interop;
 

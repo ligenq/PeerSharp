@@ -335,6 +335,7 @@ internal class UtpStream : Stream
     public IPEndPoint RemoteEndPoint { get; }
     internal ushort ConnectionIdRecv { get; }
     internal ushort ConnectionIdSend { get; }
+    internal bool IsDisposed => _disposal.IsDisposed;
     internal UtpState State => _state;
     internal uint Rtt => _rtt;
     internal int SentPacketsCount => _sentPackets.Count;
@@ -598,6 +599,12 @@ internal class UtpStream : Stream
     {
         CloseInternal(true);
         EndPendingRead();
+    }
+
+    internal void Abort()
+    {
+        CloseInternal(false);
+        Dispose();
     }
 
     /// <summary>

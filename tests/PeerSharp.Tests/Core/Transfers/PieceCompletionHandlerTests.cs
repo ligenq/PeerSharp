@@ -3,7 +3,6 @@ using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Transfers;
 using PeerSharp.Messages;
-using PeerSharp.Tests.Core.Peers;
 
 namespace PeerSharp.Tests.Core.Transfers;
 

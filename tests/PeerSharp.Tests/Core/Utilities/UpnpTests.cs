@@ -15,13 +15,13 @@ public sealed class UpnpTests
     {
         await using var server = new TestHttpServer(_ => TestHttpResponse.Ok(
             "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">" +
-            (useUrlBase ? "<URLBase>http://[::1]:1234/base/</URLBase>" : "") +
+            (useUrlBase ? "<URLBase>http://127.0.0.1:1234/base/</URLBase>" : "") +
             "<device><friendlyName>Router</friendlyName><serviceList><service><serviceType>Other</serviceType></service></serviceList>" +
             "<deviceList><device><serviceList><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:2</serviceType>" +
             "<controlURL>control</controlURL></service></serviceList></device></deviceList></device></root>"));
         var gateway = await UpnpDiscovery.ParseDescriptionAsync(server.BaseUri + "descriptions/router.xml", IPAddress.Loopback, TestContext.Current.CancellationToken);
         Assert.NotNull(gateway);
-        Assert.Equal(useUrlBase ? "http://[::1]:1234/base/control" : server.BaseUri + "descriptions/control", gateway.ControlUrl);
+        Assert.Equal(useUrlBase ? "http://127.0.0.1:1234/base/control" : server.BaseUri + "descriptions/control", gateway.ControlUrl);
     }
 
     [Theory]
@@ -118,6 +118,55 @@ public sealed class UpnpTests
 
         Assert.Empty(gateways);
         Assert.Empty(fetched);
+    }
+
+    [Fact]
+    public async Task ParseDescriptionAsync_FollowsSameHostRedirectAndResolvesRelativeControlUrl()
+    {
+        await using var server = new TestHttpServer(request => request.Path == "/desc.xml"
+            ? TestHttpResponse.Redirect("/devices/desc.xml")
+            : TestHttpResponse.Ok(UpnpTestData.DeviceDescriptionXml.Replace(">/control<", ">control<", StringComparison.Ordinal)));
+
+        var gateway = await UpnpDiscovery.ParseDescriptionAsync(server.BaseUri + "desc.xml",
+            IPAddress.Loopback, TestContext.Current.CancellationToken);
+
+        Assert.NotNull(gateway);
+        Assert.Equal(server.BaseUri + "devices/control", gateway.ControlUrl);
+    }
+
+    [Fact]
+    public async Task ParseDescriptionAsync_BlocksCrossHostRedirect()
+    {
+        var requests = new ConcurrentQueue<TestHttpRequest>();
+        await using var target = new TestHttpServer(request =>
+        {
+            requests.Enqueue(request);
+            return TestHttpResponse.Ok(UpnpTestData.DeviceDescriptionXml);
+        }, IPAddress.IPv6Loopback);
+        await using var source = new TestHttpServer(_ => TestHttpResponse.Redirect(target.BaseUri + "desc.xml"));
+
+        var gateway = await UpnpDiscovery.ParseDescriptionAsync(source.BaseUri + "desc.xml",
+            IPAddress.Loopback, TestContext.Current.CancellationToken);
+
+        Assert.Null(gateway);
+        Assert.Empty(requests);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ParseDescriptionAsync_BlocksCrossHostControlEndpoint(bool useUrlBase)
+    {
+        const string offHost = "http://192.0.2.1/";
+        string xml = useUrlBase
+            ? UpnpTestData.DeviceDescriptionXml.Replace("<device>", $"<URLBase>{offHost}</URLBase><device>", StringComparison.Ordinal)
+            : UpnpTestData.DeviceDescriptionXml.Replace(">/control<", $">{offHost}control<", StringComparison.Ordinal);
+        await using var server = new TestHttpServer(_ => TestHttpResponse.Ok(xml));
+
+        var gateway = await UpnpDiscovery.ParseDescriptionAsync(server.BaseUri + "desc.xml",
+            IPAddress.Loopback, TestContext.Current.CancellationToken);
+
+        Assert.Null(gateway);
     }
 
     [Fact]
@@ -308,13 +357,12 @@ public sealed class UpnpTests
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _acceptLoopTask;
 
-        public TestHttpServer(Func<TestHttpRequest, TestHttpResponse> handler)
+        public TestHttpServer(Func<TestHttpRequest, TestHttpResponse> handler, IPAddress? address = null)
         {
             _handler = handler;
-            _listener = new TcpListener(IPAddress.Loopback, 0);
+            _listener = new TcpListener(address ?? IPAddress.Loopback, 0);
             _listener.Start();
-            var port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-            BaseUri = $"http://127.0.0.1:{port}/";
+            BaseUri = $"http://{_listener.LocalEndpoint}/";
             _acceptLoopTask = Task.Run(AcceptLoopAsync);
         }
 
@@ -462,16 +510,18 @@ public sealed class UpnpTests
 
     private sealed record TestHttpRequest(string Method, string Path, Dictionary<string, string> Headers, string Body);
 
-    private sealed record TestHttpResponse(int StatusCode, string Body)
+    private sealed record TestHttpResponse(int StatusCode, string Body, string? Location = null)
     {
         public static TestHttpResponse Ok(string body) => new(200, body);
         public static TestHttpResponse NotFound() => new(404, "Not Found");
+        public static TestHttpResponse Redirect(string location) => new(302, string.Empty, location);
 
         public string ToHttpString()
         {
             var bytes = Encoding.UTF8.GetByteCount(Body);
-            var reason = StatusCode == 200 ? "OK" : "Not Found";
-            return $"HTTP/1.1 {StatusCode} {reason}\r\nContent-Length: {bytes}\r\nConnection: close\r\n\r\n{Body}";
+            var reason = StatusCode switch { 200 => "OK", 302 => "Found", _ => "Not Found" };
+            var redirect = Location == null ? string.Empty : $"Location: {Location}\r\n";
+            return $"HTTP/1.1 {StatusCode} {reason}\r\nContent-Length: {bytes}\r\n{redirect}Connection: close\r\n\r\n{Body}";
         }
     }
 }

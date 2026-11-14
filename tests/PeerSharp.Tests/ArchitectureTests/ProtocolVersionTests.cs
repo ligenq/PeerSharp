@@ -1,4 +1,3 @@
-using System.Reflection;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Network;
 

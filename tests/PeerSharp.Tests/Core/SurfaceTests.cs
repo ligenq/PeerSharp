@@ -1,12 +1,7 @@
-using Microsoft.Extensions.Time.Testing;
-using PeerSharp.Clients;
-using PeerSharp.Config;
-using PeerSharp.Core;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
 using PeerSharp.PiecePicking;
-using System.Net;
 
 namespace PeerSharp.Tests.Core;
 

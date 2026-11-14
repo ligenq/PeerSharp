@@ -1,4 +1,3 @@
-using PeerSharp.Core;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
 using System.Diagnostics;

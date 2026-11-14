@@ -1,11 +1,14 @@
-using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 
 namespace PeerSharp.Internals;
 
 internal sealed class MerkleHashRequestCoordinator
 {
-    private readonly ConcurrentDictionary<string, OutstandingRequest> _outstandingHashRequests = new();
+    private readonly Lock _lock = new();
+    private readonly Dictionary<string, OutstandingRequest> _outstandingHashRequests = [];
+    private readonly ConditionalWeakTable<object, PeerOrder> _peerOrder = new();
     private readonly TimeSpan _retryInterval;
+    private long _nextPeerOrder;
 
     public MerkleHashRequestCoordinator(TimeSpan retryInterval)
     {
@@ -47,58 +50,64 @@ internal sealed class MerkleHashRequestCoordinator
         }
 
         string requestKey = CreateRequestKey(request);
-        object? previousPeer = null;
-        if (_outstandingHashRequests.TryGetValue(requestKey, out var outstanding))
+        lock (_lock)
         {
-            if (now - outstanding.RequestedAt < _retryInterval)
+            long previousOrder = 0;
+            if (_outstandingHashRequests.TryGetValue(requestKey, out var outstanding))
             {
-                return MerkleHashRequestSelection<TPeer>.Throttled(requestKey);
+                if (now - outstanding.RequestedAt < _retryInterval)
+                {
+                    return MerkleHashRequestSelection<TPeer>.Throttled(requestKey);
+                }
+                previousOrder = outstanding.PeerOrder;
             }
 
-            outstanding.Peer?.TryGetTarget(out previousPeer);
+            // Keep the order across enumeration changes and peer departures. Wrap only after
+            // reaching the end, so every eligible peer gets a turn.
+            (TPeer Peer, long Order)? first = null;
+            (TPeer Peer, long Order)? next = null;
+            foreach (var peer in peers)
+            {
+                if (!canRequest(peer))
+                {
+                    continue;
+                }
+
+                long order = _peerOrder.GetValue(peer, _ => new PeerOrder(++_nextPeerOrder)).Value;
+                if (first == null || order < first.Value.Order)
+                {
+                    first = (peer, order);
+                }
+                if (order > previousOrder && (next == null || order < next.Value.Order))
+                {
+                    next = (peer, order);
+                }
+            }
+
+            if ((next ?? first) is not { } selected)
+            {
+                return MerkleHashRequestSelection<TPeer>.NoPeer;
+            }
+
+            _outstandingHashRequests[requestKey] = new OutstandingRequest(now, selected.Order);
+            return MerkleHashRequestSelection<TPeer>.Selected(selected.Peer, requestKey);
         }
-
-        // A retry means the last peer asked did not deliver - it may have rejected the request or
-        // ignored it. Asking it again would stall the piece forever, so another peer goes first.
-        TPeer? fallback = null;
-        foreach (var peer in peers)
-        {
-            if (!canRequest(peer))
-            {
-                continue;
-            }
-
-            if (ReferenceEquals(peer, previousPeer))
-            {
-                fallback = peer;
-                continue;
-            }
-
-            return Select(peer, requestKey, now);
-        }
-
-        return fallback != null
-            ? Select(fallback, requestKey, now)
-            : MerkleHashRequestSelection<TPeer>.NoPeer;
     }
 
     public void CompleteFailedV2Request(string requestKey)
     {
-        // Keep the peer so the next attempt prefers someone else, but allow it immediately.
-        _outstandingHashRequests.AddOrUpdate(
-            requestKey,
-            static _ => new OutstandingRequest(DateTimeOffset.MinValue, null),
-            static (_, existing) => existing with { RequestedAt = DateTimeOffset.MinValue });
+        lock (_lock)
+        {
+            if (_outstandingHashRequests.TryGetValue(requestKey, out var outstanding))
+            {
+                _outstandingHashRequests[requestKey] = outstanding with { RequestedAt = DateTimeOffset.MinValue };
+            }
+        }
     }
 
-    private MerkleHashRequestSelection<TPeer> Select<TPeer>(TPeer peer, string requestKey, DateTimeOffset now)
-        where TPeer : class
-    {
-        _outstandingHashRequests[requestKey] = new OutstandingRequest(now, new WeakReference<object>(peer));
-        return MerkleHashRequestSelection<TPeer>.Selected(peer, requestKey);
-    }
+    private sealed record PeerOrder(long Value);
 
-    private readonly record struct OutstandingRequest(DateTimeOffset RequestedAt, WeakReference<object>? Peer);
+    private readonly record struct OutstandingRequest(DateTimeOffset RequestedAt, long PeerOrder);
 
     private static string CreateRequestKey(V2HashRequest request)
     {

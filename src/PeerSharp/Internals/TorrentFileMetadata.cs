@@ -726,23 +726,18 @@ internal class TorrentFileInfo
         var fileIndices = GetFilesForPiece(pieceIndex);
         foreach (var fileIdx in fileIndices)
         {
-            if (fileIdx < selection.Count)
+            if (IsFileSelected(fileIdx, selection))
             {
-                var sel = selection[fileIdx];
-                if (sel.Selected && sel.Priority != Priority.DoNotDownload)
-                {
-                    return true;
-                }
-            }
-            else
-            {
-                // File index beyond selection list = assume selected (default)
                 return true;
             }
         }
 
         return false;
     }
+
+    internal static bool IsFileSelected(int index, IReadOnlyList<FileSelection>? selection)
+        => selection == null || index >= selection.Count
+            || (selection[index].Selected && selection[index].Priority != Priority.DoNotDownload);
 
     public int GetVisibleFileCount()
     {

@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Logging;
-using PeerSharp.Core;
 using PeerSharp.Internals.Dht;
 
 namespace PeerSharp.Internals;

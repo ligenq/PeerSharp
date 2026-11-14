@@ -72,6 +72,8 @@ public class SuperSeedManagerTests
             await manager.AssignPieceToPeerAsync(peerA);
             int firstPiece = peerA.SentMessages[0].HavePieceIndex;
 
+            await manager.HandlePeerHaveAsync(peerA, firstPiece);
+            Assert.Single(peerA.SentMessages);
             await manager.HandlePeerHaveAsync(peerB, firstPiece);
 
             Assert.True(peerA.SentMessages.Count >= 2);
@@ -90,10 +92,9 @@ public class SuperSeedManagerTests
     }
 
     [Fact]
-    public async Task HandlePeerHaveAsync_ReleasesEveryPeerThePieceWasAdvertisedTo()
+    public async Task HandlePeerHaveAsync_ReleasesEachAssigneeOnlyAfterItReportsThePiece()
     {
-        // With every piece already out, the next peer is offered one somebody else has too. A sighting
-        // of that piece has to free both: freeing only the first left the second waiting for good.
+        // The duplicate assignee may still be downloading when the first assignee finishes.
         var ctx = CreateTorrentContext(2);
         var manager = new SuperSeedManager(ctx.Torrent) { Enabled = true };
         var peerA = new TestPeer(new IPEndPoint(IPAddress.Loopback, 1));
@@ -110,10 +111,18 @@ public class SuperSeedManagerTests
             int shared = peerC.SentMessages[0].HavePieceIndex;
             var sharer = peerA.SentMessages[0].HavePieceIndex == shared ? peerA : peerB;
 
-            await manager.HandlePeerHaveAsync(peerD, shared);
+            await manager.HandlePeerHaveAsync(sharer, shared);
+            Assert.Single(sharer.SentMessages);
+            Assert.True(manager.ShouldAllowRequest(peerC, shared));
 
+            await manager.HandlePeerHaveAsync(peerD, shared);
             Assert.Equal(2, sharer.SentMessages.Count);
+            Assert.Single(peerC.SentMessages);
+            Assert.True(manager.ShouldAllowRequest(peerC, shared));
+
+            await manager.HandlePeerHaveAsync(peerC, shared);
             Assert.Equal(2, peerC.SentMessages.Count);
+            Assert.False(manager.ShouldAllowRequest(peerC, shared));
             Assert.NotEqual(shared, peerC.SentMessages[1].HavePieceIndex);
         }
         finally
@@ -240,7 +249,8 @@ public class SuperSeedManagerTests
             await manager.AssignPieceToPeerAsync(peerA);
             int assignedPiece = peerA.SentMessages[0].HavePieceIndex;
 
-            // peerB reports having the piece peerA was given — counts as distributed
+            await manager.HandlePeerHaveAsync(peerA, assignedPiece);
+            // peerB's bitfield is the second sighting of the piece.
             var pp = new PiecesProgress(3);
             pp.AddPiece(assignedPiece);
             manager.HandlePeerBitfield(peerB, pp);
@@ -342,7 +352,7 @@ public class SuperSeedManagerTests
             await manager.AssignPieceToPeerAsync(peerB); // piece 1
             await manager.AssignPieceToPeerAsync(peerC); // piece 2
 
-            // peerE reports having piece 0 (originally given to peerA) — sightings[0] becomes 1
+            // peerE reports having piece 0, increasing its sighting count.
             var pp = new PiecesProgress(3);
             pp.AddPiece(0);
             manager.HandlePeerBitfield(peerE, pp);
@@ -371,13 +381,14 @@ public class SuperSeedManagerTests
             manager.HandlePeerConnected(a); manager.HandlePeerConnected(b);
             await manager.AssignPieceToPeerAsync(a);
             int first = a.SentMessages[0].HavePieceIndex;
+            await manager.HandlePeerHaveAsync(a, first);
             await manager.HandlePeerHaveAsync(b, first);
-            int advertised = a.SentMessages.Count;
+            Assert.Equal(2, a.SentMessages.Count);
             await manager.HandlePeerHaveAsync(b, first);
-            Assert.Equal(advertised, a.SentMessages.Count);
+            Assert.Equal(2, a.SentMessages.Count);
             manager.HandlePeerDisconnected(a);
             await manager.AssignPieceToPeerAsync(a);
-            Assert.Equal(advertised, a.SentMessages.Count);
+            Assert.Equal(2, a.SentMessages.Count);
         }
         finally { Cleanup(ctx); }
     }
@@ -393,6 +404,7 @@ public class SuperSeedManagerTests
         {
             manager.HandlePeerConnected(a); manager.HandlePeerConnected(b);
             await manager.AssignPieceToPeerAsync(a);
+            await manager.HandlePeerHaveAsync(a, a.SentMessages[0].HavePieceIndex);
             var bitfield = new PiecesProgress(20);
             bitfield.AddPiece(a.SentMessages[0].HavePieceIndex); bitfield.AddPiece(19);
             manager.HandlePeerBitfield(b, bitfield);

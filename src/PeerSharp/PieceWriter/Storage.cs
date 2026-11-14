@@ -4,8 +4,6 @@ using Microsoft.Win32.SafeHandles;
 using PeerSharp.Internals;
 using System.Diagnostics;
 
-using PeerSharp.Exceptions;
-
 namespace PeerSharp.PieceWriter;
 
 internal sealed class Storage : IStorage

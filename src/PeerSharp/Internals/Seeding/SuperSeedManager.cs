@@ -37,7 +37,7 @@ internal class SuperSeedManager
     // Track which peer was given each piece (piece -> first peer we gave it to)
     private readonly ConcurrentDictionary<int, IPeerCommunication> _pieceOrigin = new();
 
-    // Track how many times each piece has been seen from OTHER peers (piece -> count)
+    // Track how many peers have reported holding each piece.
     private readonly int[] _pieceSightings;
 
     private readonly Torrent _torrent;
@@ -132,10 +132,10 @@ internal class SuperSeedManager
             for (int i = 0; i < Math.Min(peerPieces.Count, _pieceSightings.Length); i++)
                 if (peerPieces.HasPiece(i) && peerHas.Add(i))
                 {
-                    released.UnionWith(RecordDistributionLocked(peer, i));
+                    RecordDistributionLocked(i, released);
                 }
         }
-        _ = ReassignAfterBitfieldAsync(released).ContinueWith(static task => _ = task.Exception, TaskScheduler.Default);
+        _ = ReassignReleasedPeersAsync(released).ContinueWith(static task => _ = task.Exception, TaskScheduler.Default);
     }
 
     /// <summary>
@@ -178,8 +178,7 @@ internal class SuperSeedManager
 
     /// <summary>
     /// Called when we receive a HAVE message from a peer.
-    /// Track that this peer has this piece and check if we need to give
-    /// the original peer a new piece.
+    /// Track that this peer has the piece and advance any assignees ready for another.
     /// </summary>
     public async Task HandlePeerHaveAsync(IPeerCommunication peer, int pieceIndex)
     {
@@ -193,52 +192,44 @@ internal class SuperSeedManager
             return;
         }
 
-        List<IPeerCommunication> released;
+        var released = new HashSet<IPeerCommunication>();
         lock (_lock)
         {
             if (!_peerPieces.TryGetValue(peer, out var peerHas) || !peerHas.Add(pieceIndex)) return;
-            released = RecordDistributionLocked(peer, pieceIndex);
+            RecordDistributionLocked(pieceIndex, released);
         }
-        foreach (var original in released) await AssignPieceToPeerAsync(original).ConfigureAwait(false);
+        await ReassignReleasedPeersAsync(released).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Records <paramref name="peer"/> holding <paramref name="pieceIndex"/> and returns every other
-    /// peer that piece was advertised to, now free for another. A piece can be advertised to more
-    /// than one peer when no unassigned piece is left, and each of them is waiting on this sighting:
-    /// releasing only the first one left the rest without a piece for good.
+    /// An assignee can move on once it has the piece and a second peer has reported it.
     /// </summary>
-    private List<IPeerCommunication> RecordDistributionLocked(IPeerCommunication peer, int pieceIndex)
+    private void RecordDistributionLocked(int pieceIndex, HashSet<IPeerCommunication> released)
     {
-        var released = new List<IPeerCommunication>();
+        int sightings = ++_pieceSightings[pieceIndex];
+        if (sightings < 2)
+        {
+            return;
+        }
+
         foreach (var (assignee, assigned) in _assignedPieces)
         {
-            if (assigned == pieceIndex && !ReferenceEquals(assignee, peer))
+            if (assigned == pieceIndex && _peerPieces.TryGetValue(assignee, out var pieces) && pieces.Contains(pieceIndex))
             {
+                _distributedPieces.Add(pieceIndex);
+                _assignedPieces[assignee] = -1;
                 released.Add(assignee);
             }
         }
-
-        bool fromOtherPeer = _pieceOrigin.TryGetValue(pieceIndex, out var original) && !ReferenceEquals(original, peer);
-        if (!fromOtherPeer && released.Count == 0) return released;
-
-        _pieceSightings[pieceIndex]++;
-        _distributedPieces.Add(pieceIndex);
-        foreach (var assignee in released)
-        {
-            if (_peerPieces.TryGetValue(assignee, out var pieces)) pieces.Add(pieceIndex);
-            _assignedPieces[assignee] = -1;
-        }
-        return released;
     }
 
-    private async Task ReassignAfterBitfieldAsync(IEnumerable<IPeerCommunication> peers)
+    private async Task ReassignReleasedPeersAsync(IEnumerable<IPeerCommunication> peers)
     {
-        try
+        foreach (var peer in peers)
         {
-            foreach (var peer in peers) await AssignPieceToPeerAsync(peer).ConfigureAwait(false);
+            try { await AssignPieceToPeerAsync(peer).ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogWarning(ex, "SuperSeed: Failed to advertise the next piece"); }
         }
-        catch (Exception ex) { _logger.LogWarning(ex, "SuperSeed: Failed to advertise the next piece"); }
     }
 
     /// <summary>

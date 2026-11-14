@@ -1,5 +1,4 @@
-﻿using PeerSharp.Core;
-using PeerSharp.Diagnostics;
+﻿using PeerSharp.Diagnostics;
 using System.Diagnostics.Metrics;
 
 namespace PeerSharp.Internals;

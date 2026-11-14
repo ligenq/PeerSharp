@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Time.Testing;
 using PeerSharp.BEncoding;
-using PeerSharp.Internals;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using System.Net;

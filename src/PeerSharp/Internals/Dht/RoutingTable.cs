@@ -86,9 +86,8 @@ internal class RoutingTable
     }
 
     /// <summary>
-    /// Adds a node another node told us about. Unlike <see cref="AddNode"/> nothing has been heard
-    /// from it, so it may only fill a gap: a referral naming a node we already know is ignored
-    /// rather than allowed to repoint it somewhere else.
+    /// Remembers a referral in an empty slot. It stays inactive until direct contact confirms it,
+    /// and any responding node can take its slot.
     /// </summary>
     public void AddReferral(ReadOnlySpan<byte> id, IPEndPoint ep)
     {
@@ -101,13 +100,12 @@ internal class RoutingTable
         lock (_lock)
         {
             var bucket = _buckets[bucketId];
-            if (bucket.Find(id) != null || bucket.FindCache(id) != null)
+            if (bucket.Nodes.Count >= MaxBucketNodesCount || bucket.Find(id) != null || bucket.FindCache(id) != null)
             {
                 return;
             }
+            bucket.Nodes.Add(new BucketNode(new NodeInfo(id, ep), _timeProvider) { Active = false });
         }
-
-        NodeResponded(new NodeInfo(id, ep), IdMatchesAddress(id, ep));
     }
 
     /// <summary>

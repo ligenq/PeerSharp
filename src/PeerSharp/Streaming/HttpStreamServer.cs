@@ -1,12 +1,9 @@
 using System.Buffers.Text;
-using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using PeerSharp.Core;
-using PeerSharp.Internals;
 
 namespace PeerSharp.Streaming;
 

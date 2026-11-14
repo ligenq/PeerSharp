@@ -1,8 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using PeerSharp.BEncoding;
-using PeerSharp.Exceptions;
-using PeerSharp.Internals;
 using PeerSharp.Internals.Utilities;
 using Builder = PeerSharp.Core.TorrentFileBuilder;
 

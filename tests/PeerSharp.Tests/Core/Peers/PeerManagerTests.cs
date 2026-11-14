@@ -5,7 +5,6 @@ using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Network;
 using PeerSharp.Internals.Peers;
 using PeerSharp.Internals.Utilities;
-using PeerSharp.Exceptions;
 using PeerSharp.Messages;
 using System.Collections.Concurrent;
 using System.Net;

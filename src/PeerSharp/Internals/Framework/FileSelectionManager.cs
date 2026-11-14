@@ -387,8 +387,7 @@ internal class FileSelectionManager : IFileSelectionManager
         long bytes = 0;
         foreach (int fileIndex in info.GetFilesForPiece(pieceIndex))
         {
-            if (fileIndex < _fileSelection.Count &&
-                (!_fileSelection[fileIndex].Selected || _fileSelection[fileIndex].Priority == Priority.DoNotDownload))
+            if (!TorrentFileInfo.IsFileSelected(fileIndex, _fileSelection))
             {
                 continue;
             }

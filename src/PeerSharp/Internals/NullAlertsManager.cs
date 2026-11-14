@@ -1,6 +1,3 @@
-using PeerSharp.Core;
-using PeerSharp.Interfaces;
-
 namespace PeerSharp.Internals;
 
 /// <summary>

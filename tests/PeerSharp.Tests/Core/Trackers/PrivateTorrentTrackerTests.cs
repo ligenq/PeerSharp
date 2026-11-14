@@ -1,4 +1,3 @@
-using PeerSharp.Core;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Trackers;
 

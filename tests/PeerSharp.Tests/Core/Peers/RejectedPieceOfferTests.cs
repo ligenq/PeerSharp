@@ -1,6 +1,5 @@
 using PeerSharp.Internals;
 using PeerSharp.Internals.Peers;
-using PeerSharp.Messages;
 
 namespace PeerSharp.Tests.Core.Peers;
 

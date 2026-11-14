@@ -9,6 +9,45 @@ namespace PeerSharp.Tests.Core.Utp;
 
 public class UtpSecurityTests
 {
+    [Fact]
+    public async Task IncomingSynReservesHandshakeSlotBeforeCreatingStream()
+    {
+        var limiter = new PendingHandshakeLimiter(maxTotal: 2, maxPerAddress: 1);
+        var settings = new ConnectionSettings { EnableUtpIn = true };
+        using var listener = new MockUdpListener();
+        await using var manager = new UtpManager(TimeProvider.System, NullLoggerFactory.Instance, settings, limiter);
+        var accepted = new List<UtpStream>();
+        manager.OnNewConnection = accepted.Add;
+        manager.Start(listener);
+        var remote = new IPEndPoint(IPAddress.Loopback, 6000);
+
+        void SendSyn(ushort id)
+        {
+            byte[] syn = new byte[20];
+            syn[0] = 0x41;
+            UtpManager.WriteUInt16BigEndian(syn, 2, id);
+            manager.Receive(syn, remote);
+        }
+
+        SendSyn(10);
+        SendSyn(20);
+        Assert.Single(accepted);
+        Assert.Single(listener.SentPackets);
+        Assert.Equal(1, limiter.Pending);
+
+        accepted[0].Abort();
+        limiter.Exit(remote.Address);
+        SendSyn(20);
+
+        Assert.Equal(2, accepted.Count);
+        Assert.Equal(2, listener.SentPackets.Count);
+        var read = accepted[1].ReadAsync(new byte[1], TestContext.Current.CancellationToken);
+        manager.Stop();
+        Assert.Equal(0, await read);
+        Assert.Equal(UtpState.Closed, accepted[1].State);
+        limiter.Exit(remote.Address);
+    }
+
     [Fact(Timeout = 10000)]
     public async Task IncomingSynIsIgnoredWhenOnlyOutgoingUtpIsEnabled()
     {

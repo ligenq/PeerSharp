@@ -1,6 +1,5 @@
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
-using PeerSharp.Interfaces;
 
 namespace PeerSharp.Internals.Network;
 

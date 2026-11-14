@@ -1,4 +1,3 @@
-using PeerSharp.Core;
 using PeerSharp.Internals.Dht;
 using PeerSharp.Internals.Utilities;
 

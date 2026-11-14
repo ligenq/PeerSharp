@@ -81,16 +81,18 @@ public class MerkleHashRequestCoordinatorTests
     {
         var coordinator = new MerkleHashRequestCoordinator(TimeSpan.FromSeconds(3));
         var request = Request(index: 10);
-        var peers = new[] { new Candidate("a", true), new Candidate("b", true) };
+        var peers = new[] { new Candidate("a", true), new Candidate("b", true), new Candidate("c", true) };
         var now = DateTimeOffset.UnixEpoch;
 
         var first = coordinator.SelectV2Peer(request, peers, peer => peer.CanRequest, now);
-        var retry = coordinator.SelectV2Peer(request, peers, peer => peer.CanRequest, now.AddSeconds(4));
+        var retry = coordinator.SelectV2Peer(request, peers.Reverse(), peer => peer.CanRequest, now.AddSeconds(4));
         var third = coordinator.SelectV2Peer(request, peers, peer => peer.CanRequest, now.AddSeconds(8));
+        var wrapped = coordinator.SelectV2Peer(request, peers, peer => peer.CanRequest, now.AddSeconds(12));
 
         Assert.Equal("a", first.Peer!.Name);
         Assert.Equal("b", retry.Peer!.Name);
-        Assert.Equal("a", third.Peer!.Name);
+        Assert.Equal("c", third.Peer!.Name);
+        Assert.Equal("a", wrapped.Peer!.Name);
     }
 
     [Fact]

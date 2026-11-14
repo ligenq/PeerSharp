@@ -1249,7 +1249,6 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 foreach (var n in nodes)
                 {
                     AddRoutingReferral(n.Id, n.EndPoint);
-                    MarkStateDirty();
                     ContinueWalk(trans, n.EndPoint);
                 }
             }
@@ -1261,7 +1260,6 @@ internal partial class DhtManager : IUdpReceiver, IDhtManager
                 foreach (var n in nodes)
                 {
                     AddRoutingReferral(n.Id, n.EndPoint);
-                    MarkStateDirty();
                     ContinueWalk(trans, n.EndPoint);
                 }
             }
