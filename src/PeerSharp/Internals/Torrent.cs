@@ -65,6 +65,10 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     // during its file check - can be told from one that came before.
     private long _stopRequests;
 
+    // Stop count of the most recent accepted start. A stop can invalidate that start while
+    // StartedOrStarting still reports work waiting for I/O or the state lock.
+    private long _startStopRequests = -1;
+
     // Cancels the file check in progress, the only long work done under the state lock. Without it a
     // stop, a removal and engine disposal would all wait for the disk.
     private Func<Task>? _cancelRunningCheck;
@@ -546,6 +550,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// <see cref="StopForEngineAsync"/> instead, and do not come here.
     /// </summary>
     internal Func<Torrent, Task>? SessionSave { get; set; }
+    internal Func<Torrent, string, CancellationToken, Task>? SessionStorageMove { get; set; }
 
     internal long TotalDownloaded => FileTransferInternal?.Downloader.Downloaded ?? 0;
     internal long TotalUploaded => FileTransferInternal?.Uploader.Uploaded ?? 0;
@@ -827,14 +832,31 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
     /// <returns>The stop count to hand to <see cref="StartCoreAsync(long, CancellationToken)"/>.</returns>
     internal long BeginStart()
     {
-        Interlocked.Increment(ref _startsInProgress);
-        return Interlocked.Read(ref _stopRequests);
+        long stopRequests = StopRequests;
+        RecordStartIntent(stopRequests);
+        ReserveStart();
+        return stopRequests;
     }
+
+    internal void ReserveStart() => Interlocked.Increment(ref _startsInProgress);
 
     internal void EndStart() => Interlocked.Decrement(ref _startsInProgress);
 
     /// <summary>See <see cref="_stopRequests"/>.</summary>
     internal long StopRequests => Interlocked.Read(ref _stopRequests);
+
+    internal bool HasStartIntentAt(long stopRequests) => Interlocked.Read(ref _startStopRequests) == stopRequests;
+
+    private void RecordStartIntent(long stopRequests)
+    {
+        long previous = Interlocked.Read(ref _startStopRequests);
+        while (previous < stopRequests)
+        {
+            long observed = Interlocked.CompareExchange(ref _startStopRequests, stopRequests, previous);
+            if (observed == previous) return;
+            previous = observed;
+        }
+    }
 
     public IReadOnlyList<Core.TorrentFileInfo> GetAllFileInfo()
     {
@@ -1027,7 +1049,7 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
             restarting = wasStarted && !StopAfterMetadata;
             if (restarting)
             {
-                _ = BeginStart();
+                ReserveStart();
             }
 
             var peerPreferences = PeersInternal.ExportConnectionPreferences();
@@ -1428,23 +1450,34 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 throw new InvalidOperationException("Torrent must be stopped before moving its storage");
             }
 
-            if (FilesInternal != null)
-            {
-                // Move first, then repoint. The other order would leave the data unreachable if the
-                // move failed, which is the situation this method exists to avoid.
-                await FilesInternal.MoveFilesAsync(path, cancellationToken).ConfigureAwait(false);
-                await FilesInternal.DisposeAsync().ConfigureAwait(false);
-            }
-
-            LocalState.DownloadPath = path;
-            FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, path);
-
-            _logger.LogInformation("Storage moved to: {Path}", path);
+            var move = SessionStorageMove;
+            if (move == null)
+                await MoveStorageCoreAsync(path, null, cancellationToken).ConfigureAwait(false);
+            else
+                await move(this, path, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             _stateLock.Release();
         }
+    }
+
+    internal async Task MoveStorageCoreAsync(string path, Func<StorageMovePlan, CancellationToken, Task>? recordMove,
+        CancellationToken ct)
+    {
+        if (FilesInternal != null)
+        {
+            var snapshots = FilesInternal.GetFileSnapshots();
+            await FilesInternal.MoveFilesAsync(path, recordMove, ct).ConfigureAwait(false);
+            await FilesInternal.DisposeAsync().ConfigureAwait(false);
+            // Renames and the copy fallback preserve the file timestamps. Old paths no longer
+            // exist after the move, so use the snapshots taken before they were moved.
+            LocalState.FileSnapshots = snapshots ?? LocalState.FileSnapshots;
+        }
+
+        FilesInternal = PieceWriter.Files.Create(this, Services.FileHandleCache, Services.LoggerFactory, path);
+        LocalState.DownloadPath = path;
+        _logger.LogInformation("Storage moved to: {Path}", path);
     }
 
     public Task SetFilePriorityAsync(int fileIndex, Priority priority, CancellationToken cancellationToken = default)
@@ -1535,6 +1568,8 @@ internal sealed class Torrent : ITorrent, IPeerTransportHost, IAsyncDisposable, 
                 throw new InvalidOperationException(
                     $"Torrent '{Name}' did not finish rolling back its previous start. Stop it before starting again.");
             }
+
+            RecordStartIntent(stopRequestsAtStart);
 
             if (InfoFile.Info.IsSsl && (SslCertificate?.HasPrivateKey != true
                 || !TorrentTls.ValidateCertificate(this, SslCertificate, null)))

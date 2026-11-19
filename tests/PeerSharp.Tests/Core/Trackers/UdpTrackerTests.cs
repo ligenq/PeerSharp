@@ -300,7 +300,7 @@ public class UdpTrackerTests
         public MultiScrapeResponse? MultiScrapeResponse { get; private set; }
         public string? AnnounceErrorMessage { get; private set; }
         public Action? AfterAnnounce { get; init; }
-        public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null)
+        public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null, CancellationToken ct = default)
         {
             Success = success;
             AnnounceResponse = response;

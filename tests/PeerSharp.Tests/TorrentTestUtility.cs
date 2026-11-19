@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Time.Testing;
+using System.Collections.Concurrent;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Framework;
 using PeerSharp.PieceWriter;
@@ -113,7 +114,7 @@ internal static class TorrentTestUtility
 
     internal class MockBandwidthManager : IBandwidthManager
     {
-        private readonly Dictionary<string, BandwidthChannel> _channels = [];
+        private readonly ConcurrentDictionary<string, BandwidthChannel> _channels = new();
 
         public void SetGlobalLimits(long downloadLimit, long uploadLimit) { }
         public void SetGlobalDiskLimits(long readLimit, long writeLimit) { }
@@ -135,17 +136,8 @@ internal static class TorrentTestUtility
             return Task.FromResult(amount);
         }
 
-        public BandwidthChannel GetChannel(string name)
-        {
-            if (_channels.TryGetValue(name, out var channel))
-            {
-                return channel;
-            }
-
-            channel = new BandwidthChannel(TimeProvider.System);
-            _channels[name] = channel;
-            return channel;
-        }
+        public BandwidthChannel GetChannel(string name) =>
+            _channels.GetOrAdd(name, static _ => new BandwidthChannel(TimeProvider.System));
 
         public void ReturnBandwidth(int amount, string[] channelNames) { }
         public void RemoveTorrentChannels(ITorrent torrent) { }
@@ -359,7 +351,9 @@ internal static class TorrentTestUtility
         TorrentResumeData? resumeData = null,
         IBandwidthManager? bandwidth = null,
         bool loadResumePiecesForStart = false,
-        Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null)
+        Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null,
+        IFileHandleCache? fileHandleCache = null,
+        IFileSelectionManager? fileSelectionManager = null)
     {
         metadata ??= new TorrentFileMetadata();
         if (metadata.Info.PieceSize == 0)
@@ -377,11 +371,11 @@ internal static class TorrentTestUtility
             settings,
             bandwidth ?? new MockBandwidthManager(),
             alerts ?? new MockAlertsManager(),
-            new MockFileSelectionManager(),
+            fileSelectionManager ?? new MockFileSelectionManager(),
             new MockPeerCommunicationFactory(),
             trackerFactory ?? new MockTrackerFactory(),
             new MockGeoIpService(),
-            new MockFileHandleCache(),
+            fileHandleCache ?? new MockFileHandleCache(),
             new MockConnectionGovernor(),
             new HttpClientFactory(),
             timeProvider ?? TimeProvider.System,

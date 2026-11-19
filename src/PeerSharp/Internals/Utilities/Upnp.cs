@@ -27,7 +27,8 @@ internal static class UpnpDiscovery
     {
         AllowAutoRedirect = false,
         UseProxy = false
-    }) { Timeout = TimeSpan.FromSeconds(2) };
+    })
+    { Timeout = TimeSpan.FromSeconds(2) };
 
     public static Task<List<UpnpGateway>> DiscoverAsync(CancellationToken ct = default)
     {
@@ -353,7 +354,8 @@ internal class UpnpPortMapping : IPortMapper
     {
         AllowAutoRedirect = false,
         UseProxy = false
-    }) { Timeout = TimeSpan.FromSeconds(10) };
+    })
+    { Timeout = TimeSpan.FromSeconds(10) };
     private readonly Func<CancellationToken, Task<List<UpnpGateway>>> _discoverGatewaysAsync;
     private readonly ILogger<UpnpPortMapping> _logger;
     private readonly List<(int Port, string Protocol, string Description)> _mappings = [];

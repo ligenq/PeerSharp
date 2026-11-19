@@ -303,7 +303,7 @@ public class TrackerBaseTests
         public List<(bool Success, ScrapeResponse Response)> Scrapes { get; } = [];
         public List<(bool Success, MultiScrapeResponse Response)> MultiScrapes { get; } = [];
 
-        public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage) =>
+        public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage, CancellationToken ct) =>
             Announces.Add((success, response, errorMessage));
 
         public void OnScrapeResult(bool success, ScrapeResponse response, ITracker tracker) =>

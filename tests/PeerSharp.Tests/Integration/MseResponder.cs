@@ -215,17 +215,24 @@ internal sealed class MseResponder
     /// <summary>Encrypts and sends payload bytes.</summary>
     public async Task WritePayloadAsync(NetworkStream stream, byte[] plain, CancellationToken ct = default)
     {
-        byte[] encrypted = new byte[plain.Length];
-        if (EncryptPayload)
-        {
-            _outgoing!.Process(plain, encrypted);
-        }
-        else
-        {
-            plain.CopyTo(encrypted, 0);
-        }
-        await stream.WriteAsync(encrypted, ct);
+        await stream.WriteAsync(EncodePayload(plain), ct);
         await stream.FlushAsync(ct);
+    }
+
+    internal async Task WritePayloadWithGapAsync(NetworkStream stream, byte[] plain, int gapStart, int gapLength,
+        CancellationToken ct)
+    {
+        byte[] bytes = EncodePayload(plain);
+        await stream.WriteAsync(bytes.AsMemory(0, gapStart), ct);
+        await stream.WriteAsync(bytes.AsMemory(gapStart + gapLength), ct);
+    }
+
+    private byte[] EncodePayload(byte[] plain)
+    {
+        if (!EncryptPayload) return plain;
+        byte[] encrypted = new byte[plain.Length];
+        _outgoing!.Process(plain, encrypted);
+        return encrypted;
     }
 
     /// <summary>

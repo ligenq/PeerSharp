@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32.SafeHandles;
 using PeerSharp.Internals;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace PeerSharp.PieceWriter;
 
@@ -70,6 +71,8 @@ internal sealed class Storage : IStorage
 
     internal Func<PiecesProgress>? GetCompletedPieces { get; init; }
     internal IReadOnlyList<TorrentStateData.FileSnapshotData>? ResumeFileSnapshots { get; init; }
+    internal Action<string>? BeforeFileMoveForTesting { get; set; }
+    internal Func<string, CancellationToken, Task>? OnPartialMoveCopyForTesting { get; set; }
 
     internal List<TorrentStateData.FileSnapshotData>? GetFileSnapshots()
     {
@@ -177,7 +180,10 @@ internal sealed class Storage : IStorage
     /// as the data is large.
     /// </para>
     /// </remarks>
-    public async Task MoveAsync(string newRootPath, CancellationToken ct = default)
+    public Task MoveAsync(string newRootPath, CancellationToken ct = default) => MoveAsync(newRootPath, null, ct);
+
+    internal async Task MoveAsync(string newRootPath, Func<StorageMovePlan, CancellationToken, Task>? recordMove,
+        CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(newRootPath);
 
@@ -190,18 +196,19 @@ internal sealed class Storage : IStorage
             return;
         }
 
-        string oldRoot = Path.GetFullPath(_rootPath);
-        string newRoot = Path.GetFullPath(newRootPath);
+        string oldRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_rootPath));
+        string newRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(newRootPath));
 
         if (string.Equals(oldRoot, newRoot, StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
 
-        var moved = new List<(string From, string To)>();
+        var moved = new List<(string From, string To, string? RollbackTemporary)>();
 
         try
         {
+            var paths = new List<string>();
             foreach (var file in _files)
             {
                 ct.ThrowIfCancellationRequested();
@@ -221,7 +228,21 @@ internal sealed class Storage : IStorage
                         null,
                         isRecoverable: false);
                 }
+                paths.Add(relative);
+            }
 
+            StorageMovePlan? plan = null;
+            if (recordMove != null && paths.Count > 0)
+            {
+                plan = new StorageMovePlan(oldRoot, newRoot, paths, Guid.NewGuid());
+                await recordMove(plan, ct).ConfigureAwait(false);
+            }
+
+            for (int index = 0; index < paths.Count; index++)
+            {
+                ct.ThrowIfCancellationRequested();
+                string relative = paths[index];
+                string source = Path.Combine(oldRoot, relative);
                 string destination = Path.Combine(newRoot, relative);
                 string? destinationDirectory = Path.GetDirectoryName(destination);
                 if (!string.IsNullOrEmpty(destinationDirectory))
@@ -229,8 +250,8 @@ internal sealed class Storage : IStorage
                     Directory.CreateDirectory(destinationDirectory);
                 }
 
-                await MoveOneAsync(file.FullPath, destination, ct).ConfigureAwait(false);
-                moved.Add((file.FullPath, destination));
+                await MoveOneAsync(source, destination, plan?.GetTemporaryPath(destination, index), ct).ConfigureAwait(false);
+                moved.Add((source, destination, plan?.GetTemporaryPath(source, index)));
             }
         }
         catch (Exception ex)
@@ -301,7 +322,7 @@ internal sealed class Storage : IStorage
                 Directory.CreateDirectory(directory);
             }
 
-            await MoveOneAsync(current, sanitized, ct).ConfigureAwait(false);
+            await MoveOneAsync(current, sanitized, null, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -315,47 +336,82 @@ internal sealed class Storage : IStorage
         RemoveEmptyDirectories([current], Path.GetFullPath(_rootPath));
     }
 
-    private static async Task MoveOneAsync(string source, string destination, CancellationToken ct)
+    private async Task MoveOneAsync(string source, string destination, string? temporary, CancellationToken ct)
     {
         try
         {
-            File.Move(source, destination, overwrite: true);
+            BeforeFileMoveForTesting?.Invoke(source);
+            if (TryRename(source, destination)) return;
         }
         catch (IOException)
         {
-            await MoveByCopyingAsync(source, destination, ct).ConfigureAwait(false);
+            // The fault hook can force the copy path even for files on the same volume.
         }
+        await MoveByCopyingAsync(source, destination, temporary, overwrite: true, OnPartialMoveCopyForTesting, ct)
+            .ConfigureAwait(false);
     }
+
+    // File.Move can fall back to copying straight into the final filename across volumes.
+    // Attempt a rename only, leaving all copying to the staged path below.
+    private static bool TryRename(string source, string destination)
+    {
+        const uint ReplaceExisting = 1;
+        if (OperatingSystem.IsWindows()) return MoveFileEx(source, destination, ReplaceExisting);
+        return (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) && Rename(source, destination) == 0;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "MoveFileExW", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool MoveFileEx(string source, string destination, uint flags);
+
+    [DllImport("libc", EntryPoint = "rename", BestFitMapping = false, ThrowOnUnmappableChar = true)]
+    private static extern int Rename([MarshalAs(UnmanagedType.LPUTF8Str)] string source,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destination);
 
     /// <summary>
     /// Across volumes a rename is not available, so pay for the copy. Copy to a sibling temporary file
     /// first: cancellation or an I/O failure must not leave a truncated file at the destination that
     /// looks like a completed move.
     /// </summary>
-    internal static async Task MoveByCopyingAsync(string source, string destination, CancellationToken ct)
+    internal static Task MoveByCopyingAsync(string source, string destination, CancellationToken ct) =>
+        MoveByCopyingAsync(source, destination, null, overwrite: true, null, ct);
+
+    internal static async Task MoveByCopyingAsync(string source, string destination, string? temporary, bool overwrite,
+        Func<string, CancellationToken, Task>? onPartialCopy, CancellationToken ct)
     {
         string directory = Path.GetDirectoryName(destination) ?? Directory.GetCurrentDirectory();
-        string temporary = Path.Combine(directory, $".peersharp-{Guid.NewGuid():N}.tmp");
+        temporary ??= Path.Combine(directory, $".peersharp-{Guid.NewGuid():N}.tmp");
+        bool ownsTemporary = false;
         try
         {
             await using (var from = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read, 0, useAsync: true))
             await using (var to = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 0, useAsync: true))
             {
+                ownsTemporary = true;
+                if (onPartialCopy != null)
+                {
+                    var prefix = new byte[(int)Math.Min(4096, from.Length / 2)];
+                    await from.ReadExactlyAsync(prefix, ct).ConfigureAwait(false);
+                    await to.WriteAsync(prefix, ct).ConfigureAwait(false);
+                    await to.FlushAsync(ct).ConfigureAwait(false);
+                    await onPartialCopy(temporary, ct).ConfigureAwait(false);
+                }
                 await from.CopyToAsync(to, ct).ConfigureAwait(false);
                 await to.FlushAsync(ct).ConfigureAwait(false);
+                to.Flush(flushToDisk: true);
             }
 
             // A rename keeps this by itself. It is half of how a start tells these files are the ones
             // the torrent left, and a new one here would cost it all its pieces.
             File.SetLastWriteTimeUtc(temporary, File.GetLastWriteTimeUtc(source));
-            File.Move(temporary, destination, overwrite: true);
+            File.Move(temporary, destination, overwrite);
             File.Delete(source);
         }
         finally
         {
             try
             {
-                File.Delete(temporary);
+                if (ownsTemporary) File.Delete(temporary);
             }
             catch (IOException)
             {
@@ -369,11 +425,11 @@ internal sealed class Storage : IStorage
         }
     }
 
-    private async Task RollBackAsync(List<(string From, string To)> moved)
+    private async Task RollBackAsync(List<(string From, string To, string? RollbackTemporary)> moved)
     {
         for (int i = moved.Count - 1; i >= 0; i--)
         {
-            var (from, to) = moved[i];
+            var (from, to, temporary) = moved[i];
             try
             {
                 string? directory = Path.GetDirectoryName(from);
@@ -382,7 +438,7 @@ internal sealed class Storage : IStorage
                     Directory.CreateDirectory(directory);
                 }
 
-                await MoveOneAsync(to, from, CancellationToken.None).ConfigureAwait(false);
+                await MoveOneAsync(to, from, temporary, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -393,7 +449,7 @@ internal sealed class Storage : IStorage
         }
     }
 
-    private static bool EscapesRoot(string relativePath)
+    internal static bool EscapesRoot(string relativePath)
         => relativePath.Equals("..", StringComparison.Ordinal)
             || relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
             || relativePath.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);

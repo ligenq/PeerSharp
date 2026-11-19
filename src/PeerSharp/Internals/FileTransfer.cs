@@ -484,7 +484,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     /// </para>
     /// </summary>
     private readonly CancellationToken _stoppingToken;
-    private readonly Channel<(PeerCommunication Peer, Block Block)> _incomingBlocks;
+    private readonly Channel<(PeerCommunication Peer, Block Block, BlockRequest? Request)> _incomingBlocks;
 
     // Limit restart attempts to prevent infinite loops
     private readonly SemaphoreSlim _overflowProcessingSemaphore = new(MaxOverflowConcurrency);
@@ -506,6 +506,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     private readonly BlockRequestTracker _requestTracker = new();
     private readonly RequestScheduler _requestScheduler;
     private readonly RequestTimeoutManager _requestTimeoutManager;
+    private readonly RequestCompletionTracker _requestCompletionTracker;
     private readonly PieceCompletionHandler _pieceCompletionHandler;
     private readonly BlockProcessor _blockProcessor;
     private readonly TransferProgressReporter _progressReporter;
@@ -548,7 +549,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _pieceStateManager = new PieceStateManager(_piecePicker, pieceStateLogger, CalculateMaxActivePieces);
 
         // Use bounded channels to prevent memory exhaustion under load
-        _incomingBlocks = Channel.CreateBounded<(PeerCommunication, Block)>(new BoundedChannelOptions(256)
+        _incomingBlocks = Channel.CreateBounded<(PeerCommunication, Block, BlockRequest?)>(new BoundedChannelOptions(256)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true
@@ -600,7 +601,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             pieceCompletionLogger);
 
         var blockProcessorLogger = loggerFactory.CreateLogger<BlockProcessor>();
-        var requestCompletionTracker = new RequestCompletionTracker(
+        _requestCompletionTracker = new RequestCompletionTracker(
             _requestTracker,
             _timeProvider);
         _blockProcessor = new BlockProcessor(new BlockProcessorOptions
@@ -610,7 +611,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             EnqueuePeerPiece = EnqueuePieceFromPeerAsync,
             EnqueueWebSeedPiece = EnqueuePieceFromWebSeedAsync,
             Downloader = Downloader,
-            RequestCompletionTracker = requestCompletionTracker,
+            RequestCompletionTracker = _requestCompletionTracker,
             Torrent = _torrent,
             CancelBlockRequest = CancelBlockRequestAsync,
             Logger = blockProcessorLogger
@@ -666,6 +667,8 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
     public TransferStats Downloader { get; } = new();
     public bool EndGameMode => _torrent.Pieces.Count - _torrent.Pieces.ReceivedCount < 10 && _torrent.Pieces.Count > 10;
 
+    internal Func<int, CancellationToken, Task>? BeforePiecePublicationForTesting { get; set; }
+
     /// <summary>
     /// Returns true if any background processing tasks have failed.
     /// </summary>
@@ -690,9 +693,12 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
 
     public async Task BlockReceivedAsync(PeerCommunication peer, Block block)
     {
+        // A following choke may release this request before the worker handles its block.
+        // Match the block as it arrived, and only retire that request if it is still current.
+        _requestCompletionTracker.TryGetPendingRequest(peer, block, out var request);
         try
         {
-            await _incomingBlocks.Writer.WriteAsync((peer, block), _stoppingToken).ConfigureAwait(false);
+            await _incomingBlocks.Writer.WriteAsync((peer, block, request), _stoppingToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is OperationCanceledException or ChannelClosedException or ObjectDisposedException)
         {
@@ -706,18 +712,11 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             Logger.LogError(ex, "Failed to enqueue block from {RemoteEndPoint}", peer.RemoteEndPoint);
             // The block was answered but dropped - free its request slot so the scheduler
             // can re-request it instead of waiting for the stale-piece sweep.
-            ReleasePendingRequest(peer, block);
+            if (request != null)
+            {
+                _requestTracker.TryRemovePeerRequest(peer, (block.PieceIndex, block.Offset), out _, request);
+            }
         }
-    }
-
-    /// <summary>
-    /// Removes the in-flight request entry for a block that arrived but could not be
-    /// processed, so the request pipeline is not depressed until the stale-piece sweep.
-    /// </summary>
-    private void ReleasePendingRequest(PeerCommunication peer, Block block)
-    {
-        var key = (block.PieceIndex, block.Offset);
-        _requestTracker.TryRemovePeerRequest(peer, key, out _);
     }
 
     /// <summary>
@@ -785,6 +784,16 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                 break; // Only need to trigger one peer, they'll pick up the block
             }
         }
+    }
+
+    internal void HandlePeerChoke(PeerCommunication peer)
+    {
+        // BEP 3 cancels outstanding requests on choke. With BEP 6, the peer still owes
+        // a block or a reject for each request, including any outstanding Allowed Fast work.
+        if (peer.RemoteSupportsFastExtension) return;
+
+        _requestTracker.RemovePeer(peer);
+        ReleasePeerRetryClaims(peer);
     }
 
     /// <summary>
@@ -1333,11 +1342,13 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
         _requestTracker.RemovePeer(peer);
         _uploadQueueManager.RemovePeer(peer);
         _idlePeers.TryRemove(peer, out _);
+        ReleasePeerRetryClaims(peer);
+    }
 
+    private void ReleasePeerRetryClaims(PeerCommunication peer)
+    {
         // A piece being retried is reserved for one peer at a time so that the next failure names its
-        // author. Nothing released that reservation when the peer went away, so a piece could sit
-        // reserved for a connection that no longer exists until the claim aged out - and the peer most
-        // likely to be holding one is the peer that was just dropped for supplying the bad data.
+        // author. Give the reservation back as soon as this peer can no longer serve requests.
         foreach (var state in _pieceStateManager.ActivePieces.Values)
         {
             state.ReleaseRetryClaim(peer);
@@ -1772,7 +1783,7 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
             {
                 try
                 {
-                    await _blockProcessor.HandlePeerBlockAsync(item.Peer, item.Block).ConfigureAwait(false);
+                    await _blockProcessor.HandlePeerBlockAsync(item.Peer, item.Block, item.Request).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -2003,9 +2014,14 @@ internal class FileTransfer : IFileTransfer, IAsyncDisposable, IUnfinishedBytesP
                         // Use atomic dispose method to prevent races
                         pieceToProcess.CompleteAndDispose();
 
-                        _pieceStateManager.TryRemovePiece(pieceToProcess.Index, out _);
-
+                        // Keep the completed state visible until the bitfield is set. A late web
+                        // seed response must see either the disposed state or the verified bit.
+                        if (BeforePiecePublicationForTesting is { } beforePublication)
+                        {
+                            await beforePublication(pieceToProcess.Index, ct).ConfigureAwait(false);
+                        }
                         _torrent.Pieces.AddPiece(pieceToProcess.Index);
+                        _pieceStateManager.TryRemovePiece(pieceToProcess);
                         // Notify Torrent of verification for cached stats update
                         _torrent.OnPieceVerified(pieceToProcess.Index);
 

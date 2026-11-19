@@ -16,6 +16,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  fuzz:
+    uses: ./.github/workflows/fuzz.yml
+
+  interop:
+    uses: ./.github/workflows/interop.yml
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -78,6 +84,13 @@ jobs:
         # Microsoft.Testing.Platform requires the explicit solution option.
         run: dotnet test --solution PeerSharp.slnx --no-build --configuration Release --no-ansi --output Normal
 
+      - name: Sweep replayable fault scenarios
+        run: >
+          dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj
+          --no-build --configuration Release --no-ansi --output Normal
+          --
+          --explicit on --filter-trait Suite=ReplayableFaults
+
       - name: Pack
         run: |
           dotnet pack src/PeerSharp/PeerSharp.csproj --no-build --configuration Release --output packages
@@ -101,7 +114,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [build, fuzz, interop]
     if: ${{ !inputs.dry_run && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15

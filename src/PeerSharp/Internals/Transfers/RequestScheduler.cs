@@ -417,6 +417,16 @@ internal sealed class RequestScheduler
 
                 _requestTracker.AddBlockRequest(pieceIndex, offset, peer, request);
 
+                // Choke may have arrived after the scheduling pass decided which blocks to ask
+                // for. Recheck after registration so the choke can either find this request or
+                // the scheduling pass will remove it itself.
+                if (peer.PeerChoking && !peer.IsAllowedFast(pieceIndex))
+                {
+                    _requestTracker.TryRemovePeerRequest(peer, (pieceIndex, offset), out _, request);
+                    if (!peer.RemoteSupportsFastExtension) state.ReleaseRetryClaim(peer);
+                    return sent;
+                }
+
                 bool queued = await peer.SendRequestAsync(request).ConfigureAwait(false);
                 if (!queued)
                 {

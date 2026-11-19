@@ -8,7 +8,7 @@ namespace PeerSharp.PieceWriter;
 internal sealed class Files : IInternalFiles, IAsyncDisposable
 {
     private readonly BlockCache _blockCache;
-    private readonly IStorage _storage;
+    private readonly Storage _storage;
     private AtomicDisposal _disposal = new();
     private List<TorrentStateData.FileSnapshotData>? _lastFileSnapshots;
 
@@ -60,10 +60,10 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
 
     public bool IsDisposed => _disposal.IsDisposed;
 
-    internal bool IsInitialized => _storage is Storage storage && storage.IsInitialized;
+    internal bool IsInitialized => _storage.IsInitialized;
 
     /// <summary>See <see cref="Storage.FoundExistingData"/>.</summary>
-    internal bool FoundExistingData => _storage is Storage storage && storage.FoundExistingData;
+    internal bool FoundExistingData => _storage.FoundExistingData;
 
     /// <summary>
     /// Creates a Files instance with optional custom download path.
@@ -107,6 +107,9 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
         return _storage.MoveAsync(newRootPath, ct);
     }
 
+    internal Task MoveFilesAsync(string newRootPath, Func<StorageMovePlan, CancellationToken, Task>? recordMove,
+        CancellationToken ct) => _storage.MoveAsync(newRootPath, recordMove, ct);
+
     public Task RenameFileAsync(int fileIndex, string newRelativePath, CancellationToken ct = default)
     {
         return _storage.RenameFileAsync(fileIndex, newRelativePath, ct);
@@ -126,9 +129,9 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
 
             // After closing, not before: a file's write time can move when its last handle closes,
             // and a snapshot from before that would read as the file having changed.
-            if (opened && _storage is Storage storage)
+            if (opened)
             {
-                _lastFileSnapshots = storage.GetFileSnapshots();
+                _lastFileSnapshots = _storage.GetFileSnapshots();
             }
 
             Volatile.Write(ref _flushedOnClose, flushed);
@@ -141,8 +144,8 @@ internal sealed class Files : IInternalFiles, IAsyncDisposable
     /// in anything that changed them since, which is what the snapshot exists to catch.
     /// </summary>
     internal List<TorrentStateData.FileSnapshotData>? GetFileSnapshots() =>
-        !_disposal.IsDisposed && _storage is Storage storage && storage.IsInitialized
-            ? storage.GetFileSnapshots()
+        !_disposal.IsDisposed && _storage.IsInitialized
+            ? _storage.GetFileSnapshots()
             : _lastFileSnapshots;
 
     /// <summary>

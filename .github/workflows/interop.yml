@@ -1,4 +1,4 @@
-# Interop, run manually through workflow_dispatch.
+# Interop runs on demand and during release validation.
 #
 # These are the most valuable tests in the repository and the only lane no CI job ran. They are what
 # found the late bitfield that made every strict client ignore us, the plaintext fallback reusing a
@@ -7,16 +7,15 @@
 # Until now that record depended on someone remembering to run them by hand, on one machine, against
 # whatever client version happened to be installed.
 #
-# Run manually because these tests need real client binaries and real transfers. A missing
-# package mirror or external client release should not gate every pull request.
+# These tests need real client binaries and real transfers, so they run outside pull request CI.
 #
-# Every test that needs an external client skips itself when the binary is absent, so a failed
-# install degrades this job to the loopback interop tests rather than reporting a false failure. Read
-# the skip count in the summary: a run where everything skipped proves nothing.
+# The Linux crash-resume gate requires a pinned libtorrent. The other counterpart tests skip
+# when their client is unavailable. Read the skip count in each test report.
 name: Interop
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: true
@@ -39,6 +38,24 @@ jobs:
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
           dotnet-version: 10.0.403
+
+      - name: Build pinned libtorrent client_test (Linux)
+        if: runner.os == 'Linux'
+        env:
+          LIBTORRENT_REVISION: 87de7810dd0375e483a1465282203b089e6f4d5b
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libboost-dev libssl-dev
+          source_dir="$RUNNER_TEMP/libtorrent"
+          build_dir="$GITHUB_WORKSPACE/artifacts/peersharp-e2e/libtorrent-build"
+          git init "$source_dir"
+          git -C "$source_dir" fetch --depth 1 https://github.com/arvidn/libtorrent.git "$LIBTORRENT_REVISION"
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+          git -C "$source_dir" submodule update --init --depth 1 deps/try_signal
+          cmake -S "$source_dir" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -Dbuild_examples=ON -Dwebtorrent=OFF
+          cmake --build "$build_dir" --target client_test --parallel 2
+          test -x "$build_dir/examples/client_test"
 
       # transmission-daemon rather than transmission-qt: the harness already special-cases a "daemon"
       # executable name, drives everything over RPC and needs no display, so it is the build that runs
@@ -64,6 +81,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           if [ -x /usr/bin/transmission-daemon ]; then
+            # Ubuntu's daemon profile permits the service's paths. The tests use a separate
+            # config, download and log directory owned by the runner under /tmp.
+            profile=/etc/apparmor.d/transmission
+            if [ -f "$profile" ] && grep -qsx Y /sys/module/apparmor/parameters/enabled; then
+              sudo install -d /etc/apparmor.d/local
+              printf '\n  owner /tmp/peersharp-transmission-*/{,**} rwk,\n' |
+                sudo tee -a /etc/apparmor.d/local/transmission-daemon > /dev/null
+              sudo apparmor_parser -r "$profile"
+            fi
             echo "PEERSHARP_TRANSMISSION_INTEROP=1" >> "$GITHUB_ENV"
             echo "PEERSHARP_TRANSMISSION_EXE=/usr/bin/transmission-daemon" >> "$GITHUB_ENV"
           else
@@ -97,6 +123,23 @@ jobs:
 
       - name: Build (warnings as errors)
         run: dotnet build tests/PeerSharp.Tests/PeerSharp.Tests.csproj --no-restore --configuration Release -warnaserror
+
+      - name: Verify both libtorrent crash-resume cases (Linux)
+        if: runner.os == 'Linux'
+        shell: pwsh
+        env:
+          PEERSHARP_INTEROP: '1'
+        run: |
+          dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj `
+            --no-build --configuration Release --results-directory TestResults -- `
+            --filter-method '*.ARestartServesExactlyThePublishedPieces' --report-trx `
+            --report-trx-filename libtorrent-crash-resume.trx
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$report = Get-Content -Raw TestResults/libtorrent-crash-resume.trx
+          $counters = $report.TestRun.ResultSummary.Counters
+          if ($counters.total -ne '2' -or $counters.passed -ne '2') {
+            throw 'Release validation requires both libtorrent crash-resume cases to pass.'
+          }
 
       - name: Test interop
         run: >

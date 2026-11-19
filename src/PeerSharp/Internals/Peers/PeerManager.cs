@@ -68,6 +68,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
     private readonly ConcurrentDictionary<IPEndPoint, PeerCommunication> _connectedEndpoints = new();
     private readonly Lock _connectedEndpointRegistrationLock = new();
 
+    // The identity of the run that may admit incoming handshakes, or null during shutdown.
+    private readonly Lock _incomingRunLock = new();
+    private object? _incomingRun = new();
+
     // Maps each connected remote peer id (hex) to the PeerCommunication that owns it.
     // Endpoints alone cannot correlate an incoming connection (peer's ephemeral source port)
     // with an outgoing one (peer's listen port), so this second gate dedups by identity once
@@ -218,6 +222,12 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         IPEndPoint? remote = null,
         ProtocolEncryption? encryption = null)
     {
+        var run = Volatile.Read(ref _incomingRun);
+        if (run == null || _disposal.IsDisposed)
+        {
+            stream.Close();
+            return;
+        }
         remote = NetworkUtils.NormalizeEndPoint(remote);
 
         if (_torrent.InfoFile.Info.IsSsl || (_torrent.IsI2p && remote != null && !_settings.Connection.I2pAllowMixedNetworks)
@@ -339,16 +349,20 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        // The add always succeeds because peer is a freshly created instance (reference equality).
-        // Duplicate endpoints were already rejected by the endpoint gate above.
-        _connectedPeers.TryAdd(peer, 0);
-        Interlocked.Increment(ref _connectedPeersCount);
-
-        peer.Start(stream, encryption);
+        if (!TryStartIncomingPeer(peer, stream, encryption, run))
+        {
+            await RejectStaleIncomingPeerAsync(peer).ConfigureAwait(false);
+        }
     }
 
     private async Task AddIncomingTcpPeerCoreAsync(System.Net.Sockets.TcpClient client, byte[] handshake, ProtocolEncryption? encryption)
     {
+        var run = Volatile.Read(ref _incomingRun);
+        if (run == null || _disposal.IsDisposed)
+        {
+            client.Close();
+            return;
+        }
         if (_torrent.InfoFile.Info.IsSsl || (_torrent.IsI2p && !_settings.Connection.I2pAllowMixedNetworks) || !AcceptsIncomingEncryption(encryption))
         {
             client.Close();
@@ -443,14 +457,37 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
             return;
         }
 
-        // The add always succeeds because peer is a freshly created instance (reference equality).
-        // Duplicate endpoints were already rejected by the endpoint gate above.
-        _connectedPeers.TryAdd(peer, 0);
-        Interlocked.Increment(ref _connectedPeersCount);
-
         // The factory gave the peer its stream over this socket; starting on a second one would read the
         // same socket through two wrappers.
-        peer.Start(peer.Stream!, encryption);
+        if (!TryStartIncomingPeer(peer, peer.Stream!, encryption, run))
+        {
+            await RejectStaleIncomingPeerAsync(peer).ConfigureAwait(false);
+        }
+    }
+
+    private bool TryStartIncomingPeer(PeerCommunication peer, Stream stream, ProtocolEncryption? encryption, object run)
+    {
+        lock (_incomingRunLock)
+        {
+            // A handshake can suspend before registration. Stop and metadata handoff must either
+            // see the published peer or invalidate its admission before a new run starts.
+            if (!ReferenceEquals(_incomingRun, run) || _disposal.IsDisposed)
+            {
+                return false;
+            }
+
+            _connectedPeers.TryAdd(peer, 0);
+            Interlocked.Increment(ref _connectedPeersCount);
+            peer.Start(stream, encryption);
+            return true;
+        }
+    }
+
+    private async Task RejectStaleIncomingPeerAsync(PeerCommunication peer)
+    {
+        UnregisterConnectedEndpoint(peer);
+        _governor.ReleaseConnectionSlot();
+        await peer.CloseAsync().ConfigureAwait(false);
     }
 
     private bool AcceptsIncomingEncryption(ProtocolEncryption? encryption)
@@ -1279,6 +1316,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         var p = (PeerCommunication)peer;
         switch (msg.Id)
         {
+            case MessageId.Choke:
+                _torrent.FileTransferInternal.HandlePeerChoke(p);
+                break;
+
             case MessageId.Unchoke:
                 // to minimize delay between unchoke and first request
                 FireAndForget(_torrent.FileTransferInternal.RequestBlocksAsync(p, immediate: true), "RequestBlocks (Unchoke)");
@@ -1476,6 +1517,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         }
         _mainLoopCts?.Dispose();
         _mainLoopCts = new CancellationTokenSource();
+        lock (_incomingRunLock)
+        {
+            if (_incomingRun == null) Volatile.Write(ref _incomingRun, new object());
+        }
 
         // Start the main periodic task loop (replaces 3 timers with single async loop)
         _mainLoopTask = MainLoopAsync(_mainLoopCts.Token);
@@ -1520,12 +1565,17 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
         _pendingConnections.Clear();
 
         var toClose = new List<PeerCommunication>(_connectedPeersCount + _connectingPeersCount);
-        foreach (var kvp in _connectedPeers)
+        foreach (var peer in _connectedPeers.Keys)
         {
-            toClose.Add(kvp.Key);
+            // Removing the registration takes ownership of its governor slot. A concurrent
+            // ConnectionClosedAsync releases the slot itself if it removed the registration first.
+            if (_connectedPeers.TryRemove(peer, out _))
+            {
+                Interlocked.Decrement(ref _connectedPeersCount);
+                _governor.ReleaseConnectionSlot();
+                toClose.Add(peer);
+            }
         }
-        _connectedPeers.Clear();
-        Interlocked.Exchange(ref _connectedPeersCount, 0);
 
         foreach (var kvp in _connectingPeers)
         {
@@ -1568,6 +1618,10 @@ internal class PeerManager : IInternalPeers, IPeerListener, IAsyncDisposable
 
     private async Task StopSchedulingAsync()
     {
+        lock (_incomingRunLock)
+        {
+            Volatile.Write(ref _incomingRun, null);
+        }
         if (_mainLoopCts != null)
         {
             try { await _mainLoopCts.CancelAsync().ConfigureAwait(false); }

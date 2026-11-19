@@ -5,7 +5,10 @@ param(
 
     [string] $Configuration = 'Release',
 
-    [string] $OutputDirectory = 'artifacts/fuzz-findings'
+    [string] $OutputDirectory = 'artifacts/fuzz-findings',
+
+    [ValidateRange(0, [int]::MaxValue)]
+    [int] $TimeLimitSeconds = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,7 +34,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'SharpFuzz instrumentation failed.' }
 
     [System.IO.Directory]::CreateDirectory($findings) | Out-Null
-    & afl-fuzz -i $corpus -o $findings -m none -- dotnet $harness $Target
+    $aflOptions = @('-i', $corpus, '-o', $findings, '-m', 'none')
+    if ($TimeLimitSeconds -gt 0) {
+        $aflOptions += @('-V', $TimeLimitSeconds.ToString([CultureInfo]::InvariantCulture))
+    }
+    # SharpFuzz instruments managed IL. The native dotnet launcher cannot contain AFL's signature.
+    & env AFL_SKIP_BIN_CHECK=1 afl-fuzz @aflOptions -- dotnet $harness $Target
     if ($LASTEXITCODE -ne 0) { throw "afl-fuzz exited with code $LASTEXITCODE." }
 }
 finally {

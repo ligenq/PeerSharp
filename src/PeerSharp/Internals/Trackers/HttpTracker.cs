@@ -25,6 +25,7 @@ internal class HttpTracker : TrackerBase, IDisposable
     private readonly ILogger<HttpTracker> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly HostAddressCache _hostAddresses;
+    private readonly Lock _trackerIdLock = new();
     private AtomicDisposal _disposal = new();
     private IHttpClient? _testClient;
 
@@ -66,7 +67,7 @@ internal class HttpTracker : TrackerBase, IDisposable
                 // request to HttpClient anyway made its connect callback throw "no such host" once per
                 // family, on every announce, for trackers whose names stopped resolving long ago.
                 _logger.LogDebug("Announce to {Url} skipped - its host has no usable address", Url);
-                RaiseAnnounceResult(false, new AnnounceResponse(), $"Tracker host {new Uri(Url).Host} has no usable address");
+                RaiseAnnounceResult(false, new AnnounceResponse(), $"Tracker host {new Uri(Url).Host} has no usable address", ct);
                 return;
             }
 
@@ -94,12 +95,16 @@ internal class HttpTracker : TrackerBase, IDisposable
             }
 
             // BEP 3: hold on to the session token for the next announce to this tracker.
-            if (!string.IsNullOrEmpty(response.TrackerId))
+            lock (_trackerIdLock)
             {
-                _trackerId = response.TrackerId;
+                ct.ThrowIfCancellationRequested();
+                if (!string.IsNullOrEmpty(response.TrackerId))
+                {
+                    _trackerId = response.TrackerId;
+                }
             }
 
-            RaiseAnnounceResult(true, response);
+            RaiseAnnounceResult(true, response, ct: ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -108,6 +113,7 @@ internal class HttpTracker : TrackerBase, IDisposable
         }
         catch (Exception ex)
         {
+            ct.ThrowIfCancellationRequested();
             if (ex is TaskCanceledException || ex is OperationCanceledException || ex is TimeoutException)
             {
                 _logger.LogInformation("Announce to {Url} failed: Timeout or Cancelled", Url);
@@ -124,7 +130,7 @@ internal class HttpTracker : TrackerBase, IDisposable
             {
                 RetryHint = (ex as TrackerFailureException)?.RetryHint
             };
-            RaiseAnnounceResult(false, failure, ex.Message);
+            RaiseAnnounceResult(false, failure, ex.Message, ct);
         }
     }
 
@@ -748,9 +754,12 @@ internal class HttpTracker : TrackerBase, IDisposable
         // BEP 3: quote back whatever this tracker last gave us, so it can tie our announces together.
         // Percent-encoded because the value is opaque and nothing stops it containing reserved
         // characters.
-        if (!string.IsNullOrEmpty(_trackerId))
+        lock (_trackerIdLock)
         {
-            AppendParam("trackerid", Uri.EscapeDataString(_trackerId));
+            if (!string.IsNullOrEmpty(_trackerId))
+            {
+                AppendParam("trackerid", Uri.EscapeDataString(_trackerId));
+            }
         }
 
         // BEP 21: a partial seed "MUST send an event=paused parameter in every announce while it is a

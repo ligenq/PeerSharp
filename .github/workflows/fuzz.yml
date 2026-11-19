@@ -2,6 +2,7 @@ name: Fuzz
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -38,13 +39,15 @@ jobs:
           sudo apt-get install --yes afl++
 
       - name: Run bounded fuzz session
-        shell: bash
+        shell: pwsh
+        run: pwsh tests/PeerSharp.Fuzz/Run-Fuzz.ps1 -Target '${{ matrix.target }}' -TimeLimitSeconds 600
+
+      - name: Archive findings
+        if: always()
         run: |
-          set +e
-          timeout --signal=INT --kill-after=30s 10m pwsh tests/PeerSharp.Fuzz/Run-Fuzz.ps1 -Target '${{ matrix.target }}'
-          status=$?
-          if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
-            exit "$status"
+          # AFL++ uses colons in its filenames, which the artifact service rejects.
+          if [ -d artifacts/fuzz-findings ]; then
+            tar -C artifacts -czf artifacts/fuzz-findings.tar.gz fuzz-findings
           fi
 
       - name: Upload findings
@@ -52,7 +55,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: sharpfuzz-${{ matrix.target }}-findings
-          path: artifacts/fuzz-findings
+          path: artifacts/fuzz-findings.tar.gz
           if-no-files-found: ignore
 
       - name: Fail if AFL++ found a crash
