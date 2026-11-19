@@ -16,8 +16,6 @@ No public API changes. Binary compatible with 5.4.0.
   owning transfer stops or disconnects.
 - Inbound peer handshakes are bounded globally and per address. DHT lookup and publication paths now
   handle retries, cancellation and response order reliably.
-- Tracker restarts, web-seed range failures, magnet metadata handoff and encrypted transfer recovery
-  now have deterministic regression coverage for their retry paths.
 - Torrent metadata parsing keeps its own copy of caller-provided bytes. Info-hash distribution,
   file-selection progress and piece-to-file lookup edge cases are corrected.
 - uTP and file-handle disposal now release pending work cleanly and report closed-handle failures
@@ -28,6 +26,7 @@ No public API changes. Binary compatible with 5.4.0.
 - Added replayable fault scenarios for storage and session crashes, torrent lifecycle, peer connection
   slots, DHT lookups, tracker restarts, web-seed failover, HTTP ranges, block scheduling, endgame
   handoff, v2 proofs, uTP admission and encrypted transfer recovery.
+- Added deterministic regression coverage for tracker restart races and magnet metadata handoff.
 - Release validation now runs replayable fault sweeps, counterpart-client interop and coverage-guided
   fuzzing before publishing packages.
 
