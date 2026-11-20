@@ -34,17 +34,13 @@ public class PeerEvaluationSchedulerTests
 
         var peer = CreatePeer();
 
-        // Enqueue same peer twice
+        // Enqueue same peer twice, then complete the channel so RunAsync drains it and returns
+        // without depending on a timing window.
         scheduler.Enqueue(peer);
         scheduler.Enqueue(peer);
+        queue.Writer.Complete();
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-        var runTask = scheduler.RunAsync(cts.Token);
-
-        // Wait a bit for processing
-        await Task.Delay(100);
-        cts.Cancel();
-        try { await runTask; } catch (OperationCanceledException) { }
+        await scheduler.RunAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
 
         // Should only be evaluated once due to de-duplication while in queue
         Assert.Single(evaluated);
@@ -56,38 +52,34 @@ public class PeerEvaluationSchedulerTests
     {
         var queue = Channel.CreateUnbounded<PeerCommunication>();
         int evaluationCount = 0;
-        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstEvaluated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEvaluated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var scheduler = new PeerEvaluationScheduler(queue, p =>
         {
-            evaluationCount++;
-            if (evaluationCount == 2)
-            {
-                tcs.TrySetResult();
-            }
-
+            int count = Interlocked.Increment(ref evaluationCount);
+            (count == 1 ? firstEvaluated : secondEvaluated).TrySetResult();
             return Task.CompletedTask;
         }, NullLogger<PeerEvaluationScheduler>.Instance);
 
         var peer = CreatePeer();
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource();
         var runTask = scheduler.RunAsync(cts.Token);
 
-        // First enqueue
+        // First enqueue, and wait until it has actually been evaluated (the scheduler removes the
+        // peer from its de-duplication set before evaluating it).
         scheduler.Enqueue(peer);
+        await firstEvaluated.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
-        // Give time to process
-        await Task.Delay(50);
-
-        // Second enqueue - should work now because first one is out of _queuedPeers
+        // Second enqueue - must be accepted because the first one is out of _queuedPeers
         scheduler.Enqueue(peer);
+        await secondEvaluated.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
-        await Task.WhenAny(tcs.Task, Task.Delay(500));
         cts.Cancel();
         try { await runTask; } catch (OperationCanceledException) { }
 
-        Assert.Equal(2, evaluationCount);
+        Assert.Equal(2, Volatile.Read(ref evaluationCount));
     }
 
     private class MockPeerListener : IPeerListener
