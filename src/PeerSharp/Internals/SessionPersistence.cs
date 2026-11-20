@@ -15,6 +15,7 @@ namespace PeerSharp.Internals;
 ///   - resume.dat (resume data bytes)
 ///   - options.json (saved options)
 /// Entries saved by older versions without current.txt are read directly from the hash directory.
+/// A pending storage move is recorded beside current.txt until the new location is published.
 /// {SessionPath}/session.json holds what belongs to the session rather than to a torrent.
 /// </summary>
 internal sealed class SessionPersistence : ISessionPersistence
@@ -28,6 +29,7 @@ internal sealed class SessionPersistence : ISessionPersistence
     private const string SessionStateFileName = "session.json";
     private const string CurrentSnapshotFileName = "current.txt";
     private const string SnapshotPrefix = "snapshot-";
+    private const string StorageMoveFileName = "storage-move.json";
 
     private readonly Lock _lock = new();
 
@@ -56,6 +58,32 @@ internal sealed class SessionPersistence : ISessionPersistence
         EnsureDirectoryExists(_sessionPath);
         EnsureDirectoryExists(GetTorrentsPath());
     }
+
+    // The callback is used by fault tests to interrupt the two sides of the atomic pointer swap.
+    internal Func<bool, CancellationToken, Task>? OnSnapshotPublication { get; init; }
+    internal Func<string, CancellationToken, Task>? OnPartialRecoveryCopy { get; init; }
+
+    internal Task RecordStorageMoveAsync(InfoHash hash, StorageMovePlan move, CancellationToken ct)
+    {
+        string json = JsonSerializer.Serialize(move, PeerSharpJsonContext.Default.StorageMovePlan);
+        return WriteAllTextAtomicAsync(GetStorageMovePath(hash), json, ct);
+    }
+
+    internal async Task RecoverStorageMoveAsync(InfoHash hash, string? savedPath, CancellationToken ct)
+    {
+        string path = GetStorageMovePath(hash);
+        if (!File.Exists(path)) return;
+
+        string json = await File.ReadAllTextAsync(path, ct).ConfigureAwait(false);
+        var move = JsonSerializer.Deserialize(json, PeerSharpJsonContext.Default.StorageMovePlan)
+            ?? throw new InvalidDataException("The pending storage move is empty.");
+        await move.RecoverAsync(savedPath, OnPartialRecoveryCopy, ct).ConfigureAwait(false);
+        ClearStorageMove(hash);
+    }
+
+    internal void ClearStorageMove(InfoHash hash) => TryDeleteTemporaryFile(GetStorageMovePath(hash));
+
+    private string GetStorageMovePath(InfoHash hash) => Path.Combine(GetTorrentPath(hash), StorageMoveFileName);
 
     public async Task DeleteAsync(InfoHash hash, CancellationToken cancellationToken = default)
     {
@@ -299,7 +327,7 @@ internal sealed class SessionPersistence : ISessionPersistence
                                     piece.SerializationCancellationToken = ct;
                                 using var writer = new Utf8JsonWriter(stream);
                                 JsonSerializer.Serialize(writer, resumeState, PeerSharpJsonContext.Default.TorrentStateData);
-                            }, ct), preallocationSize: 0, FileOptions.None, cancellationToken));
+                            }, ct), preallocationSize: 0, FileOptions.None, beforeMove: null, cancellationToken));
                     }
                     else if (entry.ResumeData != null)
                     {
@@ -321,8 +349,14 @@ internal sealed class SessionPersistence : ISessionPersistence
 
                     await Task.WhenAll(writes).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
-                    await WriteAllTextAtomicAsync(Path.Combine(torrentDir, CurrentSnapshotFileName), snapshotName, cancellationToken).ConfigureAwait(false);
+                    var publication = OnSnapshotPublication;
+                    await WriteAllTextAtomicAsync(Path.Combine(torrentDir, CurrentSnapshotFileName), snapshotName,
+                        publication == null ? null : ct => publication(false, ct), cancellationToken).ConfigureAwait(false);
                     published = true;
+                    if (publication != null)
+                    {
+                        await publication(true, cancellationToken).ConfigureAwait(false);
+                    }
                     foreach (string oldSnapshot in Directory.EnumerateDirectories(torrentDir, SnapshotPrefix + "*"))
                     {
                         if (oldSnapshot != snapshotDir) TryDeleteSnapshot(oldSnapshot);
@@ -416,7 +450,12 @@ internal sealed class SessionPersistence : ISessionPersistence
     /// happened to contain - i.e. truncated resume data replacing a perfectly good copy.
     /// </summary>
     private static Task WriteAllBytesAtomicAsync(string path, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
-        WriteAtomicAsync(path, (stream, ct) => stream.WriteAsync(data, ct).AsTask(), data.Length, cancellationToken);
+        WriteAllBytesAtomicAsync(path, data, null, cancellationToken);
+
+    private static Task WriteAllBytesAtomicAsync(string path, ReadOnlyMemory<byte> data,
+        Func<CancellationToken, Task>? beforeMove, CancellationToken cancellationToken) =>
+        WriteAtomicAsync(path, (stream, ct) => stream.WriteAsync(data, ct).AsTask(),
+            data.Length, FileOptions.Asynchronous, beforeMove, cancellationToken);
 
     private static async Task CopySnapshotFileAsync(string sourceDir, string destinationDir, string name, CancellationToken ct)
     {
@@ -431,14 +470,11 @@ internal sealed class SessionPersistence : ISessionPersistence
     }
 
     private static Task WriteAtomicAsync(string path, Func<FileStream, CancellationToken, Task> write,
-        CancellationToken cancellationToken) => WriteAtomicAsync(path, write, 0, cancellationToken);
-
-    private static Task WriteAtomicAsync(string path, Func<FileStream, CancellationToken, Task> write,
-        long preallocationSize, CancellationToken cancellationToken)
-        => WriteAtomicAsync(path, write, preallocationSize, FileOptions.Asynchronous, cancellationToken);
+        CancellationToken cancellationToken)
+        => WriteAtomicAsync(path, write, 0, FileOptions.Asynchronous, beforeMove: null, cancellationToken);
 
     private static async Task WriteAtomicAsync(string path, Func<FileStream, CancellationToken, Task> write,
-        long preallocationSize, FileOptions fileOptions, CancellationToken cancellationToken)
+        long preallocationSize, FileOptions fileOptions, Func<CancellationToken, Task>? beforeMove, CancellationToken cancellationToken)
     {
         string temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
         try
@@ -463,6 +499,10 @@ internal sealed class SessionPersistence : ISessionPersistence
                 stream.Flush(flushToDisk: true);
             }
 
+            if (beforeMove != null)
+            {
+                await beforeMove(cancellationToken).ConfigureAwait(false);
+            }
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporaryPath, path, overwrite: true);
         }
@@ -473,9 +513,13 @@ internal sealed class SessionPersistence : ISessionPersistence
     }
 
     private static Task WriteAllTextAtomicAsync(string path, string text, CancellationToken cancellationToken)
+        => WriteAllTextAtomicAsync(path, text, null, cancellationToken);
+
+    private static Task WriteAllTextAtomicAsync(string path, string text,
+        Func<CancellationToken, Task>? beforeMove, CancellationToken cancellationToken)
     {
         // UTF-8 without a BOM, matching what File.WriteAllTextAsync produced before.
-        return WriteAllBytesAtomicAsync(path, Encoding.UTF8.GetBytes(text), cancellationToken);
+        return WriteAllBytesAtomicAsync(path, Encoding.UTF8.GetBytes(text), beforeMove, cancellationToken);
     }
 
     /// <summary>

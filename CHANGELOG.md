@@ -3,6 +3,33 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
+## 5.4.1 — Unreleased
+
+A reliability release covering storage, torrent lifecycle, peer connections, DHT, trackers and uTP.
+No public API changes. Binary compatible with 5.4.0.
+
+### Fixed
+
+- Interrupted storage moves now roll back or recover consistently, including process restarts during
+  file moves and partial copies.
+- Peer and torrent lifecycle races now release connection slots, requests and queued work as the
+  owning transfer stops or disconnects.
+- Inbound peer handshakes are bounded globally and per address. DHT lookup and publication paths now
+  handle retries, cancellation and response order reliably.
+- Torrent metadata parsing keeps its own copy of caller-provided bytes. Info-hash distribution,
+  file-selection progress and piece-to-file lookup edge cases are corrected.
+- uTP and file-handle disposal now release pending work cleanly and report closed-handle failures
+  consistently.
+
+### Testing
+
+- Added replayable fault scenarios for storage and session crashes, torrent lifecycle, peer connection
+  slots, DHT lookups, tracker restarts, web-seed failover, HTTP ranges, block scheduling, endgame
+  handoff, v2 proofs, uTP admission and encrypted transfer recovery.
+- Added deterministic regression coverage for tracker restart races and magnet metadata handoff.
+- Release validation now runs replayable fault sweeps, counterpart-client interop and coverage-guided
+  fuzzing before publishing packages.
+
 ## 5.4.0 — 2026-11-07
 
 A restart now leaves a session as it was, and a file check no longer holds up the queue. Everything

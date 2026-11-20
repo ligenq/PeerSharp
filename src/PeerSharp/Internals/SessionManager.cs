@@ -45,6 +45,9 @@ internal sealed class SessionManager : IAsyncDisposable
         _logger = logger;
     }
 
+    internal Func<Torrent, string, CancellationToken, Task>? StorageMove =>
+        _persistence is SessionPersistence ? MoveStorageAsync : null;
+
     /// <summary>
     /// The engine's pause, which a save records so the session can come back as it was left. Set by
     /// the engine, which is created after this.
@@ -173,9 +176,42 @@ internal sealed class SessionManager : IAsyncDisposable
         finally { _autoSaveLifecycle.Release(); }
     }
 
-    public Task<IReadOnlyList<SavedTorrentEntry>> LoadAllAsync(CancellationToken cancellationToken)
+    public Task<IReadOnlyList<SavedTorrentEntry>> LoadAllAsync(CancellationToken cancellationToken) =>
+        _persistence.LoadAllAsync(cancellationToken);
+
+    internal Task RecoverStorageMoveAsync(SavedTorrentEntry entry, CancellationToken ct) =>
+        _persistence is SessionPersistence persistence
+            ? persistence.RecoverStorageMoveAsync(entry.Hash, entry.Options?.DownloadPath, ct)
+            : Task.CompletedTask;
+
+    private async Task MoveStorageAsync(Torrent torrent, string path, CancellationToken ct)
     {
-        return _persistence.LoadAllAsync(cancellationToken);
+        var persistence = (SessionPersistence)_persistence;
+        var hash = torrent.SessionHash;
+        var gate = GetSaveGate(hash);
+        try
+        {
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                if (!_registry.TryGet(hash, out var current) || !ReferenceEquals(current, torrent))
+                    throw new InvalidOperationException("The torrent no longer belongs to this session.");
+
+                // Save the path that rollback must restore. Regular saves share this gate so they
+                // cannot publish another path or a snapshot taken while the files are split.
+                await SaveTorrentEntryCoreAsync(torrent, null, null, false, ct).ConfigureAwait(false);
+                await persistence.RecoverStorageMoveAsync(hash, torrent.FilesInternal?.DownloadPath, ct).ConfigureAwait(false);
+                await torrent.MoveStorageCoreAsync(Path.GetFullPath(path), (move, token) => persistence.RecordStorageMoveAsync(hash, move, token), ct)
+                    .ConfigureAwait(false);
+
+                // The files have all reached their destination. Publish its path before forgetting
+                // how to roll back, even if the caller cancelled after the last file moved.
+                await SaveTorrentEntryCoreAsync(torrent, null, null, false, CancellationToken.None).ConfigureAwait(false);
+                persistence.ClearStorageMove(hash);
+            }
+            finally { gate.Release(); }
+        }
+        finally { ReturnSaveGate(hash, gate); }
     }
 
     public Task<DhtState?> LoadDhtStateAsync(CancellationToken cancellationToken)

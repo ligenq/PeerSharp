@@ -32,9 +32,10 @@ internal abstract class TrackerBase : ITracker
 
     public abstract Task MultiScrapeAsync(IReadOnlyList<InfoHash> infoHashes, CancellationToken ct);
 
-    protected void RaiseAnnounceResult(bool success, AnnounceResponse response, string? errorMessage = null)
+    protected void RaiseAnnounceResult(bool success, AnnounceResponse response, string? errorMessage = null,
+        CancellationToken ct = default)
     {
-        _callback?.OnAnnounceResult(success, response, this, errorMessage);
+        _callback?.OnAnnounceResult(success, response, this, errorMessage, ct);
     }
 
     protected void RaiseScrapeResult(bool success, ScrapeResponse response)

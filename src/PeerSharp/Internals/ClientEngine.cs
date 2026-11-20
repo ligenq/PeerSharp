@@ -79,7 +79,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         TimeProvider timeProvider,
         ILoggerFactory loggerFactory,
         TorrentRegistry registry,
-        SessionManager? sessionManager)
+        SessionManager? sessionManager,
+        IFileHandleCache fileHandleCache)
     {
         Settings = settings;
         _bandwidth = bandwidth;
@@ -95,7 +96,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         _sessionManager = sessionManager;
         _sessionManager?.SessionPause = this;
 
-        _fileHandleCache = new FileHandleCache(loggerFactory: loggerFactory); // Default 200 handles
+        _fileHandleCache = fileHandleCache;
         // One pool for this engine's trackers, web seeds and magnet fetches, disposed with the engine.
         _httpClientFactory = new HttpClientFactory(new HostAddressCache(_timeProvider));
         _connectionGovernor = new ConnectionGovernor(settings);
@@ -222,11 +223,13 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     /// </summary>
     /// <param name="options">Configuration options for the client.</param>
     public static ClientEngine Create(TorrentClientOptions options)
+        => CreateWithServices(options, TimeProvider.System);
+
+    internal static ClientEngine CreateWithServices(TorrentClientOptions options, TimeProvider timeProvider, IFileHandleCache? fileHandleCache = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         var loggerFactory = options.EffectiveLoggerFactory;
-        var timeProvider = TimeProvider.System;
         var settings = options.Settings ?? new Settings();
 
         // Create session persistence: use custom if provided, otherwise default if enabled
@@ -254,7 +257,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             timeProvider,
             loggerFactory,
             registry,
-            sessionManager);
+            sessionManager,
+            fileHandleCache ?? new FileHandleCache(loggerFactory: loggerFactory));
     }
 
     public void ClearBlocklist()
@@ -490,8 +494,9 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             // and a retry must finish the operation instead of treating the flag as proof.
             foreach (var torrent in _registry.GetAll())
             {
-                // A torrent checking its files is not started yet, and cannot be left to finish and
-                // start in a paused session.
+                // A check in progress is work the pause should drain, even if a stop has already
+                // been requested. That earlier stop still decides whether we resume the torrent.
+                long stopRequests = torrent.StopRequests;
                 if (!torrent.StartedOrStarting)
                 {
                     continue;
@@ -499,13 +504,15 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
                 lock (_pauseLock)
                 {
-                    // Plus the stop below, which is this pause's own.
-                    _pausedTorrents[torrent.SessionHash] = torrent.StopRequests + 1;
+                    bool alreadyHolding = _pausedTorrents.TryGetValue(torrent.SessionHash, out long heldStop)
+                        && stopRequests <= heldStop;
+                    if (alreadyHolding || torrent.HasStartIntentAt(stopRequests))
+                    {
+                        // Include only this pause's stop. A concurrent stop invalidates the hold.
+                        _pausedTorrents[torrent.SessionHash] = stopRequests + 1;
+                        torrent.QueueAutoStart = false;
+                    }
                 }
-
-                // Cleared before stopping, so the queue cannot pick this torrent up again between the
-                // stop and the next one - the queue only starts torrents that want auto-start.
-                torrent.QueueAutoStart = false;
 
                 try
                 {
@@ -697,7 +704,10 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         }
     }
 
-    private async Task StartUnlessSessionPausedAsync(Torrent torrent, CancellationToken cancellationToken)
+    private Task StartUnlessSessionPausedAsync(Torrent torrent, CancellationToken cancellationToken) =>
+        StartUnlessSessionPausedAsync(torrent, fromQueue: false, cancellationToken);
+
+    private async Task StartUnlessSessionPausedAsync(Torrent torrent, bool fromQueue, CancellationToken cancellationToken)
     {
         long stopRequestsAtStart;
         await _pauseGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -707,7 +717,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             lock (_pauseLock)
             {
                 paused = IsPaused;
-                if (paused)
+                if (paused && !fromQueue)
                 {
                     torrent.QueueAutoStart = false;
                     _pausedTorrents[torrent.SessionHash] = torrent.StopRequests;
@@ -715,7 +725,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             }
             if (paused)
             {
-                await torrent.DeferRestoredPiecesAsync(cancellationToken).ConfigureAwait(false);
+                if (!fromQueue) await torrent.DeferRestoredPiecesAsync(cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -1033,7 +1043,8 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
             actualTimeProvider,
             actualLoggerFactory,
             registry,
-            null);
+            null,
+            new FileHandleCache(loggerFactory: actualLoggerFactory));
     }
 
     private async Task<Torrent> AddMagnetInternal(MagnetLink magnetLink, ITorrentEvents? events = null, TorrentResumeData? resumeData = null, bool transient = false, bool loadResumePiecesForStart = false)
@@ -1079,6 +1090,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         {
             torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
             torrent.SessionSave = SaveStartOrStopAsync;
+            torrent.SessionStorageMove = _sessionManager?.StorageMove;
         }
 
         torrent.DhtManager = Dht;
@@ -1126,6 +1138,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
         {
             torrent.SessionStartCoordinator = StartUnlessSessionPausedAsync;
             torrent.SessionSave = SaveStartOrStopAsync;
+            torrent.SessionStorageMove = _sessionManager?.StorageMove;
         }
 
         torrent.DhtManager = Dht;
@@ -1677,6 +1690,9 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
     private async Task LoadPersistedEntryAsync(SavedTorrentEntry entry, CancellationToken cancellationToken)
     {
+        // Recover the files before a restored torrent can allocate replacements at the saved path.
+        await _sessionManager!.RecoverStorageMoveAsync(entry, cancellationToken).ConfigureAwait(false);
+
         AddTorrentOptions? options = null;
         if (entry.Options != null || entry.ResumeData != null)
         {
@@ -1864,7 +1880,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
     private async Task RebalanceQueueAsync(CancellationToken ct)
     {
-        if (_queueManager == null)
+        if (_queueManager == null || IsPaused)
         {
             return;
         }
@@ -1882,7 +1898,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
 
         try
         {
-            await RunQueuePassAsync(_queueManager, ct).ConfigureAwait(false);
+            if (!IsPaused) await RunQueuePassAsync(_queueManager, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -1933,7 +1949,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         // From here and not from when the start gets past the pause gate, so the next pass cannot take
         // this torrent for one that still needs starting, or its slot for a free one.
-        _ = torrent.BeginStart();
+        torrent.ReserveStart();
         var start = RunQueueStartAsync(torrent, ct);
         lock (_queueStarts)
         {
@@ -1946,7 +1962,7 @@ internal sealed partial class ClientEngine : IClientEngine, IDhtCallback, ITorre
     {
         try
         {
-            await torrent.StartForEngineAsync(ct).ConfigureAwait(false);
+            await StartUnlessSessionPausedAsync(torrent, fromQueue: true, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

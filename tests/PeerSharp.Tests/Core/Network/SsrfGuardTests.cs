@@ -291,7 +291,7 @@ public class SsrfGuardTests
 
     private sealed class IgnoredTrackerResults : ITrackerCallback
     {
-        public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null) { }
+        public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null, CancellationToken ct = default) { }
         public void OnMultiScrapeResult(bool success, MultiScrapeResponse response, ITracker tracker) { }
         public void OnScrapeResult(bool success, ScrapeResponse response, ITracker tracker) { }
     }

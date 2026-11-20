@@ -878,6 +878,12 @@ internal class UtpStream : Stream
     {
         lock (_lock)
         {
+            // The receive path may have found this stream just before shutdown unregistered it.
+            if (_state == UtpState.Closed)
+            {
+                return;
+            }
+
             // SECURITY: Verify packet source matches established connection
             if (!remote.Equals(RemoteEndPoint))
             {

@@ -328,7 +328,7 @@ internal static class ProtocolConstants
     /// <summary>
     /// Generates a BEP 20 compliant peer ID using Azureus-style format.
     /// Format: -XXYYYY-xxxxxxxxxxxx (20 bytes total)
-    /// - First 8 bytes: "-PS0503-" (client identifier and version)
+    /// - First 8 bytes: "-PS0504-" (client identifier and version)
     /// - Last 12 bytes: Random bytes for uniqueness
     /// </summary>
     public static byte[] GeneratePeerId()

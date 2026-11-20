@@ -354,12 +354,14 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         }
     }
 
-    public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null)
+    public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null,
+        CancellationToken ct = default)
     {
         lock (_lock)
         {
-            // O(1) lookup instead of FirstOrDefault
-            if (!_trackerLookup.TryGetValue(tracker, out var info))
+            // Stop can time out waiting for an announce, and the next start reuses this tracker.
+            // Check the attempt's token before publishing any result to the current run.
+            if (ct.IsCancellationRequested || !_trackerLookup.TryGetValue(tracker, out var info))
             {
                 return;
             }
@@ -771,6 +773,17 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
         }
         catch (OperationCanceledException) { /* Expected on timeout */ }
         catch (Exception) { /* Stop announces are best effort. */ }
+        finally
+        {
+            // The bounded wait can time out before the deadline's cancellation callback runs.
+            // Ensure a detached Stopped response cannot publish results into a later run.
+            if (!timeoutCts.IsCancellationRequested)
+            {
+                _ = timeoutCts.CancelAsync().ContinueWith(
+                    task => _logger.LogTrace(task.Exception, "Error cancelling the stopped announce for {Url}", info.Url),
+                    CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            }
+        }
     }
 
     /// <summary>
@@ -930,7 +943,6 @@ internal class TrackerManager : IAsyncDisposable, ITrackerCallback, ITrackers
             }
 
             // Coalesce timer and manual requests while this tracker is already announcing.
-            // Its callback has no attempt ID, so overlapping attempts cannot be correlated safely.
             if (info.CurrentAnnounceTask is { IsCompleted: false })
             {
                 info.PendingCompleted |= evt == TrackerEvent.Completed;

@@ -6,12 +6,106 @@ The unit and integration tests need no setup and run on every build; everything 
 | Suite | Gate | Where |
 |---|---|---|
 | Unit, integration, architecture, property-based | none - runs on every build | `tests/PeerSharp.Tests` |
+| Replayable fault scenarios | four fixed seeds in CI, 64 in the Release workflow | [Fault scenarios](#replayable-fault-scenarios) |
 | Coverage-guided fuzzing | AFL++ and a corpus | [PeerSharp.Fuzz](PeerSharp.Fuzz/README.md) |
-| Local counterpart-client interop | real client binaries; manual CI workflow | `tests/PeerSharp.Tests/Interop` |
+| Local counterpart-client interop | real client binaries; runs on demand and during release validation | `tests/PeerSharp.Tests/Interop` |
 | Live DHT probes | `PEERSHARP_INTEROP=1` | `tests/PeerSharp.Tests/Interop` |
 | Real-swarm soak | `PEERSHARP_SOAK=1` plus content you choose | `tests/PeerSharp.Tests/Interop` |
 | Real-swarm streaming with longer and shorter request queues | `PEERSHARP_SOAK=1` plus content you choose; `PEERSHARP_STREAMING_QUEUES`, `_ROUNDS`, `_BITRATE`, `_SECONDS`, `_REPORT`; `_PLAYERS` (`strict`, `exoplayer`) the player profiles; `_FROM_START=1` plays from the file's start, as a film is watched, uncapped, and reports every stall | `tests/PeerSharp.Tests/Interop/RealSwarmStreamingTests.cs` |
 | Streaming from a mixed local swarm: first byte and stalls, from the start and after a seek | `PEERSHARP_STREAMING=1`; `PEERSHARP_STREAMING_REPORT` names a file the numbers are appended to, `PEERSHARP_STREAMING_LOG` one the player's engine logs to in detail, `PEERSHARP_STREAMING_SWARM` the big-piece test's seeders, as `24x384` (two dozen at 384 KiB/s) or several such groups separated by commas | `tests/PeerSharp.Tests/Integration/StreamingSwarmTests.cs` |
+
+## Replayable fault scenarios
+
+The uTP test feeds reordered SYNs, dropped packets, retries and resets through the engine's
+receive path, then advances the fake handshake clock or shuts down the engine. It checks the
+per-address and global admission limits, both stream indexes and whether the pipe workers drain.
+The resume test injects cancellation and I/O failures at file-handle barriers during writes and
+session saves. It reopens the persisted state and hashes every piece it claims directly from disk.
+It also checks that the missing pieces can be downloaded again.
+
+The BEP 44 test varies reply order and injects lost, duplicate and wrong-endpoint replies.
+It checks that publishing reaches the token holder and that cancellation drains pending queries.
+The BitTorrent v2 test holds a piece while peers reject or abandon hash requests, then supplies an
+invalid proof followed by a valid one. It checks the retained payload verifies and reaches disk.
+The session publication test cancels a save on each side of the snapshot pointer swap and
+reopens the session to check that metadata, options and resume data match a single generation.
+The endgame test disconnects a peer, delivers a stale block and replaces a duplicate request
+while cancellation is in flight. It checks that the final piece is published once and both
+request indexes drain.
+The encrypted transfer test drops queued bytes partway through a piece on a real loopback
+connection. A fresh peer must finish the transfer while the verified piece stays available.
+The test compares the completed file byte for byte with the original payload.
+The storage move test forces the copy fallback for the first file, then interrupts the move
+with cancellation or an I/O failure. It checks rollback, retries from the saved path, and
+reopens and rehashes the pieces after the retry.
+The storage move process test kills the engine after the first file moves and on either side of
+publishing the new download path. The restarted session must recover every file at the root
+selected by its snapshot and start with all pieces available. Another case kills the mover during
+a partial copy, then kills the recovery process during a second copy. The final restart must remove
+both temporary copies while preserving the existing destination file and an unrelated temporary file.
+The HTTP range test cancels one of two overlapping reads on either side of piece verification.
+It checks streaming priorities, the surviving response bytes, and shutdown with two pending reads.
+The tracker restart test holds an HTTP announce past the stop deadline, then releases the old
+success or failure during a new run. It checks peer discovery, swarm counts, retry timing and the
+tracker ID sent with the next announce.
+The web-seed test stalls or truncates the second range of a piece that spans two files. It checks
+that a healthy source supplies both ranges, a duplicate arriving during publication is discarded,
+and waiting readers get the verified bytes.
+The magnet handoff test delivers authenticated metadata through the peer message handler, then
+stops the torrent or pauses the session during the rebuild. It checks file selections, publication
+and connection slots for public and private metadata.
+The session crash test runs two fixed cases. It kills a writer process before or after the snapshot
+pointer swap, then checks recovery and a subsequent save from a fresh process.
+
+The lifecycle model runs generated commands against two torrents sharing one download queue slot.
+It checks the registry, start/stop state, pause intent and queue eligibility after each command,
+including after saving and reopening. Failures print the original history and a reduced history
+that still reproduces the same invariant violation. The file-check schedule test covers all six
+orders of a pending read completing, an explicit stop, and a session pause. It checks the final
+state and then reopens the session to verify that resuming honors the stop.
+
+The connection slot model keeps one incoming peer connected while a second torrent dials,
+accepts peers, receives metadata, and stops or restarts. It compares the shared governor's
+active and pending counts with the peers that own them and probes the ceiling with a fresh
+incoming connection after each command. The history includes disconnects that finish before
+and after shutdown, plus an incoming handshake that returns after its run has been stopped.
+
+The block request model uses the real scheduler with two scripted peers and a two-block piece.
+It varies timeout, choke, rejection, disconnect and late reply order. It checks both request
+indexes and the outgoing requests after each command, then restores a healthy peer and verifies
+the announced piece against the bytes on disk. It exercises base-protocol and Fast Extension chokes,
+including a choke during request scheduling and a valid block already queued when a choke arrives.
+
+Run all scenarios locally with the same four seeds used in pull requests.
+
+```powershell
+dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj --configuration Release -- --filter-trait Suite=ReplayableFaults
+```
+
+Run the 64-seed sweep with the same flags as the Release workflow.
+
+```powershell
+dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj --configuration Release -- --explicit on --filter-trait Suite=ReplayableFaults
+```
+
+Failures print a seed and event trace. To replay seed 63, for example, select its `FaultSeed` trait.
+
+```powershell
+dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj --configuration Release -- --explicit on --filter-trait FaultSeed=63
+```
+
+Add a class filter such as `--filter-class '*.DhtLookupFaultTests'` to replay one scenario.
+Use `--filter-class '*.TorrentLifecycleModelTests'` with a seed to replay a lifecycle history.
+Use `--filter-class '*.FileCheckScheduleTests'` to exercise all six fixed schedules.
+Use `--filter-class '*.ConnectionSlotModelTests'` with a seed to replay a connection history.
+Use `--filter-class '*.BlockRequestModelTests'` with a seed to replay a block request history.
+The seed controls the inputs, fake clocks control protocol deadlines, and barriers control the
+storage and session fault points. The .NET thread pool schedules the remaining continuations.
+
+Release validation also runs the existing **Interop** and **Fuzz** workflows on the candidate
+commit. Check the interop reports for which external clients ran and the fuzz artifacts for crashes.
+When a review or a sweep exposes an invariant violation, keep a regression that fails on the affected
+revision and passes with the fix.
 
 ## Mutation and concurrency testing
 
@@ -63,10 +157,9 @@ opt-in: each requires `PEERSHARP_SOAK=1`, separately from the DHT probes' `PEERS
 because they transfer real data for a long time against a swarm of strangers.
 
 The rest of `PeerSharp.Tests.Interop` — the local counterpart-client tests and the loopback ones —
-runs through the manual Interop workflow (`.github/workflows/interop.yml`). It needs real client
-binaries and real transfers, so it does not run on every pull request. Trigger it when validating
-changes to protocol handling or transport behavior. A test whose counterpart client is not installed skips rather
-than fails, so read the skip count: a run where everything skipped proves nothing.
+runs through the Interop workflow (`.github/workflows/interop.yml`) on demand and during release
+validation. It needs real client binaries and real transfers. Trigger it when validating changes to
+protocol handling or transport behavior. Check the skip count to see whether tests found their external clients.
 
 **You choose the content.** Nothing is hardcoded; the tests skip until you point them somewhere.
 Use something you have the right to distribute. Projects that publish their own releases over
@@ -167,3 +260,14 @@ format real clients would ignore.
   reference implementation passing them is evidence they describe conformant behaviour; one failing
   would be a finding about these tests. Opt-in: `PEERSHARP_INTEROP=1` and a `client_test` built by
   the end-to-end harness.
+- `LibtorrentCrashResumeTests` kills a PeerSharp downloader immediately before or after a resume
+  snapshot becomes current. After restart without a forced recheck, it checks the initial BitTorrent
+  bitfield and compares the bytes downloaded by libtorrent against the original payload. The newly
+  saved piece crosses two files. PeerSharp then requests the missing pieces and a fresh libtorrent
+  client downloads the complete torrent for byte-for-byte verification. Run both crash cases with
+  `PEERSHARP_INTEROP=1`, the same `client_test` binary, and the following filter. On Linux,
+  the Interop workflow builds a pinned libtorrent and requires both crash cases to pass.
+
+```text
+dotnet test --project tests/PeerSharp.Tests/PeerSharp.Tests.csproj --configuration Release -- --filter-method '*.ARestartServesExactlyThePublishedPieces'
+```

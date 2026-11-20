@@ -117,7 +117,7 @@ internal class UdpTracker : TrackerBase, IDisposable
                 // and caught once per family and retry.
                 _connectionId = 0;
                 _logger.LogDebug("Tracker {Url} announce skipped - its host has no usable address", Url);
-                RaiseAnnounceResult(false, new AnnounceResponse(), $"Tracker host {new Uri(Url).Host} has no usable address");
+                RaiseAnnounceResult(false, new AnnounceResponse(), $"Tracker host {new Uri(Url).Host} has no usable address", ct);
                 return;
             }
 
@@ -147,16 +147,17 @@ internal class UdpTracker : TrackerBase, IDisposable
                 }
             }
 
+            ct.ThrowIfCancellationRequested();
             if (responses.Count > 0)
             {
-                RaiseAnnounceResult(true, MergeAnnounceResponses(responses));
+                RaiseAnnounceResult(true, MergeAnnounceResponses(responses), ct: ct);
             }
             else
             {
                 _connectionId = 0;
                 string message = errors.LastOrDefault()?.Message ?? "Tracker announce failed";
                 _logger.LogWarning(errors.LastOrDefault(), "Tracker {Url} announce failed over all eligible address families - {Message}", Url, message);
-                RaiseAnnounceResult(false, new AnnounceResponse(), message);
+                RaiseAnnounceResult(false, new AnnounceResponse(), message, ct);
             }
         }
         finally

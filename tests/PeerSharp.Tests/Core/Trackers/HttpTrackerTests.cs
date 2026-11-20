@@ -167,7 +167,7 @@ public class HttpTrackerTests
         public MultiScrapeResponse? MultiScrapeResponse { get; private set; }
         public string? ErrorMessage { get; private set; }
 
-        public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null)
+        public void OnAnnounceResult(bool success, AnnounceResponse response, ITracker tracker, string? errorMessage = null, CancellationToken ct = default)
         {
             Success = success;
             AnnounceResponse = response;

@@ -43,7 +43,17 @@ internal sealed class BlockProcessor
         {
             long pieceSize = _torrent.InfoFile.Info.GetPieceSize(block.PieceIndex);
             int blocksPerPiece = (int)Math.Ceiling((double)pieceSize / _blockSize);
-            _pieceStateManager.TryAddPiece(new PieceState(block.PieceIndex, blocksPerPiece));
+            var newState = new PieceState(block.PieceIndex, blocksPerPiece);
+            if (!_pieceStateManager.TryAddPiece(newState))
+            {
+                newState.Dispose();
+            }
+            else if (_torrent.Pieces.HasPiece(block.PieceIndex))
+            {
+                // Verification may have finished between the initial bitfield check and this add.
+                newState.Dispose();
+                _pieceStateManager.TryRemovePiece(newState);
+            }
         }
 
         try
@@ -56,7 +66,13 @@ internal sealed class BlockProcessor
         }
     }
 
-    public async Task HandlePeerBlockAsync(PeerCommunication peer, Block block)
+    public Task HandlePeerBlockAsync(PeerCommunication peer, Block block)
+    {
+        _requestCompletionTracker.TryGetPendingRequest(peer, block, out var request);
+        return HandlePeerBlockAsync(peer, block, request);
+    }
+
+    public async Task HandlePeerBlockAsync(PeerCommunication peer, Block block, BlockRequest? pendingRequest)
     {
         // Trace, not Debug: this is the per-block path, so at 16 KiB a block a healthy transfer emits
         // hundreds of these a second. Debug should stay usable while a transfer is running.
@@ -67,9 +83,8 @@ internal sealed class BlockProcessor
         bool stored = false;
 
         _pieceStateManager.TryGetPiece(block.PieceIndex, out var state);
-        _requestCompletionTracker.TryGetPendingRequest(peer, block, out var pendingRequest);
 
-        if (state != null && !IsValidRequestedBlock(peer, block, out pendingRequest))
+        if (state != null && (pendingRequest?.Length != block.Length || !IsValidBlockGeometry(block)))
         {
             _logger.LogDebug(
                 "Rejected unsolicited or malformed block: Piece {PieceIndex}, Offset {Offset}, Length {Length} from {RemoteEndPoint}",
@@ -151,22 +166,6 @@ internal sealed class BlockProcessor
         }
     }
 
-    private bool IsValidRequestedBlock(PeerCommunication peer, Block block, out BlockRequest request)
-    {
-        request = default!;
-        if (!IsValidBlockGeometry(block))
-        {
-            return false;
-        }
-
-        if (!_requestCompletionTracker.TryGetPendingRequest(peer, block, out request))
-        {
-            return false;
-        }
-
-        return request.Length == block.Length;
-    }
-
     private bool IsValidBlockGeometry(Block block)
     {
         var info = _torrent.InfoFile.Info;
@@ -190,7 +189,7 @@ internal sealed class BlockProcessor
 
         _pieceStateManager.TryGetPiece(block.PieceIndex, out var state);
 
-        if (state != null)
+        if (state != null && !_torrent.Pieces.HasPiece(block.PieceIndex))
         {
             int blockIdx = block.Offset / _blockSize;
 

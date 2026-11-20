@@ -39,7 +39,7 @@ polling statistics, and proxy capability reporting.
 ### Installation
 
 ```bash
-dotnet add package PeerSharp --version 5.4.0
+dotnet add package PeerSharp --version 5.4.1
 ```
 
 Requires .NET 10.0 or later.
@@ -49,7 +49,7 @@ Requires .NET 10.0 or later.
 Each GitHub release includes SPDX SBOMs for `PeerSharp` and `PeerSharp.WebTorrent` alongside the NuGet and symbol packages. Release packages have signed GitHub build-provenance and SBOM attestations. After downloading a package, verify its origin with the GitHub CLI:
 
 ```bash
-gh attestation verify PeerSharp.5.4.0.nupkg --repo ligenq/PeerSharp
+gh attestation verify PeerSharp.5.4.1.nupkg --repo ligenq/PeerSharp
 ```
 
 ### Basic Usage
@@ -465,7 +465,7 @@ magnet's metadata fetch and stop, `--run-for <s>` for an unattended run that exi
 PeerSharp.WebTorrent is an optional extension package that adds peer support over WebRTC data channels. Install it only in applications that need browser/WebTorrent interop; the core `PeerSharp` package has no dependency on RtcForge or WebRTC.
 
 ```bash
-dotnet add package PeerSharp.WebTorrent --version 5.4.0
+dotnet add package PeerSharp.WebTorrent --version 5.4.1
 ```
 
 ```csharp
@@ -529,8 +529,9 @@ audits direct and transitive NuGet dependencies during restore, and verifies for
 Pull requests build and test on Linux and Windows, publish Cobertura coverage with an 80% line and
 branch floor for each shipping assembly, validate trimmed output, replay the fuzz corpus, and keep
 every benchmark fixture executable. CodeQL and dependency review cover code and supply-chain
-changes. Bounded fuzzing, real-client interoperability and mutation analysis run through manual
-workflow triggers. CodeQL also runs on pushes and pull requests.
+changes. Release validation adds a wider sweep of transport and resume faults, bounded fuzzing
+and real-client interoperability. Fuzzing, interop and mutation analysis are also available on
+demand. CodeQL also runs on pushes and pull requests.
 
 Shipping packages are validated against the NuGet baseline configured in each package project
 and the approved public-API snapshot. Before opening a pull request, run at least:

@@ -11,7 +11,9 @@ The harness has four targets:
 - `dht-compact` exercises the compact node and peer codecs, which decode byte strings taken
   straight from a DHT datagram. Their contract is total, so the harness catches nothing at all.
 
-CI builds the harness and replays every committed seed with `--self-test`. The manually triggered Fuzz workflow runs each target under AFL++ for a bounded period and uploads the findings directory.
+CI builds the harness and replays every committed seed with `--self-test`. The Fuzz workflow
+runs each target under AFL++ for a bounded period and uploads a tar archive of its findings. Run it
+on demand or through the Release workflow.
 
 On a machine with AFL++ installed, start a local run from the repository root:
 

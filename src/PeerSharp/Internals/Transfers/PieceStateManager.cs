@@ -113,6 +113,16 @@ internal sealed class PieceStateManager : IDisposable
         return false;
     }
 
+    public bool TryRemovePiece(PieceState state)
+    {
+        if (_activePieces.TryRemove(new KeyValuePair<int, PieceState>(state.Index, state)))
+        {
+            Interlocked.Decrement(ref _activePiecesCount);
+            return true;
+        }
+        return false;
+    }
+
     public bool TryGetPiece(int index, out PieceState state)
     {
         return _activePieces.TryGetValue(index, out state!);
@@ -142,9 +152,8 @@ internal sealed class PieceStateManager : IDisposable
 
         foreach (var state in toRemove)
         {
-            if (state.TryDisposeIfInactive() && _activePieces.TryRemove(new KeyValuePair<int, PieceState>(state.Index, state)))
+            if (state.TryDisposeIfInactive() && TryRemovePiece(state))
             {
-                Interlocked.Decrement(ref _activePiecesCount);
                 _logger.LogDebug("Pruned stale piece {PieceIndex} (no active peers)", state.Index);
             }
         }
