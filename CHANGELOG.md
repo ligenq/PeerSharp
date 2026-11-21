@@ -3,7 +3,7 @@
 Notable changes per release. Entries describe what a consumer of the library would notice; the commit
 history has the reasoning and the measurements behind each one.
 
-## 5.4.1 — Unreleased
+## 5.4.1 — 2026-11-21
 
 A reliability release covering storage, torrent lifecycle, peer connections, DHT, trackers and uTP.
 No public API changes. Binary compatible with 5.4.0.

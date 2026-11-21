@@ -21,7 +21,7 @@
 		<RepositoryType>git</RepositoryType>
 		<PackageIcon>application-icon.png</PackageIcon>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
-		<PackageReleaseNotes>PeerSharp 5.4.1 improves reliability across storage, torrent lifecycle, peer connections, DHT, trackers and uTP. Fixes interrupted storage moves and recovery, bounds inbound handshakes, and corrects transfer, retry, lookup and disposal edge cases. No public API changes. Binary compatible with 5.4.0. See https://github.com/ligenq/PeerSharp/blob/v5.4.1/CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>PeerSharp 5.4.1 improves reliability across storage, torrent lifecycle, peer connections, DHT, trackers and uTP. Fixes interrupted storage moves and recovery, bounds inbound handshakes, and corrects transfer, retry, lookup and disposal edge cases. Failed encryption handshakes now close cleanly, and unresponsive peers and UDP trackers are logged without error-level stack traces. No public API changes. Binary compatible with 5.4.0. See https://github.com/ligenq/PeerSharp/blob/v5.4.1/CHANGELOG.md.</PackageReleaseNotes>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<IsTrimmable>true</IsTrimmable>
 		<!-- iOS allows no code generation at run time, so an app there is compiled ahead of time in
