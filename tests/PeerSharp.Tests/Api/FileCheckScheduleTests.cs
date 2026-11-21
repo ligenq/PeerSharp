@@ -77,7 +77,11 @@ public sealed class FileCheckScheduleTests
                     else
                     {
                         long requestedStops = pending.Count - 1;
-                        await TorrentTestUtility.WaitUntilAsync(() => torrent.StopRequests >= requestedStops,
+                        // A stop counts itself before it cancels the running check, so wait for the
+                        // cancellation to reach the read too. Otherwise the read can be released in
+                        // between and finish the check before the stop gets to it.
+                        await TorrentTestUtility.WaitUntilAsync(
+                            () => torrent.StopRequests >= requestedStops && handles.Cancellation.IsCancellationRequested,
                             because: $"{step} to reach the torrent before the read is released");
                         Assert.False(start.IsCompleted);
                     }

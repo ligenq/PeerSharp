@@ -156,7 +156,16 @@ internal class UdpTracker : TrackerBase, IDisposable
             {
                 _connectionId = 0;
                 string message = errors.LastOrDefault()?.Message ?? "Tracker announce failed";
-                _logger.LogWarning(errors.LastOrDefault(), "Tracker {Url} announce failed over all eligible address families - {Message}", Url, message);
+                if (errors.Count > 0 && errors.All(static e => e is TimeoutException))
+                {
+                    // An unresponsive UDP tracker is ordinary on a public swarm; match HttpTracker
+                    // by logging timeouts without a stack trace at Information level.
+                    _logger.LogInformation("Tracker {Url} announce failed: {Message}", Url, message);
+                }
+                else
+                {
+                    _logger.LogWarning(errors.LastOrDefault(), "Tracker {Url} announce failed over all eligible address families - {Message}", Url, message);
+                }
                 RaiseAnnounceResult(false, new AnnounceResponse(), message, ct);
             }
         }
@@ -311,7 +320,6 @@ internal class UdpTracker : TrackerBase, IDisposable
         {
             ct.ThrowIfCancellationRequested();
             // Retry logic for transient failures
-            Exception? lastException = null;
             for (int attempt = 0; attempt <= MaxRetries; attempt++)
             {
                 try
@@ -336,29 +344,29 @@ internal class UdpTracker : TrackerBase, IDisposable
                 }
                 catch (UdpTrackerException ex) when (ex.IsTransient && attempt < MaxRetries)
                 {
-                    lastException = ex;
-                    _logger.LogWarning(ex, "Scrape transient error (attempt {Attempt})", attempt + 1);
+                    _logger.LogDebug(ex, "Scrape transient error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
                 }
                 catch (TimeoutException ex) when (attempt < MaxRetries)
                 {
-                    lastException = ex;
-                    _logger.LogWarning(ex, "Scrape timeout (attempt {Attempt})", attempt + 1);
+                    _logger.LogDebug(ex, "Scrape timeout (attempt {Attempt}/{MaxRetries})", attempt + 1, MaxRetries);
                 }
                 catch (SocketException ex) when (attempt < MaxRetries)
                 {
-                    lastException = ex;
-                    _logger.LogWarning(ex, "Scrape socket error (attempt {Attempt})", attempt + 1);
+                    _logger.LogDebug(ex, "Scrape socket error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
                 }
             }
-
-            // All retries exhausted
-            _connectionId = 0;
-            _logger.LogWarning(lastException, "Tracker {Url} scrape failed after {MaxRetries} retries - {Message}", Url, MaxRetries, lastException?.Message ?? "Unknown error");
-            RaiseScrapeResult(false, new ScrapeResponse());
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw;
+        }
+        catch (TimeoutException ex)
+        {
+            _connectionId = 0;
+#pragma warning disable S6667 // Deliberately no stack trace: tracker timeouts are ordinary on public swarms.
+            _logger.LogInformation("Tracker {Url} scrape failed: {Message}", Url, ex.Message);
+#pragma warning restore S6667
+            RaiseScrapeResult(false, new ScrapeResponse());
         }
         catch (Exception ex)
         {
@@ -395,7 +403,6 @@ internal class UdpTracker : TrackerBase, IDisposable
         try
         {
             ct.ThrowIfCancellationRequested();
-            Exception? lastException = null;
             for (int attempt = 0; attempt <= MaxRetries; attempt++)
             {
                 try
@@ -418,24 +425,18 @@ internal class UdpTracker : TrackerBase, IDisposable
                 }
                 catch (UdpTrackerException ex) when (ex.IsTransient && attempt < MaxRetries)
                 {
-                    lastException = ex;
                     _logger.LogDebug(ex, "Multi-scrape transient error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
                 }
                 catch (TimeoutException ex) when (attempt < MaxRetries)
                 {
-                    lastException = ex;
                     _logger.LogDebug(ex, "Multi-scrape timeout (attempt {Attempt}/{MaxRetries})", attempt + 1, MaxRetries);
                 }
                 catch (SocketException ex) when (attempt < MaxRetries)
                 {
-                    lastException = ex;
                     _logger.LogDebug(ex, "Multi-scrape socket error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
                 }
             }
 
-            _connectionId = 0;
-            _logger.LogWarning(lastException, "Tracker {Url} multi-scrape failed after {MaxRetries} retries - {Message}", Url, MaxRetries, lastException?.Message ?? "Unknown error");
-            RaiseMultiScrapeResult(false, new MultiScrapeResponse());
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -447,7 +448,15 @@ internal class UdpTracker : TrackerBase, IDisposable
             _logger.LogWarning(ex, "Tracker {Url} multi-scrape failed - {Message}", Url, ex.Message);
             RaiseMultiScrapeResult(false, new MultiScrapeResponse());
         }
-        catch (Exception ex) when (ex is SocketException || ex is TimeoutException)
+        catch (TimeoutException ex)
+        {
+            _connectionId = 0;
+#pragma warning disable S6667 // Deliberately no stack trace: tracker timeouts are ordinary on public swarms.
+            _logger.LogInformation("Tracker {Url} multi-scrape failed: {Message}", Url, ex.Message);
+#pragma warning restore S6667
+            RaiseMultiScrapeResult(false, new MultiScrapeResponse());
+        }
+        catch (SocketException ex)
         {
             _connectionId = 0;
             _logger.LogWarning(ex, "Tracker {Url} multi-scrape failed - {Message}", Url, ex.Message);
@@ -481,7 +490,6 @@ internal class UdpTracker : TrackerBase, IDisposable
         try
         {
             ct.ThrowIfCancellationRequested();
-            Exception? lastException = null;
             for (int attempt = 0; attempt <= MaxRetries; attempt++)
             {
                 try
@@ -501,28 +509,32 @@ internal class UdpTracker : TrackerBase, IDisposable
                 }
                 catch (UdpTrackerException ex) when (ex.IsTransient && attempt < MaxRetries)
                 {
-                    lastException = ex;
-                    _logger.LogWarning(ex, "Multi-scrape transient error (attempt {Attempt})", attempt + 1);
+                    _logger.LogDebug(ex, "Multi-scrape transient error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
                 }
                 catch (TimeoutException ex) when (attempt < MaxRetries)
                 {
-                    lastException = ex;
-                    _logger.LogWarning(ex, "Multi-scrape timeout (attempt {Attempt})", attempt + 1);
+                    _logger.LogDebug(ex, "Multi-scrape timeout (attempt {Attempt}/{MaxRetries})", attempt + 1, MaxRetries);
                 }
                 catch (SocketException ex) when (attempt < MaxRetries)
                 {
-                    lastException = ex;
-                    _logger.LogWarning(ex, "Multi-scrape socket error (attempt {Attempt})", attempt + 1);
+                    _logger.LogDebug(ex, "Multi-scrape socket error (attempt {Attempt}/{MaxRetries}) - {Message}", attempt + 1, MaxRetries, ex.Message);
                 }
             }
 
             _connectionId = 0;
-            _logger.LogError(lastException, "Tracker {Url} multi-scrape failed after {MaxRetries} retries", Url, MaxRetries);
             return new MultiScrapeResponse();
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             throw;
+        }
+        catch (TimeoutException ex)
+        {
+            _connectionId = 0;
+#pragma warning disable S6667 // Deliberately no stack trace: tracker timeouts are ordinary on public swarms.
+            _logger.LogInformation("Tracker {Url} multi-scrape failed: {Message}", Url, ex.Message);
+#pragma warning restore S6667
+            return new MultiScrapeResponse();
         }
         catch (Exception ex)
         {

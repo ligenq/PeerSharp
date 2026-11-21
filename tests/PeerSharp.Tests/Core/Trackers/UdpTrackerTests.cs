@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Time.Testing;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using PeerSharp.Internals;
 using PeerSharp.Internals.Framework;
@@ -1961,5 +1962,46 @@ public class UdpTrackerTests
         await tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
 
         Assert.False(_callback.Success);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task AnnounceAsync_AllTimeouts_LogsInformationWithoutWarningOrStackTrace()
+    {
+        var sink = new RecordingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Information);
+            builder.AddProvider(sink);
+        });
+
+        using var tracker = new UdpTracker(
+            _timeProvider,
+            _socketFactory,
+            loggerFactory,
+            (_, _) => Task.FromResult(new[] { IPAddress.Parse("192.0.2.10") }));
+        tracker.Init("udp://silent.example:451/announce", _torrent, _callback);
+        tracker.SetRequestTimeout(TimeSpan.FromSeconds(5));
+
+        var announceTask = tracker.AnnounceAsync(TrackerEvent.None, TestContext.Current.CancellationToken);
+
+        for (int attempt = 0; attempt <= 3; attempt++)
+        {
+            await _socketFactory.LastSocket.WaitForPacketAsync(attempt, TimeSpan.FromSeconds(5));
+            await _socketFactory.LastSocket.WaitForPendingReceiveAsync(TimeSpan.FromSeconds(5));
+            _timeProvider.Advance(TimeSpan.FromSeconds(5));
+            if (attempt < 3)
+            {
+                await AdvanceUntilNextPacketAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+
+        await announceTask;
+
+        Assert.False(_callback.Success);
+        Assert.DoesNotContain(sink.Entries, entry => entry.Level >= LogLevel.Warning);
+        Assert.Contains(sink.Entries, entry =>
+            entry.Level == LogLevel.Information
+            && entry.Exception == null
+            && entry.Message.Contains("udp://silent.example:451/announce", StringComparison.Ordinal));
     }
 }
