@@ -38,6 +38,7 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
 {
     private const string EnableVariable = "PEERSHARP_TRANSMISSION_INTEROP";
     private const string ExeVariable = "PEERSHARP_TRANSMISSION_EXE";
+    private const string LeechOnWindowsVariable = "PEERSHARP_TRANSMISSION_LEECH_ON_WINDOWS";
     private const string DefaultExe = @"C:\Program Files\Transmission\transmission-qt.exe";
 
     private const int RpcPort = 9099;
@@ -243,11 +244,32 @@ public sealed class TransmissionInteropTests : IAsyncLifetime
     /// measured while seeding follows the data, it belongs to our send path; if it stays put, it
     /// belongs to Transmission or to the connection between us.
     /// </para>
+    ///
+    /// <para>
+    /// Skipped on Windows unless <c>PEERSHARP_TRANSMISSION_LEECH_ON_WINDOWS=1</c>. Transmission 4.1.x
+    /// on Windows discards its unsent output when a <c>send()</c> fails: <c>tr-buffer.h</c> compares
+    /// the int result against <c>0U</c>, so -1 counts as success and the whole queue is drained while
+    /// its RC4 keystream has already moved past those bytes. Everything after that decrypts to
+    /// garbage on our side - see commits d88363f and ffca401, confirmed against a patched build and
+    /// against MonoTorrent. Each break drops the connection, and in about half of CI runs the
+    /// download stalls before the timeout. That makes this a coin flip on Transmission's defect
+    /// rather than a check of ours, so it cannot gate a release.
+    /// Linux CI still runs it, where the comparison is correct, and seeding to Transmission still
+    /// runs on Windows.
+    /// </para>
     /// </summary>
     [Fact(Timeout = 900_000)]
     public async Task Leeching_FromTransmission_ReceivesTheWholeFile()
     {
         RequireEnabled();
+        if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable(LeechOnWindowsVariable) != "1")
+        {
+            Assert.Skip(
+                "Transmission 4.1.x on Windows discards its send buffer after a failed send(), which " +
+                "desynchronises the encrypted stream (commits d88363f, ffca401). " +
+                $"Set {LeechOnWindowsVariable}=1 to run it anyway.");
+        }
+
         string exe = Environment.GetEnvironmentVariable(ExeVariable) ?? DefaultExe;
         if (!File.Exists(exe))
         {
