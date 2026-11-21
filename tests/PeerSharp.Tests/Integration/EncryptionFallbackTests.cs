@@ -182,6 +182,207 @@ public class EncryptionFallbackTests : IDisposable
         }
     }
 
+    [Fact(Timeout = 30000)]
+    public async Task ProxyAuthenticationFailureBeforePeerConnectionIsLoggedAsError()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var sink = new RecordingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Debug);
+            builder.AddProvider(sink);
+        });
+        var torrent = TorrentTestUtility.CreateMinimal(downloadPath: _path);
+        torrent.Settings.Proxy.Type = ProxyType.Http;
+        torrent.Settings.Proxy.Host = IPAddress.Loopback.ToString();
+        torrent.Settings.Proxy.Port = (ushort)port;
+        torrent.Settings.Proxy.ProxyPeers = true;
+
+        var peer = new PeerCommunication(torrent, new NullPeerListener(), TimeProvider.System, loggerFactory);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var rejectProxy = Task.Run(async () =>
+        {
+            using var client = await listener.AcceptTcpClientAsync(cancellation.Token);
+            var stream = client.GetStream();
+            using var reader = new StreamReader(stream, leaveOpen: true);
+            while (!string.IsNullOrEmpty(await reader.ReadLineAsync(cancellation.Token))) { }
+            await stream.WriteAsync(
+                "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n"u8.ToArray(),
+                cancellation.Token);
+        }, cancellation.Token);
+
+        try
+        {
+            bool connected = await peer.ConnectAsync("192.0.2.1", 6881, useUtp: false, timeoutMs: 5000, ct: cancellation.Token);
+            await rejectProxy;
+
+            Assert.False(connected);
+            Assert.Contains(sink.Entries, entry =>
+                entry.Level == LogLevel.Error
+                && entry.Exception is IOException ex
+                && ex.Message.Contains("HTTP Proxy connection failed", StringComparison.Ordinal));
+        }
+        finally
+        {
+            await cancellation.CancelAsync();
+            await peer.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A peer that accepts a connection and never answers our MSE Pe1 times out inside the
+    /// encryption handshake (which aborts and disposes the transport). ConnectAsync must not
+    /// fall through to PerformPlaintextHandshakeAsync on that disposed stream and log an
+    /// unexpected IOException error.
+    /// </summary>
+    [Fact(Timeout = 60000)]
+    public async Task PeerThatIgnoresEncryptionHandshake_TimesOutWithoutUnexpectedErrorLog()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+        using var stopPeer = new CancellationTokenSource();
+        var accepted = new List<TcpClient>();
+        int connectionCount = 0;
+
+        var acceptLoop = Task.Run(async () =>
+        {
+            try
+            {
+                var client = await listener.AcceptTcpClientAsync(stopPeer.Token);
+                lock (accepted)
+                {
+                    accepted.Add(client);
+                }
+                Interlocked.Increment(ref connectionCount);
+
+                // Drain Pe1 and stay silent until the test ends.
+                var buffer = new byte[256];
+                try { _ = await client.GetStream().ReadAsync(buffer, stopPeer.Token); } catch { /* Test teardown. */ }
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, stopPeer.Token); } catch { /* Test teardown. */ }
+            }
+            catch
+            {
+                // Listener stopped.
+            }
+        });
+
+        var sink = new RecordingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Debug);
+            builder.AddProvider(sink);
+        });
+
+        var torrent = TorrentTestUtility.CreateMinimal(downloadPath: _path);
+        torrent.Settings.Connection.Encryption = Encryption.Allow;
+
+        var peer = new PeerCommunication(torrent, new NullPeerListener(), TimeProvider.System, loggerFactory);
+
+        try
+        {
+            // Longer than the 5s first-read MSE timeout so ReadHandshakeBytesAsync aborts the
+            // transport before the outer connect timeout fires.
+            bool connected = await peer.ConnectAsync(IPAddress.Loopback.ToString(), port, useUtp: false, timeoutMs: 12000);
+
+            Assert.False(connected);
+            Assert.True(peer.OfferedAnEncryptionChoice);
+            Assert.False(peer.HungUpDuringEncryptionHandshake);
+            Assert.Equal(1, Volatile.Read(ref connectionCount));
+            Assert.DoesNotContain(sink.Entries, entry => entry.Level >= LogLevel.Warning);
+        }
+        finally
+        {
+            await stopPeer.CancelAsync();
+            await peer.DisposeAsync();
+            listener.Stop();
+            lock (accepted)
+            {
+                foreach (var client in accepted)
+                {
+                    client.Dispose();
+                }
+            }
+
+            try { await acceptLoop; } catch { /* Listener stopped. */ }
+        }
+    }
+
+    /// <summary>
+    /// When the outer dial budget expires during an MSE handshake before the inner 5s read timer,
+    /// the peer did not hang up - our own timeout aborted the transport. It must neither log an
+    /// unexpected error nor claim HungUpDuringEncryptionHandshake.
+    /// </summary>
+    [Fact(Timeout = 60000)]
+    public async Task PeerThatExceedsConnectTimeoutDuringEncryptionHandshake_DoesNotClaimHangUpOrLogError()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+        using var stopPeer = new CancellationTokenSource();
+        var accepted = new List<TcpClient>();
+
+        var acceptLoop = Task.Run(async () =>
+        {
+            try
+            {
+                var client = await listener.AcceptTcpClientAsync(stopPeer.Token);
+                lock (accepted)
+                {
+                    accepted.Add(client);
+                }
+
+                var buffer = new byte[256];
+                try { _ = await client.GetStream().ReadAsync(buffer, stopPeer.Token); } catch { /* Test teardown. */ }
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, stopPeer.Token); } catch { /* Test teardown. */ }
+            }
+            catch
+            {
+                // Listener stopped.
+            }
+        });
+
+        var sink = new RecordingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Debug);
+            builder.AddProvider(sink);
+        });
+
+        var torrent = TorrentTestUtility.CreateMinimal(downloadPath: _path);
+        torrent.Settings.Connection.Encryption = Encryption.Allow;
+
+        var peer = new PeerCommunication(torrent, new NullPeerListener(), TimeProvider.System, loggerFactory);
+
+        try
+        {
+            bool connected = await peer.ConnectAsync(IPAddress.Loopback.ToString(), port, useUtp: false, timeoutMs: 1000);
+
+            Assert.False(connected);
+            Assert.False(peer.HungUpDuringEncryptionHandshake);
+            Assert.DoesNotContain(sink.Entries, entry => entry.Level >= LogLevel.Warning);
+        }
+        finally
+        {
+            await stopPeer.CancelAsync();
+            await peer.DisposeAsync();
+            listener.Stop();
+            lock (accepted)
+            {
+                foreach (var client in accepted)
+                {
+                    client.Dispose();
+                }
+            }
+
+            try { await acceptLoop; } catch { /* Listener stopped. */ }
+        }
+    }
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);

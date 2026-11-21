@@ -1003,10 +1003,12 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         _cts?.Dispose();
         _cts = new CancellationTokenSource();
 
+        // Use provided timeout (from adaptive timeout manager)
+        using var connectTimeoutCts = new CancellationTokenSource(timeoutMs);
+        bool connectionOpened = false;
+
         try
         {
-            // Use provided timeout (from adaptive timeout manager)
-            using var connectTimeoutCts = new CancellationTokenSource(timeoutMs);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ConnectionToken, connectTimeoutCts.Token, ct);
             // The dial budget also bounds negotiation and handshake writes/reads.
             using var abandon = linkedCts.Token.UnsafeRegister(static state => ((PeerCommunication)state!).AbortTransport(), this);
@@ -1087,7 +1089,7 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
                 else if (proxy.ForceProxy)
                 {
-                    throw new IOException("ForceProxy requires a usable proxy configuration.");
+                    throw new InvalidOperationException("ForceProxy requires a usable proxy configuration.");
                 }
                 else if (System.Net.IPAddress.TryParse(ip, out var peerAddress))
                 {
@@ -1151,6 +1153,11 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                 }
             }
 
+            // The transport to the peer is open (directly, through a proxy, or over uTP). From here an
+            // I/O failure is the peer hanging up or resetting - TLS included - rather than a fault in
+            // our own setup, so the catches below report it without a stack trace.
+            connectionOpened = true;
+
             if (_torrent.InfoFile.Info.IsSsl)
             {
                 SetStreamLayeredOverLimiter(await TorrentTls.ConnectAsync(Stream!, _torrent, linkedCts.Token).ConfigureAwait(false));
@@ -1206,6 +1213,20 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     StartBackgroundLoops();
                     return true;
                 }
+                else if (linkedCts.IsCancellationRequested)
+                {
+                    if (_cts.IsCancellationRequested || ct.IsCancellationRequested)
+                    {
+                        LogConnectCancelled(ip, port);
+                    }
+                    else
+                    {
+                        LogConnectTimeout(ip, port, GetConnectionElapsedMs(), "EncryptionHandshakeTimeout");
+                    }
+
+                    await CloseAsync().ConfigureAwait(false);
+                    return false;
+                }
                 else if (encryptionSetting == Encryption.Require)
                 {
                     _logger.LogWarning("Encryption required but failed for {Ip}:{Port}", ip, port);
@@ -1229,10 +1250,19 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
                     await CloseAsync().ConfigureAwait(false);
                     return false;
                 }
-                // Encryption failed on a still-open connection - fall through and try plaintext on it.
+                else
+                {
+                    // Encryption failed (timeout, protocol error, or aborted transport). We have already
+                    // written MSE bytes to this stream - and a read timeout has already disposed it via
+                    // AbortTransport - so a plaintext handshake cannot run on the same connection. Close
+                    // here and let the peer's history alternate to plaintext on a fresh connection.
+                    _logger.LogDebug("Encryption handshake failed for {Ip}:{Port}", ip, port);
+                    await CloseAsync().ConfigureAwait(false);
+                    return false;
+                }
             }
 
-            // Try plaintext handshake (encryption failed or Encryption=Refuse)
+            // Try plaintext handshake (offerEncryption=false or Encryption=Refuse)
             _logger.LogDebug("Trying plaintext handshake with {Ip}:{Port}", ip, port);
             if (await PerformPlaintextHandshakeAsync().ConfigureAwait(false))
             {
@@ -1253,9 +1283,16 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
         // time, so the exception type or message is kept and the trace is not. In one 3.9 MB log,
         // 17,174 of 31,509 lines were traces, most of them from a connect timeout. Genuine faults, in
         // the general catch at the end, still carry theirs.
-        catch (OperationCanceledException ex) when (!_cts.IsCancellationRequested)
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested || ct.IsCancellationRequested)
         {
-            // Connection timeout (not explicit cancellation via CloseAsync()) - expected in BitTorrent
+            // Explicit cancellation via CloseAsync() or caller token
+            LogConnectCancelled(ip, port);
+            await CloseAsync().ConfigureAwait(false);
+            return false;
+        }
+        catch (OperationCanceledException ex)
+        {
+            // Connection timeout (not explicit cancellation) - expected in BitTorrent
             LogConnectTimeout(ip, port, GetConnectionElapsedMs(), ex.GetType().Name);
             await CloseAsync().ConfigureAwait(false);
             return false;
@@ -1267,13 +1304,6 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
-        catch (OperationCanceledException)
-        {
-            // Explicit cancellation via CloseAsync()
-            LogConnectCancelled(ip, port);
-            await CloseAsync().ConfigureAwait(false);
-            return false;
-        }
         catch (SocketException ex)
         {
             // Expected network errors - log without stack trace at Debug level
@@ -1281,10 +1311,38 @@ internal class PeerCommunication : IPeerCommunication, IBandwidthUser, IAsyncDis
             await CloseAsync().ConfigureAwait(false);
             return false;
         }
-        catch (IOException ex) when (ex.InnerException is SocketException)
+        catch (IOException) when (_cts.IsCancellationRequested || ct.IsCancellationRequested)
         {
-            // Expected network errors wrapped in IOException - log without stack trace
-            LogConnectFailed(ip, port, ex.InnerException.Message);
+            // Transport aborted by explicit cancellation
+            LogConnectCancelled(ip, port);
+            await CloseAsync().ConfigureAwait(false);
+            return false;
+        }
+        catch (IOException ex) when (connectTimeoutCts.IsCancellationRequested)
+        {
+            // Transport aborted by dial/handshake timeout (for example, RateLimitedStream disposed before write)
+            LogConnectTimeout(ip, port, GetConnectionElapsedMs(), ex.GetType().Name);
+            await CloseAsync().ConfigureAwait(false);
+            return false;
+        }
+        catch (IOException ex) when (connectionOpened)
+        {
+            // I/O failures once the transport is open (including during TLS) are expected transport
+            // outcomes; proxy setup/authentication failures before that remain visible through the
+            // general error log.
+            LogConnectFailed(ip, port, ex.InnerException?.Message ?? ex.Message);
+            await CloseAsync().ConfigureAwait(false);
+            return false;
+        }
+        catch (ObjectDisposedException) when (_cts.IsCancellationRequested || ct.IsCancellationRequested)
+        {
+            LogConnectCancelled(ip, port);
+            await CloseAsync().ConfigureAwait(false);
+            return false;
+        }
+        catch (ObjectDisposedException ex) when (connectTimeoutCts.IsCancellationRequested)
+        {
+            LogConnectTimeout(ip, port, GetConnectionElapsedMs(), ex.GetType().Name);
             await CloseAsync().ConfigureAwait(false);
             return false;
         }

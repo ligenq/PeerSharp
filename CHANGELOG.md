@@ -20,6 +20,15 @@ No public API changes. Binary compatible with 5.4.0.
   file-selection progress and piece-to-file lookup edge cases are corrected.
 - uTP and file-handle disposal now release pending work cleanly and report closed-handle failures
   consistently.
+- An outgoing connection whose encryption handshake times out or fails no longer retries plaintext on
+  the same connection, which could only fail and was logged as an unexpected error. The connection
+  closes and the next attempt to that peer offers plaintext. A dial that runs out of time during the
+  handshake is reported as a timeout rather than as the peer hanging up.
+- Peers that reset or time out after the connection opens, including during TLS on SSL torrents, are
+  logged at Debug without a stack trace. A connection cancelled by the caller is logged as cancelled
+  rather than as a timeout. Proxy setup and authentication failures are still logged as errors.
+- An unresponsive UDP tracker is logged at Information without a stack trace, as HTTP trackers already
+  were. Scrape retries log at Debug instead of Warning.
 
 ### Testing
 
