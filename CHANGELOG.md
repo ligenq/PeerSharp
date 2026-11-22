@@ -37,7 +37,9 @@ No public API changes. Binary compatible with 5.4.0.
   handoff, v2 proofs, uTP admission and encrypted transfer recovery.
 - Added deterministic regression coverage for tracker restart races and magnet metadata handoff.
 - Release validation now runs replayable fault sweeps, counterpart-client interop and coverage-guided
-  fuzzing before publishing packages.
+  fuzzing before publishing packages. Downloading from Transmission is checked on Linux only: on
+  Windows, Transmission 4.1.x discards unsent data after a failed send, which breaks the encrypted
+  stream on its side.
 
 ## 5.4.0 — 2026-11-07
 

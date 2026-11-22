@@ -128,6 +128,15 @@ internal sealed class SyntheticPeer : IAsyncDisposable
             {
                 return;
             }
+            catch (InvalidOperationException) when (_stopping.IsCancellationRequested)
+            {
+                // DisposeAsync stopped the listener between the loop's check and this call, and
+                // TcpListener reports "Not listening" before it looks at the token. DisposeAsync
+                // cancels _stopping before it stops the listener, so this is shutdown, not a fault.
+                // Letting it escape made DisposeAsync throw, which in an `await using` replaces the
+                // test's own outcome - it turned a skipped libtorrent interop test into a failure.
+                return;
+            }
 
             SyntheticConnection connection;
             lock (_connections)
