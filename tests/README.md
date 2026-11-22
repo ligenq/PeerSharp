@@ -161,6 +161,13 @@ runs through the Interop workflow (`.github/workflows/interop.yml`) on demand an
 validation. It needs real client binaries and real transfers. Trigger it when validating changes to
 protocol handling or transport behavior. Check the skip count to see whether tests found their external clients.
 
+One test skips on purpose: on Windows, `Leeching_FromTransmission_ReceivesTheWholeFile` skips unless
+`PEERSHARP_TRANSMISSION_LEECH_ON_WINDOWS=1`. Transmission 4.1.x on Windows throws away its unsent
+output when a `send()` fails, after its RC4 stream has already moved past those bytes, so everything
+after that decrypts to garbage on our side and about half of runs stall. The defect is Transmission's,
+not ours; the diagnosis is in commits `d88363f` and `ffca401`. Linux still runs the test, and seeding
+to Transmission still runs on both platforms.
+
 **You choose the content.** Nothing is hardcoded; the tests skip until you point them somewhere.
 Use something you have the right to distribute. Projects that publish their own releases over
 BitTorrent are the conventional choice, and are also the most useful to measure against — they are
